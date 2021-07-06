@@ -1,0 +1,458 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1625610268 -7200
+# Parent  cfe6a8a9d2d4531fea484305c8934166a2aa38a3
+Bug 1556261 - Re-Implement message header button customisation.
+
+diff --git a/mail/base/content/mainCommandSet.inc.xhtml b/mail/base/content/mainCommandSet.inc.xhtml
+--- a/mail/base/content/mainCommandSet.inc.xhtml
++++ b/mail/base/content/mainCommandSet.inc.xhtml
+@@ -2,16 +2,18 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+   <command id="cmd_quit" oncommand="goQuitApplication(event)"/>
+   <!--The cmd_createFilterFromPopup is used to notify the email context popup -->
+   <command id="cmd_createFilterFromPopup"/>
+   <command id="cmd_CustomizeMailToolbar"
+            oncommand="CustomizeMailToolbar('mail-toolbox', 'CustomizeMailToolbar')"/>
++  <command id="cmd_CustomizeHeaderToolbar"
++           oncommand="CustomizeMailToolbar('header-view-toolbox', 'CustomizeHeaderToolbar')"/>
+ 
+   <commandset id="mailFileMenuItems"
+               commandupdater="true"
+               events="create-menu-file"
+               oncommandupdate="goUpdateMailMenuItems(this)">
+       <command id="cmd_newFolder" oncommand="goDoCommand('cmd_newFolder')" disabled="true"/>
+       <command id="cmd_newVirtualFolder" oncommand="goDoCommand('cmd_newVirtualFolder')" disabled="true"/>
+       <command id="cmd_getNewMessages" oncommand="goDoCommand('cmd_getNewMessages')" disabled="true"/>
+diff --git a/mail/base/content/messageWindow.js b/mail/base/content/messageWindow.js
+--- a/mail/base/content/messageWindow.js
++++ b/mail/base/content/messageWindow.js
+@@ -460,16 +460,22 @@ function delayedOnLoadMessageWindow() {
+ 
+   gPhishingDetector.init();
+ 
+   // initialize the customizeDone method on the customizeable toolbar
+   var toolbox = document.getElementById("mail-toolbox");
+   toolbox.customizeDone = function(aEvent) {
+     MailToolboxCustomizeDone(aEvent, "CustomizeMailToolbar");
+   };
++  toolbox = document.getElementById("header-view-toolbox");
++  if (toolbox) {
++    toolbox.customizeDone = function(aEvent) {
++      MailToolboxCustomizeDone(aEvent, "CustomizeMailToolbar");
++    };
++  }
+ 
+   SetupCommandUpdateHandlers();
+ 
+   gMessageDisplay = new StandaloneMessageDisplayWidget();
+   // eslint-disable-next-line no-global-assign
+   gFolderDisplay = new StandaloneFolderDisplayWidget(gMessageDisplay);
+   gFolderDisplay.msgWindow = msgWindow;
+   gFolderDisplay.messenger = messenger;
+diff --git a/mail/base/content/msgHdrPopup.inc.xhtml b/mail/base/content/msgHdrPopup.inc.xhtml
+--- a/mail/base/content/msgHdrPopup.inc.xhtml
++++ b/mail/base/content/msgHdrPopup.inc.xhtml
+@@ -96,16 +96,23 @@
+      <menuitem label="&detachAllAttachmentsCmd.label;"
+                accesskey="&detachAllAttachmentsCmd.accesskey;"
+                command="cmd_detachAllAttachments" />
+      <menuitem label="&deleteAllAttachmentsCmd.label;"
+                accesskey="&deleteAllAttachmentsCmd.accesskey;"
+                command="cmd_deleteAllAttachments" />
+   </menupopup>
+ 
++  <menupopup id="header-toolbar-context-menu">
++    <menuitem id="CustomizeHeaderToolbar"
++              command="cmd_CustomizeHeaderToolbar"
++              label="&customizeToolbar.label;"
++              accesskey="&customizeToolbar.accesskey;"/>
++  </menupopup>
++
+   <menupopup id="attachment-toolbar-context-menu"
+              onpopupshowing="return onShowAttachmentToolbarContextMenu(event);">
+     <menuitem id="context-expandAttachmentBar"
+               type="checkbox"
+               label="&startExpandedCmd.label;"
+               accesskey="&startExpandedCmd.accesskey;"
+               oncommand="Services.prefs.setBoolPref('mailnews.attachments.display.start_expanded', this.getAttribute('checked'));"/>
+   </menupopup>
+diff --git a/mail/base/content/msgHdrView.inc.xhtml b/mail/base/content/msgHdrView.inc.xhtml
+--- a/mail/base/content/msgHdrView.inc.xhtml
++++ b/mail/base/content/msgHdrView.inc.xhtml
+@@ -9,18 +9,24 @@
+                             <vbox id="expandedHeadersBox" flex="1">
+ 
+                               <!-- This hbox has display:block set to imbue it with the HTML layout
+                                    model. This lets us float the message header toolbar to the right
+                                    so we don't waste space when the From field and the toolbar could
+                                    fit alongside each other. -->
+                               <hbox id="expandedHeadersTopBox">
+ 
+-                                <vbox id="header-view-toolbox" class="inline-toolbox">
+-                                  <hbox id="header-view-toolbar" class="themeable-brighttext">
++                                <toolbox id="header-view-toolbox"
++                                         class="inline-toolbox"
++                                         defaulticonsize="small"
++                                         minwidth="50px"
++                                         defaultlabelalign="end"
++                                         defaultmode="full"
++                                         inlinetoolbox="true">
++                                  <toolbarpalette id="header-view-toolbar-palette">
+                                     <!-- XXXdmose need to move these commands to a controller, either
+                                          on the header view, the message pane, or the default
+                                          controller -->
+ 
+                                     <!-- XXXdmose need to audit our shortcut/a11y setup and make sure
+                                          these buttons are doing the right thing -->
+ 
+                                     <menupopup id="header-toolbar-context-menu"
+@@ -28,16 +34,70 @@
+                                       <menuitem oncommand="ToolbarContextMenu.openAboutAddonsForContextAction(this.parentElement)"
+                                                      data-l10n-id="toolbar-context-menu-manage-extension"
+                                                      class="customize-context-manageExtension"/>
+                                       <menuitem oncommand="ToolbarContextMenu.removeExtensionForContextAction(this.parentElement)"
+                                                      data-l10n-id="toolbar-context-menu-remove-extension"
+                                                      class="customize-context-removeExtension"/>
+                                     </menupopup>
+ 
++                                    <toolbarbutton id="hdrForwardButton"
++                                                   label="&hdrForwardButton1.label;"
++                                                   tooltiptext="&hdrForwardButton1.tooltip;"
++                                                   oncommand="MsgForwardMessage(event); RestoreFocusAfterHdrButton();"
++                                                   observes="button_forward"
++                                                   class="toolbarbutton-1 msgHeaderView-button hdrForwardButton"/>
++                                    <toolbaritem id="hdrMenuForwardButton" label="&hdrMenuForwardButton.label;">
++                                    <!-- This toolbaritem is a dummy and should only be shown when
++                                         customizing the toolbar to distinguish the forward button
++                                         from the forward dual-button. -->
++                                      <toolbarbutton id="hdrDualForwardButton"
++                                                     label="&hdrForwardButton1.label;"
++                                                     tooltiptext="&hdrForwardButton1.tooltip;"
++                                                     oncommand="MsgForwardMessage(event); RestoreFocusAfterHdrButton();"
++                                                     observes="button_forward"
++                                                     class="toolbarbutton-1 msgHeaderView-button hdrForwardButton"
++                                                     type="menu-button">
++                                        <menupopup id="hdrForwardDropdown">
++                                          <menuitem id="hdrForwardAsInlineMenu"
++                                                    label="&buttonMenuForwardAsInline.label;"
++                                                    tooltiptext="&forwardAsInline.tooltip;"
++                                                    command="cmd_forwardInline"/>
++                                          <menuitem id="hdrForwardAsAttachmentMenu"
++                                                    label="&buttonMenuForwardAsAttachment.label;"
++                                                    tooltiptext="&forwardAsAttachment.tooltip;"
++                                                    command="cmd_forwardAttachment"/>
++                                        </menupopup>
++                                      </toolbarbutton>
++                                    </toolbaritem>
++                                    <toolbarbutton id="hdrArchiveButton"
++                                                   label="&hdrArchiveButton1.label;"
++                                                   tooltiptext="&hdrArchiveButton1.tooltip;"
++                                                   oncommand="MsgArchiveSelectedMessages(event); RestoreFocusAfterHdrButton();"
++                                                   observes="button_archive"
++                                                   class="toolbarbutton-1 msgHeaderView-button hdrArchiveButton"/>
++                                    <toolbarbutton id="hdrJunkButton" label="&hdrJunkButton1.label;"
++                                                   tooltiptext="&hdrJunkButton1.tooltip;"
++                                                   observes="button_junk"
++                                                   class="toolbarbutton-1 msgHeaderView-button hdrJunkButton"
++                                                   oncommand="goDoCommand('button_junk'); RestoreFocusAfterHdrButton();"/>
++                                    <toolbarbutton id="hdrTrashButton"
++                                                   label="&hdrTrashButton1.label;"
++                                                   tooltiptext="&hdrTrashButton1.tooltip;"
++                                                   observes="button_delete"
++                                                   class="toolbarbutton-1 msgHeaderView-button hdrTrashButton"
++                                                   oncommand="goDoCommand(event.shiftKey ? 'button_shiftDelete' :
++                                                                          'button_delete'); RestoreFocusAfterHdrButton();"/>
++                                    <toolbarbutton id="hdrOpenConversationButton"
++                                                   label="&hdrOpenConversationButton1.label;"
++                                                   tooltiptext="&hdrOpenConversationButton1.tooltip;"
++                                                   observes="button_showconversation"
++                                                   class="toolbarbutton-1 msgHeaderView-button hdrConversationButton"
++                                                   oncommand="gConversationOpener.openConversationForMessages(gFolderDisplay.selectedMessages); RestoreFocusAfterHdrButton();"/>
++
+                                     <toolbarbutton id="hdrReplyToSenderButton" label="&hdrReplyButton1.label;"
+                                                    tooltiptext="&hdrReplyButton2.tooltip;"
+                                                    oncommand="MsgReplySender(event); RestoreFocusAfterHdrButton();"
+                                                    observes="button_reply"
+                                                    class="toolbarbutton-1 msgHeaderView-button hdrReplyToSenderButton"/>
+                                     <toolbaritem id="hdrSmartReplyButton" label="&hdrSmartReplyButton1.label;">
+                                       <!-- This button is a dummy and should only be shown when
+                                            customizing the toolbar to distinguish the smart reply
+@@ -122,40 +182,38 @@
+                                                     label="&hdrReplyButton1.label;"
+                                                     tooltiptext="&hdrReplyButton2.tooltip;"
+                                                     observes="button_reply"
+                                                     oncommand="MsgReplySender(event); event.stopPropagation();
+                                                                RestoreFocusAfterHdrButton();"/>
+                                         </menupopup>
+                                       </toolbarbutton>
+                                     </toolbaritem>
+-                                    <toolbarbutton id="hdrForwardButton"
+-                                                   label="&hdrForwardButton1.label;"
+-                                                   tooltiptext="&hdrForwardButton1.tooltip;"
+-                                                   oncommand="MsgForwardMessage(event); RestoreFocusAfterHdrButton();"
+-                                                   observes="button_forward"
+-                                                   class="toolbarbutton-1 msgHeaderView-button hdrForwardButton"/>
+-                                    <toolbarbutton id="hdrArchiveButton"
+-                                                   label="&hdrArchiveButton1.label;"
+-                                                   tooltiptext="&hdrArchiveButton1.tooltip;"
+-                                                   oncommand="MsgArchiveSelectedMessages(event); RestoreFocusAfterHdrButton();"
+-                                                   observes="button_archive"
+-                                                   class="toolbarbutton-1 msgHeaderView-button hdrArchiveButton"/>
+-                                    <toolbarbutton id="hdrJunkButton" label="&hdrJunkButton1.label;"
+-                                                   tooltiptext="&hdrJunkButton1.tooltip;"
+-                                                   observes="button_junk"
+-                                                   class="toolbarbutton-1 msgHeaderView-button hdrJunkButton"
+-                                                   oncommand="goDoCommand('button_junk'); RestoreFocusAfterHdrButton();"/>
+-                                    <toolbarbutton id="hdrTrashButton"
+-                                                   label="&hdrTrashButton1.label;"
+-                                                   tooltiptext="&hdrTrashButton1.tooltip;"
+-                                                   observes="button_delete"
+-                                                   class="toolbarbutton-1 msgHeaderView-button hdrTrashButton"
+-                                                   oncommand="goDoCommand(event.shiftKey ? 'button_shiftDelete' :
+-                                                                          'button_delete'); RestoreFocusAfterHdrButton();"/>
++                                    <toolbarbutton id="hdrTagButton"
++                                                   type="menu"
++                                                   class="toolbarbutton-1 msgHeaderView-button hdrTagButton"
++                                                   label="&tagButton.label;"
++                                                   tooltiptext="&tagButton.tooltip;"
++                                                   command="cmd_tag">
++                                      <menupopup id="hdrTagDropdown"
++                                                 onpopupshowing="InitMessageTags(this);">
++                                        <menuitem id="hdrTagDropdown-addNewTag"
++                                                  label="&addNewTag.label;"
++                                                  accesskey="&addNewTag.accesskey;"
++                                                  command="cmd_addTag"/>
++                                        <menuitem id="manageTags"
++                                                  label="&manageTags.label;"
++                                                  accesskey="&manageTags.accesskey;"
++                                                  command="cmd_manageTags"/>
++                                        <menuseparator id="hdrTagDropdown-sep-afterAddNewTag"/>
++                                        <menuitem id="hdrTagDropdown-tagRemoveAll"
++                                                  command="cmd_removeTags"/>
++                                        <menuseparator id="hdrTagDropdown-sep-afterTagRemoveAll"/>
++                                      </menupopup>
++                                    </toolbarbutton>
+                                     <toolbarbutton id="otherActionsButton"
+                                                    type="menu"
+                                                    wantdropmarker="true"
+                                                    label="&otherActionsButton2.label;"
+                                                    tooltiptext="&otherActionsButton.tooltip;"
+                                                    class="toolbarbutton-1 msgHeaderView-button">
+                                       <menupopup id="otherActionsPopup"
+                                                  onpopupshowing="onShowOtherActionsPopup();">
+@@ -177,35 +235,16 @@
+                                                   label="&otherActionsOpenInNewTab1.label;"
+                                                   accesskey="&otherActionsOpenInNewTab1.accesskey;"
+                                                   oncommand="OpenMessageInNewTab(event);"/>
+                                         <menuitem id="viewSourceMenuItem"
+                                                   label="&viewSourceMenuItem1.label;"
+                                                   accesskey="&viewSourceMenuItem1.accesskey;"
+                                                   oncommand="ViewPageSource(gFolderDisplay.selectedMessageUris);" />
+                                         <menuseparator id="otherActionsSeparator"/>
+-                                        <menu id="otherActionsTag"
+-                                              label="&tagMenu.label;"
+-                                              accesskey="&tagMenu.accesskey;">
+-                                          <menupopup id="hdrTagDropdown"
+-                                                     onpopupshowing="InitMessageTags(this);">
+-                                            <menuitem id="hdrTagDropdown-addNewTag"
+-                                                      label="&addNewTag.label;"
+-                                                      accesskey="&addNewTag.accesskey;"
+-                                                      command="cmd_addTag"/>
+-                                            <menuitem id="manageTags"
+-                                                      label="&manageTags.label;"
+-                                                      accesskey="&manageTags.accesskey;"
+-                                                      command="cmd_manageTags"/>
+-                                            <menuseparator id="hdrTagDropdown-sep-afterAddNewTag"/>
+-                                            <menuitem id="hdrTagDropdown-tagRemoveAll"
+-                                                      command="cmd_removeTags"/>
+-                                            <menuseparator id="hdrTagDropdown-sep-afterTagRemoveAll"/>
+-                                          </menupopup>
+-                                        </menu>
+                                         <menuitem id="markAsReadMenuItem"
+                                                   label="&markAsReadMenuItem1.label;"
+                                                   accesskey="&markAsReadMenuItem1.accesskey;"
+                                                   oncommand="MsgMarkMsgAsRead();"/>
+                                         <menuitem id="markAsUnreadMenuItem"
+                                                   label="&markAsUnreadMenuItem1.label;"
+                                                   accesskey="&markAsUnreadMenuItem1.accesskey;"
+                                                   oncommand="MsgMarkMsgAsRead();"/>
+@@ -227,18 +266,25 @@
+                                             <menuitem id="otherActions-calendar-convert-task-menuitem"
+                                                       label="&calendar.context.convertmenu.task.label;"
+                                                       accesskey="&calendar.context.convertmenu.task.accesskey;"
+                                                       oncommand="calendarExtract.extractFromEmail(false)" />
+                                           </menupopup>
+                                         </menu>
+                                       </menupopup>
+                                     </toolbarbutton>
+-                                  </hbox>
+-                                </vbox>
++                                  </toolbarpalette>
++
++                                  <toolbar is="customizable-toolbar" id="header-view-toolbar"
++                                           class="inline-toolbar" align="start"
++                                           customizable="true" mode="full"
++                                           context="header-toolbar-context-menu"
++                                           defaulticonsize="small" defaultmode="full"
++                                           defaultset="hdrReplyToSenderButton,hdrSmartReplyButton,hdrForwardButton,hdrArchiveButton,hdrJunkButton,hdrTrashButton,otherActionsButton"/>
++                                </toolbox>
+ 
+                                 <!-- This box ensures that the expandedHeaders grid below is aligned
+                                      with the bottom of the message header toolbar. Like the
+                                      expandedHeadersTopBox, this uses display:block to give us HTML
+                                      layouting. -->
+                                 <box id="expandedBoxSpacer"/>
+ 
+                                 <!-- Theoretically, we should be able to replace this grid with just
+diff --git a/mail/base/content/msgMail3PaneWindow.js b/mail/base/content/msgMail3PaneWindow.js
+--- a/mail/base/content/msgMail3PaneWindow.js
++++ b/mail/base/content/msgMail3PaneWindow.js
+@@ -941,16 +941,22 @@ async function loadPostAccountWizard() {
+   // Set focus to the Thread Pane the first time the window is opened.
+   SetFocusThreadPane();
+ 
+   // Initialize the customizeDone method on the customizeable toolbar.
+   let toolbox = document.getElementById("mail-toolbox");
+   toolbox.customizeDone = function(aEvent) {
+     MailToolboxCustomizeDone(aEvent, "CustomizeMailToolbar");
+   };
++  toolbox = document.getElementById("header-view-toolbox");
++  if (toolbox) {
++    toolbox.customizeDone = function(aEvent) {
++      MailToolboxCustomizeDone(aEvent, "CustomizeMailToolbar");
++    };
++  }
+ 
+   // Restore the previous folder selection before shutdown, or select the first
+   // inbox folder of a newly created account.
+   selectFirstFolder();
+ 
+   // All core modal dialogs are done, the user can now interact with the 3-pane
+   // window.
+   Services.obs.notifyObservers(window, "mail-startup-done");
+diff --git a/mail/locales/en-US/chrome/messenger/msgHdrViewOverlay.dtd b/mail/locales/en-US/chrome/messenger/msgHdrViewOverlay.dtd
+--- a/mail/locales/en-US/chrome/messenger/msgHdrViewOverlay.dtd
++++ b/mail/locales/en-US/chrome/messenger/msgHdrViewOverlay.dtd
+@@ -19,25 +19,28 @@
+ <!ENTITY userAgentField4.label "User agent">
+ <!ENTITY referencesField4.label "References">
+ <!ENTITY messageIdField4.label "Message ID">
+ <!ENTITY inReplyToField4.label "In reply to">
+ <!ENTITY originalWebsite4.label "Website">
+ 
+ <!ENTITY hdrArchiveButton1.label "Archive">
+ <!ENTITY hdrArchiveButton1.tooltip "Archive this message">
++<!ENTITY hdrOpenConversationButton1.label "Conversation">
++<!ENTITY hdrOpenConversationButton1.tooltip "Show conversation of this message">
+ <!ENTITY hdrSmartReplyButton1.label "Smart Reply">
+ <!ENTITY hdrReplyButton1.label "Reply">
+ <!ENTITY hdrReplyButton2.tooltip "Reply to the sender of this message">
+ <!ENTITY hdrReplyAllButton1.label "Reply All">
+ <!ENTITY hdrReplyAllButton1.tooltip "Reply to sender and all recipients">
+ <!ENTITY hdrReplyListButton1.label "Reply List">
+ <!ENTITY hdrReplyListButton1.tooltip "Reply to mailing list">
+ <!ENTITY hdrFollowupButton1.label "Followup">
+ <!ENTITY hdrFollowupButton1.tooltip "Post a followup to this newsgroup">
++<!ENTITY hdrMenuForwardButton.label "Forward As">
+ <!ENTITY hdrForwardButton1.label "Forward">
+ <!ENTITY hdrForwardButton1.tooltip "Forward this message">
+ <!ENTITY hdrJunkButton1.label "Junk">
+ <!ENTITY hdrJunkButton1.tooltip "Mark this message as junk">
+ <!ENTITY hdrTrashButton1.label "Delete">
+ <!ENTITY hdrTrashButton1.tooltip "Delete this message">
+ 
+ <!ENTITY hdrViewToolbarShowFull.label "Show Icons and Text">
+diff --git a/mail/themes/shared/mail/messageHeader.css b/mail/themes/shared/mail/messageHeader.css
+--- a/mail/themes/shared/mail/messageHeader.css
++++ b/mail/themes/shared/mail/messageHeader.css
+@@ -20,16 +20,47 @@
+   max-height: 14em;
+ }
+ 
+ #expandedBoxSpacer {
+   display: block;
+   height: 4px;
+ }
+ 
++toolbarpaletteitem > #hdrReplyToSenderButton {
++  display: -moz-box;
++}
++
++window[toolboxId="header-view-toolbox"] #wrapper-spring {
++  display: none;
++}
++
++window[toolboxId="header-view-toolbox"] #modefull {
++  display: none;
++}
++
++window[toolboxId="header-view-toolbox"] #palette-box .toolbarbutton-1 {
++  border-width: 0;
++}
++
++.inline-toolbox[doCustomization] {
++  background: hsla(0, 0%, 50%, 0.5);
++}
++
++/* Only show the dummy smart reply button when customizing. */
++.inline-toolbox[doCustomization] #hdrSmartReplyButton > toolbarbutton,
++toolbarpaletteitem #hdrSmartReplyButton > toolbarbutton {
++  display: none;
++}
++
++.inline-toolbox[doCustomization] #hdrDummyReplyButton,
++toolbarpaletteitem #hdrDummyReplyButton {
++  display: -moz-box !important;
++}
++
+ /* ::::: msg header buttons ::::: */
+ 
+ .headerContainer {
+   min-width: 1px;
+ }
+ 
+ #otherActionsButton > .toolbarbutton-icon {
+   display: none;
+@@ -107,30 +138,39 @@
+ .hdrJunkButton {
+   list-style-image: url("chrome://messenger/skin/icons/junk.svg");
+ }
+ 
+ .hdrTrashButton {
+   list-style-image: url("chrome://messenger/skin/icons/delete.svg");
+ }
+ 
++.hdrTagButton {
++  list-style-image: url("chrome://messenger/skin/icons/tag.svg");
++}
++
++.hdrConversationButton {
++  list-style-image: url("chrome://messenger/skin/icons/conversation.svg");
++}
++
+ #attachmentSaveAllSingle,
+ #attachmentSaveAllMultiple {
+   list-style-image: url("chrome://messenger/skin/icons/save.svg");
+ }
+ 
+ /* ::::: msg header toolbars ::::: */
+ 
+ #expandedHeadersTopBox {
+   /* Use the HTML layout model to allow the message header toolbar to float to
+      the right of the From field. */
+   display: block;
+ }
+ 
+ #header-view-toolbox {
++  appearance: none;
+   float: inline-end;
+   display: block;
+   padding-top: 2px;
+ }
+ 
+ /* ::::: expanded header pane ::::: */
+ 
+ #expandedsubjectBox {
