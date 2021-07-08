@@ -1,0 +1,152 @@
+# vim: se ft=diff :
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1625776130 -7200
+# Parent  3dc627bf29436420b7a0fcac0cce909c6dc3f3ee
+Bug 1713786 - Fix 'View > Repair Text Encoding'. Original idea by José M. Muñoz <jose@bmo.anonaddy.com>.
+
+diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
+--- a/mail/base/content/mailWindow.js
++++ b/mail/base/content/mailWindow.js
+@@ -1096,18 +1096,107 @@ nsBrowserAccess.prototype = {
+     return true;
+   },
+ 
+   get tabCount() {
+     return document.getElementById("tabmail").tabInfo.length;
+   },
+ };
+ 
+-function MailSetCharacterSet() {
+-  msgWindow.mailCharacterSet = "_autodetect_all";
++// Copied from ext-mail.js.
++function MsgHdrToRawMessage(msgHdr) {
++  let messenger = Cc["@mozilla.org/messenger;1"].createInstance(
++    Ci.nsIMessenger
++  );
++  let msgUri = msgHdr.folder.generateMessageURI(msgHdr.messageKey);
++  let service = messenger.messageServiceFromURI(msgUri);
++  return new Promise((resolve, reject) => {
++    let streamlistener = {
++      _data: [],
++      _stream: null,
++      onDataAvailable(aRequest, aInputStream, aOffset, aCount) {
++        if (!this._stream) {
++          this._stream = Cc[
++            "@mozilla.org/scriptableinputstream;1"
++          ].createInstance(Ci.nsIScriptableInputStream);
++          this._stream.init(aInputStream);
++        }
++        this._data.push(this._stream.read(aCount));
++      },
++      onStartRequest() {},
++      onStopRequest(aRequest, aStatus) {
++        if (aStatus == Cr.NS_OK) {
++          resolve(this._data.join(""));
++        } else {
++          Cu.reportError(aStatus);
++          reject();
++        }
++      },
++      QueryInterface: ChromeUtils.generateQI([
++        "nsIStreamListener",
++        "nsIRequestObserver",
++      ]),
++    };
++
++    service.streamMessage(
++      msgUri,
++      streamlistener,
++      null, // aMsgWindow
++      null, // aUrlListener
++      false, // aConvertData
++      "" //aAdditionalHeader
++    );
++  });
++}
++
++async function MailSetCharacterSet() {
++  if (!gFolderDisplay?.selectedMessage) {
++    return;
++  }
++
++  let raw = await MsgHdrToRawMessage(gFolderDisplay.selectedMessage);
++  let { MimeParser } = ChromeUtils.import("resource:///modules/mimeParser.jsm");
++  let mimeMsg = MimeParser.extractAllBodyParts(raw);
++
++  let body = "";
++  if ("body" in mimeMsg.parts[0]) {
++    // Single body part.
++    body = mimeMsg.parts[0].body;
++  } else {
++    // Multiple body parts. Let's use the one that corresponds to the display pref.
++    let htmlDisplay = Services.prefs.getIntPref("mailnews.display.html_as");
++    for (let part of mimeMsg.parts[0].parts) {
++      if (htmlDisplay == 4) {
++        // Show all body parts. Let's hope they all have the same encoding.
++        body += part.body;
++      } else if (
++        part.contentType == "text/plain" &&
++        (htmlDisplay == 1 || // Plaintext.
++          !body) // No body yet, so grab it, there might not be a HTML part following.
++      ) {
++        body = part.body;
++      } else if (
++        part.contentType == "text/html" &&
++        (htmlDisplay == 0 || // Original HTML.
++          htmlDisplay == 3) // Sanitised HTML.
++      ) {
++        body = part.body;
++      }
++    }
++  }
++  if (!body) {
++    return;
++  }
++
++  let compUtils = Cc[
++    "@mozilla.org/messengercompose/computils;1"
++  ].createInstance(Ci.nsIMsgCompUtils);
++  let charset = compUtils.detectCharset(body);
++
++  msgWindow.mailCharacterSet = charset;
+   msgWindow.charsetOverride = true;
+   gMessageDisplay.keyForCharsetOverride =
+     "messageKey" in gMessageDisplay.displayedMessage
+       ? gMessageDisplay.displayedMessage.messageKey
+       : null;
+   messenger.setDocumentCharset(msgWindow.mailCharacterSet);
+ }
+ 
+diff --git a/mailnews/mime/src/mimeParser.jsm b/mailnews/mime/src/mimeParser.jsm
+--- a/mailnews/mime/src/mimeParser.jsm
++++ b/mailnews/mime/src/mimeParser.jsm
+@@ -432,16 +432,28 @@ var MimeParser = {
+         .join("."),
+       bodyformat: "decode",
+       stripcontinuations: true,
+       strformat: "unicode",
+     });
+     return emitter.mimeMsg;
+   },
+ 
++  extractAllBodyParts(input) {
++    var emitter = Object.create(ExtractMimeMsgEmitter);
++    MimeParser.parseSync(input, emitter, {
++      pruneat: "",
++      includeAttachments: false,
++      strformat: "binarystring",
++      bodyformat: "decode",
++      stripcontinuations: true,
++    });
++    return emitter.mimeMsg;
++  },
++
+   /**
+    * Returns a dictionary of headers for the given input.
+    *
+    * The input is any type of input that would be accepted by parseSync. What
+    * is returned is a JS object that represents the headers of the entire
+    * envelope as would be received by startPart when partNum is the empty
+    * string.
+    *
