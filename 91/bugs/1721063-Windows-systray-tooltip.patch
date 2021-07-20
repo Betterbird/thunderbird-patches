@@ -1,0 +1,149 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1626806750 -7200
+# Parent  be87e2e8aa40c8602a23202479cdcf5023196b20
+Bug 1721063 - Improve Windows systray tooltip.
+
+diff --git a/mail/components/preferences/dockoptions.js b/mail/components/preferences/dockoptions.js
+--- a/mail/components/preferences/dockoptions.js
++++ b/mail/components/preferences/dockoptions.js
+@@ -1,10 +1,10 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ /* import-globals-from ../../../../toolkit/content/preferencesBindings.js */
+ 
+ Preferences.addAll([
+   { id: "mail.biff.animate_dock_icon", type: "bool" },
+-  { id: "mail.biff.use_new_count_in_mac_dock", type: "bool" },
++  { id: "mail.notification.count.new", type: "bool" },
+ ]);
+diff --git a/mail/components/preferences/dockoptions.xhtml b/mail/components/preferences/dockoptions.xhtml
+--- a/mail/components/preferences/dockoptions.xhtml
++++ b/mail/components/preferences/dockoptions.xhtml
+@@ -26,17 +26,17 @@
+       <separator class="thin"/>
+       <html:div>
+       <html:fieldset>
+         <html:legend data-l10n-id="dock-icon-legend"></html:legend>
+         <vbox>
+         <separator class="thin"/>
+         <label data-l10n-id="dock-icon-show-label"/>
+         <radiogroup id="dockCount"
+-                    preference="mail.biff.use_new_count_in_mac_dock"
++                    preference="mail.notification.count.new"
+                     class="indent" orient="vertical">
+           <radio id="dockCountAll" value="false"
+                  data-l10n-id="count-unread-messages-radio"/>
+           <radio id="dockCountNew" value="true"
+                  data-l10n-id="count-new-messages-radio"/>
+         </radiogroup>
+         </vbox>
+       </html:fieldset>
+diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
+--- a/mailnews/base/src/MailNotificationService.jsm
++++ b/mailnews/base/src/MailNotificationService.jsm
+@@ -16,36 +16,34 @@ var EXPORTED_SYMBOLS = ["NewMailNotifica
+ var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+ var { MailServices } = ChromeUtils.import(
+   "resource:///modules/MailServices.jsm"
+ );
+ 
+ var NMNS = Ci.mozINewMailNotificationService;
+ 
+ var countInboxesPref = "mail.notification.count.inbox_only";
+-// Old name for pref
+-var countNewMessagesPref = "mail.biff.use_new_count_in_mac_dock";
+-// When we go cross-platform we should migrate to
+-// const countNewMessagesPref = "mail.notification.count.new";
++var countNewMessagesPref = "mail.notification.count.new";
+ 
+ // Helper function to retrieve a boolean preference with a default
+ function getBoolPref(pref, defaultValue) {
+   try {
+     return Services.prefs.getBoolPref(pref);
+   } catch (e) {
+     return defaultValue;
+   }
+ }
+ 
+ // constructor
+ function NewMailNotificationService() {
+   this._mUnreadCount = 0;
+   this._mNewCount = 0;
+   this._listeners = [];
+   this.wrappedJSObject = this;
++  this.folderBiffMap = new Map();
+ 
+   this._log = console.createInstance({
+     prefix: "mail.notification",
+     maxLogLevel: "Warn",
+     maxLogLevelPref: "mail.notification.loglevel",
+   });
+ 
+   // Listen for mail-startup-done to do the rest of our setup after folders are initialized
+@@ -278,25 +276,32 @@ NewMailNotificationService.prototype = {
+       if (newCount > 0) {
+         this._mNewCount += newCount;
+         this._log.debug(
+           "NMNS_biffStateChanged: " +
+             folder.URI +
+             " New mail count " +
+             this._mNewCount
+         );
++        this.folderBiffMap.set(folder.URI, newCount);
+         if (this.countNew) {
+           this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+         }
+       }
+     } else if (newValue == Ci.nsIMsgFolder.nsMsgBiffState_NoMail) {
+-      // Dodgy - when any folder tells us it has no mail, clear all unread mail
+-      this._mNewCount = 0;
++      let folderBiff = this.folderBiffMap.get(folder.URI);
++      if (folderBiff) {
++        this._mNewCount -= folderBiff;
++        this.folderBiffMap.delete(folder.URI);
++      }
+       this._log.debug(
+-        "NMNS_biffStateChanged: " + folder.URI + " New mail count 0"
++        "NMNS_biffStateChanged: " +
++          folder.URI +
++          " New mail count " +
++          this._mNewCount
+       );
+       if (this.countNew) {
+         this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+       }
+     }
+   },
+ 
+   _newMailReceived(folder, oldValue, newValue) {
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -867,22 +867,18 @@ pref("mail.biff.use_system_alert", true)
+ // add jitter to biff interval
+ pref("mail.biff.add_interval_jitter", true);
+ 
+ #ifdef MOZ_SUITE
+ // if true, check for new mail even when opening non-mail windows
+ pref("mail.biff.on_new_window", true);
+ #endif
+ 
+-#ifdef XP_MACOSX
+-// If true, the number used in the Mac OS X dock notification will be the
+-// the number of "new" messages, as per the classic Thunderbird definition.
+-// Defaults to false, which notifies about the number of unread messages.
+-pref("mail.biff.use_new_count_in_mac_dock", false);
+-#endif
++// Used for Windows systray and Mac doc.
++pref("mail.notification.count.new", true);
+ 
+ // For feed account serverType=rss sound on biff; if true, mail.biff.play_sound.* settings are used.
+ pref("mail.feed.play_sound", false);
+ 
+ // Content disposition for attachments (except binary files and vcards).
+ //   0= Content-Disposition: inline
+ //   1= Content-Disposition: attachment
+ pref("mail.content_disposition_type", 1);
