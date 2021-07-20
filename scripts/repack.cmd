@@ -20,7 +20,8 @@ rm -f %~1.xpi
 mv chrome\en-US\locale\en-US\branding chrome\%~1\locale\%~1\branding
 mv localization\en-US\branding\ localization\%~1\branding\
 
-:: Remove original en-US locale
+:: Remove original en-US locale, experiments showed that it isn't used as fallback
+:: when left in omni.ja. Leaving chrome/en-US even switched to that locale.
 rm -rf chrome\en-US
 rm -rf localization\en-US
 
@@ -33,6 +34,7 @@ sed -i -e 's/en-US en-US\/locale\/en-US/%~1 %~1\/locale\/%~1/' chrome\chrome.man
 sed -i -e 's/en-US en-US\/locale\/pdfviewer/%~1 %~1\/locale\/pdfviewer/' chrome\chrome.manifest
 
 :: TODO: Add extra strings
+cp ..\msgHdrViewOverlay-%~1.dtd chrome\%~1\locale\%~1\messenger\
 
 :: Pack the whole thing again
 7z a -r -tzip -m0=Copy omni.ja *.*
