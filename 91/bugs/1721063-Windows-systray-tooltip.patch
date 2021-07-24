@@ -2,7 +2,7 @@
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1626806750 -7200
 # Parent  06eeada3b4ba868a7cd9d675d6a28c0eb50c5cb9
-Bug 1721063 - Improve Windows systray tooltip.
+Bug 1721063 - Rework MailNotificationService.jsm to improve Windows systray tooltip.
 
 diff --git a/mail/components/preferences/dockoptions.js b/mail/components/preferences/dockoptions.js
 --- a/mail/components/preferences/dockoptions.js
@@ -74,7 +74,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    this._mNewCount = 0;
    this._listeners = [];
    this.wrappedJSObject = this;
-+  this.folderBiffMap = new Map();
++  this.folderNewMap = new Map();
  
    this._log = console.createInstance({
      prefix: "mail.notification",
@@ -83,65 +83,199 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    });
  
    // Listen for mail-startup-done to do the rest of our setup after folders are initialized
-@@ -256,47 +254,62 @@ NewMailNotificationService.prototype = {
-         "NMNS_biffStateChanged: folder " +
+@@ -81,16 +79,17 @@ NewMailNotificationService.prototype = {
+             "NMNS_Observe: unable to deregister mail-startup-done listener: " +
+               e
+           );
+         }
+         Services.obs.addObserver(this, "profile-before-change");
+         MailServices.mailSession.AddFolderListener(
+           this,
+           Ci.nsIFolderListener.intPropertyChanged |
++            Ci.nsIFolderListener.boolPropertyChanged |
+             Ci.nsIFolderListener.added |
+             Ci.nsIFolderListener.removed |
+             Ci.nsIFolderListener.propertyFlagChanged
+         );
+         this._initUnreadCount();
+       } else if (aTopic == "profile-before-change") {
+         try {
+           MailServices.mailSession.RemoveFolderListener(this);
+@@ -178,16 +177,19 @@ NewMailNotificationService.prototype = {
+     } else if (
+       aFolder.flags & Ci.nsMsgFolderFlags.SpecialUse &&
+       !(aFolder.flags & Ci.nsMsgFolderFlags.Inbox)
+     ) {
+       // It's a special folder *other than the inbox*, don't count it by default.
+       shouldCount.data = false;
+     } else if (aFolder.flags & Ci.nsMsgFolderFlags.Virtual) {
+       shouldCount.data = false;
++    } else if (Services.prefs.getBoolPref(countNewMessagesPref, true)) {
++      // If we're counting new messages, we count them in all folders.
++      shouldCount.data = true;
+     } else {
+       // If we're only counting inboxes and it's not an inbox...
+       try {
+         // If we can't get this pref, just leave it as the default
+         let onlyCountInboxes = Services.prefs.getBoolPref(countInboxesPref);
+         if (onlyCountInboxes && !(aFolder.flags & Ci.nsMsgFolderFlags.Inbox)) {
+           shouldCount.data = false;
+         }
+@@ -204,99 +206,111 @@ NewMailNotificationService.prototype = {
+     );
+     this._log.trace(
+       "NMNS_confirmShouldCount: after observers " + shouldCount.data
+     );
+ 
+     return shouldCount.data;
+   },
+ 
++  OnItemBoolPropertyChanged(folder, property, oldValue, newValue) {
++    this._log.trace(
++      "NMNS_OnItemBoolPropertyChanged: folder " +
++        folder.URI +
++        " " +
++        property +
++        " " +
++        oldValue +
++        " " +
++        newValue
++    );
++    if (property == "NewMessages") {
++      this._newMessagesChanged(folder, oldValue, newValue);
++    }
++  },
++
+   OnItemIntPropertyChanged(folder, property, oldValue, newValue) {
+     try {
+       if (property == "FolderSize") {
+         return;
+       }
+       this._log.trace(
+         "NMNS_OnItemIntPropertyChanged: folder " +
            folder.URI +
-           " New mail, " +
-           (allFolders.length - 1) +
-           " subfolders"
+           " " +
+           property +
+           " " +
+           oldValue +
+           " " +
+           newValue
        );
-       let newCount = 0;
+-      if (property == "BiffState") {
+-        this._biffStateChanged(folder, oldValue, newValue);
+-      } else if (property == "TotalUnreadMessages") {
++      if (property == "TotalUnreadMessages") {
+         this._updateUnreadCount(folder, oldValue, newValue);
++        this._updateNewCount(folder, newValue - oldValue);
+       } else if (property == "NewMailReceived") {
+         this._newMailReceived(folder, oldValue, newValue);
+       }
+     } catch (error) {
+       this._log.error("NMNS_OnItemIntPropertyChanged: exception " + error);
+     }
+   },
+ 
+-  _biffStateChanged(folder, oldValue, newValue) {
+-    if (newValue == Ci.nsIMsgFolder.nsMsgBiffState_NewMail) {
+-      if (folder.server && !folder.server.performingBiff) {
+-        this._log.debug(
+-          "NMNS_biffStateChanged: folder " +
+-            folder.URI +
+-            " notified, but server not performing biff"
+-        );
+-        return;
+-      }
++  _updateNewCount(folder, newCount) {
++    if (newCount <= 0 || !this.confirmShouldCount(folder)) {
++      return;
++    }
+ 
+-      // Biff notifications come in for the top level of the server, we need to look for
+-      // the folder that actually contains the new mail
+-
+-      let allFolders = [folder, ...folder.descendants];
+-
+-      this._log.trace(
+-        "NMNS_biffStateChanged: folder " +
+-          folder.URI +
+-          " New mail, " +
+-          (allFolders.length - 1) +
+-          " subfolders"
+-      );
+-      let newCount = 0;
++    this._log.debug(
++      "NMNS_updateNewCount: folder " +
++        folder.URI +
++        " new messages: " +
++        newCount
++    );
++    let folderBiff = this.folderNewMap.get(folder.URI);
++    if (!folderBiff || folderBiff == -1) {
++      this.folderNewMap.set(folder.URI, newCount);
++    }
  
 -      for (let folder of allFolders) {
 -        if (this.confirmShouldCount(folder)) {
 -          let folderNew = folder.getNumNewMessages(false);
-+      for (let f of allFolders) {
-+        if (this.confirmShouldCount(f)) {
-+          let folderNew = f.getNumNewMessages(false);
-           this._log.debug(
-             "NMNS_biffStateChanged: folder " +
+-          this._log.debug(
+-            "NMNS_biffStateChanged: folder " +
 -              folder.URI +
-+              f.URI +
-               " new messages: " +
-               folderNew
-           );
-           if (folderNew > 0) {
-             newCount += folderNew;
-+            let folderBiff = this.folderBiffMap.get(f.URI);
-+            if (!folderBiff) {
-+              this.folderBiffMap.set(f.URI, folderNew);
-+            } else {
-+              this.folderBiffMap.set(f.URI, folderBiff + folderNew);
-+            }
-           }
-         }
+-              " new messages: " +
+-              folderNew
+-          );
+-          if (folderNew > 0) {
+-            newCount += folderNew;
+-          }
+-        }
++    this._mNewCount += newCount;
++    this._log.debug(
++      "NMNS_updateNewCount: " +
++        folder.URI +
++        " New mail count " +
++        this._mNewCount
++    );
++    if (this.countNew) {
++      this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
++    }
++  },
++      
++  _newMessagesChanged(folder, oldValue, newValue) {
++    let folderBiff;
++    if (newValue) {
++      // We have new messages.
++      // `getNumNewMessages()` doesn't work until after the biff
++      // notification (BiffState or NumNewBiffMessages changed)
++      // and it doesn't work on local folders at all.
++      // We use a change of TotalUnreadMessages.
++      folderBiff = this.folderNewMap.get(folder.URI);
++      if (!folderBiff) {
++        // Notification for TotalUnreadMessages will fix this.
++        this.folderNewMap.set(folder.URI, -1);
        }
-       if (newCount > 0) {
-         this._mNewCount += newCount;
-         this._log.debug(
-           "NMNS_biffStateChanged: " +
-             folder.URI +
-             " New mail count " +
-             this._mNewCount
-         );
-         if (this.countNew) {
-           this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
-         }
+-      if (newCount > 0) {
+-        this._mNewCount += newCount;
+-        this._log.debug(
+-          "NMNS_biffStateChanged: " +
+-            folder.URI +
+-            " New mail count " +
+-            this._mNewCount
+-        );
+-        if (this.countNew) {
+-          this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+-        }
++    } else {
++      // New messages went away.
++      folderBiff = this.folderNewMap.get(folder.URI);
++      if (folderBiff) {
++        this._mNewCount -= folderBiff;
++        this.folderNewMap.delete(folder.URI);
        }
-     } else if (newValue == Ci.nsIMsgFolder.nsMsgBiffState_NoMail) {
+-    } else if (newValue == Ci.nsIMsgFolder.nsMsgBiffState_NoMail) {
 -      // Dodgy - when any folder tells us it has no mail, clear all unread mail
 -      this._mNewCount = 0;
-+      let allFolders = [folder, ...folder.descendants];
-+      for (let f of allFolders) {
-+        let folderBiff = this.folderBiffMap.get(f.URI);
-+        if (folderBiff) {
-+          this._mNewCount -= folderBiff;
-+          this.folderBiffMap.delete(f.URI);
-+        }
-+      }
        this._log.debug(
 -        "NMNS_biffStateChanged: " + folder.URI + " New mail count 0"
-+        "NMNS_biffStateChanged: " +
++        "NMNS_newMessagesChanged: " +
 +          folder.URI +
 +          " New mail count " +
 +          this._mNewCount
@@ -153,7 +287,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    },
  
    _newMailReceived(folder, oldValue, newValue) {
-@@ -316,16 +329,22 @@ NewMailNotificationService.prototype = {
+@@ -316,16 +330,22 @@ NewMailNotificationService.prototype = {
          oldValue +
          " New folder " +
          newValue +
@@ -162,11 +296,11 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
          " New total " +
          this._mNewCount
      );
-+    let folderBiff = this.folderBiffMap.get(folder.URI);
++    let folderBiff = this.folderNewMap.get(folder.URI);
 +    if (!folderBiff) {
-+      this.folderBiffMap.set(folder.URI, newValue - oldValue);
++      this.folderNewMap.set(folder.URI, newValue - oldValue);
 +    } else {
-+      this.folderBiffMap.set(folder.URI, folderBiff + newValue - oldValue);
++      this.folderNewMap.set(folder.URI, folderBiff + newValue - oldValue);
 +    }
      if (this.countNew) {
        this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
