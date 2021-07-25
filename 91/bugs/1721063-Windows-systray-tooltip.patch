@@ -44,7 +44,7 @@ diff --git a/mail/components/preferences/dockoptions.xhtml b/mail/components/pre
 diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
 --- a/mailnews/base/src/MailNotificationService.jsm
 +++ b/mailnews/base/src/MailNotificationService.jsm
-@@ -16,36 +16,34 @@ var EXPORTED_SYMBOLS = ["NewMailNotifica
+@@ -16,36 +16,35 @@ var EXPORTED_SYMBOLS = ["NewMailNotifica
  var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
  var { MailServices } = ChromeUtils.import(
    "resource:///modules/MailServices.jsm"
@@ -74,6 +74,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    this._mNewCount = 0;
    this._listeners = [];
    this.wrappedJSObject = this;
++  this.folderCountMap = new Map();
 +  this.folderNewMap = new Map();
  
    this._log = console.createInstance({
@@ -83,7 +84,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    });
  
    // Listen for mail-startup-done to do the rest of our setup after folders are initialized
-@@ -81,16 +79,17 @@ NewMailNotificationService.prototype = {
+@@ -81,16 +80,17 @@ NewMailNotificationService.prototype = {
              "NMNS_Observe: unable to deregister mail-startup-done listener: " +
                e
            );
@@ -101,7 +102,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
        } else if (aTopic == "profile-before-change") {
          try {
            MailServices.mailSession.RemoveFolderListener(this);
-@@ -178,16 +177,19 @@ NewMailNotificationService.prototype = {
+@@ -178,16 +178,19 @@ NewMailNotificationService.prototype = {
      } else if (
        aFolder.flags & Ci.nsMsgFolderFlags.SpecialUse &&
        !(aFolder.flags & Ci.nsMsgFolderFlags.Inbox)
@@ -121,7 +122,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
          if (onlyCountInboxes && !(aFolder.flags & Ci.nsMsgFolderFlags.Inbox)) {
            shouldCount.data = false;
          }
-@@ -204,99 +206,113 @@ NewMailNotificationService.prototype = {
+@@ -204,130 +207,133 @@ NewMailNotificationService.prototype = {
      );
      this._log.trace(
        "NMNS_confirmShouldCount: after observers " + shouldCount.data
@@ -166,9 +167,9 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -      } else if (property == "TotalUnreadMessages") {
 +      if (property == "TotalUnreadMessages") {
          this._updateUnreadCount(folder, oldValue, newValue);
+-      } else if (property == "NewMailReceived") {
+-        this._newMailReceived(folder, oldValue, newValue);
 +        this._updateNewCount(folder, newValue - oldValue);
-       } else if (property == "NewMailReceived") {
-         this._newMailReceived(folder, oldValue, newValue);
        }
      } catch (error) {
        this._log.error("NMNS_OnItemIntPropertyChanged: exception " + error);
@@ -186,15 +187,31 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -        return;
 -      }
 +  _updateNewCount(folder, newCount) {
-+    if (newCount <= 0 || !this.confirmShouldCount(folder)) {
++    if (!this.confirmShouldCount(folder)) {
 +      return;
 +    }
  
 -      // Biff notifications come in for the top level of the server, we need to look for
 -      // the folder that actually contains the new mail
--
++    this._log.debug(
++      "NMNS_updateNewCount: folder " +
++        folder.URI +
++        " new messages: " +
++        newCount
++    );
++    let folderCount = this.folderCountMap.get(folder.URI);
++    if (!folderCount) {
++      this.folderCountMap.set(folder.URI, newCount);
++    } else {
++      this.folderCountMap.set(folder.URI, folderCount + newCount);
++    }
+ 
 -      let allFolders = [folder, ...folder.descendants];
--
++    let folderNew = this.folderNewMap.get(folder.URI);
++    if (!folderNew) {
++      return;
++    }
+ 
 -      this._log.trace(
 -        "NMNS_biffStateChanged: folder " +
 -          folder.URI +
@@ -203,33 +220,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -          " subfolders"
 -      );
 -      let newCount = 0;
-+    this._log.debug(
-+      "NMNS_updateNewCount: folder " +
-+        folder.URI +
-+        " new messages: " +
-+        newCount
-+    );
-+    let folderBiff = this.folderNewMap.get(folder.URI);
-+    if (!folderBiff || folderBiff == -1) {
-+      this.folderNewMap.set(folder.URI, newCount);
-+    } else {
-+      this.folderNewMap.set(folder.URI, folderBiff + newCount);
-+    }
- 
--      for (let folder of allFolders) {
--        if (this.confirmShouldCount(folder)) {
--          let folderNew = folder.getNumNewMessages(false);
--          this._log.debug(
--            "NMNS_biffStateChanged: folder " +
--              folder.URI +
--              " new messages: " +
--              folderNew
--          );
--          if (folderNew > 0) {
--            newCount += folderNew;
--          }
--        }
-+    this._mNewCount += newCount;
++    this._mNewCount = Math.max(this._mNewCount + newCount, 0);
 +    this._log.debug(
 +      "NMNS_updateNewCount: " +
 +        folder.URI +
@@ -240,78 +231,159 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
 +    }
 +  },
-+      
+ 
+-      for (let folder of allFolders) {
+-        if (this.confirmShouldCount(folder)) {
+-          let folderNew = folder.getNumNewMessages(false);
 +  _newMessagesChanged(folder, oldValue, newValue) {
-+    let folderBiff;
 +    if (newValue) {
 +      // We have new messages.
 +      // `getNumNewMessages()` doesn't work until after the biff
 +      // notification (BiffState or NumNewBiffMessages changed)
 +      // and it doesn't work on local folders at all.
 +      // We use a change of TotalUnreadMessages.
-+      folderBiff = this.folderNewMap.get(folder.URI);
-+      if (!folderBiff) {
-+        // Notification for TotalUnreadMessages will fix this.
-+        this.folderNewMap.set(folder.URI, -1);
++      let folderNew = this.folderNewMap.get(folder.URI);
++      if (!folderNew) {
++        this.folderNewMap.set(folder.URI, true);
++        let folderCount = this.folderCountMap.get(folder.URI);
++        if (folderCount) {
++          // The count arrived before the "NewMessages" notification.
++          this._mNewCount += folderCount;
+           this._log.debug(
+-            "NMNS_biffStateChanged: folder " +
++            "NMNS_newMessagesChanged: " +
+               folder.URI +
+-              " new messages: " +
+-              folderNew
++              " New mail count " +
++              this._mNewCount
+           );
+-          if (folderNew > 0) {
+-            newCount += folderNew;
++          if (this.countNew) {
++            this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+           }
+         }
        }
 -      if (newCount > 0) {
 -        this._mNewCount += newCount;
--        this._log.debug(
--          "NMNS_biffStateChanged: " +
--            folder.URI +
--            " New mail count " +
--            this._mNewCount
--        );
--        if (this.countNew) {
--          this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
--        }
 +    } else {
 +      // New messages went away.
-+      folderBiff = this.folderNewMap.get(folder.URI);
-+      if (folderBiff) {
-+        this._mNewCount -= folderBiff;
-+        this.folderNewMap.delete(folder.URI);
++      let folderCount = this.folderCountMap.get(folder.URI);
++      if (folderCount) {
++        this._mNewCount = Math.max(this._mNewCount - folderCount, 0);
+         this._log.debug(
+-          "NMNS_biffStateChanged: " +
++          "NMNS_newMessagesChanged: " +
+             folder.URI +
+             " New mail count " +
+             this._mNewCount
+         );
+         if (this.countNew) {
+           this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+         }
        }
 -    } else if (newValue == Ci.nsIMsgFolder.nsMsgBiffState_NoMail) {
 -      // Dodgy - when any folder tells us it has no mail, clear all unread mail
 -      this._mNewCount = 0;
-       this._log.debug(
+-      this._log.debug(
 -        "NMNS_biffStateChanged: " + folder.URI + " New mail count 0"
-+        "NMNS_newMessagesChanged: " +
-+          folder.URI +
-+          " New mail count " +
-+          this._mNewCount
-       );
-       if (this.countNew) {
-         this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
-       }
-     }
-   },
- 
-   _newMailReceived(folder, oldValue, newValue) {
-@@ -316,16 +332,22 @@ NewMailNotificationService.prototype = {
-         oldValue +
-         " New folder " +
-         newValue +
-         " Old total " +
-         oldTotal +
-         " New total " +
-         this._mNewCount
-     );
-+    let folderBiff = this.folderNewMap.get(folder.URI);
-+    if (!folderBiff) {
-+      this.folderNewMap.set(folder.URI, newValue - oldValue);
-+    } else {
-+      this.folderNewMap.set(folder.URI, folderBiff + newValue - oldValue);
-+    }
-     if (this.countNew) {
-       this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+-      );
+-      if (this.countNew) {
+-        this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+-      }
+-    }
+-  },
+-
+-  _newMailReceived(folder, oldValue, newValue) {
+-    if (!this.confirmShouldCount(folder)) {
+-      return;
+-    }
+-
+-    if (!oldValue || oldValue < 0) {
+-      oldValue = 0;
+-    }
+-    let oldTotal = this._mNewCount;
+-    this._mNewCount += newValue - oldValue;
+-    this._log.debug(
+-      "NMNS_newMailReceived: " +
+-        folder.URI +
+-        " Old folder " +
+-        oldValue +
+-        " New folder " +
+-        newValue +
+-        " Old total " +
+-        oldTotal +
+-        " New total " +
+-        this._mNewCount
+-    );
+-    if (this.countNew) {
+-      this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
++      this.folderCountMap.delete(folder.URI);
++      this.folderNewMap.delete(folder.URI);
      }
    },
  
    _updateUnreadCount(folder, oldValue, newValue) {
      if (!this.confirmShouldCount(folder)) {
        return;
+     }
+ 
+@@ -358,16 +364,19 @@ NewMailNotificationService.prototype = {
+             " added to " +
+             item.folder.folderURL
+         );
+       }
+     }
+   },
+ 
+   OnItemPropertyFlagChanged(item, property, oldFlag, newFlag) {
++    if (property != "Status") {
++      return;
++    }
+     if (item instanceof Ci.nsIMsgDBHdr) {
+       if (
+         oldFlag & Ci.nsMsgMessageFlags.New &&
+         !(newFlag & Ci.nsMsgMessageFlags.New)
+       ) {
+         this._log.trace(
+           "NMNS_OnItemPropertyFlagChanged: item " +
+             item.folder.getUriForMsg(item) +
+@@ -375,16 +384,34 @@ NewMailNotificationService.prototype = {
+         );
+       } else if (newFlag & Ci.nsMsgMessageFlags.New) {
+         this._log.trace(
+           "NMNS_OnItemPropertyFlagChanged: item " +
+             item.folder.getUriForMsg(item) +
+             " marked unread"
+         );
+       }
++
++      if (!(oldFlag & Ci.nsMsgMessageFlags.New)) {
++        // Changing read status of non-new message. We need to
++        // compensate since this will change the (new) unread
++        // message count which we might be tracking on the folder.
++        if (
++          oldFlag & Ci.nsMsgMessageFlags.Read &&
++          !(newFlag & Ci.nsMsgMessageFlags.Read)
++        ) {
++          this._updateNewCount(item.folder, -1);
++        }
++        if (
++          !(oldFlag & Ci.nsMsgMessageFlags.Read) &&
++          newFlag & Ci.nsMsgMessageFlags.Read
++        ) {
++          this._updateNewCount(item.folder, 1);
++        }
++      }
+     }
+   },
+ 
+   OnItemRemoved(parentItem, item) {
+     if (item instanceof Ci.nsIMsgDBHdr && !item.isRead) {
+       this._log.trace(
+         "NMNS_OnItemRemoved: unread item " +
+           item.folder.getUriForMsg(item) +
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
