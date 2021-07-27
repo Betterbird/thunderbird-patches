@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1627327407 -7200
-# Parent  2e746cbcfebca8b469d8b4799006dca937d27046
+# Date 1627419220 -7200
+# Parent  e87e3df7a3ab88b614ac4e5972e0c5f316d6e81c
 Bug 1721063 - Rework MailNotificationService.jsm to improve Windows systray tooltip.
 
 diff --git a/mail/components/preferences/dockoptions.js b/mail/components/preferences/dockoptions.js
@@ -41,6 +41,93 @@ diff --git a/mail/components/preferences/dockoptions.xhtml b/mail/components/pre
          </radiogroup>
          </vbox>
        </html:fieldset>
+diff --git a/mailnews/base/public/mozINewMailListener.idl b/mailnews/base/public/mozINewMailListener.idl
+--- a/mailnews/base/public/mozINewMailListener.idl
++++ b/mailnews/base/public/mozINewMailListener.idl
+@@ -11,12 +11,13 @@
+  * from mozINewMailNotificationService
+  * NOTE: THIS INTERFACE IS UNDER ACTIVE DEVELOPMENT AND SUBJECT TO CHANGE,
+  * see https://bugzilla.mozilla.org/show_bug.cgi?id=715799
+  */
+ interface mozINewMailListener : nsISupports {
+   /** The new mail notification service will call this when the number of interesting
+    * messages has changed
+    *
+-   * @param unreadCount   The number of unread messages the user cares to be notified about
++   * @param count   The number of unread messages the user cares to be notified about
++   * @param extra   Any additional information that could be relevant (like where the new message are)
+    */
+-  void onCountChanged(in unsigned long count);
++  void onCountChanged(in unsigned long count, in AString extra);
+ };
+diff --git a/mailnews/base/src/MailNotificationManager.jsm b/mailnews/base/src/MailNotificationManager.jsm
+--- a/mailnews/base/src/MailNotificationManager.jsm
++++ b/mailnews/base/src/MailNotificationManager.jsm
+@@ -32,16 +32,17 @@ class MailNotificationManager {
+     "nsIFolderListener",
+     "mozINewMailListener",
+   ]);
+ 
+   constructor() {
+     this._systemAlertAvailable = true;
+     this._unreadChatCount = 0;
+     this._unreadMailCount = 0;
++    this._unreadMailExtra = "";
+     // @type {Map<nsIMsgFolder, number>} - A map of folder and its last biff time.
+     this._folderBiffTime = new Map();
+     // @type {Set<nsIMsgFolder>} - A set of folders to show alert for.
+     this._pendingFolders = new Set();
+ 
+     this._logger = console.createInstance({
+       prefix: "mail.notification",
+       maxLogLevel: "Warn",
+@@ -153,19 +154,21 @@ class MailNotificationManager {
+         this._fillAlertInfo(folder);
+         break;
+     }
+   }
+ 
+   /**
+    * @see mozINewMailNotificationService
+    */
+-  onCountChanged(count) {
++  onCountChanged(count, extra) {
++    console.log("entry", count, extra);
+     this._logger.log(`Unread mail count changed to ${count}`);
+     this._unreadMailCount = count;
++    this._unreadMailExtra = extra;
+     this._updateUnreadCount();
+   }
+ 
+   /**
+    * Show an alert according the changed folder.
+    * @param {nsIMsgFolder} changedFolder - The folder that emitted the change
+    *   event, can be a root folder or a real folder.
+    */
+@@ -409,19 +412,23 @@ class MailNotificationManager {
+   async _updateUnreadCount() {
+     this._logger.debug(
+       `Update unreadMailCount=${this._unreadMailCount}, unreadChatCount=${this._unreadChatCount}`
+     );
+     let count = this._unreadMailCount + this._unreadChatCount;
+     let tooltip = "";
+     if (AppConstants.platform == "win") {
+       if (count > 0) {
++        console.log(count, this._unreadMailExtra);
+         tooltip = await l10n.formatValue("unread-messages-os-tooltip", {
+           count,
+         });
++        if (this._unreadMailExtra) {
++          tooltip += this._unreadMailExtra;
++        }
+       }
+       WinUnreadBadge.updateUnreadCount(count, tooltip);
+     }
+     this._osIntegration?.updateUnreadCount(count, tooltip);
+   }
+ 
+   _animateDockIcon() {
+     if (Services.prefs.getBoolPref("mail.biff.animate_dock_icon", false)) {
 diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
 --- a/mailnews/base/src/MailNotificationService.jsm
 +++ b/mailnews/base/src/MailNotificationService.jsm
@@ -122,7 +209,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
          if (onlyCountInboxes && !(aFolder.flags & Ci.nsMsgFolderFlags.Inbox)) {
            shouldCount.data = false;
          }
-@@ -204,130 +207,147 @@ NewMailNotificationService.prototype = {
+@@ -204,131 +207,233 @@ NewMailNotificationService.prototype = {
      );
      this._log.trace(
        "NMNS_confirmShouldCount: after observers " + shouldCount.data
@@ -169,7 +256,8 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
          this._updateUnreadCount(folder, oldValue, newValue);
 -      } else if (property == "NewMailReceived") {
 -        this._newMailReceived(folder, oldValue, newValue);
-+        this._updateNewCount(folder, newValue - oldValue);
++        // For new folders, there is a call with old == -1 and new == 0.
++        this._updateNewCount(folder, newValue - Math.max(oldValue, 0));
        }
      } catch (error) {
        this._log.error("NMNS_OnItemIntPropertyChanged: exception " + error);
@@ -227,8 +315,6 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -          " New mail, " +
 -          (allFolders.length - 1) +
 -          " subfolders"
--      );
--      let newCount = 0;
 +    this._mNewCount = Math.max(this._mNewCount + newCount, 0);
 +    this._log.debug(
 +      "NMNS_updateNewCount: " +
@@ -237,7 +323,13 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +        this._mNewCount
 +    );
 +    if (this.countNew) {
-+      this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
++      this._notifyListeners(
++        NMNS.count,
++        "onCountChanged",
++        this._mNewCount,
++        this._folderInfo()
+       );
+-      let newCount = 0;
 +    }
 +  },
  
@@ -253,7 +345,10 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      // We use a change of TotalUnreadMessages.
 +      let folderNew = this.folderNewMap.get(folder.URI);
 +      if (!folderNew) {
-+        this.folderNewMap.set(folder.URI, true);
++        this.folderNewMap.set(folder.URI, {
++          name: folder.name,
++          isInbox: folder.flags & Ci.nsMsgFolderFlags.Inbox,
++        });
 +        let folderCount = this.folderCountMap.get(folder.URI);
 +        if (folderCount) {
 +          // The count arrived before the "NewMessages" notification.
@@ -273,7 +368,8 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +            this._notifyListeners(
 +              NMNS.count,
 +              "onCountChanged",
-+              this._mNewCount
++              this._mNewCount,
++              this._folderInfo()
 +            );
            }
          }
@@ -293,7 +389,13 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
              this._mNewCount
          );
          if (this.countNew) {
-           this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
+-          this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
++          this._notifyListeners(
++            NMNS.count,
++            "onCountChanged",
++            this._mNewCount,
++            this._folderInfo()
++          );
          }
        }
 -    } else if (newValue == Ci.nsIMsgFolder.nsMsgBiffState_NoMail) {
@@ -305,17 +407,50 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -      if (this.countNew) {
 -        this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
 -      }
--    }
--  },
--
++      this.folderCountMap.delete(folder.URI);
++      this.folderNewMap.delete(folder.URI);
+     }
+   },
+ 
 -  _newMailReceived(folder, oldValue, newValue) {
 -    if (!this.confirmShouldCount(folder)) {
 -      return;
--    }
++  _folderInfo() {
++    let totalInbox = 0;
++    let countInbox = 0;
++    let inboxName = "";
++    let folders = [];
++    for (const [key, value] of this.folderNewMap) {
++      let count = this.folderCountMap.get(key);
++      if (!count) {
++        continue;
++      }
++      if (value.isInbox) {
++        totalInbox += count;
++        countInbox++;
++        inboxName = value.name; // Could be localised.
++        continue;
++      }
++      folders.push({ count, name: value.name });
+     }
 -
 -    if (!oldValue || oldValue < 0) {
 -      oldValue = 0;
--    }
++    if (totalInbox == 0 && folders.length == 0) {
++      return "";
++    }
++    let output = "\n";
++    let lineCount = 0;
++    let folderAddsComma = false;
++    if (totalInbox > 0) {
++      output += inboxName;
++      if (countInbox > 1) {
++        output += "(Σ)";
++      }
++      output += ": " + totalInbox.toString(10);
++      lineCount = 1;
++      folderAddsComma = true;
+     }
 -    let oldTotal = this._mNewCount;
 -    this._mNewCount += newValue - oldValue;
 -    this._log.debug(
@@ -332,9 +467,41 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -    );
 -    if (this.countNew) {
 -      this._notifyListeners(NMNS.count, "onCountChanged", this._mNewCount);
-+      this.folderCountMap.delete(folder.URI);
-+      this.folderNewMap.delete(folder.URI);
++    if (folders.length == 0) {
++      return output;
      }
++    let lineLength = output.length - 1; // Don't count the initial newline.
++    folders.sort((el1, el2) => el2.count - el1.count);
++    for (let i = 0; i < folders.length; i++) {
++      let folder = folders[i].name + ": " + folders[i].count;
++      if (lineLength + folder.length > 60) {
++        if (lineCount >= 5) {
++          // Sorry, can't list more folders.
++          output += ", \u2026";
++          break;
++        }
++        if (folderAddsComma) {
++          output += ",\n" + folder;
++        } else {
++          // No comma, so this is the first thing we add.
++          output += folder;
++          folderAddsComma = true;
++        }
++        lineCount++;
++        lineLength = folder.length;
++        continue;
++      }
++      if (folderAddsComma) {
++        output += ", " + folder;
++      } else {
++        // No comma, so this is the first thing we add.
++        output += folder;
++        folderAddsComma = true;
++        lineCount = 1;
++      }
++      lineLength += folder.length;
++    }
++    return output;
    },
  
    _updateUnreadCount(folder, oldValue, newValue) {
@@ -342,7 +509,8 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
        return;
      }
  
-@@ -358,16 +378,19 @@ NewMailNotificationService.prototype = {
+     // treat "count unknown" as zero
+@@ -358,16 +463,19 @@ NewMailNotificationService.prototype = {
              " added to " +
              item.folder.folderURL
          );
@@ -362,7 +530,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
          this._log.trace(
            "NMNS_OnItemPropertyFlagChanged: item " +
              item.folder.getUriForMsg(item) +
-@@ -375,16 +398,34 @@ NewMailNotificationService.prototype = {
+@@ -375,16 +483,34 @@ NewMailNotificationService.prototype = {
          );
        } else if (newFlag & Ci.nsMsgMessageFlags.New) {
          this._log.trace(
@@ -397,6 +565,35 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
        this._log.trace(
          "NMNS_OnItemRemoved: unread item " +
            item.folder.getUriForMsg(item) +
+@@ -443,18 +569,25 @@ NewMailNotificationService.prototype = {
+       let l = this._listeners[i];
+       if (l.flags & flag) {
+         list.push(l.obj);
+       }
+     }
+     return list;
+   },
+ 
+-  _notifyListeners(flag, func, value) {
++  _notifyListeners(flag, func, value1, value2 = "") {
+     let list = this._listenersForFlag(flag);
+     for (let i = 0; i < list.length; i++) {
+       this._log.debug(
+-        "NMNS_notifyListeners " + flag + " " + func + " " + value
++        "NMNS_notifyListeners " +
++          flag +
++          " " +
++          func +
++          " " +
++          value1 +
++          " " +
++          value2
+       );
+-      list[i][func](value);
++      list[i][func](value1, value2);
+     }
+   },
+ };
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
