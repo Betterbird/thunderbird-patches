@@ -1,0 +1,115 @@
+# vim: se ft=diff :
+# HG changeset patch
+# User José M. Muñoz <jose>
+# Date 2021-05-21 06:10
+Bug 1563452 - Don't break attributes when serializing. r=?
+
+diff --git a/dom/base/test/gtest/TestSerializerNoBreakLink.cpp b/dom/base/test/gtest/TestSerializerNoBreakLink.cpp
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/gtest/TestSerializerNoBreakLink.cpp
+@@ -0,0 +1,53 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "gtest/gtest.h"
++#include "nsCOMPtr.h"
++#include "nsString.h"
++#include "mozilla/dom/DOMParser.h"
++#include "mozilla/dom/Document.h"
++#include "nsIDocumentEncoder.h"
++#include "mozilla/ErrorResult.h"
++
++// This is a test for serialising some DOM with a link
++// whose href contains a space.
++
++// int main(int argc, char** argv)
++TEST(TestSerializerNoBreakLink, TestSerializerNoBreakLinkMain)
++{
++  bool allTestsPassed = false;
++  constexpr auto htmlInput =
++      u"<html><head>"
++      "<meta http-equiv=\"content-type\" content=\"text/html; charset=\">"
++      "</head><body>Hello Thunderbird! <a href=\"http:www.example.com/"
++      "link with space.txt\">Link</a></body></html>"_ns;
++
++  do {
++    // Parse the HTML source.
++    mozilla::IgnoredErrorResult rv2;
++    RefPtr<mozilla::dom::DOMParser> parser =
++        mozilla::dom::DOMParser::CreateWithoutGlobal(rv2);
++    if (rv2.Failed()) break;
++    nsCOMPtr<mozilla::dom::Document> document = parser->ParseFromString(
++        htmlInput, mozilla::dom::SupportedType::Text_html, rv2);
++    if (rv2.Failed()) break;
++
++    // Serialize it back to HTML source again.
++    nsCOMPtr<nsIDocumentEncoder> encoder =
++        do_createDocumentEncoder("text/html");
++    if (!encoder) break;
++    nsresult rv = encoder->Init(document, u"text/html"_ns,
++                                nsIDocumentEncoder::OutputFormatted);
++    if (NS_FAILED(rv)) break;
++    nsString parsed;
++    rv = encoder->EncodeToString(parsed);
++    if (NS_FAILED(rv)) break;
++
++    EXPECT_TRUE(parsed.Find(u"link with space"_ns) != kNotFound);
++    allTestsPassed = true;
++  } while (false);
++
++  EXPECT_TRUE(allTestsPassed);
++}
+diff --git a/dom/base/test/gtest/moz.build b/dom/base/test/gtest/moz.build
+--- a/dom/base/test/gtest/moz.build
++++ b/dom/base/test/gtest/moz.build
+@@ -5,16 +5,17 @@
+ # file, you can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ UNIFIED_SOURCES += [
+     "TestContentUtils.cpp",
+     "TestMimeType.cpp",
+     "TestParser.cpp",
+     "TestPlainTextSerializer.cpp",
+     "TestScheduler.cpp",
++    "TestSerializerNoBreakLink.cpp",
+     "TestXPathGenerator.cpp",
+ ]
+ 
+ LOCAL_INCLUDES += ["/dom/base"]
+ 
+ include("/ipc/chromium/chromium-config.mozbuild")
+ 
+ FINAL_LIBRARY = "xul-gtest"
+diff --git a/dom/serializers/nsXMLContentSerializer.cpp b/dom/serializers/nsXMLContentSerializer.cpp
+--- a/dom/serializers/nsXMLContentSerializer.cpp
++++ b/dom/serializers/nsXMLContentSerializer.cpp
+@@ -660,25 +660,17 @@ bool nsXMLContentSerializer::SerializeAt
+     if (bIncludesDouble && bIncludesSingle) {
+       NS_ENSURE_TRUE(
+           sValue.ReplaceSubstring(u"\""_ns, u"&quot;"_ns, mozilla::fallible),
+           false);
+     }
+     NS_ENSURE_TRUE(attrString.Append(sValue, mozilla::fallible), false);
+     NS_ENSURE_TRUE(attrString.Append(cDelimiter, mozilla::fallible), false);
+   }
+-  if (mDoRaw || PreLevel() > 0) {
+-    NS_ENSURE_TRUE(AppendToStringConvertLF(attrString, aStr), false);
+-  } else if (mDoFormat) {
+-    NS_ENSURE_TRUE(AppendToStringFormatedWrapped(attrString, aStr), false);
+-  } else if (mDoWrap) {
+-    NS_ENSURE_TRUE(AppendToStringWrapped(attrString, aStr), false);
+-  } else {
+-    NS_ENSURE_TRUE(AppendToStringConvertLF(attrString, aStr), false);
+-  }
++  NS_ENSURE_TRUE(AppendToStringConvertLF(attrString, aStr), false);
+ 
+   return true;
+ }
+ 
+ uint32_t nsXMLContentSerializer::ScanNamespaceDeclarations(
+     Element* aElement, Element* aOriginalElement,
+     const nsAString& aTagNamespaceURI) {
+   uint32_t index, count;
