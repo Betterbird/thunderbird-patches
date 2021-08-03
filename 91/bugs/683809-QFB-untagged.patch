@@ -1,0 +1,327 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1628032143 -7200
+#      Tue Aug 03 21:49:31 2021 +0200
+# Node ID e91623332a27a839494208f352798b09c40d1d16
+# Parent  be87e2e8aa40c8602a23202479cdcf5023196b20
+Bug 683809 - QF for untagged messages, two-button solution.
+
+diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
+--- a/mail/base/content/quickFilterBar.inc.xhtml
++++ b/mail/base/content/quickFilterBar.inc.xhtml
+@@ -61,16 +61,24 @@
+                         keyLabelNonMac="&quickFilterBar.textbox.emptyText.keyLabel2.nonmac;"
+                         keyLabelMac="&quickFilterBar.textbox.emptyText.keyLabel2.mac;"
+                         timeout="500"
+                         maxlength="192"
+                         width="320"
+                         style="min-width:280px;"/>
+       </hbox>
+       <hbox id="quick-filter-bar-expando">
++        <toolbarbutton id="qfb-tag-untagged"
++                       type="checkbox"
++                       persist="checked"
++                       class="toolbarbutton-1"/>
++        <toolbarbutton id="qfb-tag-tagged"
++                       type="checkbox"
++                       persist="checked"
++                       class="toolbarbutton-1"/>
+         <arrowscrollbox id="quick-filter-bar-tab-bar"
+                         orient="horizontal"
+                         collapsed="true"
+                         flex="2">
+         <menulist id="qfb-boolean-mode"
+                   tooltiptext="&quickFilterBar.booleanMode.tooltip;"
+                   persist="value">
+           <menupopup id="qfb-boolean-mode-popup">
+diff --git a/mail/modules/QuickFilterManager.jsm b/mail/modules/QuickFilterManager.jsm
+--- a/mail/modules/QuickFilterManager.jsm
++++ b/mail/modules/QuickFilterManager.jsm
+@@ -831,87 +831,155 @@ var TagFacetingFilter = {
+    * Default behaviour but:
+    * - We collapse our expando if we get unchecked.
+    * - We want to initiate a faceting pass if we just got checked.
+    */
+   onCommand(aState, aNode, aEvent, aDocument) {
+     let checked = aNode.checked ? true : null;
+     if (!checked) {
+       aDocument.getElementById("quick-filter-bar-tab-bar").collapsed = true;
++      aDocument.getElementById("qfb-tag-untagged").collapsed = true;
++      aDocument.getElementById("qfb-tag-tagged").collapsed = true;
+     }
+ 
+     // return ourselves if we just got checked to have
+     //  onSearchStart/onSearchMessage/onSearchDone get to do their thing.
+     return [checked, true];
+   },
+ 
+   domBindExtra(aDocument, aMuxer, aNode) {
+     // Tag filtering mode menu (All of/Any of)
+     function commandHandler(aEvent) {
+       let filterValue = aMuxer.getFilterValueForMutation(
+         TagFacetingFilter.name
+       );
+       filterValue.mode = aEvent.target.value;
+       aMuxer.updateSearch();
+     }
++    function untaggedHandler(aEvent) {
++      let filterValue = aMuxer.getFilterValueForMutation(
++        TagFacetingFilter.name
++      );
++      filterValue.untagged = aEvent.target.checked;
++      aMuxer.updateSearch();
++      dump(`clicked untagged button ${filterValue.untagged}\n`);
++    }
++    function taggedHandler(aEvent) {
++      let filterValue = aMuxer.getFilterValueForMutation(
++        TagFacetingFilter.name
++      );
++      filterValue.tagged = aEvent.target.checked;
++      if (filterValue.tagged) {
++        // If tagged button is enabled, individual tags are switched off.
++        for (let key in filterValue.tags) {
++          let tagButton = aDocument.getElementById("qfb-tag-" + key);
++          tagButton.checked = false;
++          tagButton.removeAttribute("inverted");
++          filterValue.tags[key] = false;
++        }
++      }
++      aMuxer.updateSearch();
++      dump(`clicked tagged button ${filterValue.tagged}\n`);
++    }
+     aDocument
+       .getElementById("qfb-boolean-mode")
+       .addEventListener("ValueChange", commandHandler);
++    aDocument
++      .getElementById("qfb-tag-untagged")
++      .addEventListener("click", untaggedHandler);
++    aDocument
++      .getElementById("qfb-tag-tagged")
++      .addEventListener("click", taggedHandler);
+   },
+ 
+   reflectInDOM(aNode, aFilterValue, aDocument, aMuxer) {
+     aNode.checked = !!aFilterValue;
+     if (aFilterValue != null && typeof aFilterValue == "object") {
+       this._populateTagBar(aFilterValue, aDocument, aMuxer);
+     } else {
+       aDocument.getElementById("quick-filter-bar-tab-bar").collapsed = true;
++      aDocument.getElementById("qfb-tag-untagged").collapsed = true;
++      aDocument.getElementById("qfb-tag-tagged").collapsed = true;
+     }
+   },
+ 
+   _populateTagBar(aState, aDocument, aMuxer) {
+     let tagbar = aDocument.getElementById("quick-filter-bar-tab-bar");
+     let keywordMap = aState.tags;
+ 
+     // If we have a mode stored use that. If we don't have a mode, then update
+     // our state to agree with what the UI is currently displaying;
+     // this will happen for fresh profiles.
+     let qbm = aDocument.getElementById("qfb-boolean-mode");
+     if (aState.mode) {
+       qbm.value = aState.mode;
+     } else {
+       aState.mode = qbm.value;
+     }
+-
+-    function commandHandler(aEvent) {
+-      let tagKey = aEvent.target.getAttribute("value");
+-      let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-      state.tags[tagKey] = aEvent.target.checked ? true : null;
+-      aEvent.target.removeAttribute("inverted");
+-      aMuxer.updateSearch();
++    // Similarly, update untagged/tagged button.
++    let untagged = aDocument.getElementById("qfb-tag-untagged");
++    if (typeof aState.untagged === "boolean") {
++      untagged.checked = aState.untagged;
++    } else {
++      aState.untagged = untagged.checked;
++    }
++    let tagged = aDocument.getElementById("qfb-tag-tagged");
++    if (typeof aState.tagged === "boolean") {
++      tagged.checked = aState.tagged;
++    } else {
++      aState.tagged = tagged.checked;
+     }
+ 
+-    function rightClickHandler(aEvent) {
+-      // Only do something if this is a right-click, otherwise commandHandler
+-      //  will pick up on it.
+-      if (aEvent.button == 2) {
+-        // we need to toggle the checked state ourselves
+-        aEvent.target.checked = !aEvent.target.checked;
++    // Processing of click (command) and right-click (contextmenu) events.
++    function clickHandler(aEvent) {
++      // There are three possible current states: null, true, and false (inverted).
++      let buttonState = null;
++      if (aEvent.target.checked) {
++        buttonState = !(aEvent.target.getAttribute("inverted") == "true");
++      }
+ 
+-        let tagKey = aEvent.target.getAttribute("value");
+-        let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-        state.tags[tagKey] = aEvent.target.checked ? false : null;
+-        if (aEvent.target.checked) {
+-          aEvent.target.setAttribute("inverted", "true");
++      if (aEvent.type == "command") {
++        // Swap inverted if opposite button clicked.
++        if (buttonState === false) {
++          buttonState = true;
++        } else if (buttonState === true) {
++          buttonState = null;
++        } else {
++          buttonState = true;
++        }
++      } else {
++        // type == "contextmenu"
++        /* eslint-disable no-lonely-if */
++        // Swap inverted if opposite button clicked.
++        if (buttonState === true) {
++          buttonState = false;
++        } else if (buttonState === false) {
++          buttonState = null;
+         } else {
+-          aEvent.target.removeAttribute("inverted");
++          buttonState = false;
+         }
+-        aMuxer.updateSearch();
+-        aEvent.stopPropagation();
+-        aEvent.preventDefault();
++        /* eslint-enable no-lonely-if */
+       }
++
++      // Now update attributes with buttonState.
++      if (buttonState === false) {
++        aEvent.target.checked = true;
++        aEvent.target.setAttribute("inverted", "true");
++      } else {
++        aEvent.target.removeAttribute("inverted");
++        aEvent.target.checked = buttonState;
++      }
++      let tagKey = aEvent.target.getAttribute("value");
++      let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
++      state.tags[tagKey] = buttonState;
++      aMuxer.updateSearch();
++      aEvent.stopPropagation();
++      aEvent.preventDefault();
++
++      // TODO: Set qfb-tag-tagged accordingly. Need to clear if individuals are set.
+     }
+ 
+     // -- nuke existing exposed tags, but not the mode selector (which is first)
+     while (tagbar.children.length > 1) {
+       tagbar.lastElementChild.remove();
+     }
+ 
+     let addCount = 0;
+@@ -926,18 +994,18 @@ var TagFacetingFilter = {
+         addCount++;
+ 
+         // Keep in mind that the XBL does not get built for dynamically created
+         //  elements such as these until they get displayed, which definitely
+         //  means not before we append it into the tree.
+         let button = aDocument.createXULElement("toolbarbutton");
+ 
+         button.setAttribute("id", "qfb-tag-" + tag.key);
+-        button.addEventListener("command", commandHandler);
+-        button.addEventListener("click", rightClickHandler);
++        button.addEventListener("command", clickHandler);
++        button.addEventListener("click", clickHandler);
+         button.setAttribute("type", "checkbox");
+         if (keywordMap[tag.key] !== null) {
+           button.setAttribute("checked", "true");
+           if (!keywordMap[tag.key]) {
+             button.setAttribute("inverted", "true");
+           }
+         }
+         button.setAttribute("label", tag.tag);
+@@ -947,16 +1015,18 @@ var TagFacetingFilter = {
+         button.setAttribute("class", "toolbarbutton-1 qfb-tag-button");
+         if (color) {
+           button.setAttribute("style", "color: " + color + " !important;");
+         }
+         tagbar.appendChild(button);
+       }
+     }
+     tagbar.collapsed = !addCount;
++    aDocument.getElementById("qfb-tag-untagged").collapsed = !addCount;
++    aDocument.getElementById("qfb-tag-tagged").collapsed = !addCount;
+   },
+ };
+ QuickFilterManager.defineFilter(TagFacetingFilter);
+ 
+ /**
+  * true: must have attachment, false: must not have attachment.
+  */
+ QuickFilterManager.defineFilter({
+diff --git a/mail/themes/shared/jar.inc.mn b/mail/themes/shared/jar.inc.mn
+--- a/mail/themes/shared/jar.inc.mn
++++ b/mail/themes/shared/jar.inc.mn
+@@ -297,16 +297,17 @@
+   skin/classic/messenger/icons/tag.svg                        (../shared/mail/icons/tag.svg)
+   skin/classic/messenger/icons/template.svg                   (../shared/mail/icons/template.svg)
+   skin/classic/messenger/icons/thread.svg                     (../shared/mail/icons/thread.svg)
+   skin/classic/messenger/icons/thread-col.svg                 (../shared/mail/icons/thread-col.svg)
+   skin/classic/messenger/icons/thread-ignored.svg             (../shared/mail/icons/thread-ignored.svg)
+   skin/classic/messenger/icons/timeline.svg                   (../shared/mail/icons/timeline.svg)
+   skin/classic/messenger/icons/toolbarbutton-arrow.svg        (../shared/mail/icons/toolbarbutton-arrow.svg)
+   skin/classic/messenger/icons/underline.svg                  (../shared/mail/icons/underline.svg)
++  skin/classic/messenger/icons/untag.svg                      (../shared/mail/icons/untag.svg)
+   skin/classic/messenger/icons/userIcon.svg                   (../shared/mail/icons/userIcon.svg)
+   skin/classic/messenger/icons/visible.svg                    (../shared/mail/icons/visible.svg)
+   skin/classic/messenger/icons/waiting.svg                    (../shared/mail/icons/waiting.svg)
+   skin/classic/messenger/icons/warning-12.svg                 (../shared/mail/icons/warning-12.svg)
+   skin/classic/messenger/icons/zoomout.svg                    (../shared/mail/icons/zoomout.svg)
+   skin/classic/messenger/shared/aboutDownloads.css            (../shared/mail/aboutDownloads.css)
+   skin/classic/messenger/shared/abContactsPanel.css           (../shared/mail/abContactsPanel.css)
+   skin/classic/messenger/shared/accountCentral.css            (../shared/mail/accountCentral.css)
+diff --git a/mail/themes/shared/mail/icons/untag.svg b/mail/themes/shared/mail/icons/untag.svg
+new file mode 100644
+--- /dev/null
++++ b/mail/themes/shared/mail/icons/untag.svg
+@@ -0,0 +1,6 @@
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<svg width="16" height="16" xmlns="http://www.w3.org/2000/svg" fill="context-fill" fill-opacity="context-fill-opacity" viewBox="0 0 16 16">
++  <path d="M3 3h3.59a1 1 0 01.7.3l2 2-4 4-2-2A1 1 0 013 6.58zm2 1C3.67 4 3.67 6 5 6s1.33-2 0-2zm1.34 9.16l1.04 1.05a3 3 0 004.24 0l2.59-2.59a2.99 2.99 0 000-4.24l-1.05-1.04-1.41 1.41 1.04 1.04a1 1 0 010 1.42l-2.58 2.58a1 1 0 01-1.42 0l-1.04-1.04zM14.7 2.71c.9-.95-.47-2.33-1.42-1.42l-2.58 2.59-2-2A3 3 0 006.59 1H1v5.59a3 3 0 00.88 2.12l2 2-2.59 2.58a1 1 0 001.42 1.42"/>
++</svg>
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -29,16 +29,34 @@
+ #qfb-tags {
+   list-style-image: url("chrome://messenger/skin/icons/tag.svg");
+ }
+ 
+ #qfb-attachment {
+   list-style-image: url("chrome://messenger/skin/icons/attach.svg");
+ }
+ 
++#qfb-tag-untagged {
++  list-style-image: url("chrome://messenger/skin/icons/untag.svg");
++}
++
++#qfb-tag-tagged {
++  list-style-image: url("chrome://messenger/skin/icons/tag.svg");
++}
++
++#qfb-tag-untagged,
++#qfb-tag-tagged {
++  margin-block: 0 2px;
++}
++
++#qfb-tag-untagged > .toolbarbutton-text,
++#qfb-tag-tagged > .toolbarbutton-text {
++  display: none;
++}
++
+ #quick-filter-bar[disabled="true"] {
+   visibility: collapse;
+ }
+ 
+ #qfb-results-label {
+   color: GrayText;
+   text-align: end;
+   visibility: hidden;
