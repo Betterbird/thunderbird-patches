@@ -13,6 +13,9 @@ then move the ones ending in *-m-c.patch into mozilla-esr91/.hg/patches.
 Copy .mozconfig into the mozilla-esr91 directory.
 Apply the patches using `hg qpush`. Build normally using `mach build`. Build an installer using `mach package`. Voilà.
 
+Note that our builds sometimes include patches taken from https://bugzilla.mozilla.org/ when we quick-track fixes.
+We don't store those patches here. You will notice it on the `hg qpush`.
+
 Linux users please note that 08-branding-m-c.patch patches a Windows installer script making use of Windows PowerShell.
 
 Visit www.betterbird.eu for details.
