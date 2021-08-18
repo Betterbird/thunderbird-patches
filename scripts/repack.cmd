@@ -5,7 +5,7 @@ cd %~1
 7z x ..\omni.ja
 
 :: Get language pack
-wget http://ftp.mozilla.org/pub/thunderbird/releases/91.0b1/linux-x86_64/xpi/%~1.xpi
+wget http://ftp.mozilla.org/pub/thunderbird/releases/91.0.1/linux-x86_64/xpi/%~1.xpi
 
 :: Remove stuff we don't want from the language pack
 7z d %~1.xpi manifest.json
@@ -25,16 +25,18 @@ mv localization\en-US\branding\ localization\%~1\branding\
 rm -rf chrome\en-US
 rm -rf localization\en-US
 
-:: Need to worry about the CRLF here?
-echo %~1> update.locale
-echo %~1,en-US> res\multilocale.txt
+:: lessecho uses LR instead of CRLF
+lessecho %~1> update.locale
+lessecho %~1,en-US> res\multilocale.txt
 
 :: Edit chrome\chrome.manifest
 sed -i -e 's/en-US en-US\/locale\/en-US/%~1 %~1\/locale\/%~1/' chrome\chrome.manifest
 sed -i -e 's/en-US en-US\/locale\/pdfviewer/%~1 %~1\/locale\/pdfviewer/' chrome\chrome.manifest
 
-:: TODO: Add extra strings
-cp ..\msgHdrViewOverlay-%~1.dtd chrome\%~1\locale\%~1\messenger\
+:: Call script that provides extra strings
+call ..\%~1.cmd
 
 :: Pack the whole thing again
 7z a -r -tzip -m0=Copy omni.ja *.*
+
+cd ..
