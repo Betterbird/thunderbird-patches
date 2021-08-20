@@ -2,7 +2,10 @@ mkdir %~1
 cd %~1
 
 :: Unpack original
+7z e ..\betterbird-%~2.en-US.win64.installer.exe core/omni.ja
+move omni.ja ..\omni.ja
 7z x ..\omni.ja
+del ..\omni.ja
 
 :: Get language pack
 wget http://ftp.mozilla.org/pub/thunderbird/releases/91.0.1/linux-x86_64/xpi/%~1.xpi
@@ -40,3 +43,9 @@ call ..\%~1.cmd
 7z a -r -tzip -m0=Copy omni.ja *.*
 
 cd ..
+copy betterbird-%~2.en-US.win64.installer.exe betterbird-%~2.%~1.win64.installer.exe
+mkdir core
+mv %~1\omni.ja core\omni.ja
+7z u betterbird-%~2.%~1.win64.installer.exe core\omni.ja
+rmdir /s /q core
+rmdir /s /q %~1
