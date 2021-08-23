@@ -21,4 +21,6 @@ If you miss them, you will notice it on the `hg qpush`.
 Linux users please note that 08-branding-m-c.patch patches a Windows installer script making use of Windows PowerShell.
 However, that part of the build system should not be triggered for Linux builds.
 
+Linux users can use https://github.com/4ch1m/ansible-betterbird for a "one click" build, well, "one command" build.
+
 Visit www.betterbird.eu for details.
