@@ -14,7 +14,7 @@ set icv=iconv -f windows-1252 -t utf-8
 :: Original strings:
 :: <!ENTITY contextDecryptToFolder.label "Decrypt to Folder">
 :: <!ENTITY contextDecryptToFolder.accesskey "Y">
-%lecho% "<!ENTITY contextDecryptToFolder.label \"Ontsleutelen in map\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
+%lecho% "<!ENTITY contextDecryptToFolder.label \"Ontsleutelen naar map\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
 %lecho% "<!ENTITY contextDecryptToFolder.accesskey \"a\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
 
 :: Original strings:
