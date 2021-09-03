@@ -1,0 +1,138 @@
+# vim: se ft=diff :
+# HG changeset patch
+# User Yonggang Luo <luoyonggang@gmail.com>
+# Date 1630668909 -7200
+# Parent  b80896696f383c7299542d2002298bb0777a68c3
+Add imgIContainer createImageFromCanvasContext(in nsISupports canvasContext) in imgITools to converting canvas context to imgIContainer.
+
+diff --git a/image/imgITools.idl b/image/imgITools.idl
+--- a/image/imgITools.idl
++++ b/image/imgITools.idl
+@@ -14,17 +14,17 @@ interface imgIContainer;
+ interface imgILoader;
+ interface imgICache;
+ interface imgIScriptedNotificationObserver;
+ interface imgINotificationObserver;
+ interface imgIContainerCallback;
+ 
+ webidl Document;
+ 
+-[scriptable, builtinclass, uuid(4c2383a4-931c-484d-8c4a-973590f66e3f)]
++[scriptable, builtinclass, uuid(d003366b-733e-4f91-b6f4-c0cf3f5b273e)]
+ interface imgITools : nsISupports
+ {
+     /**
+      * decodeImageFromBuffer
+      * Caller provides an buffer, a buffer size and a mimetype. We read from
+      * the stream and decompress it (according to the specified mime type) and
+      * return the resulting imgIContainer.
+      *
+@@ -132,16 +132,46 @@ interface imgITools : nsISupports
+      */
+     nsIInputStream encodeScaledImage(in imgIContainer aContainer,
+                                      in ACString aMimeType,
+                                      in long aWidth,
+                                      in long aHeight,
+                                      [optional] in AString outputOptions);
+ 
+     /**
++     * createImageFromCanvasContext
++     * Retrieve the image container from canvas context, not from canvas but
++     * from canvasContext directly, is just because if we need get image
++     * container from canvas, we need to get the context of canvas, and that
++     * need the parameter which type('2d' or '3d') of context we are looking
++     * for, and in practical code, we always write this as a literal string,
++     * so when we want to retrieve the context of the canvas, need to pass that
++     * literal string again.
++     * For example:
++     *  1. Pass parameter with canvas:
++     *     let canvas = createCanvasElement();
++     *     let canvasContent = canvas.getContext('2d');
++     *     canvasContext.drawSomething();
++     *     let imageContainer = imgTools.createImageFromCanvas(canvas, '2d');
++     *  2. Pass parameter with context:
++     *     let canvas = createCanvasElement();
++     *     let canvasContent = canvas.getContext('2d');
++     *     canvasContext.drawSomething();
++     *     let imageContainer = imgTools.createImageFromCanvasContext(canvasContext);
++     * So choosing the second API option is better.
++     *
++     * @param aCanvasContext
++     *        The context of a specific canvas ('2d' or '3d').
++     * @return
++     *        The corresponding image container for aCanvasContext, if aCanvasContext is
++     *        invalid or there is no corresponding image container, return null. 
++     */
++     imgIContainer createImageFromCanvasContext(in nsISupports aCanvasContext);
++
++    /**
+      * getImgLoaderForDocument
+      * Retrieve an image loader that reflects the privacy status of the given
+      * document.
+      *
+      * @param doc
+      *        A document. Must not be null.
+      */
+     imgILoader getImgLoaderForDocument(in Document doc);
+diff --git a/image/imgTools.cpp b/image/imgTools.cpp
+--- a/image/imgTools.cpp
++++ b/image/imgTools.cpp
+@@ -31,16 +31,22 @@
+ #include "ScriptedNotificationObserver.h"
+ #include "imgIScriptedNotificationObserver.h"
+ #include "gfxPlatform.h"
+ #include "js/ArrayBuffer.h"
+ #include "js/RootingAPI.h"  // JS::{Handle,Rooted}
+ #include "js/Value.h"       // JS::Value
+ #include "Orientation.h"
+ 
++// Betterbird extra.
++#include "nsICanvasRenderingContextInternal.h"
++#include "ImageOps.h"
++#include "gfx2DGlue.h"
++#include "gfxDrawable.h"
++
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ namespace image {
+ 
+ namespace {
+ 
+ static nsresult sniff_mimetype_callback(nsIInputStream* in, void* data,
+@@ -635,16 +641,35 @@ imgTools::EncodeCroppedImage(imgIContain
+ NS_IMETHODIMP
+ imgTools::CreateScriptedObserver(imgIScriptedNotificationObserver* aInner,
+                                  imgINotificationObserver** aObserver) {
+   NS_ADDREF(*aObserver = new ScriptedNotificationObserver(aInner));
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++imgTools::CreateImageFromCanvasContext(nsISupports* aCanvasContext,
++                                       imgIContainer** aContainer) {
++  nsCOMPtr<nsICanvasRenderingContextInternal> contextInternal =
++      do_QueryInterface(aCanvasContext);
++  if (!contextInternal) {
++    return NS_OK;
++  }
++  RefPtr<SourceSurface> surface = contextInternal->GetSurfaceSnapshot();
++  if (!surface) {
++    return NS_OK;
++  }
++  RefPtr<gfxDrawable> drawable =
++      new gfxSurfaceDrawable(surface, surface->GetSize());
++  nsCOMPtr<imgIContainer> container = ImageOps::CreateFromDrawable(drawable);
++  container.forget(aContainer);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
+ imgTools::GetImgLoaderForDocument(dom::Document* aDoc, imgILoader** aLoader) {
+   NS_IF_ADDREF(*aLoader = nsContentUtils::GetImgLoaderForDocument(aDoc));
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ imgTools::GetImgCacheForDocument(dom::Document* aDoc, imgICache** aCache) {
+   nsCOMPtr<imgILoader> loader;
