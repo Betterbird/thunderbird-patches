@@ -1,0 +1,156 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1630913515 -7200
+# Parent  d172988301bcc9336d7226ec6f45bb73f03203a7
+Feature: Use nsIMultilineTreeView.
+
+Based on the work of Paul Rouget in https://bugzilla.mozilla.org/show_bug.cgi?id=441414
+and https://bugzilla.mozilla.org/show_bug.cgi?id=213945
+
+diff --git a/mail/base/content/threadTree.inc.xhtml b/mail/base/content/threadTree.inc.xhtml
+--- a/mail/base/content/threadTree.inc.xhtml
++++ b/mail/base/content/threadTree.inc.xhtml
+@@ -74,20 +74,23 @@
+                                  class="thread-tree-icon-header attachmentColumnHeader"
+                                  persist="hidden ordinal sortDirection"
+                                  fixed="true"
+                                  closemenu="none"
+                                  src="chrome://messenger/skin/icons/attachment-col.svg"
+                                  label="&attachmentColumn.label;"
+                                  tooltiptext="&attachmentColumn2.tooltip;"/>
+                         <splitter class="tree-splitter"/>
++                        <!--
++                          subjectCol used to have ignoreincolumnpicker="true".
++                          Switching the subject off will now trigger the multi-line view.
++                        -->
+                         <treecol id="subjectCol"
+                                  persist="ordinal width sortDirection"
+                                  flex="7"
+-                                 ignoreincolumnpicker="true"
+                                  closemenu="none"
+                                  label="&subjectColumn.label;"
+                                  tooltiptext="&subjectColumn2.tooltip;"/>
+                         <splitter class="tree-splitter"/>
+                         <treecol is="treecol-image" id="unreadButtonColHeader"
+                                  class="thread-tree-icon-header readColumnHeader"
+                                  persist="hidden ordinal sortDirection"
+                                  fixed="true"
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -97,16 +97,17 @@ class viewSortInfo {
+ NS_IMPL_ADDREF(nsMsgDBView)
+ NS_IMPL_RELEASE(nsMsgDBView)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsMsgDBView)
+   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIMsgDBView)
+   NS_INTERFACE_MAP_ENTRY(nsIMsgDBView)
+   NS_INTERFACE_MAP_ENTRY(nsIDBChangeListener)
+   NS_INTERFACE_MAP_ENTRY(nsITreeView)
++  NS_INTERFACE_MAP_ENTRY(nsIMultilineTreeView)
+   NS_INTERFACE_MAP_ENTRY(nsIJunkMailClassificationListener)
+ NS_INTERFACE_MAP_END
+ 
+ nsMsgDBView::nsMsgDBView() {
+   // Member initializers and constructor code.
+   m_sortValid = false;
+   m_checkedCustomColumns = false;
+   m_sortOrder = nsMsgViewSortOrder::none;
+@@ -263,17 +264,17 @@ nsresult nsMsgDBView::AppendKeywordPrope
+     *tagAdded = true;
+     properties.Append(' ');
+     properties.Append(selector);
+   }
+   return rv;
+ }
+ 
+ ///////////////////////////////////////////////////////////////////////////
+-// nsITreeView Implementation Methods (and helper methods)
++// nsIMultilineTreeView Implementation Methods (and helper methods)
+ ///////////////////////////////////////////////////////////////////////////
+ 
+ static nsresult GetDisplayNameInAddressBook(const nsACString& emailAddress,
+                                             nsAString& displayName) {
+   nsresult rv;
+   nsCOMPtr<nsIAbManager> abManager(
+       do_GetService("@mozilla.org/abmanager;1", &rv));
+   NS_ENSURE_SUCCESS(rv, rv);
+@@ -2123,18 +2124,46 @@ nsMsgDBView::CycleCell(int32_t row, nsTr
+     }
+     default:
+       break;
+   }
+ 
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP
++nsMsgDBView::GetColspanText(int32_t aRow, nsAString& aValue) {
++  nsresult rv = NS_OK;
++
++  nsCOMPtr <nsIMsgDBHdr> msgHdr;
++  rv = GetMsgHdrForViewIndex(aRow, getter_AddRefs(msgHdr));
++
++  if (NS_FAILED(rv) || !msgHdr) {
++    ClearHdrCache();
++    return NS_MSG_INVALID_DBVIEW_INDEX;
++  }
++  return FetchSubject(msgHdr, m_flags[aRow], aValue);
++}
++
++NS_IMETHODIMP
++nsMsgDBView::GetColspanTextProperties(int32_t row, nsTArray<nsCString>& props) {
++  props.Clear();
++  nsCString m("multiline");
++  props.AppendElement(m);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsMsgDBView::IsMultiline(bool *isMulti) {
++  *isMulti = true;
++  return NS_OK;
++}
++
+ ///////////////////////////////////////////////////////////////////////////
+-// end nsITreeView Implementation Methods
++// end nsIMultilineTreeView Implementation Methods
+ ///////////////////////////////////////////////////////////////////////////
+ 
+ NS_IMETHODIMP
+ nsMsgDBView::Open(nsIMsgFolder* folder, nsMsgViewSortTypeValue sortType,
+                   nsMsgViewSortOrderValue sortOrder,
+                   nsMsgViewFlagsTypeValue viewFlags, int32_t* pCount) {
+   m_viewFlags = viewFlags;
+   m_sortOrder = sortOrder;
+diff --git a/mailnews/base/src/nsMsgDBView.h b/mailnews/base/src/nsMsgDBView.h
+--- a/mailnews/base/src/nsMsgDBView.h
++++ b/mailnews/base/src/nsMsgDBView.h
+@@ -90,25 +90,26 @@ struct IdUint32 {
+ struct IdKey : public IdUint32 {
+   nsTArray<uint8_t> key;
+ };
+ 
+ // This is an abstract implementation class.
+ // The actual view objects will be instances of sub-classes of this class.
+ class nsMsgDBView : public nsIMsgDBView,
+                     public nsIDBChangeListener,
+-                    public nsITreeView,
++                    public nsIMultilineTreeView,
+                     public nsIJunkMailClassificationListener {
+  public:
+   nsMsgDBView();
+ 
+   NS_DECL_ISUPPORTS
+   NS_DECL_NSIMSGDBVIEW
+   NS_DECL_NSIDBCHANGELISTENER
+   NS_DECL_NSITREEVIEW
++  NS_DECL_NSIMULTILINETREEVIEW
+   NS_DECL_NSIJUNKMAILCLASSIFICATIONLISTENER
+ 
+   nsMsgViewIndex GetInsertIndexHelper(nsIMsgDBHdr* msgHdr,
+                                       nsTArray<nsMsgKey>& keys,
+                                       nsCOMArray<nsIMsgFolder>* folders,
+                                       nsMsgViewSortOrderValue sortOrder,
+                                       nsMsgViewSortTypeValue sortType);
+   int32_t SecondaryCompare(nsMsgKey key1, nsIMsgFolder* folder1, nsMsgKey key2,
