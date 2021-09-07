@@ -1,5 +1,5 @@
 # HG changeset patch
-# Date 1630961084 -7200
+# Date 1631044877 -7200
 # User Betterbird <betterbird@betterbird.eu>
 # Parent  3a83a5c25a2ed0b73f616f9def2f1e738a90ce90
 Feature: Introduce nsIMultilineTreeView.
@@ -37,7 +37,7 @@ diff --git a/layout/style/nsCSSAnonBoxList.h b/layout/style/nsCSSAnonBoxList.h
 diff --git a/layout/xul/tree/nsITreeView.idl b/layout/xul/tree/nsITreeView.idl
 --- a/layout/xul/tree/nsITreeView.idl
 +++ b/layout/xul/tree/nsITreeView.idl
-@@ -166,8 +166,22 @@ interface nsITreeView : nsISupports
+@@ -166,8 +166,23 @@ interface nsITreeView : nsISupports
     */
    void setCellValue(in long row, in TreeColumn col, in AString value);
  
@@ -57,6 +57,7 @@ diff --git a/layout/xul/tree/nsITreeView.idl b/layout/xul/tree/nsITreeView.idl
 +  AString getColspanText(in long row);
 +  Array<ACString> getColspanTextProperties(in long row);
 +  boolean alignWith(in long row, in TreeColumn col);
++  boolean isImageCol(in TreeColumn col);
 +
 +  boolean isMultiline();
 +};
@@ -245,7 +246,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
    mScratchArray.Clear();
    ComputedStyle* indentContext =
        GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeIndentation());
-@@ -2865,23 +2902,32 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+@@ -2865,23 +2902,39 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
        separatorRect.width -= primaryX - rowRect.x;
        separatorRect.x += primaryX - rowRect.x;
      }
@@ -255,16 +256,23 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
      // Now loop over our cells. Only paint a cell if it intersects with our
      // dirty rect.
 +    int32_t xColspanIndent = -1;
++    nsTreeColumn* imageCol = nullptr;
++    nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
      for (nsTreeColumn* currCol = mColumns->GetFirstColumn(); currCol;
           currCol = currCol->GetNext()) {
++      if (multilineView) {
++        // Get the column from which to take the image.
++        bool isImageCol;
++        multilineView->IsImageCol(currCol, &isImageCol);
++        if (isImageCol) imageCol = currCol;
++      }
        nsRect cellRect;
        rv = currCol->GetRect(this, rowRect.y, rowRect.height, &cellRect);
        // Don't paint cells in hidden columns.
        if (NS_FAILED(rv) || cellRect.width == 0) continue;
  
 +      // Find cell to align with.
-+      if (mIsMultiline && xColspanIndent == -1) {
-+        nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
++      if (multilineView && xColspanIndent == -1) {
 +        bool alignWith;
 +        multilineView->AlignWith(aRowIndex, currCol, &alignWith);
 +        if (alignWith) xColspanIndent = cellRect.x;
@@ -278,7 +286,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
          nsRect checkRect = cellRect;
          if (currCol->IsPrimary())
            checkRect = nsRect(cellRect.x, originalRowRect.y, cellRect.width,
-@@ -2890,16 +2936,86 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+@@ -2890,16 +2943,86 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
          nsRect dirtyRect;
          nscoord dummy;
          if (dirtyRect.IntersectRect(aDirtyRect, checkRect))
@@ -352,8 +360,8 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
 +                           rowRect.width - xColspanIndent, rowRect.height);
 +        nsRect dirtyRect;
 +        if (dirtyRect.IntersectRect(aDirtyRect, colspanRect)) {
-+          result &= PaintColspan(aRowIndex, colspanRect, aPresContext,
-+                                 aRenderingContext, aDirtyRect);
++          result &= PaintColspan(aRowIndex, imageCol, colspanRect, aPresContext,
++                                 aRenderingContext, aDirtyRect, aBuilder);
 +        }
 +      }
 +    }
@@ -365,7 +373,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
  ImgDrawResult nsTreeBodyFrame::PaintSeparator(int32_t aRowIndex,
                                                const nsRect& aSeparatorRect,
                                                nsPresContext* aPresContext,
-@@ -2981,16 +3097,17 @@ ImgDrawResult nsTreeBodyFrame::PaintCell
+@@ -2981,16 +3104,17 @@ ImgDrawResult nsTreeBodyFrame::PaintCell
    bool isRTL = StyleVisibility()->mDirection == StyleDirection::Rtl;
  
    // Obtain the margins for the cell and then deflate our rect by that
@@ -383,7 +391,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
    // Adjust the rect for its border and padding.
    AdjustForBorderPadding(cellContext, cellRect);
  
-@@ -3135,16 +3252,60 @@ ImgDrawResult nsTreeBodyFrame::PaintCell
+@@ -3135,16 +3259,72 @@ ImgDrawResult nsTreeBodyFrame::PaintCell
      }
    }
  
@@ -392,11 +400,10 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
    return result;
  }
  
-+ImgDrawResult nsTreeBodyFrame::PaintColspan(int32_t aRowIndex,
-+                                            const nsRect& aColspanRect,
-+                                            nsPresContext* aPresContext,
-+                                            gfxContext& aRenderingContext,
-+                                            const nsRect& aDirtyRect) {
++ImgDrawResult nsTreeBodyFrame::PaintColspan(
++    int32_t aRowIndex, nsTreeColumn* aImageColumn, const nsRect& aColspanRect,
++    nsPresContext* aPresContext, gfxContext& aRenderingContext,
++    const nsRect& aDirtyRect, nsDisplayListBuilder* aBuilder) {
 +  PrefillPropertyArray(aRowIndex, nullptr);
 +  nsAutoString properties;
 +  mView->GetRowProperties(aRowIndex, properties);
@@ -417,18 +424,31 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
 +  // Adjust the rect for its border and padding.
 +  AdjustForBorderPadding(descContext, colspanRect);
 +
++  // Add the colspan's properties. We also need them for the image.
++  nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
++  nsTArray<nsCString> scratchArray;
++  multilineView->GetColspanTextProperties(aRowIndex, scratchArray);
++  AtomArrayExtend(mScratchArray, scratchArray);
++
++  // Now paint the icon for our colspan.
++  nscoord currX = 0;
++  nscoord remainingWidth = colspanRect.width;
++  nsRect iconRect(colspanRect.x, colspanRect.y, remainingWidth,
++                  colspanRect.height);
 +  nsRect dirtyRect;
++  if (dirtyRect.IntersectRect(aDirtyRect, iconRect)) {
++    result &= PaintImage(aRowIndex, aImageColumn, iconRect, aPresContext,
++                         aRenderingContext, aDirtyRect, remainingWidth, currX,
++                         aBuilder);
++  }
++
 +  if (dirtyRect.IntersectRect(aDirtyRect, colspanRect)) {
-+    nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
 +    nsAutoString text;
-+    PrefillPropertyArray(aRowIndex, nullptr);
-+    nsTreeUtils::TokenizeProperties(properties, mScratchArray);
-+    nsTArray<nsCString> scratchArray;
-+    multilineView->GetColspanTextProperties(aRowIndex, scratchArray);
-+    AtomArrayExtend(mScratchArray, scratchArray);
 +    ComputedStyle* textContext =
 +        GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeColspanText());
 +    multilineView->GetColspanText(aRowIndex, text);
++    colspanRect.x += currX;
++    colspanRect.width = remainingWidth;
 +    result &= PaintMultilineText(text, colspanRect, aPresContext,
 +                                 aRenderingContext, aDirtyRect, textContext);
 +  }
@@ -444,7 +464,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
  
    bool isRTL = StyleVisibility()->mDirection == StyleDirection::Rtl;
    nscoord rightEdge = aCurrX + aRemainingWidth;
-@@ -3528,16 +3689,171 @@ ImgDrawResult nsTreeBodyFrame::PaintText
+@@ -3528,16 +3708,171 @@ ImgDrawResult nsTreeBodyFrame::PaintText
  
    if (opacity != 1.0f) {
      aRenderingContext.PopGroupAndBlend();
@@ -619,7 +639,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFra
 diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame.h
 --- a/layout/xul/tree/nsTreeBodyFrame.h
 +++ b/layout/xul/tree/nsTreeBodyFrame.h
-@@ -225,16 +225,23 @@ class nsTreeBodyFrame final : public nsL
+@@ -225,16 +225,25 @@ class nsTreeBodyFrame final : public nsL
  
    // This method paints a specific cell in a given row of the tree.
    ImgDrawResult PaintCell(int32_t aRowIndex, nsTreeColumn* aColumn,
@@ -630,10 +650,12 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame
  
 +  // This method pains the content into the "colspan" of the row, typically
 +  // underneath the cells of the row and spanning many cells
-+  ImgDrawResult PaintColspan(int32_t aRowIndex, const nsRect& aColspanRect,
++  ImgDrawResult PaintColspan(int32_t aRowIndex, nsTreeColumn* aImageColumn,
++                             const nsRect& aColspanRect,
 +                             nsPresContext* aPresContext,
 +                             gfxContext& aRenderingContext,
-+                             const nsRect& aDirtyRect);
++                             const nsRect& aDirtyRect,
++                             nsDisplayListBuilder* aBuilder);
 +
    // This method paints the twisty inside a cell in the primary column of an
    // tree.
@@ -643,7 +665,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame
                              gfxContext& aRenderingContext,
                              const nsRect& aDirtyRect, nscoord& aRemainingWidth,
                              nscoord& aCurrX);
-@@ -248,16 +255,22 @@ class nsTreeBodyFrame final : public nsL
+@@ -248,16 +257,22 @@ class nsTreeBodyFrame final : public nsL
                             nscoord& aCurrX, nsDisplayListBuilder* aBuilder);
  
    // This method paints the text string inside a particular cell of the tree.
@@ -666,7 +688,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame
                                const nsRect& aDirtyRect);
  
    // This method paints a drop feedback of the tree.
-@@ -320,16 +333,19 @@ class nsTreeBodyFrame final : public nsL
+@@ -320,16 +335,19 @@ class nsTreeBodyFrame final : public nsL
  
    // Returns the source rectangle of the image to be displayed.
    nsRect GetImageSourceRect(ComputedStyle* aComputedStyle, bool useImageRegion,
@@ -686,7 +708,7 @@ diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame
  
    // Calculate the total width of our scrollable portion
    nscoord CalcHorzWidth(const ScrollParts& aParts);
-@@ -590,16 +606,18 @@ class nsTreeBodyFrame final : public nsL
+@@ -590,16 +608,18 @@ class nsTreeBodyFrame final : public nsL
    int32_t mRowCount;
  
    // The row the mouse is hovering over.
