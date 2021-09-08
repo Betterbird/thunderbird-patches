@@ -14,7 +14,7 @@ set icv=iconv -f windows-1252 -t utf-8
 :: Original strings:
 :: <!ENTITY contextDecryptToFolder.label "Decrypt to Folder">
 :: <!ENTITY contextDecryptToFolder.accesskey "Y">
-%lecho% "<!ENTITY contextDecryptToFolder.label \"Ontsleutelen in map\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
+%lecho% "<!ENTITY contextDecryptToFolder.label \"Ontsleutelen naar map\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
 %lecho% "<!ENTITY contextDecryptToFolder.accesskey \"a\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
 
 :: Original strings:
@@ -28,3 +28,13 @@ set icv=iconv -f windows-1252 -t utf-8
 ::     .label = Enable search in encrypted messages (stores decrypted copy locally)
 %lecho% "enable-gloda-search-encrypted-label =" >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .label = Versleutelde berichten doorzoekbaar maken (slaat ontsleutelde kopie lokaal op)" >> localization\nl\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: dock-options-show-badge =
+::     .label = Show badge icon
+::     .accesskey = b
+:: Will need to translate these. "Icon" is usually "Symbol" in German and "badge" was never translated. Good luck to the translators.
+:: "Badge icon" already seems to be a misnomer.
+%lecho% "dock-options-show-badge =" >> localization\nl\messenger\preferences\dock-options.ftl
+%lecho% "    .label = Show badge icon" >> localization\nl\messenger\preferences\dock-options.ftl
+%lecho% "    .accesskey = b" >> localization\nl\messenger\preferences\dock-options.ftl

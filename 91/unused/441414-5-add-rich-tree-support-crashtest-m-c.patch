@@ -1,0 +1,1071 @@
+# vim: se ft=diff :
+# HG changeset patch
+# User Yonggang Luo <luoyonggang@gmail.com>
+# Date 1630741950 -7200
+# Parent  bd74e46732f5e10566f035c3aa4d2ab18cb0755e
+Fixes for bug #441414 to add rich tree support, crashtest attached. Add rich tree cell renderer functional in <tree> element by rendering the treecell as a canvas or other things that can generate a image container. Add ':-moz-tree-renderer' atom for styling the treecell like ':moz-tree-image', A treecell can be rendered as a cell renderer either by specify the column type='renderer' or add 'renderer'' property for specific cell. (Row,Column,Cell) are acceptable, So either column's id ,row's id, or cell's id/properties for specified cell is 'renderer'', then that cell will be rendered as canvas or other rendering engine.
+The main differences from Paul's patch are:
+Paul is trying to support multiline support in C++ code, and can not be customize use Javascript,
+  and at that time, we do not have `Canvas`,
+I was trying to treat a `Tree Cell` as a `Canvas`, and rendering it through Javascript code, and
+  I can feed the `Canvas` with the Tree Cell/Row data, so we can rendering  the cell in any form we want.
+
+The Core API is like following:
+
+[scriptable, uuid(aceed5f8-e57a-4cdc-b859-cf864904ab1c)]
+interface nsITreeCellRenderer : nsISupports
+{
+  imgIContainer draw(in nsITreeView view, in long row, in nsITreeColumn col, in AString props);
+};
+
+The renderer hook:
+[scriptable, uuid(64ba5199-c4f4-4498-bbdc-f8e4c369086c)]
+interface nsITreeBoxObject : nsISupports
+{
+  attribute nsITreeCellRenderer cellRenderer;
+}
+
+In Javascript:
+document.getElementById('tree').treeBoxObject.cellRenderer = {
+  // nsISupports
+  QueryInterface: function(aIID) {
+    if (aIID.equals(Ci.nsITreeCellRenderer) ||
+        aIID.equals(Ci.nsISupports) ||
+        aIID.equals(Ci.nsISupportsWeakReference))
+      return this;
+    throw Components.results.NS_NOINTERFACE;
+  },
+  draw: function(view, row, col, props) {
+    let canvas = window.document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
+    let ctx = this.canvas.getContext("2d");
+    ctx.drawSomthing();....
+    let imageTools = Cc["@mozilla.org/image/tools;1"].
+         getService(Ci.imgITools);
+    /* Putting the canvas result into Tree Cell by draw API */
+    return imageTools.createImageFromCanvasContext(ctx);
+  }
+}
+
+In C++:
+The TreeBoxObject already have PaintImage api, because we return imgIContainer directly, so we can reuse this
+API to rendering our canvas context to the surface.
+
+diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
+--- a/dom/bindings/Bindings.conf
++++ b/dom/bindings/Bindings.conf
+@@ -1951,16 +1951,18 @@ addExternalIface('imgIRequest', nativeTy
+ addExternalIface('LoadContext', nativeType='nsILoadContext', notflattened=True)
+ addExternalIface('LoadInfo', nativeType='nsILoadInfo',
+                  headerFile='nsILoadInfo.h', notflattened=True)
+ addExternalIface('MenuBuilder', nativeType='nsIMenuBuilder', notflattened=True)
+ addExternalIface('XULControllers', nativeType='nsIControllers', notflattened=True)
+ addExternalIface('MozObserver', nativeType='nsIObserver', notflattened=True)
+ addExternalIface('MozTreeView', nativeType='nsITreeView',
+                   headerFile='nsITreeView.h', notflattened=True)
++addExternalIface('MozTreeCellRenderer', nativeType='nsITreeCellRenderer',
++                  headerFile='nsITreeCellRenderer.h', notflattened=True)
+ addExternalIface('MozWakeLockListener', headerFile='nsIDOMWakeLockListener.h')
+ addExternalIface('nsIBrowserDOMWindow', nativeType='nsIBrowserDOMWindow',
+                  notflattened=True)
+ addExternalIface('nsIDOMWindowUtils', nativeType='nsIDOMWindowUtils', notflattened=True)
+ addExternalIface('nsIEventTarget', nativeType='nsIEventTarget', notflattened=True)
+ addExternalIface('nsIFile', nativeType='nsIFile', notflattened=True)
+ addExternalIface('nsILoadGroup', nativeType='nsILoadGroup',
+                  headerFile='nsILoadGroup.h', notflattened=True)
+diff --git a/dom/chrome-webidl/XULTreeElement.webidl b/dom/chrome-webidl/XULTreeElement.webidl
+--- a/dom/chrome-webidl/XULTreeElement.webidl
++++ b/dom/chrome-webidl/XULTreeElement.webidl
+@@ -1,16 +1,17 @@
+ 
+ /* -*- Mode: IDL; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/.
+  */
+ 
+ interface MozTreeView;
++interface MozTreeCellRenderer;
+ 
+ dictionary TreeCellInfo {
+     long row = 0;
+     TreeColumn? col = null;
+     DOMString childElt = "";
+ };
+ 
+ [ChromeOnly,
+@@ -28,16 +29,22 @@ interface XULTreeElement : XULElement
+    * The view that backs the tree and that supplies it with its data.
+    * It is dynamically settable, either using a view attribute on the
+    * tree tag or by setting this attribute to a new value.
+    */
+   [SetterThrows, NeedsCallerType]
+   attribute MozTreeView? view;
+ 
+   /**
++   * The canvas handler for rich cell, to rendering anything that canvas
++   * supports, we can use this to render a beautiful tree cell.
++   */
++  attribute MozTreeCellRenderer? cellRenderer;
++
++  /**
+    * Whether or not we are currently focused.
+    */
+   attribute boolean focused;
+ 
+   /**
+    * Obtain the treebody content node
+    */
+   readonly attribute Element? treeBody;
+diff --git a/dom/xul/XULTreeElement.cpp b/dom/xul/XULTreeElement.cpp
+--- a/dom/xul/XULTreeElement.cpp
++++ b/dom/xul/XULTreeElement.cpp
+@@ -404,10 +404,28 @@ void XULTreeElement::RemoveImageCacheEnt
+     return;
+   }
+   nsTreeBodyFrame* body = GetTreeBodyFrame();
+   if (body) {
+     body->RemoveImageCacheEntry(aRowIndex, &aCol);
+   }
+ }
+ 
++already_AddRefed<nsITreeCellRenderer> XULTreeElement::GetCellRenderer() {
++  nsTreeBodyFrame* body = GetTreeBodyFrame();
++  if (body) {
++    nsCOMPtr<nsITreeCellRenderer> r;
++    body->GetCellRenderer(getter_AddRefs(r));
++    return r.forget();
++  }
++  return nullptr;
++}
++
++void
++XULTreeElement::SetCellRenderer(nsITreeCellRenderer* aCellRenderer) {
++  nsTreeBodyFrame* body = GetTreeBodyFrame();
++  if (body) {
++    body->SetCellRenderer(aCellRenderer);
++  }
++}
++
+ }  // namespace dom
+ }  // namespace mozilla
+diff --git a/dom/xul/XULTreeElement.h b/dom/xul/XULTreeElement.h
+--- a/dom/xul/XULTreeElement.h
++++ b/dom/xul/XULTreeElement.h
+@@ -8,16 +8,17 @@
+ #define XULTreeElement_h__
+ 
+ #include "mozilla/Attributes.h"
+ #include "nsCycleCollectionParticipant.h"
+ #include "nsWrapperCache.h"
+ #include "nsString.h"
+ #include "nsXULElement.h"
+ #include "nsITreeView.h"
++#include "nsITreeCellRenderer.h"
+ 
+ class nsTreeBodyFrame;
+ class nsTreeColumn;
+ class nsTreeColumns;
+ 
+ namespace mozilla {
+ class ErrorResult;
+ 
+@@ -84,16 +85,19 @@ class XULTreeElement final : public nsXU
+   already_AddRefed<DOMRect> GetCoordsForCellItem(int32_t row, nsTreeColumn& col,
+                                                  const nsAString& element,
+                                                  ErrorResult& aRv);
+ 
+   bool IsCellCropped(int32_t row, nsTreeColumn* col, ErrorResult& aRv);
+ 
+   void RemoveImageCacheEntry(int32_t row, nsTreeColumn& col, ErrorResult& aRv);
+ 
++  already_AddRefed<nsITreeCellRenderer> GetCellRenderer();
++  void SetCellRenderer(nsITreeCellRenderer* aCellRenderer);
++
+   void SetFocused(bool aFocused);
+   void EnsureRowIsVisible(int32_t index);
+   void Invalidate(void);
+   void InvalidateColumn(nsTreeColumn* col);
+   void InvalidateRow(int32_t index);
+   void InvalidateCell(int32_t row, nsTreeColumn* col);
+   void InvalidateRange(int32_t startIndex, int32_t endIndex);
+   void RowCountChanged(int32_t index, int32_t count);
+diff --git a/layout/xul/tree/crashtests/441414-richtree.css b/layout/xul/tree/crashtests/441414-richtree.css
+new file mode 100644
+--- /dev/null
++++ b/layout/xul/tree/crashtests/441414-richtree.css
+@@ -0,0 +1,46 @@
++#threadTree {
++    -moz-appearance: none;
++    border: none;
++    margin: 0px 0px 0px;
++}
++#threadTree treechildren {
++    -moz-appearance: none;
++    border: none;
++    margin: 0px 0px 0px;
++}
++#threadTree treechildren::-moz-tree-row {
++    height: 96px;
++    -moz-appearance: none;
++    border: none;
++    margin: 0px 0px 16px 0px;
++    background: none;
++    outline: none;
++}
++#threadTree treechildren::-moz-tree-cell {
++    border: none;
++    padding: 0px 0px 0px 0px;
++    margin: 0px 0px 0px 0px;
++    background: none;
++    outline: none;
++}
++#threadTree treechildren::-moz-tree-cell-text {
++    border: none;
++    padding: 0px 0px 0px 0px;
++}
++#threadTree treechildren::-moz-tree-column {
++    border: none;
++    -moz-border-start: 0;
++    -moz-border-end: 0;
++}
++#threadTree .tree-bodybox {
++    border: none;
++}
++
++#threadTree treechildren::-moz-tree-image {
++}
++
++#threadTree treechildren::-moz-tree-renderer {
++    background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAAK/INwWK6QAAABl0RVh0U29mdHdhcmUAQWRvYmUgSW1hZ2VSZWFkeXHJZTwAAADxSURBVHjaYvz//z/DUAZMDEMcjHpg1AOjHhj1wKgHRj0w6oFRD4x6YNQDox4Y9cCQBSzUNGxhqi1R/dP42YcZB6UHwI4rq0UVYARGMhMzEAOtYmJlmFGePnhj4MuHt2D697EpWOVZ3ZoYPr19NXjzwOf3byAhjjO4OBn+/fs7eGMAYiI7A6tjFSTJMEOSDST5MOP33GDxwL9LK8H0fwF5hv+8UkOrFIKBv+8fMTCAMBpg1AsfGh5gFpSDs2kdE1T3QNekVXStyBhHx0ZHPTDqgVEPjHpg1AOjHhj1wKgHRj0w6oFRD4x6YNQDI9QDAAEGAKsZKwQMs7baAAAAAElFTkSuQmCC");
++    background-repeat: no-repeat;
++    background-position: center; 
++}
+diff --git a/layout/xul/tree/crashtests/441414-richtree.xhtml b/layout/xul/tree/crashtests/441414-richtree.xhtml
+new file mode 100644
+--- /dev/null
++++ b/layout/xul/tree/crashtests/441414-richtree.xhtml
+@@ -0,0 +1,416 @@
++<?xml version="1.0"?>
++<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
++<?xml-stylesheet href="441414-richtree.css" type="text/css"?>
++
++<window title="Rich Tree Test" width="600" height="600"
++  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
++
++<script type="text/javascript"><![CDATA[
++var Cc = Components.classes;
++var Ci = Components.interfaces;
++var Cu = Components.utils;
++
++var gIdx=[{
++    isRead: true,
++    hasAttachment: true,
++    subjectCol: 'Hello, Gmail',
++    dateCol: '2014-08-15 17:10',
++    senderCol: 'Earth',
++    description: 'Comes from gmail.'
++  },{
++    isRead: false,
++    hasAttachment: false,
++    subjectCol: 'Hello, Gmail',
++    dateCol: '17:10',
++    senderCol: 'Marks',
++    description: 'Comes from gmail.'
++  }
++];
++
++var treeView = {
++  _rowCount: 0,
++  updateRowCount: function() {
++    this._rowCount = 19173966; //2147483647,19173966, 19173961.133928571428571428571429
++  },
++
++  // nsISupports
++  QueryInterface: function(aIID) {
++    if (aIID.equals(Ci.nsITreeView) ||
++        aIID.equals(Ci.nsISupports))
++      return this;
++    throw Components.results.NS_NOINTERFACE;
++  },
++
++  // nsITreeView
++  treeBox: null,
++  selection: null,
++
++  get rowCount()                     { return this._rowCount },
++  setTree: function(treeBox)         { this.treeBox = treeBox; },
++  getCellText: function(idx, column) {
++    var node;
++    if (idx <= 1) {
++      node = gIdx[idx];
++    } else {
++      node = gIdx[0];
++    }
++    if (column.id == "subjectCol")
++      return node.subjectCol;
++    if (column.id == "dateCol")
++      return node.dateCol;
++    if (column.id == "senderCol")
++      return "senderCol";
++
++    if (column.id == "description")
++      return node.description;
++    return "";
++  },
++  isContainer: function(idx)         { return false; },
++  isContainerOpen: function(idx)     { return false; },
++  isContainerEmpty: function(idx)    { return true; },
++  isSeparator: function(idx)         { return false; },
++  isSorted: function()               { return true; },
++  isEditable: function(idx, column)  { return false; },
++
++  getParentIndex: function(idx) { return -1; },
++  getLevel: function(idx) { return 0; },
++  hasNextSibling: function(idx, after) { return false; },
++  toggleOpenState: function(idx) {},
++
++  getImageSrc: function(idx, column) {},
++  getProgressMode : function(idx,column) {},
++  getCellValue: function(idx, column) {},
++  cycleHeader: function(col, elem) {},
++  selectionChanged: function() {},
++  cycleCell: function(idx, column) {},
++  performAction: function(action) {},
++  performActionOnCell: function(action, index, column) {},
++
++  getRowProperties: function(idx) {
++    return 'richrowtitle richrowsubheader richrowsubheader';
++  },
++  getCellProperties: function(idx, column) {
++    var node;
++    if (idx <= 1) {
++      node = gIdx[idx];
++    } else {
++      node = gIdx[0];
++    }
++    var ret = "";
++    if (node.isRead) {
++      ret += "read ";
++    } else {
++      ret += "unread ";
++    }
++    if (node.hasAttachment) {
++      ret += "attach";
++    }
++    return ret;
++  },
++  getColumnProperties: function(column, element) {},
++};
++
++function onStart() {
++  treeView.updateRowCount();
++  var treeBoxObject= document.getElementById("threadTree");
++  initThreadTree("threadTree", "threadTreeBody");
++  treeBoxObject.view = treeView;
++}
++
++window.addEventListener("load", onStart, true);
++
++function initThreadTree(threadTreeId, threadTreeBodyId) {
++  treeCellCanvas.initialize(document.getElementById(threadTreeId),
++      document.getElementById(threadTreeBodyId));
++}
++
++// First, checks if it isn't implemented yet.
++if (typeof String.prototype.format != 'function') {
++  String.prototype.format = function() {
++    var args = arguments;
++    return this.replace(/{(\d+)}/g, function(match, number) {
++      let val = args[number];
++      let valType = (typeof val);
++      if (valType == 'undefined') {
++        return '{undefined}';
++      }
++      if (valType == 'string') {
++        return val;
++      }
++      if (valType == 'object') {
++        return JSON.stringify(val);
++      }
++      return val.toString();
++    });
++  };
++}
++
++if (typeof String.prototype.startsWith != 'function') {
++  String.prototype.startsWith = function (str){
++    return this.slice(0, str.length) == str;
++  };
++}
++
++if (typeof String.prototype.endsWith != 'function') {
++  String.prototype.endsWith = function(str){
++    return this.length >= s.length && this.substr(this.length - s.length) == s;
++  }
++}
++
++function propertiesHasAtom(props, atomString) {
++    if (props == atomString) {
++      return true;
++    }
++    if (props.indexOf(' ' + atomString + ' ') >= 0) {
++      return true;
++    }
++    if (props.startsWith(atomString + ' ')) {
++      return true;
++    }
++    if (props.endsWith(' ' + atomString)) {
++      return true;
++    }
++    return false;
++}
++
++function jsdump(str) {
++  Cc['@mozilla.org/consoleservice;1']
++            .getService(Ci.nsIConsoleService)
++            .logStringMessage(str);
++}
++
++function drawText(ctx, text, font, color, align, x, y, maxWidth, crop) {
++  ctx.beginPath();
++  ctx.font = font;
++
++  var measureContent = '';
++  var finalPos = 0;
++  if (crop) {
++    measureContent = '...';
++    if (ctx.measureText(text) <= maxWidth) {
++      finalPos = text.length;
++    }
++  }
++  for (var i = 0; i < text.length && i >= finalPos;) {
++    var ch = text[i];
++    //replace(/[\.,-\/#!$%\^&\*;:{}=\-_`~()]/g,"")
++    //.,-/#!$%^&*;:{}=\-_\'~()]"
++    //' \t\n\r\v'
++
++    measureContent += ch;
++    var metrics = ctx.measureText(measureContent);
++    if (metrics.width > maxWidth) {
++      break;
++    }
++    finalPos = ++i;
++  }
++
++  var renderContent = text.substring(0, finalPos);
++  if (crop && finalPos != text.length) {
++    renderContent += '...';
++  }
++  ctx.textBaseline = 'bottom';
++  ctx.textAlign = align;
++  ctx.fillStyle = color;
++  ctx.fillText(renderContent, x, y);
++  return text.substring(finalPos, text.length);
++}
++
++var treeCellCanvas = {
++  // nsISupports
++  QueryInterface: function(aIID) {
++    if (aIID.equals(Ci.nsITreeCellRenderer) ||
++        aIID.equals(Ci.nsIDOMEventListener) ||
++        aIID.equals(Ci.nsISupports) ||
++        aIID.equals(Ci.nsISupportsWeakReference))
++      return this;
++    throw Components.results.NS_NOINTERFACE;
++  },
++
++  //Private:
++  treeBoxObject: null,
++  treeBody: null,
++  richColumn: null,
++  senderColumn: null,
++  dateColumn: null,
++  subjectColumn: null,
++
++  canvas: null,
++  canvasWidth: 0,
++
++  mousePos: null,
++  currentRow: -1,
++  relativeRow: -1,
++
++  initialize: function(treeElement, treeBody) {
++    this.treeBoxObject = treeElement.treeBoxObject;
++    this.treeBody = treeBody;
++    this.canvas = window.document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
++
++    this.richColumn = this.treeBoxObject.columns.getNamedColumn('richCol');
++    this.canvasWidth = this.richColumn.width - 17; /* The scrollbar width */
++    this.senderColumn = this.treeBoxObject.columns.getNamedColumn('senderCol');
++    this.dateColumn = this.treeBoxObject.columns.getNamedColumn('dateCol');
++    this.subjectColumn = this.treeBoxObject.columns.getNamedColumn('subjectCol');
++
++    //https://developer.mozilla.org/en-US/docs/Web/Events
++    treeElement.addEventListener('click', this, true);
++    treeElement.addEventListener('dblclick', this, false);
++    treeElement.addEventListener('mousemove', this, false);
++    treeElement.addEventListener('mousedown', this, true);
++    treeElement.addEventListener('mouseup', this, false);
++    treeElement.addEventListener('mouseover', this, false);
++    treeElement.addEventListener('mouseout', this, false);
++
++    treeElement.addEventListener('mouseenter', this, false);
++    treeElement.addEventListener('mouseleave', this, false);
++
++    this.treeBoxObject.cellRenderer = this;
++    this.treeBoxObject.invalidate();
++  },
++  invalidateRow: function(row) {
++    if (row >= 0) {
++      this.treeBoxObject.invalidateRow(row);
++    }
++  },
++  //Public:
++  handleEvent: function(e) {
++    if (this.mousePos == null) {
++      this.mousePos = {x:-1, y:-1};
++    }
++    switch (e.type) {
++    default:
++      this.mousePos.x = e.clientX || e.pageX || e.X; 
++      this.mousePos.y = e.clientY || e.pageY || e.Y;
++
++      let posRow = { }, posCol = { }, posChild = { };
++      this.treeBoxObject.getCellAt(this.mousePos.x, this.mousePos.y,
++                                   posRow, posCol, posChild);
++
++      var isSameColumn = posCol.value != null && posCol.value.id == this.richColumn.id;
++
++      let row = posRow.value;
++      if (posCol.value == null) {
++        row = -1;
++      }
++
++      if (row < 0 || row != this.currentRow) {
++        jsdump("{0} {1}:{2} {3} {4} {5}".format(e.type, this.currentRow, row, this.mousePos, posCol.value, isSameColumn));
++      }
++
++      this.currentRow = row;
++      this.relativeRow = row;
++      if (this.relativeRow >= 0) {
++        this.relativeRow -=  this.treeBoxObject.getFirstVisibleRow();
++      }
++      break;
++    }
++  },
++  //nsISupports (ctx) render(in nsITreeView view, in long row, in nsITreeColumn col, in AString props);
++  //The underlying code for view is comn\mailnews\base\src\nsMsgDBView.cpp
++  draw: function(view, row, col, props) {
++    this.canvas.width = this.canvasWidth;
++    this.canvas.height = this.treeBoxObject.rowHeight - 16;
++
++    var ctx = this.canvas.getContext("2d");
++    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
++
++    let hasButton = this.relativeRow == row - this.treeBoxObject.getFirstVisibleRow();
++    let hasHover = propertiesHasAtom(props, 'hover');
++    var selected = propertiesHasAtom(props, 'selected');
++    if (hasButton != hasHover) {
++      jsdump("hover:{0}, button:{1}".format(hasHover, hasButton));
++    }
++    var fillColor = null;
++    if (selected && hasHover) {
++      fillColor = "rgb(228, 228, 228)";
++    } else if (selected && !hasHover) {
++      fillColor = "rgb(221, 221, 221)";
++    } else if (!selected && hasHover) {
++      fillColor = "rgb(235, 235, 235)";
++    }
++    if (!fillColor) {
++      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
++    } else {
++      ctx.beginPath();
++      ctx.rect(0, 0, this.canvas.width, this.canvas.height);
++      ctx.fillStyle=fillColor;
++      ctx.fill();
++    }
++
++    var message = row.toString() + " " + props;
++    if (hasButton) {
++      message += " hasButton";
++    }
++
++    var unread = propertiesHasAtom(props, 'unread');
++    var hasAttachments = propertiesHasAtom(props, 'attach');
++
++    if (unread) {
++      ctx.beginPath();
++      ctx.rect(0, 8, 4, 78);
++      ctx.fillStyle="rgb(57,160,87)";
++      ctx.fill();
++    }
++
++    var sender = view.getCellText(row, this.senderColumn);
++    var date = view.getCellText(row, this.dateColumn).split(' ')[0];
++    var title = view.getCellText(row, this.subjectColumn).substring(0, 128);
++
++    ctx.beginPath();
++    ctx.arc(500, 50, row % 10 + 10, 0, 2 * 3.14, false);
++    ctx.fillStyle = 'rgb(0,122,0)';
++    ctx.fill();
++    ctx.lineWidth = 5;
++    ctx.strokeStyle = '#003300';
++    ctx.stroke();
++
++    var textStartX = 12;
++    var textStartY = 8;
++    var senderSize = 14;
++    var titleSize = 14;
++    var summarySize = 12;
++    var titleLineSpacing = 10;
++    var normalLineSpacing = 8;
++
++    var font = 'Calibri, Arial, "Microsoft YaHei", SimSun';
++
++    var senderFont = 'bold {0}px {1}'.format(senderSize, font);
++    var titleFont = '{0}px {1}'.format(titleSize, font);
++    var summaryFont = '{0}px {1}'.format(summarySize, font);
++    var titleColor = 'black';
++    var summaryColor = 'rgb(122,122,122)';
++
++    textStartY += senderSize;
++    drawText(ctx, sender, senderFont, "black", 'left', textStartX, textStartY, 160, true);
++    drawText(ctx, date, titleFont, "black", 'right', this.canvasWidth - 12, textStartY, 78, true);
++
++    textStartY += titleSize + titleLineSpacing;
++    drawText(ctx, title, titleFont , titleColor, 'left', textStartX, textStartY, 200, true);
++    textStartY += summarySize + normalLineSpacing;
++    message = drawText(ctx, message, summaryFont , summaryColor, 'left', textStartX, textStartY, this.canvasWidth - 70, false);
++    textStartY += summarySize + normalLineSpacing;
++    drawText(ctx, message, summaryFont , summaryColor, 'left', textStartX, textStartY, this.canvasWidth - 70, true);
++    let imageTools = Cc["@mozilla.org/image/tools;1"].
++               getService(Ci.imgITools);
++    return imageTools.createImageFromCanvasContext(ctx);
++  }
++}
++]]></script>
++
++  <keyset>
++    <key key="W" modifiers="accel" oncommand="window.close();"/>
++  </keyset>
++  <hbox flex="1">
++    <tree id="threadTree" width="600" hidecolumnpicker="true">
++      <treecols>
++        <treecol hideheader="true" id="richCol" flex="1" type="renderer" ignoreincolumnpicker="true" />
++        <treecol hidden="true" hideheader="true" id="senderCol" flex="1" type="rich" ignoreincolumnpicker="true" />
++        <treecol hidden="true" hideheader="true" id="dateCol" flex="1" type="rich" ignoreincolumnpicker="true" />
++        <treecol hidden="true" hideheader="true" id="subjectCol" flex="1" type="rich" ignoreincolumnpicker="true" />
++      </treecols>
++      <treechildren id="threadTreeBody" />
++    </tree>
++    <hbox flex="1" />
++  </hbox>
++</window>
+diff --git a/layout/xul/tree/crashtests/crashtests.list b/layout/xul/tree/crashtests/crashtests.list
+--- a/layout/xul/tree/crashtests/crashtests.list
++++ b/layout/xul/tree/crashtests/crashtests.list
+@@ -7,12 +7,13 @@ load 382444-1.html
+ load 391178-1.xhtml
+ load chrome://reftest/content/crashtests/layout/xul/tree/crashtests/391178-2.xhtml
+ load chrome://reftest/content/crashtests/layout/xul/tree/crashtests/393665-1.xhtml
+ load chrome://reftest/content/crashtests/layout/xul/tree/crashtests/399227-1.xhtml
+ load 399692-1.xhtml
+ load 399715-1.xhtml
+ load chrome://reftest/content/crashtests/layout/xul/tree/crashtests/409807-1.xhtml
+ load chrome://reftest/content/crashtests/layout/xul/tree/crashtests/414170-1.xhtml
++load 441414-richtree.xhtml
+ load 479931-1.xhtml
+ load 585815.html
+ load 601427.html
+ load chrome://reftest/content/crashtests/layout/xul/tree/crashtests/730441-3.xhtml
+diff --git a/layout/xul/tree/moz.build b/layout/xul/tree/moz.build
+--- a/layout/xul/tree/moz.build
++++ b/layout/xul/tree/moz.build
+@@ -3,16 +3,17 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ with Files("**"):
+     BUG_COMPONENT = ("Core", "XUL")
+ 
+ XPIDL_SOURCES += [
++    "nsITreeCellRenderer.idl",
+     "nsITreeSelection.idl",
+     "nsITreeView.idl",
+ ]
+ 
+ XPIDL_MODULE = "layout_xul_tree"
+ 
+ EXPORTS += [
+     "nsTreeColFrame.h",
+diff --git a/layout/xul/tree/nsITreeCellRenderer.idl b/layout/xul/tree/nsITreeCellRenderer.idl
+new file mode 100644
+--- /dev/null
++++ b/layout/xul/tree/nsITreeCellRenderer.idl
+@@ -0,0 +1,38 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++interface imgIContainer;
++interface nsITreeView;
++interface nsTreeColumn;
++
++[scriptable, uuid(aceed5f8-e57a-4cdc-b859-cf864904ab1c)]
++interface nsITreeCellRenderer : nsISupports
++{
++  /**
++   * draw
++   * Rendering a tree cell's content at the position (row,col), returning the
++   * imgIContainer of the drawn result. The rendering could be HTML5's canvas
++   * drawing or other means.
++   *
++   * @param view
++   *        The tree view used to retrieve the data, do not directly place this
++   *        function into nsITreeView comes from a reason, split out the drawing 
++   *        code from the data provider code, cause nsITreeView can be implemented
++   *        in C++/Javascript, and for most condition, nsITreeCellRenderer should 
++   *        be implemented in Javascript. So we create a independent interface for
++   *        draw.
++   * @param row
++   *        The row in the nsITreeView are drawing.
++   * @param col
++   *        The column in the nsITreeView are drawing.
++   * @param props
++   *        The parameter contained the corresponding row, column and cell properties,
++   *        such as 'hove', 'selected', so that the draw function can use these properties
++   *        to decide what to be drawn.
++   */
++  imgIContainer draw(in nsITreeView view, in long row, in nsTreeColumn col, in AString props);
++};
+diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFrame.cpp
+--- a/layout/xul/tree/nsTreeBodyFrame.cpp
++++ b/layout/xul/tree/nsTreeBodyFrame.cpp
+@@ -3107,37 +3107,72 @@ ImgDrawResult nsTreeBodyFrame::PaintCell
+     result &= PaintTwisty(aRowIndex, aColumn, twistyRect, aPresContext,
+                           aRenderingContext, aDirtyRect, remainingWidth, currX);
+   }
+ 
+   // Now paint the icon for our cell.
+   nsRect iconRect(currX, cellRect.y, remainingWidth, cellRect.height);
+   nsRect dirtyRect;
+   if (dirtyRect.IntersectRect(aDirtyRect, iconRect)) {
+-    result &= PaintImage(aRowIndex, aColumn, iconRect, aPresContext,
+-                         aRenderingContext, aDirtyRect, remainingWidth, currX,
+-                         aBuilder);
++    // Resolve style for the image.
++    ComputedStyle* imageContext =
++        GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeImage());
++    // Get the image.
++    bool useImageRegion = true;
++    nsCOMPtr<imgIContainer> image;
++    GetImage(aRowIndex, aColumn, false, imageContext, useImageRegion,
++             getter_AddRefs(image));
++    result &= PaintImage(image, aColumn, iconRect, aPresContext,
++                         aRenderingContext, imageContext, aDirtyRect,
++                         remainingWidth, currX, useImageRegion, aBuilder);
+   }
+ 
+   // Now paint our element, but only if we aren't a cycler column.
+   // XXX until we have the ability to load images, allow the view to
+   // insert text into cycler columns...
+   if (!aColumn->IsCycler()) {
+     nsRect elementRect(currX, cellRect.y, remainingWidth, cellRect.height);
+     nsRect dirtyRect;
+     if (dirtyRect.IntersectRect(aDirtyRect, elementRect)) {
+-      switch (aColumn->GetType()) {
++      int16_t cellType = aColumn->GetType();
++      if (mScratchArray.Contains(nsGkAtoms::renderer)) {
++        cellType = TreeColumn_Binding::TYPE_RENDERER;
++      }
++      switch (cellType) {
+         case TreeColumn_Binding::TYPE_TEXT:
+           result &= PaintText(aRowIndex, aColumn, elementRect, aPresContext,
+                               aRenderingContext, aDirtyRect, currX);
+           break;
+         case TreeColumn_Binding::TYPE_CHECKBOX:
+           result &= PaintCheckbox(aRowIndex, aColumn, elementRect, aPresContext,
+                                   aRenderingContext, aDirtyRect);
+           break;
++        case TreeColumn_Binding::TYPE_RENDERER: {
++          // Resolve style for the renderer.
++          ComputedStyle* rendererContext =
++              GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeRenderer());
++          bool useImageRegion = false;
++          nsCOMPtr<imgIContainer> image;
++          if (mCellRenderer) {
++            nsAutoString properties =
++                nsTreeUtils::StringizeProperties(mScratchArray);
++            mCellRenderer->Draw(mView, aRowIndex, aColumn, properties,
++                                getter_AddRefs(image));
++          }
++          if (!image) {
++            // If retrieve the image from the renderer failed, drawing the
++            // context style of the current tree cell.
++            GetImage(aRowIndex, aColumn, true, rendererContext, useImageRegion,
++                     getter_AddRefs(image));
++          }
++          result &= PaintImage(image, aColumn, iconRect, aPresContext,
++                               aRenderingContext, rendererContext, aDirtyRect,
++                               remainingWidth, currX, useImageRegion, aBuilder);
++          break;
++        }
+       }
+     }
+   }
+ 
+   aCurrX = currX;
+ 
+   return result;
+ }
+@@ -3235,46 +3270,41 @@ ImgDrawResult nsTreeBodyFrame::PaintTwis
+       }
+     }
+   }
+ 
+   return result;
+ }
+ 
+ ImgDrawResult nsTreeBodyFrame::PaintImage(
+-    int32_t aRowIndex, nsTreeColumn* aColumn, const nsRect& aImageRect,
++    imgIContainer* aImage, nsTreeColumn* aColumn, const nsRect& aImageRect,
+     nsPresContext* aPresContext, gfxContext& aRenderingContext,
+-    const nsRect& aDirtyRect, nscoord& aRemainingWidth, nscoord& aCurrX,
++    ComputedStyle* aStyleContext, const nsRect& aDirtyRect,
++    nscoord& aRemainingWidth, nscoord& aCurrX, bool aUseImageRegion,
+     nsDisplayListBuilder* aBuilder) {
+   MOZ_ASSERT(aColumn && aColumn->GetFrame(), "invalid column passed");
+ 
+   bool isRTL = StyleVisibility()->mDirection == StyleDirection::Rtl;
+   nscoord rightEdge = aCurrX + aRemainingWidth;
+   // Resolve style for the image.
+-  ComputedStyle* imageContext =
+-      GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeImage());
++  ComputedStyle* imageContext = aStyleContext;
+ 
+   // Obtain opacity value for the image.
+   float opacity = imageContext->StyleEffects()->mOpacity;
+ 
+   // Obtain the margins for the image and then deflate our rect by that
+   // amount.  The image is assumed to be contained within the deflated rect.
+   nsRect imageRect(aImageRect);
+   nsMargin imageMargin;
+   imageContext->StyleMargin()->GetMargin(imageMargin);
+   imageRect.Deflate(imageMargin);
+ 
+-  // Get the image.
+-  bool useImageRegion = true;
+-  nsCOMPtr<imgIContainer> image;
+-  GetImage(aRowIndex, aColumn, false, imageContext, useImageRegion,
+-           getter_AddRefs(image));
+-
+   // Get the image destination size.
+-  nsSize imageDestSize = GetImageDestSize(imageContext, useImageRegion, image);
++  nsSize imageDestSize =
++      GetImageDestSize(imageContext, aUseImageRegion, aImage);
+   if (!imageDestSize.width || !imageDestSize.height) {
+     return ImgDrawResult::SUCCESS;
+   }
+ 
+   // Get the borders and padding.
+   nsMargin bp(0, 0, 0, 0);
+   GetBorderPadding(imageContext, bp);
+ 
+@@ -3304,17 +3334,17 @@ ImgDrawResult nsTreeBodyFrame::PaintImag
+       // We adjust the imageRect width so that the image is placed at the start
+       // of the cell.
+       imageRect.width = destRect.width;
+     }
+   }
+ 
+   ImgDrawResult result = ImgDrawResult::SUCCESS;
+ 
+-  if (image) {
++  if (aImage) {
+     if (isRTL) imageRect.x = rightEdge - imageRect.width;
+     // Paint our borders and background for our image rect
+     result &= PaintBackgroundLayer(imageContext, aPresContext,
+                                    aRenderingContext, imageRect, aDirtyRect);
+ 
+     // The destRect x and y have not been set yet. Let's do that now.
+     // Initially, we use the imageRect x and y.
+     destRect.x = imageRect.x;
+@@ -3343,23 +3373,23 @@ ImgDrawResult nsTreeBodyFrame::PaintImag
+     // It's almost time to paint the image.
+     // Deflate destRect for the border and padding.
+     destRect.Deflate(bp);
+ 
+     // Compute the area where our whole image would be mapped, to get the
+     // desired subregion onto our actual destRect:
+     nsRect wholeImageDest;
+     CSSIntSize rawImageCSSIntSize;
+-    if (NS_SUCCEEDED(image->GetWidth(&rawImageCSSIntSize.width)) &&
+-        NS_SUCCEEDED(image->GetHeight(&rawImageCSSIntSize.height))) {
++    if (NS_SUCCEEDED(aImage->GetWidth(&rawImageCSSIntSize.width)) &&
++        NS_SUCCEEDED(aImage->GetHeight(&rawImageCSSIntSize.height))) {
+       // Get the image source rectangle - the rectangle containing the part of
+       // the image that we are going to display.  sourceRect will be passed as
+       // the aSrcRect argument in the DrawImage method.
+       nsRect sourceRect =
+-          GetImageSourceRect(imageContext, useImageRegion, image);
++          GetImageSourceRect(imageContext, aUseImageRegion, aImage);
+ 
+       // Let's say that the image is 100 pixels tall and that the CSS has
+       // specified that the destination height should be 50 pixels tall. Let's
+       // say that the cell height is only 20 pixels. So, in those 20 visible
+       // pixels, we want to see the top 20/50ths of the image.  So, the
+       // sourceRect.height should be 100 * 20 / 50, which is 40 pixels.
+       // Essentially, we are scaling the image as dictated by the CSS
+       // destination height and width, and we are then clipping the scaled
+@@ -3372,31 +3402,31 @@ ImgDrawResult nsTreeBodyFrame::PaintImag
+       // source image onto the destination area.
+       // * If this happens with a RasterImage, it probably means the image is
+       // in an error state, and we shouldn't draw anything. Hence, we leave
+       // wholeImageDest as an empty rect (its initial state).
+       // * If this happens with a VectorImage, it probably means the image has
+       // no explicit width or height attribute -- but we can still proceed and
+       // just treat the destination area as our whole SVG image area. Hence, we
+       // set wholeImageDest to the full destRect.
+-      if (image->GetType() == imgIContainer::TYPE_VECTOR) {
++      if (aImage->GetType() == imgIContainer::TYPE_VECTOR) {
+         wholeImageDest = destRect;
+       }
+     }
+ 
+     if (opacity != 1.0f) {
+       aRenderingContext.PushGroupForBlendBack(gfxContentType::COLOR_ALPHA,
+                                               opacity);
+     }
+ 
+     uint32_t drawFlags = aBuilder && aBuilder->UseHighQualityScaling()
+                              ? imgIContainer::FLAG_HIGH_QUALITY_SCALING
+                              : imgIContainer::FLAG_NONE;
+     result &= nsLayoutUtils::DrawImage(
+-        aRenderingContext, imageContext, aPresContext, image,
++        aRenderingContext, imageContext, aPresContext, aImage,
+         nsLayoutUtils::GetSamplingFilterForFrame(this), wholeImageDest,
+         destRect, destRect.TopLeft(), aDirtyRect, drawFlags);
+ 
+     if (opacity != 1.0f) {
+       aRenderingContext.PopGroupAndBlend();
+     }
+   }
+ 
+@@ -3804,16 +3834,30 @@ void nsTreeBodyFrame::ScrollToRow(int32_
+ 
+ nsresult nsTreeBodyFrame::ScrollToRowInternal(const ScrollParts& aParts,
+                                               int32_t aRow) {
+   ScrollInternal(aParts, aRow);
+ 
+   return NS_OK;
+ }
+ 
++nsresult nsTreeBodyFrame::GetCellRenderer(nsITreeCellRenderer** aCellRenderer) {
++  AutoWeakFrame weakFrame(this);
++  NS_ENSURE_STATE(weakFrame.IsAlive());
++  nsCOMPtr<nsITreeCellRenderer> renderer = mCellRenderer;
++  renderer.forget(aCellRenderer);
++  return NS_OK;
++}
++
++nsresult nsTreeBodyFrame::SetCellRenderer(nsITreeCellRenderer* aCellRenderer) {
++  NS_ENSURE_ARG_POINTER(aCellRenderer);
++  mCellRenderer = aCellRenderer;
++  return NS_OK;
++}
++
+ void nsTreeBodyFrame::ScrollByLines(int32_t aNumLines) {
+   if (!mView) {
+     return;
+   }
+   int32_t newIndex = mTopRowIndex + aNumLines;
+   ScrollToRow(newIndex);
+ }
+ 
+diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame.h
+--- a/layout/xul/tree/nsTreeBodyFrame.h
++++ b/layout/xul/tree/nsTreeBodyFrame.h
+@@ -13,16 +13,17 @@
+ #include "nsLeafBoxFrame.h"
+ #include "nsITreeView.h"
+ #include "nsIScrollbarMediator.h"
+ #include "nsITimer.h"
+ #include "nsIReflowCallback.h"
+ #include "nsTArray.h"
+ #include "nsTreeStyleCache.h"
+ #include "nsTreeColumns.h"
++#include "nsITreeCellRenderer.h"
+ #include "nsTHashMap.h"
+ #include "nsTHashSet.h"
+ #include "imgIRequest.h"
+ #include "imgINotificationObserver.h"
+ #include "nsScrollbarFrame.h"
+ #include "nsThreadUtils.h"
+ #include "mozilla/LookAndFeel.h"
+ 
+@@ -105,16 +106,18 @@ class nsTreeBodyFrame final : public nsL
+                                 const nsACString& aElt, int32_t* aX,
+                                 int32_t* aY, int32_t* aWidth, int32_t* aHeight);
+   nsresult IsCellCropped(int32_t aRow, nsTreeColumn* aCol, bool* aResult);
+   nsresult RowCountChanged(int32_t aIndex, int32_t aCount);
+   nsresult BeginUpdateBatch();
+   nsresult EndUpdateBatch();
+   nsresult ClearStyleAndImageCaches();
+   void RemoveImageCacheEntry(int32_t aRowIndex, nsTreeColumn* aCol);
++  nsresult GetCellRenderer(nsITreeCellRenderer** aCellRenderer);
++  nsresult SetCellRenderer(nsITreeCellRenderer* aCellRenderer);
+ 
+   void CancelImageRequests();
+ 
+   void ManageReflowCallback(const nsRect& aRect, nscoord aHorzWidth);
+ 
+   virtual nsSize GetXULMinSize(nsBoxLayoutState& aBoxLayoutState) override;
+   virtual void SetXULBounds(nsBoxLayoutState& aBoxLayoutState,
+                             const nsRect& aRect,
+@@ -235,22 +238,24 @@ class nsTreeBodyFrame final : public nsL
+   ImgDrawResult PaintTwisty(int32_t aRowIndex, nsTreeColumn* aColumn,
+                             const nsRect& aTwistyRect,
+                             nsPresContext* aPresContext,
+                             gfxContext& aRenderingContext,
+                             const nsRect& aDirtyRect, nscoord& aRemainingWidth,
+                             nscoord& aCurrX);
+ 
+   // This method paints the image inside the cell of an tree.
+-  ImgDrawResult PaintImage(int32_t aRowIndex, nsTreeColumn* aColumn,
++  ImgDrawResult PaintImage(imgIContainer* aImage, nsTreeColumn* aColumn,
+                            const nsRect& aImageRect,
+                            nsPresContext* aPresContext,
+                            gfxContext& aRenderingContext,
++                           ComputedStyle* aStyleContext,
+                            const nsRect& aDirtyRect, nscoord& aRemainingWidth,
+-                           nscoord& aCurrX, nsDisplayListBuilder* aBuilder);
++                           nscoord& aCurrX, bool aUseImageRegion,
++                           nsDisplayListBuilder* aBuilder);
+ 
+   // This method paints the text string inside a particular cell of the tree.
+   ImgDrawResult PaintText(int32_t aRowIndex, nsTreeColumn* aColumn,
+                           const nsRect& aTextRect, nsPresContext* aPresContext,
+                           gfxContext& aRenderingContext,
+                           const nsRect& aDirtyRect, nscoord& aCurrX);
+ 
+   // This method paints the checkbox inside a particular cell of the tree.
+@@ -606,11 +611,15 @@ class nsTreeBodyFrame final : public nsL
+   // Set while we flush layout to take account of effects of
+   // overflow/underflow event handlers
+   bool mCheckingOverflow;
+ 
+   // Hash set to keep track of which listeners we created and thus
+   // have pointers to us.
+   nsTHashSet<nsTreeImageListener*> mCreatedListeners;
+ 
++  // This is an external tree cell renderer. If present, it renders the cell
++  // content into an imgIContainer by canvas or other means, which is then
++  // painted using PaintImage.
++  nsCOMPtr<nsITreeCellRenderer> mCellRenderer;
+ };  // class nsTreeBodyFrame
+ 
+ #endif
