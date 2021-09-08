@@ -36,5 +36,5 @@ set icv=iconv -f windows-1252 -t utf-8
 :: Will need to translate these. "Icon" is usually "Symbol" in German and "badge" was never translated. Good luck to the translators.
 :: "Badge icon" already seems to be a misnomer.
 %lecho% "dock-options-show-badge =" >> localization\nl\messenger\preferences\dock-options.ftl
-%lecho% "    .label = Show badge icon" >> localization\nl\messenger\preferences\dock-options.ftl
-%lecho% "    .accesskey = b" >> localization\nl\messenger\preferences\dock-options.ftl
+%lecho% "    .label = Badgepictogram tonen" >> localization\nl\messenger\preferences\dock-options.ftl
+%lecho% "    .accesskey = B" >> localization\nl\messenger\preferences\dock-options.ftl
