@@ -38,3 +38,7 @@ set icv=iconv -f windows-1252 -t utf-8
 %lecho% "dock-options-show-badge =" >> localization\de\messenger\preferences\dock-options.ftl
 %lecho% "    .label = Show badge icon" >> localization\de\messenger\preferences\dock-options.ftl
 %lecho% "    .accesskey = b" >> localization\de\messenger\preferences\dock-options.ftl
+
+:: Original strings:
+:: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
+%lecho% "<!ENTITY multilineAllFolders.label \"Mehrzeilen Ansicht für alle Ordner\">" | %icv% >> chrome\de\locale\de\messenger\messenger.dtd
