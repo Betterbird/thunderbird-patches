@@ -29,3 +29,7 @@ However, that part of the build system should not be triggered for Linux builds.
 Linux users also can use [Ansible-betterbird](https://github.com/4ch1m/ansible-betterbird) for an automated "one click" build, well, "one command" build. To build successfully on Linux, you need at least 16 GB of memory or swap space.
 
 Visit [www.betterbird.eu](https://www.betterbird.eu/) for details.
+
+## Translations
+
+Translation strings are found [here](./scripts).
