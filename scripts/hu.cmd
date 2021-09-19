@@ -7,9 +7,9 @@ set icv=iconv -f windows-1252 -t utf-8
 :: <!ENTITY hdrOpenConversationButton1.label "Conversation">
 :: <!ENTITY hdrOpenConversationButton1.tooltip "Show conversation of this message">
 :: <!ENTITY hdrMenuForwardButton.label "Forward As">
-%lecho% "<!ENTITY hdrOpenConversationButton1.label \"Beszélgetés\">" >> | %icv% chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
+%lecho% "<!ENTITY hdrOpenConversationButton1.label \"Beszélgetés\">" | %icv% >> chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
 %lecho% "<!ENTITY hdrOpenConversationButton1.tooltip \"A kijelölt üzenet beszélgetésének megjelenítése\">" | %icv% >> chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
-%lecho% "<!ENTITY hdrMenuForwardButton.label \"Továbbítás módja\">" >> | %icv% chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
+%lecho% "<!ENTITY hdrMenuForwardButton.label \"Továbbítás módja\">" | %icv% >> chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
 
 :: Original strings:
 :: <!ENTITY contextDecryptToFolder.label "Decrypt to Folder">
