@@ -7,14 +7,14 @@ set icv=iconv -f windows-1252 -t utf-8
 :: <!ENTITY hdrOpenConversationButton1.label "Conversation">
 :: <!ENTITY hdrOpenConversationButton1.tooltip "Show conversation of this message">
 :: <!ENTITY hdrMenuForwardButton.label "Forward As">
-%lecho% "<!ENTITY hdrOpenConversationButton1.label \"Beszélgetés\">" >> chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
+%lecho% "<!ENTITY hdrOpenConversationButton1.label \"Beszélgetés\">" >> | %icv% chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
 %lecho% "<!ENTITY hdrOpenConversationButton1.tooltip \"A kijelölt üzenet beszélgetésének megjelenítése\">" | %icv% >> chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
-%lecho% "<!ENTITY hdrMenuForwardButton.label \"Továbbítás módja\">" >> chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
+%lecho% "<!ENTITY hdrMenuForwardButton.label \"Továbbítás módja\">" >> | %icv% chrome\hu\locale\hu\messenger\msgHdrViewOverlay.dtd
 
 :: Original strings:
 :: <!ENTITY contextDecryptToFolder.label "Decrypt to Folder">
 :: <!ENTITY contextDecryptToFolder.accesskey "Y">
-%lecho% "<!ENTITY contextDecryptToFolder.label \"Visszafejtés mappába\">" | %icv% >> chrome\hu\locale\hu\messenger\messenger.dtd
+%lecho% "<!ENTITY contextDecryptToFolder.label \"Visszafejtés egy mappába\">" | %icv% >> chrome\hu\locale\hu\messenger\messenger.dtd
 %lecho% "<!ENTITY contextDecryptToFolder.accesskey \"f\">" >> chrome\hu\locale\hu\messenger\messenger.dtd
 
 :: Original strings:
@@ -34,7 +34,7 @@ set icv=iconv -f windows-1252 -t utf-8
 ::     .label = Show badge icon
 ::     .accesskey = b
 %lecho% "dock-options-show-badge =" >> localization\hu\messenger\preferences\dock-options.ftl
-%lecho% "    .label = Jelvény ikon megjelenítése" >> localization\hu\messenger\preferences\dock-options.ftl
+%lecho% "    .label = Jelvény ikon megjelenítése" | %icv% >> localization\hu\messenger\preferences\dock-options.ftl
 %lecho% "    .accesskey = J" >> localization\hu\messenger\preferences\dock-options.ftl
 
 :: Original strings:
