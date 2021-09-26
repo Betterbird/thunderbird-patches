@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1628161451 -7200
-# Parent  bab85511fda8211f7654f5ec007042dc57c9ff87
+# Date 1632654779 -7200
+# Parent  4a3a99ccf5db0f7fb7b8bb7f620aba0d5e13e274
 Bug 188988 - Switch on indexing of encrypted parts in Gloda depending on pref.
 
 diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
 --- a/mail/components/preferences/general.inc.xhtml
 +++ b/mail/components/preferences/general.inc.xhtml
-@@ -984,16 +984,21 @@
+@@ -986,16 +986,21 @@
      <html:fieldset data-category="paneGeneral">
        <html:legend data-l10n-id="general-indexing-label"></html:legend>
        <vbox>
@@ -50,6 +50,88 @@ diff --git a/mail/components/preferences/general.js b/mail/components/preference
    { id: "mailnews.labels.color.3", type: "string" },
    { id: "mailnews.labels.description.4", type: "wstring" },
    { id: "mailnews.labels.color.4", type: "string" },
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm b/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm
+@@ -869,16 +869,36 @@ MimeDecryptHandler.prototype = {
+     }
+ 
+     this.decryptedHeaders = r.newHeaders;
+     if (r.startPos >= 0 && r.endPos > r.startPos) {
+       this.decryptedData =
+         this.decryptedData.substr(0, r.startPos) +
+         this.decryptedData.substr(r.endPos);
+     }
++
++    if (
++      this.decryptedHeaders?.subject &&
++      this.uri?.spec.includes("emitter=js&examineEncryptedParts=true")
++    ) {
++      // This is a little hack for Gloda. Although we pass the protected-headers part back via
++      // `this.returnData()` the new subject is not acknowledged and Gloda uses
++      // `msgHeg.mime2DecodedSubject` which may be just "...".
++      // So we store the original header in the database. If you have a better idea, let us know!
++      let msgHdr = this.uri.QueryInterface(Ci.nsIMsgMessageUrl).messageHeader;
++      if (msgHdr) {
++        msgHdr.setStringProperty(
++          "originalSubject",
++          String.fromCharCode.apply(
++            undefined,
++            new TextEncoder("UTF-8").encode(this.decryptedHeaders.subject)
++          )
++        );
++      }
++    }
+   },
+ 
+   /*
+   async extractAutocryptGossip() {
+     let m1 = this.decryptedData.search(/^--/m);
+     let m2 = this.decryptedData.search(/\r?\n\r?\n/);
+     let m = Math.max(m1, m2);
+ 
+diff --git a/mail/extensions/openpgp/content/modules/mimeVerify.jsm b/mail/extensions/openpgp/content/modules/mimeVerify.jsm
+--- a/mail/extensions/openpgp/content/modules/mimeVerify.jsm
++++ b/mail/extensions/openpgp/content/modules/mimeVerify.jsm
+@@ -443,16 +443,38 @@ MimeVerify.prototype = {
+       let r =
+         this.signedData.substr(0, this.protectedHeaders.startPos) +
+         this.signedData.substr(this.protectedHeaders.endPos);
+       this.returnData(r);
+     } else {
+       this.returnData(this.signedData);
+     }
+ 
++    if (
++      this.protectedHeaders?.newHeaders.subject &&
++      this.uri?.spec.includes("emitter=js&examineEncryptedParts=true")
++    ) {
++      // This is a little hack for Gloda. Although we pass the protected-headers part back via
++      // `this.returnData()` the new subject is not acknowledged and Gloda uses
++      // `msgHeg.mime2DecodedSubject` which may be just "...".
++      // So we store the original header in the database. If you have a better idea, let us know!
++      let msgHdr = this.uri.QueryInterface(Ci.nsIMsgMessageUrl).messageHeader;
++      if (msgHdr) {
++        msgHdr.setStringProperty(
++          "originalSubject",
++          String.fromCharCode.apply(
++            undefined,
++            new TextEncoder("UTF-8").encode(
++              this.protectedHeaders.newHeaders.subject
++            )
++          )
++        );
++      }
++    }
++
+     // return if not verifying first mime part
+     if (
+       this.mimePartNumber.length > 0 &&
+       this.mimePartNumber.search(/^1(\.1)?$/) < 0
+     ) {
+       return;
+     }
+ 
 diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
 --- a/mail/locales/en-US/messenger/preferences/preferences.ftl
 +++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
@@ -129,10 +211,38 @@ diff --git a/mailnews/db/gloda/modules/IndexMsg.jsm b/mailnews/db/gloda/modules/
  
      this._log.debug("  * Got message, subject " + aMsgHdr.subject);
  
+@@ -3328,17 +3340,26 @@ var GlodaMsgIndexer = {
+       }
+     }
+ 
+     // Mark the message as new (for the purposes of fulltext insertion)
+     if (insertFulltext) {
+       curMsg._isNew = true;
+     }
+ 
+-    curMsg._subject = aMsgHdr.mime2DecodedSubject;
++    curMsg._subject = aMsgHdr.getStringProperty("originalSubject");
++    if (curMsg._subject) {
++      let arr = new Uint8Array(curMsg._subject.length);
++      for (let i = 0; i < curMsg._subject.length; i++) {
++        arr[i] = curMsg._subject.charCodeAt(i);
++      }
++      curMsg._subject = new TextDecoder().decode(arr);
++    } else {
++      curMsg._subject = aMsgHdr.mime2DecodedSubject;
++    }
+     curMsg._attachmentNames = attachmentNames;
+ 
+     // curMsg._indexAuthor gets set by GlodaFundAttr.jsm
+     // curMsg._indexRecipients gets set by GlodaFundAttr.jsm
+ 
+     // zero the notability so everything in grokNounItem can just increment
+     curMsg.notability = 0;
+ 
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
-@@ -1087,16 +1087,18 @@ pref("mailnews.database.dbcache.loglevel
+@@ -1097,16 +1097,18 @@ pref("mailnews.database.dbcache.loglevel
  // -- Global Database (gloda) options
  // Should the indexer be enabled?
  pref("mailnews.database.global.indexer.enabled", false);
