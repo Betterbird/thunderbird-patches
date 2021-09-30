@@ -41,4 +41,4 @@ set icv=iconv -f windows-1252 -t utf-8
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
-%lecho% "<!ENTITY multilineAllFolders.label \"Mehrzeilen Ansicht für alle Ordner\">" | %icv% >> chrome\de\locale\de\messenger\messenger.dtd
+%lecho% "<!ENTITY multilineAllFolders.label \"Mehrzeilen-Ansicht für alle Ordner\">" | %icv% >> chrome\de\locale\de\messenger\messenger.dtd
