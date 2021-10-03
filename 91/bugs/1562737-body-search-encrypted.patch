@@ -1,0 +1,181 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1633247453 -7200
+# Parent  afd4ab05a670770a00e92188a5b3337540984ee7
+Bug 1562737 - Body search in PGP encrypted messages.
+
+diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/nsMsgBodyHandler.h
+--- a/mailnews/search/public/nsMsgBodyHandler.h
++++ b/mailnews/search/public/nsMsgBodyHandler.h
+@@ -90,16 +90,20 @@ class nsMsgBodyHandler {
+   bool m_pastPartHeaders;  // true if we've already skipped over the part
+                            // headers
+   bool m_partIsQP;     // true if the Content-Transfer-Encoding header claims
+                        // quoted-printable
+   bool m_partIsHtml;   // true if the Content-type header claims text/html
+   bool m_base64part;   // true if the current part is in base64
+   bool m_isMultipart;  // true if the message is a multipart/* message
+   bool m_partIsText;   // true if the current part is text/*
++  bool m_seenMpPGP;    // true if we've seen the multipart/encrypted;
++                       // protocol="application/pgp-encrypted"; header
++  bool m_partIsPGP;    // true if the current part is the PGP payload in
++                       // application/octet-stream
+   bool m_inMessageAttachment;  // true if current part is message/*
+ 
+   nsTArray<nsCString> m_boundaries;  // The boundary strings to look for
+   nsCString m_partCharset;           // The charset found in the part
+ 
+   // See implementation for comments
+   int32_t ApplyTransformations(const nsCString& line, int32_t length,
+                                bool& returnThisLine, nsCString& buf);
+diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMsgBodyHandler.cpp
+--- a/mailnews/search/src/nsMsgBodyHandler.cpp
++++ b/mailnews/search/src/nsMsgBodyHandler.cpp
+@@ -73,16 +73,18 @@ void nsMsgBodyHandler::Initialize()
+ {
+   // Default transformations for local message search and MAPI access
+   m_stripHeaders = true;
+   m_partIsHtml = false;
+   m_base64part = false;
+   m_partIsQP = false;
+   m_isMultipart = false;
+   m_partIsText = true;  // Default is text/plain, maybe proven otherwise later.
++  m_seenMpPGP = false;
++  m_partIsPGP = false;
+   m_pastMsgHeaders = false;
+   m_pastPartHeaders = false;
+   m_inMessageAttachment = false;
+   m_headerBytesRead = 0;
+ }
+ 
+ nsMsgBodyHandler::~nsMsgBodyHandler() {}
+ 
+@@ -274,59 +276,69 @@ int32_t nsMsgBodyHandler::ApplyTransform
+         eatThisLine = true;
+       } else {
+         // It is wrong to call ApplyTransformations() here since this will
+         // lead to the buffer being doubled-up at |buf.Append(line);|
+         // below. ApplyTransformations(buf, buf.Length(), eatThisLine, buf);
+         // Avoid spurious failures
+         eatThisLine = false;
+       }
+-    } else if (!m_partIsHtml) {
++    } else if (!m_partIsHtml && !m_partIsPGP) {
+       buf.Truncate();
+       eatThisLine = true;  // We have no content...
+     }
+ 
+     if (m_partIsHtml) {
+       StripHtml(buf);
+     }
+ 
++    if (m_partIsPGP) {
++      printf("=== Decrypt this!\n|%s|\n", buf.get());
++    }
++
+     // Reset all assumed headers
+     m_base64part = false;
+     // Get ready to sniff new part headers, but do not reset m_pastMsgHeaders
+     // since it will screw the body line count.
+     m_pastPartHeaders = false;
+     m_partIsHtml = false;
+     // If we ever see a multipart message, each part needs to set
+     // 'm_partIsText', so no more defaulting to 'true' when the part is done.
+     m_partIsText = false;
+ 
++    if (m_partIsPGP) m_seenMpPGP = false;
++    m_partIsPGP = false;
++
+     // Note: we cannot reset 'm_partIsQP' yet since we still need it to process
+     // the last buffer returned here. Parsing the next part will set a new
+     // value.
+     return buf.Length();
+   }
+ 
+-  if (!m_partIsText) {
++  if (!m_partIsText && !m_partIsPGP) {
+     // Ignore non-text parts
+     buf.Truncate();
+     eatThisLine = true;
+     return 0;
+   }
+ 
+-  // Accumulate base64 parts and HTML parts for later decoding or tag stripping.
+-  if (m_base64part || m_partIsHtml) {
++  // Accumulate base64 parts, HTML parts and encrypted parts for later decoding
++  // or tag stripping.
++  if (m_base64part || m_partIsHtml || m_partIsPGP) {
+     if (m_partIsHtml && !m_base64part) {
+       size_t bufLength = buf.Length();
+       if (!m_partIsQP || bufLength == 0 || !StringEndsWith(buf, "="_ns)) {
+         // Replace newline in HTML with a space.
+         buf.Append(' ');
+       } else {
+         // Strip the soft line break.
+         buf.SetLength(bufLength - 1);
+       }
++    } else if (m_partIsPGP && buf.Length() > 0) {
++      buf.Append('\n');
+     }
+     buf.Append(line);
+     eatThisLine = true;
+     return buf.Length();
+   }
+ 
+   buf.Assign(line);
+   return buf.Length();
+@@ -385,34 +397,54 @@ void nsMsgBodyHandler::SniffPossibleMIME
+                -1) {
+       if (m_isMultipart) {
+         // Nested multipart, get ready for new headers.
+         m_base64part = false;
+         m_partIsQP = false;
+         m_pastPartHeaders = false;
+         m_partIsHtml = false;
+         m_partIsText = false;
++        m_seenMpPGP = false;
++        m_partIsPGP = false;
+       }
+       m_isMultipart = true;
+       m_partCharset.Truncate();
++      m_seenMpPGP = false;
+     } else if (lowerCaseLine.Find("message/", /* ignoreCase = */ true) != -1) {
+       // Initialise again.
+       m_base64part = false;
+       m_partIsQP = false;
+       m_pastPartHeaders = false;
+       m_partIsHtml = false;
+       m_partIsText =
+           true;  // Default is text/plain, maybe proven otherwise later.
++      m_seenMpPGP = false;
++      m_partIsPGP = false;
+       m_inMessageAttachment = true;
++    } else if (lowerCaseLine.Find("application/octet-stream",
++                                  /* ignoreCase = */ true) != -1 &&
++               m_seenMpPGP) {
++      m_base64part = false;
++      m_partIsQP = false;
++      m_pastPartHeaders = false;
++      m_partIsHtml = false;
++      m_partIsText = false;
++      m_seenMpPGP = false;
++      m_partIsPGP = true;
+     } else if (lowerCaseLine.Find("text/", /* ignoreCase = */ true) != -1)
+       m_partIsText = true;
+     else if (lowerCaseLine.Find("text/", /* ignoreCase = */ true) == -1)
+       m_partIsText = false;  // We have disproven our assumption.
+   }
+ 
++  if (m_isMultipart &&
++      lowerCaseLine.Find("protocol", /* ignoreCase = */ true) != -1 &&
++      lowerCaseLine.Find("application/pgp-encrypted",
++                         /* ignoreCase = */ true) != -1)
++    m_seenMpPGP = true;
+   int32_t start;
+   if (m_isMultipart && (start = lowerCaseLine.Find(
+                             "boundary=", /* ignoreCase = */ true)) != -1) {
+     start += 9;  // strlen("boundary=")
+     if (line[start] == '\"') start++;
+     int32_t end = line.RFindChar('\"');
+     if (end == -1) end = line.Length();
+ 
