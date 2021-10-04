@@ -42,3 +42,13 @@ set icv=iconv -f windows-1252 -t utf-8
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"Mehrzeilen-Ansicht für alle Ordner\">" | %icv% >> chrome\de\locale\de\messenger\messenger.dtd
+
+:: Fix mess from https://bugzilla.mozilla.org/show_bug.cgi?id=1728893#c24
+sed -i -e 's/return-receipt-checkbox/return-receipt-checkbox-control/'       localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/receipt-leave-radio/receipt-leave-radio-control/'               localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/receipt-move-radio/receipt-move-radio-control/'                 localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/receipt-return-never-radio/receipt-return-never-radio-control/' localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/receipt-return-some-radio/receipt-return-some-radio-control/'   localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/receipt-not-to-cc/receipt-not-to-cc-label/'                     localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/sender-outside-domain/sender-outside-domain-label/'             localization\de\messenger\preferences\receipts.ftl
+sed -i -e 's/other-cases-label/other-cases-text-label/'                      localization\de\messenger\preferences\receipts.ftl
