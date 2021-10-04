@@ -30,13 +30,5 @@ set icv=iconv -f windows-1252 -t utf-8
 %lecho% "    .label = Keresés engedélyezése titkosított üzenetekben (a visszafejtett másolatot helyben tárolja)" | %icv% >> localization\hu\messenger\preferences\preferences.ftl
 
 :: Original strings:
-:: dock-options-show-badge =
-::     .label = Show badge icon
-::     .accesskey = b
-%lecho% "dock-options-show-badge =" >> localization\hu\messenger\preferences\dock-options.ftl
-%lecho% "    .label = Jelvény ikon megjelenítése" | %icv% >> localization\hu\messenger\preferences\dock-options.ftl
-%lecho% "    .accesskey = J" >> localization\hu\messenger\preferences\dock-options.ftl
-
-:: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"Többsoros nézet minden mappában\">" | %icv% >> chrome\hu\locale\hu\messenger\messenger.dtd
