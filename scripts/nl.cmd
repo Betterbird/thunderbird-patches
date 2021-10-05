@@ -28,13 +28,3 @@ set icv=iconv -f windows-1252 -t utf-8
 ::     .label = Enable search in encrypted messages (stores decrypted copy locally)
 %lecho% "enable-gloda-search-encrypted-label =" >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .label = Versleutelde berichten doorzoekbaar maken (slaat ontsleutelde kopie lokaal op)" >> localization\nl\messenger\preferences\preferences.ftl
-
-:: Original strings:
-:: dock-options-show-badge =
-::     .label = Show badge icon
-::     .accesskey = b
-:: Will need to translate these. "Icon" is usually "Symbol" in German and "badge" was never translated. Good luck to the translators.
-:: "Badge icon" already seems to be a misnomer.
-%lecho% "dock-options-show-badge =" >> localization\nl\messenger\preferences\dock-options.ftl
-%lecho% "    .label = Badgepictogram tonen" >> localization\nl\messenger\preferences\dock-options.ftl
-%lecho% "    .accesskey = B" >> localization\nl\messenger\preferences\dock-options.ftl
