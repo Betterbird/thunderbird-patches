@@ -28,3 +28,7 @@ set icv=iconv -f windows-1252 -t utf-8
 ::     .label = Enable search in encrypted messages (stores decrypted copy locally)
 %lecho% "enable-gloda-search-encrypted-label =" >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .label = Versleutelde berichten doorzoekbaar maken (slaat ontsleutelde kopie lokaal op)" >> localization\nl\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
+%lecho% "<!ENTITY multilineAllFolders.label \"Weergave met meerdere regels voor alle mappen\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
