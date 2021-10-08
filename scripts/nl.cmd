@@ -1,7 +1,6 @@
 :: "Standard" lessecho in Windows gets confused by non-ASCII characters, hence we use Mozilla's version.
 set lecho=C:\mozilla-build\msys\bin\lessecho.exe
-:: Sadly its output is windows-1252 and we need UTF-8.
-set icv=iconv -f windows-1252 -t utf-8
+:: Script will only work if Windows system locale is set to UTF-8 !!
 
 :: Original strings:
 :: <!ENTITY hdrOpenConversationButton1.label "Conversation">
