@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1633649603 -7200
+# Date 1633678973 -7200
 # Parent  afd4ab05a670770a00e92188a5b3337540984ee7
 Bug 1562737 - Body search in PGP encrypted messages.
 
@@ -721,8 +721,28 @@ new file mode 100644
 diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
 --- a/mailnews/search/src/nsMsgLocalSearch.cpp
 +++ b/mailnews/search/src/nsMsgLocalSearch.cpp
-@@ -630,17 +630,32 @@ nsresult nsMsgSearchOfflineMail::MatchTe
-                  ? (*aExpressionTree)
+@@ -235,17 +235,19 @@ void nsMsgSearchBoolExpression::Generate
+ //-----------------------------------------------------------------------------
+ 
+ NS_IMPL_ISUPPORTS_INHERITED(nsMsgSearchOfflineMail, nsMsgSearchAdapter,
+                             nsIUrlListener)
+ 
+ nsMsgSearchOfflineMail::nsMsgSearchOfflineMail(
+     nsIMsgSearchScopeTerm* scope,
+     nsTArray<RefPtr<nsIMsgSearchTerm>> const& termList)
+-    : nsMsgSearchAdapter(scope, termList) {}
++    : nsMsgSearchAdapter(scope, termList) {
++  m_searchPending = false;
++}
+ 
+ nsMsgSearchOfflineMail::~nsMsgSearchOfflineMail() {
+   // Database should have been closed when the scope term finished.
+   CleanUpScope();
+   NS_ASSERTION(!m_db, "db not closed");
+ }
+ 
+ nsresult nsMsgSearchOfflineMail::ValidateTerms() {
+@@ -631,16 +633,30 @@ nsresult nsMsgSearchOfflineMail::MatchTe
                         ->OfflineEvaluate(msgToMatch, defaultCharset, scope, db,
                                           headers, Filtering)
                   : true;  // vacuously true...
@@ -730,22 +750,21 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
    return NS_OK;
  }
  
-+// Guard against re-entrancy. This can happen if `MatchTermsForSearch()` takes
-+// too long and an impatient second call comes along. Observed on a body search
-+// of and encrypted message. That goes via JS land, synchronises async
-+// processing and causes all sorts of strife.
-+// If we don't do that, the second call will reset `m_listContext`,
-+// and then the pending first call crashes.
-+// We could make `m_listContext` into a local variable, but it looks like
-+// re-entracy is not desired here and is caused by the messing around with
-+// the event loop in the JS code.
-+static bool inFunction = false;
  nsresult nsMsgSearchOfflineMail::Search(bool* aDone) {
-+  if (inFunction) {
++  // Guard against re-entrancy. This can happen if `MatchTermsForSearch()` takes
++  // too long and an impatient second call comes along. Observed on a body
++  // search of and encrypted message. That goes via JS land, synchronises async
++  // processing and causes all sorts of strife.
++  // If we don't do that, the second call will reset `m_listContext`,
++  // and then the pending first call crashes.
++  // We could make `m_listContext` into a local variable, but it looks like
++  // re-entracy is not desired here and is caused by the messing around with
++  // the event loop in the JS code.
++  if (m_searchPending) {
 +    *aDone = false;
 +    return NS_OK;
 +  }
-+  inFunction = true;
++  m_searchPending = true;
    nsresult err = NS_OK;
  
    NS_ENSURE_ARG(aDone);
@@ -754,7 +773,7 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
  
    const uint32_t kTimeSliceInMS = 200;
  
-@@ -689,16 +704,17 @@ nsresult nsMsgSearchOfflineMail::Search(
+@@ -689,16 +705,17 @@ nsresult nsMsgSearchOfflineMail::Search(
  
    delete expressionTree;
  
@@ -763,7 +782,7 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
    // an error code but the caller of this function says, oh, we did not finish
    // so continue...what we really want is to treat this current scope as done
    if (*aDone) CleanUpScope();  // Do clean up for end-of-scope processing
-+  inFunction = false;
++  m_searchPending = false;
    return err;
  }
  
@@ -772,3 +791,27 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
    if (m_db) {
      m_listContext = nullptr;
      m_db->Close(false);
+diff --git a/mailnews/search/src/nsMsgLocalSearch.h b/mailnews/search/src/nsMsgLocalSearch.h
+--- a/mailnews/search/src/nsMsgLocalSearch.h
++++ b/mailnews/search/src/nsMsgLocalSearch.h
+@@ -68,17 +68,20 @@ class nsMsgSearchOfflineMail : public ns
+                              nsMsgSearchBoolExpression** aExpressionTree,
+                              bool* pResult);
+ 
+   static nsresult ConstructExpressionTree(
+       nsTArray<RefPtr<nsIMsgSearchTerm>> const& termList, uint32_t termCount,
+       uint32_t& aStartPosInList, nsMsgSearchBoolExpression** aExpressionTree);
+ 
+   nsCOMPtr<nsIMsgDatabase> m_db;
++  // `m_listContext` could be a local variable. See comment at
++  // `nsMsgSearchOfflineMail::Search()`.
+   nsCOMPtr<nsIMsgEnumerator> m_listContext;
++  bool m_searchPending;
+   void CleanUpScope();
+ };
+ 
+ class nsMsgSearchOfflineNews : public nsMsgSearchOfflineMail {
+  public:
+   nsMsgSearchOfflineNews(nsIMsgSearchScopeTerm*,
+                          nsTArray<RefPtr<nsIMsgSearchTerm>> const&);
+   virtual ~nsMsgSearchOfflineNews();
