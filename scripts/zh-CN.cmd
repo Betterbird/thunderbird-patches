@@ -31,3 +31,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"在所有文件夹启用多行视图\">" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.dtd
+
+:: Fix mess from https://bugzilla.mozilla.org/show_bug.cgi?id=1734933#c1
+%lecho% "type-column-label = 内容类型" >> localization\zh-CN\messenger\preferences\preferences.ftl
