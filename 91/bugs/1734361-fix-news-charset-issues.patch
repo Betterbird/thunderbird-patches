@@ -1,10 +1,12 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1634073374 -7200
+# Date 1634234070 -7200
 # Parent  c1fdbad8c6138276f5d35568fb9c4d63969d5c64
 Bug 1734361 - Restore erroneously removed 'text->inputAutodetect = true;'.
 * * *
 Bug 1734361 - Use news server default charset.
+* * *
+Bug 1734361 - Re-establish news folder charset.
 
 diff --git a/mailnews/base/content/menulist-charsetpicker.js b/mailnews/base/content/menulist-charsetpicker.js
 --- a/mailnews/base/content/menulist-charsetpicker.js
@@ -46,6 +48,46 @@ diff --git a/mailnews/base/content/menulist-charsetpicker.js b/mailnews/base/con
      }
    }
    customElements.define(
+diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+--- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
++++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+@@ -5,16 +5,17 @@
+ 
+ // this file implements the nsMsgDatabase interface using the MDB Interface.
+ 
+ #include "nscore.h"
+ #include "msgCore.h"
+ #include "nsIFile.h"
+ #include "nsMailDatabase.h"
+ #include "nsDBFolderInfo.h"
++#include "nsIMsgNewsFolder.h"
+ #include "nsMsgThread.h"
+ #include "nsIMsgSearchTerm.h"
+ #include "nsMsgBaseCID.h"
+ #include "nsMorkCID.h"
+ #include "nsIMdbFactoryFactory.h"
+ #include "mozilla/Logging.h"
+ #include "mozilla/Telemetry.h"
+ #include "prprf.h"
+@@ -2818,16 +2819,18 @@ nsIMimeConverter* nsMsgDatabase::GetMime
+ nsresult nsMsgDatabase::GetEffectiveCharset(nsIMdbRow* row,
+                                             nsACString& resultCharset) {
+   resultCharset.Truncate();
+   nsresult rv = RowCellColumnToCharPtr(row, m_messageCharSetColumnToken,
+                                        getter_Copies(resultCharset));
+   if (NS_FAILED(rv) || resultCharset.IsEmpty() ||
+       resultCharset.EqualsLiteral("us-ascii")) {
+     resultCharset.AssignLiteral("UTF-8");
++    nsCOMPtr<nsIMsgNewsFolder> newsfolder(do_QueryInterface(m_folder));
++    if (newsfolder) newsfolder->GetCharset(resultCharset);
+   }
+   return rv;
+ }
+ 
+ nsresult nsMsgDatabase::RowCellColumnToMime2DecodedString(
+     nsIMdbRow* row, mdb_token columnToken, nsAString& resultStr) {
+   nsresult err = NS_OK;
+   const char* nakedString = nullptr;
 diff --git a/mailnews/mime/src/mimetext.cpp b/mailnews/mime/src/mimetext.cpp
 --- a/mailnews/mime/src/mimetext.cpp
 +++ b/mailnews/mime/src/mimetext.cpp
@@ -105,7 +147,7 @@ diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStrea
  #define PREF_MAIL_DISPLAY_GLYPH "mail.display_glyph"
  #define PREF_MAIL_DISPLAY_STRUCT "mail.display_struct"
  
-@@ -113,17 +114,24 @@ nsresult bridge_new_new_uri(void* bridge
+@@ -113,17 +114,25 @@ nsresult bridge_new_new_uri(void* bridge
            // check to see if we have a charset override...and if we do, set that
            // field appropriately too...
            nsresult rv = i18nUrl->GetCharsetOverRide(getter_Copies(charset));
@@ -118,8 +160,9 @@ diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStrea
 +            // Special treatment for news: URLs. Get the server default charset.
 +            nsCOMPtr<nsINntpUrl> nntpURL(do_QueryInterface(aURI));
 +            if (nntpURL) {
-+              nntpURL->GetCharset(charset);
-+              *default_charset = ToNewCString(charset);
++              rv = nntpURL->GetCharset(charset);
++              *default_charset =
++                  NS_SUCCEEDED(rv) ? ToNewCString(charset) : strdup("UTF-8");
 +            } else {
 +              *default_charset = strdup("UTF-8");
 +            }
@@ -131,6 +174,29 @@ diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStrea
              // notify the default to msgWindow (for the menu check mark)
              // do not set the default in case of nsMimeMessageDraftOrTemplate
              // or nsMimeMessageEditorTemplate because it is already set
+diff --git a/mailnews/news/public/nsIMsgNewsFolder.idl b/mailnews/news/public/nsIMsgNewsFolder.idl
+--- a/mailnews/news/public/nsIMsgNewsFolder.idl
++++ b/mailnews/news/public/nsIMsgNewsFolder.idl
+@@ -91,16 +91,19 @@ interface nsIMsgNewsFolder : nsISupports
+   /// @}
+ 
+   void moveFolder(in nsIMsgFolder aNewsgroupToMove, in nsIMsgFolder aRefNewsgroup, in int32_t aOrientation);
+ 
+   nsIMsgFolder addNewsgroup(in AUTF8String newsgroupName, in ACString setStr);
+ 
+   void setReadSetFromStr(in ACString setStr);
+ 
++  /// returns the server's default charset.
++  readonly attribute ACString charset;
++
+   readonly attribute ACString newsrcLine;
+   readonly attribute ACString optionLines;
+   readonly attribute ACString unsubscribedNewsgroupLines;
+   void SetNewsrcHasChanged(in boolean newsrcHasChanged);
+   void updateSummaryFromNNTPInfo(in long oldest, in long youngest, in long total);
+   void removeMessage(in nsMsgKey key);
+   [noscript] void removeMessages(in nsMsgKeyArrayRef aMsgKeys);
+   void cancelComplete();
 diff --git a/mailnews/news/public/nsINntpUrl.idl b/mailnews/news/public/nsINntpUrl.idl
 --- a/mailnews/news/public/nsINntpUrl.idl
 +++ b/mailnews/news/public/nsINntpUrl.idl
@@ -154,10 +220,39 @@ diff --git a/mailnews/news/public/nsINntpUrl.idl b/mailnews/news/public/nsINntpU
    const nsNewsAction ActionFetchPart = 2;
    /// Save the contents of an article to disk
    const nsNewsAction ActionSaveMessageToDisk = 3;
+diff --git a/mailnews/news/src/nsNewsFolder.cpp b/mailnews/news/src/nsNewsFolder.cpp
+--- a/mailnews/news/src/nsNewsFolder.cpp
++++ b/mailnews/news/src/nsNewsFolder.cpp
+@@ -1237,16 +1237,25 @@ NS_IMETHODIMP nsMsgNewsFolder::MoveFolde
+ 
+   return rv;
+ }
+ 
+ nsresult nsMsgNewsFolder::CreateBaseMessageURI(const nsACString& aURI) {
+   return nsCreateNewsBaseMessageURI(nsCString(aURI).get(), mBaseMessageURI);
+ }
+ 
++NS_IMETHODIMP nsMsgNewsFolder::GetCharset(nsACString& charset) {
++  nsCOMPtr<nsIMsgIncomingServer> server;
++  nsresult rv = GetServer(getter_AddRefs(server));
++  NS_ENSURE_SUCCESS(rv, rv);
++  nsCOMPtr<nsINntpIncomingServer> nserver(do_QueryInterface(server));
++  NS_ENSURE_TRUE(nserver, NS_ERROR_NULL_POINTER);
++  return nserver->GetCharset(charset);
++}
++
+ NS_IMETHODIMP
+ nsMsgNewsFolder::GetNewsrcLine(nsACString& newsrcLine) {
+   nsresult rv;
+   nsString newsgroupNameUtf16;
+   rv = GetName(newsgroupNameUtf16);
+   if (NS_FAILED(rv)) return rv;
+   NS_ConvertUTF16toUTF8 newsgroupName(newsgroupNameUtf16);
+ 
 diff --git a/mailnews/news/src/nsNntpUrl.cpp b/mailnews/news/src/nsNntpUrl.cpp
 --- a/mailnews/news/src/nsNntpUrl.cpp
 +++ b/mailnews/news/src/nsNntpUrl.cpp
-@@ -256,16 +256,24 @@ NS_IMETHODIMP nsNntpUrl::GetMessageID(ns
+@@ -256,16 +256,25 @@ NS_IMETHODIMP nsNntpUrl::GetMessageID(ns
  }
  
  NS_IMETHODIMP nsNntpUrl::GetKey(nsMsgKey* key) {
@@ -168,10 +263,11 @@ diff --git a/mailnews/news/src/nsNntpUrl.cpp b/mailnews/news/src/nsNntpUrl.cpp
  
 +NS_IMETHODIMP nsNntpUrl::GetCharset(nsACString& charset) {
 +  nsCOMPtr<nsIMsgIncomingServer> server;
-+  GetServer(getter_AddRefs(server));
++  nsresult rv = GetServer(getter_AddRefs(server));
++  NS_ENSURE_SUCCESS(rv, rv);
 +  nsCOMPtr<nsINntpIncomingServer> nserver(do_QueryInterface(server));
-+  nserver->GetCharset(charset);
-+  return NS_OK;
++  NS_ENSURE_TRUE(nserver, NS_ERROR_NULL_POINTER);
++  return nserver->GetCharset(charset);
 +}
 +
  NS_IMETHODIMP nsNntpUrl::GetNormalizedSpec(nsACString& aPrincipalSpec) {
@@ -182,3 +278,102 @@ diff --git a/mailnews/news/src/nsNntpUrl.cpp b/mailnews/news/src/nsNntpUrl.cpp
    mURI = aURI;
    return NS_OK;
  }
+diff --git a/mailnews/search/src/nsMsgFilter.cpp b/mailnews/search/src/nsMsgFilter.cpp
+--- a/mailnews/search/src/nsMsgFilter.cpp
++++ b/mailnews/search/src/nsMsgFilter.cpp
+@@ -21,16 +21,17 @@
+ #include "nsIOutputStream.h"
+ #include "nsIStringBundle.h"
+ #include "nsComponentManagerUtils.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsIMsgFilterService.h"
+ #include "prmem.h"
+ #include "mozilla/ArrayUtils.h"
+ #include "mozilla/Services.h"
++#include "nsIMsgNewsFolder.h"
+ 
+ static const char* kImapPrefix = "//imap:";
+ static const char* kWhitespace = "\b\t\r\n ";
+ 
+ nsMsgRuleAction::nsMsgRuleAction() {}
+ 
+ nsMsgRuleAction::~nsMsgRuleAction() {}
+ 
+@@ -571,19 +572,23 @@ NS_IMETHODIMP nsMsgFilter::LogRuleHitFai
+ 
+ NS_IMETHODIMP
+ nsMsgFilter::MatchHdr(nsIMsgDBHdr* msgHdr, nsIMsgFolder* folder,
+                       nsIMsgDatabase* db, const nsACString& headers,
+                       bool* pResult) {
+   NS_ENSURE_ARG_POINTER(folder);
+   NS_ENSURE_ARG_POINTER(msgHdr);
+   // use offlineMail because
++  nsCString folderCharset;
++  folderCharset.AssignLiteral("UTF-8");
++  nsCOMPtr<nsIMsgNewsFolder> newsfolder(do_QueryInterface(folder));
++  if (newsfolder) newsfolder->GetCharset(folderCharset);
+   nsresult rv = nsMsgSearchOfflineMail::MatchTermsForFilter(
+-      msgHdr, m_termList, "UTF-8", m_scope, db, headers, &m_expressionTree,
+-      pResult);
++      msgHdr, m_termList, folderCharset.get(), m_scope, db, headers,
++      &m_expressionTree, pResult);
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgFilter::SetFilterList(nsIMsgFilterList* filterList) {
+   // doesn't hold a ref.
+   m_filterList = filterList;
+   return NS_OK;
+diff --git a/mailnews/search/src/nsMsgSearchAdapter.cpp b/mailnews/search/src/nsMsgSearchAdapter.cpp
+--- a/mailnews/search/src/nsMsgSearchAdapter.cpp
++++ b/mailnews/search/src/nsMsgSearchAdapter.cpp
+@@ -20,16 +20,17 @@
+ #include "mozilla/UniquePtr.h"
+ #include "prmem.h"
+ #include "MailNewsTypes.h"
+ #include "nsComponentManagerUtils.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsMemory.h"
+ #include "nsMsgMessageFlags.h"
+ #include "mozilla/Attributes.h"
++#include "nsIMsgNewsFolder.h"
+ 
+ // This stuff lives in the base class because the IMAP search syntax
+ // is used by the Dredd SEARCH command as well as IMAP itself
+ 
+ // km - the NOT and HEADER strings are not encoded with a trailing
+ //      <space> because they always precede a mnemonic that has a
+ //      preceding <space> and double <space> characters cause some
+ //    imap servers to return an error.
+@@ -196,16 +197,30 @@ nsresult nsMsgSearchAdapter::GetSearchCh
+   nsCOMPtr<nsIPrefBranch> prefs(do_GetService(NS_PREFSERVICE_CONTRACTID, &rv));
+   if (NS_SUCCEEDED(rv)) {
+     prefs->GetBoolPref("mailnews.force_ascii_search", &forceAsciiSearch);
+   }
+ 
+   srcCharset = m_defaultCharset;
+   dstCharset.Assign(srcCharset);
+ 
++  if (m_scope) {
++    nsCOMPtr<nsIMsgFolder> folder;
++    rv = m_scope->GetFolder(getter_AddRefs(folder));
++    if (NS_SUCCEEDED(rv) && folder) {
++      nsCOMPtr<nsIMsgNewsFolder> newsfolder(do_QueryInterface(folder));
++      if (newsfolder) {
++        nsCString folderCharset;
++        rv = newsfolder->GetCharset(folderCharset);
++        if (NS_SUCCEEDED(rv))
++          dstCharset.Assign(NS_ConvertASCIItoUTF16(folderCharset));
++      }
++    }
++  }
++
+   if (forceAsciiSearch) {
+     // Special cases to use in order to force US-ASCII searching with Latin1
+     // or MacRoman text. Eurgh. This only has to happen because IMAP
+     // and Dredd servers currently (4/23/97) only support US-ASCII.
+     //
+     // If the dest csid is ISO Latin 1 or MacRoman, attempt to convert the
+     // source text to US-ASCII. (Not for now.)
+     // if ((dst_csid == CS_LATIN1) || (dst_csid == CS_MAC_ROMAN))
