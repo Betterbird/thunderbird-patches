@@ -15,6 +15,13 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: <!ENTITY contextDecryptToFolder.accesskey "Y">
 %lecho% "<!ENTITY contextDecryptToFolder.label \"In Ordner entschlüsseln\">" >> chrome\de\locale\de\messenger\messenger.dtd
 %lecho% "<!ENTITY contextDecryptToFolder.accesskey \"h\">" >> chrome\de\locale\de\messenger\messenger.dtd
+:: decryptToFolder.title=Confirm Decrypt
+:: decryptToFolder.desc=This will decrypt messages to a folder which is not local. Are you sure you want to continue?
+:: decryptToFolder.dontAsk.label=Don't ask me again.
+%lecho% "decryptToFolder.title=Entschlüsselung Bestätigen" >> chrome\de\locale\de\messenger\messenger.properties
+%lecho% "decryptToFolder.desc=Dies wird die Nachrichten in einen nicht lokalen Ordner entschlüsseln. Sind Sie sicher, dass Sie fortsetzen möchten?" >> chrome\de\locale\de\messenger\messenger.properties
+%lecho% "decryptToFolder.dontAsk.label=Diese Meldung nicht mehr anzeigen" >> chrome\de\locale\de\messenger\messenger.properties
+
 
 :: Original strings:
 :: <!ENTITY quickFilterBar.untagged.tooltip "Show messages with no tags">
