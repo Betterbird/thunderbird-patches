@@ -58,3 +58,15 @@ sed -i -e 's/receipt-return-some-radio/receipt-return-some-radio-control/'   loc
 sed -i -e 's/receipt-not-to-cc/receipt-not-to-cc-label/'                     localization\de\messenger\preferences\receipts.ftl
 sed -i -e 's/sender-outside-domain/sender-outside-domain-label/'             localization\de\messenger\preferences\receipts.ftl
 sed -i -e 's/other-cases-label/other-cases-text-label/'                      localization\de\messenger\preferences\receipts.ftl
+
+:: Fix more mess from bug 1734933 and bug 1718411.
+%lecho% "type-column-header = Dateityp" >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "action-column-header = Aktion" >> localization\de\messenger\preferences\preferences.ftl
+
+%lecho% "add-web-search-engine =" >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "  .label = Hinzufügen…"  >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "  .accesskey = H"        >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "add-opensearch-provider-title = Add OpenSearch Provider" >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "add-opensearch-provider-text = Enter the URL of the OpenSearch provider to add. Either use the direct URL of the OpenSearch Description file, or a URL where it can be auto-discovered." >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "adding-opensearch-provider-failed-title = Adding OpenSearch Provider Failed" >> localization\de\messenger\preferences\preferences.ftl
+%lecho% "adding-opensearch-provider-failed-text = Could not add OpenSearch Provider for { $url }." >> localization\de\messenger\preferences\preferences.ftl
