@@ -1,8 +1,8 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1636888095 -3600
-# Parent  c6294a3fa89f4335a911fd2259aee56ca829b43d
-Bug 1740956 - Print detached attachment's location in attachment list.
+# Date 1637004625 -3600
+# Parent  5f27e9ff9347c2b9c6da0db2604abf5a56ec5d48
+Bug 1740956/1741093 - Print detached attachment's location in attachment list, correct size and indicate deleted attachments.
 
 diff --git a/mail/themes/linux/mail/messageBody.css b/mail/themes/linux/mail/messageBody.css
 --- a/mail/themes/linux/mail/messageBody.css
@@ -127,10 +127,73 @@ diff --git a/mail/themes/windows/mail/messageBody.css b/mail/themes/windows/mail
 +.mimeAttachmentURL {
    padding: 0 0 0.25em;
  }
+diff --git a/mailnews/mime/emitters/nsMimeBaseEmitter.cpp b/mailnews/mime/emitters/nsMimeBaseEmitter.cpp
+--- a/mailnews/mime/emitters/nsMimeBaseEmitter.cpp
++++ b/mailnews/mime/emitters/nsMimeBaseEmitter.cpp
+@@ -297,17 +297,18 @@ nsMimeBaseEmitter::GetOutputListener(nsI
+   NS_IF_ADDREF(*listener = mOutListener);
+   return NS_OK;
+ }
+ 
+ // Attachment handling routines
+ nsresult nsMimeBaseEmitter::StartAttachment(const nsACString& name,
+                                             const char* contentType,
+                                             const char* url,
+-                                            bool aIsExternalAttachment) {
++                                            bool aIsExternalAttachment,
++                                            bool aIsDeleted) {
+   // Ok, now we will setup the attachment info
+   mCurrentAttachment = (attachmentInfoType*)PR_NEWZAP(attachmentInfoType);
+   if ((mCurrentAttachment) && mAttachArray) {
+     ++mAttachCount;
+ 
+     mCurrentAttachment->displayName = ToNewCString(name);
+     mCurrentAttachment->urlSpec = strdup(url);
+     mCurrentAttachment->contentType = strdup(contentType);
 diff --git a/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp b/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp
 --- a/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp
 +++ b/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp
-@@ -447,34 +447,46 @@ nsresult nsMimeHtmlDisplayEmitter::Start
+@@ -334,18 +334,20 @@ nsresult nsMimeHtmlDisplayEmitter::EndHe
+   WriteHTMLHeaders(name);
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsMimeHtmlDisplayEmitter::StartAttachment(const nsACString& name,
+                                                    const char* contentType,
+                                                    const char* url,
+-                                                   bool aIsExternalAttachment) {
++                                                   bool aIsExternalAttachment,
++                                                   bool aIsDeleted) {
+   nsresult rv = NS_OK;
++  mIsDeleted = aIsDeleted;
+   nsCOMPtr<nsIMsgHeaderSink> headerSink;
+   rv = GetHeaderSink(getter_AddRefs(headerSink));
+ 
+   if (NS_SUCCEEDED(rv) && headerSink) {
+     nsCString uriString;
+ 
+     nsCOMPtr<nsIMsgMessageUrl> msgurl(do_QueryInterface(mURL, &rv));
+     if (NS_SUCCEEDED(rv)) {
+@@ -425,50 +427,72 @@ nsresult nsMimeHtmlDisplayEmitter::Start
+     UtilityWrite("</fieldset>");
+     UtilityWrite("<div class=\"mimeAttachmentWrap print-only\">");
+     UtilityWrite("<table class=\"mimeAttachmentTable\">");
+   }
+ 
+   UtilityWrite("<tr>");
+ 
+   UtilityWrite("<td class=\"mimeAttachmentFile\">");
++  if (mIsDeleted) UtilityWrite("<strike>");
+   nsCString escapedName;
+   nsAppendEscapedHTML(name, escapedName);
+   UtilityWrite(escapedName.get());
++  if (mIsDeleted) UtilityWrite("</strike>");
+   UtilityWrite("</td>");
+ 
+   mFirst = false;
+   return NS_OK;
+ }
  
  nsresult nsMimeHtmlDisplayEmitter::AddAttachmentField(const char* field,
                                                        const char* value) {
@@ -158,24 +221,32 @@ diff --git a/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp b/mailnews/mime/emitte
 -  UtilityWrite(NS_ConvertUTF16toUTF8(sizeString).get());
 -  UtilityWrite("</td>");
 +  if (strcmp(field, HEADER_X_MOZILLA_PART_SIZE) == 0) {
-+    uint64_t size = atoi(value);
-+    nsAutoString sizeString;
-+    rv = FormatFileSize(size, false, sizeString);
-+    UtilityWrite("<td class=\"mimeAttachmentSize\">");
-+    UtilityWrite(NS_ConvertUTF16toUTF8(sizeString).get());
-+    UtilityWrite("</td>");
++    if (strcmp(value, " ") != 0 && strcmp(value, "-") != 0) {
++      uint64_t size = atoi(value);
++      nsAutoString sizeString;
++      rv = FormatFileSize(size, false, sizeString);
++      UtilityWrite("<td class=\"mimeAttachmentSize\">");
++      UtilityWrite(NS_ConvertUTF16toUTF8(sizeString).get());
++      UtilityWrite("</td>");
++    } else {
++      UtilityWrite("<td class=\"mimeAttachmentSize\">");
++      UtilityWrite(value);
++      UtilityWrite("</td>");
++    }
 +  } else if (strcmp(field, HEADER_X_MOZILLA_PART_URL) == 0) {
 +    // Only output this for detached and external attachments.
 +    if (strncmp(value, "file://", 7) == 0 ||
 +        strncmp(value, "http://", 7) == 0 ||
 +        strncmp(value, "https://", 8) == 0) {
 +      UtilityWrite("<td class=\"mimeAttachmentURL\">");
++      if (mIsDeleted) UtilityWrite("<strike>");
 +      nsAutoCString val(value);
 +      int query = val.FindChar('?');
 +      if (query != kNotFound) val.SetLength(query);
 +      nsAutoCString unescaped;
 +      MsgUnescapeString(val, 0, unescaped);
 +      UtilityWrite(unescaped.get());
++      if (mIsDeleted) UtilityWrite("</strike>");
 +      UtilityWrite("</td>");
 +    } else {
 +      UtilityWrite("<td>&nbsp;</td>");
@@ -189,3 +260,237 @@ diff --git a/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp b/mailnews/mime/emitte
    if (!mSkipAttachment) {
      UtilityWrite("</tr>");
    }
+diff --git a/mailnews/mime/emitters/nsMimeHtmlEmitter.h b/mailnews/mime/emitters/nsMimeHtmlEmitter.h
+--- a/mailnews/mime/emitters/nsMimeHtmlEmitter.h
++++ b/mailnews/mime/emitters/nsMimeHtmlEmitter.h
+@@ -18,33 +18,34 @@ class nsMimeHtmlDisplayEmitter : public 
+   virtual ~nsMimeHtmlDisplayEmitter(void);
+ 
+   // Header handling routines.
+   NS_IMETHOD EndHeader(const nsACString& name) override;
+ 
+   // Attachment handling routines
+   NS_IMETHOD StartAttachment(const nsACString& name, const char* contentType,
+                              const char* url,
+-                             bool aIsExternalAttachment) override;
++                             bool aIsExternalAttachment, bool aIsDeleted) override;
+   NS_IMETHOD AddAttachmentField(const char* field, const char* value) override;
+   NS_IMETHOD EndAttachment() override;
+   NS_IMETHOD EndAllAttachments() override;
+ 
+   // Body handling routines
+   NS_IMETHOD WriteBody(const nsACString& buf, uint32_t* amountWritten) override;
+   NS_IMETHOD EndBody() override;
+   NS_IMETHOD WriteHTMLHeaders(const nsACString& name) override;
+ 
+   virtual nsresult WriteHeaderFieldHTMLPrefix(const nsACString& name) override;
+   virtual nsresult WriteHeaderFieldHTML(const char* field,
+                                         const char* value) override;
+   virtual nsresult WriteHeaderFieldHTMLPostfix() override;
+ 
+  protected:
+   bool mFirst;           // Attachment flag...
++  bool mIsDeleted;       // This attachment is deleted, strike it.
+   bool mSkipAttachment;  // attachments we shouldn't show...
+ 
+   nsCOMPtr<nsIMsgHeaderSink> mHeaderSink;
+ 
+   nsresult GetHeaderSink(nsIMsgHeaderSink** aHeaderSink);
+   bool BroadCastHeadersAndAttachments();
+   nsresult StartAttachmentInBody(const nsACString& name,
+                                  const char* contentType, const char* url);
+diff --git a/mailnews/mime/emitters/nsMimeXmlEmitter.cpp b/mailnews/mime/emitters/nsMimeXmlEmitter.cpp
+--- a/mailnews/mime/emitters/nsMimeXmlEmitter.cpp
++++ b/mailnews/mime/emitters/nsMimeXmlEmitter.cpp
+@@ -123,17 +123,18 @@ nsresult nsMimeXmlEmitter::EndHeader(con
+   UtilityWrite("</mailheader>");
+   return NS_OK;
+ }
+ 
+ // Attachment handling routines
+ nsresult nsMimeXmlEmitter::StartAttachment(const nsACString& name,
+                                            const char* contentType,
+                                            const char* url,
+-                                           bool aIsExternalAttachment) {
++                                           bool aIsExternalAttachment,
++                                           bool aIsDeleted) {
+   char buf[128];
+ 
+   ++mAttachCount;
+ 
+   sprintf(buf, "<mailattachment id=\"%d\">", mAttachCount);
+   UtilityWrite(buf);
+ 
+   AddAttachmentField(HEADER_PARM_FILENAME, PromiseFlatCString(name).get());
+diff --git a/mailnews/mime/emitters/nsMimeXmlEmitter.h b/mailnews/mime/emitters/nsMimeXmlEmitter.h
+--- a/mailnews/mime/emitters/nsMimeXmlEmitter.h
++++ b/mailnews/mime/emitters/nsMimeXmlEmitter.h
+@@ -20,17 +20,17 @@ class nsMimeXmlEmitter : public nsMimeBa
+   NS_IMETHOD StartHeader(bool rootMailHeader, bool headerOnly,
+                          const char* msgID, const char* outCharset) override;
+   NS_IMETHOD AddHeaderField(const char* field, const char* value) override;
+   NS_IMETHOD EndHeader(const nsACString& buf) override;
+ 
+   // Attachment handling routines
+   NS_IMETHOD StartAttachment(const nsACString& name, const char* contentType,
+                              const char* url,
+-                             bool aIsExternalAttachment) override;
++                             bool aIsExternalAttachment, bool aIsDeleted) override;
+   NS_IMETHOD AddAttachmentField(const char* field, const char* value) override;
+   NS_IMETHOD EndAttachment() override;
+ 
+   NS_IMETHOD WriteXMLHeader(const char* msgID);
+   NS_IMETHOD WriteXMLTag(const char* tagName, const char* value);
+ 
+  protected:
+   // For header determination...
+diff --git a/mailnews/mime/public/nsIMimeEmitter.idl b/mailnews/mime/public/nsIMimeEmitter.idl
+--- a/mailnews/mime/public/nsIMimeEmitter.idl
++++ b/mailnews/mime/public/nsIMimeEmitter.idl
+@@ -57,17 +57,17 @@ interface nsIMimeEmitter : nsISupports {
+      */
+     void endHeader([const] in AUTF8String name);
+ 
+     void updateCharacterSet([const] in string aCharset);
+ 
+     // Attachment handling routines.
+     void startAttachment([const] in AUTF8String name,
+                          [const] in string contentType,
+-                         [const] in string url, in boolean aNotDownloaded);
++                         [const] in string url, in boolean aNotDownloaded, in boolean aIsDeleted);
+     void addAttachmentField([const] in string field, [const] in string value);
+     void endAttachment();
+ 
+     void endAllAttachments();
+ 
+     // Body handling routines.
+     void startBody(in boolean bodyOnly, [const] in string msgID, [const] in string outCharset);
+     void writeBody([const] in AUTF8String buf, out uint32_t amountWritten);
+diff --git a/mailnews/mime/src/mimemoz2.cpp b/mailnews/mime/src/mimemoz2.cpp
+--- a/mailnews/mime/src/mimemoz2.cpp
++++ b/mailnews/mime/src/mimemoz2.cpp
+@@ -20,16 +20,17 @@
+ #include "prmem.h"
+ #include "plstr.h"
+ #include "prmem.h"
+ #include "mimemoz2.h"
+ #include "nsIPrefService.h"
+ #include "nsIPrefBranch.h"
+ #include "nsIStringBundle.h"
+ #include "nsString.h"
++#include "nsIFileURL.h"
+ #include "nsMimeStringResources.h"
+ #include "nsStreamConverter.h"
+ #include "nsIMsgMailNewsUrl.h"
+ #include "mozITXTToHTMLConv.h"
+ #include "nsCExternalHandlerService.h"
+ #include "nsIMIMEService.h"
+ #include "nsIImapUrl.h"
+ #include "nsMsgI18N.h"
+@@ -655,19 +656,51 @@ extern "C" void NotifyEmittersOfAttachme
+     if (tmp->m_isExternalLinkAttachment)
+       sizeStr.Append(tmp->m_sizeExternalStr);
+     else
+       sizeStr.AppendInt(tmp->m_size);
+ 
+     nsAutoCString downloadedStr;
+     downloadedStr.AppendInt(tmp->m_isDownloaded);
+ 
++    // Calculate size based on the URL.
++    bool isDeleted = false;
++    if (tmp->m_realType.Find("/x-moz-deleted"_ns) != kNotFound) {
++      sizeStr = "-";
++      isDeleted = true;
++    }
++    if (StringBeginsWith(spec, "file://"_ns) ||
++        StringBeginsWith(spec, "http://"_ns) ||
++        StringBeginsWith(spec, "https://"_ns)) {
++      sizeStr = " ";
++      if (StringBeginsWith(spec, "file://"_ns)) {
++        // Get the size from the file.
++        nsCOMPtr<nsIFileURL> fileURL = do_QueryInterface(tmp->m_url);
++        if (fileURL) {
++          nsCOMPtr<nsIFile> file;
++          fileURL->GetFile(getter_AddRefs(file));
++          if (file) {
++            bool exists = false;
++            file->Exists(&exists);
++            if (exists) {
++              int64_t fileSize = 0;
++              file->GetFileSize(&fileSize);
++              sizeStr.Truncate();
++              sizeStr.AppendInt(fileSize);
++            } else {
++              sizeStr = "-";
++              isDeleted = true;
++            }
++          }
++        }
++      }
++    }
+     mimeEmitterStartAttachment(opt, tmp->m_realName.get(),
+                                tmp->m_realType.get(), spec.get(),
+-                               tmp->m_isExternalAttachment);
++                               tmp->m_isExternalAttachment, isDeleted);
+     mimeEmitterAddAttachmentField(opt, HEADER_X_MOZILLA_PART_URL, spec.get());
+     mimeEmitterAddAttachmentField(opt, HEADER_X_MOZILLA_PART_SIZE,
+                                   sizeStr.get());
+     mimeEmitterAddAttachmentField(opt, HEADER_X_MOZILLA_PART_DOWNLOADED,
+                                   downloadedStr.get());
+ 
+     if ((opt->format_out == nsMimeOutput::nsMimeMessageQuoting) ||
+         (opt->format_out == nsMimeOutput::nsMimeMessageBodyQuoting) ||
+@@ -1573,27 +1606,28 @@ extern "C" nsresult mimeEmitterAddAllHea
+ 
+   return NS_ERROR_FAILURE;
+ }
+ 
+ extern "C" nsresult mimeEmitterStartAttachment(MimeDisplayOptions* opt,
+                                                const char* name,
+                                                const char* contentType,
+                                                const char* url,
+-                                               bool aIsExternalAttachment) {
++                                               bool aIsExternalAttachment,
++                                               bool aIsDeleted) {
+   // Check for draft processing...
+   if (NoEmitterProcessing(opt->format_out)) return NS_OK;
+ 
+   mime_stream_data* msd = GetMSD(opt);
+   if (!msd) return NS_ERROR_FAILURE;
+ 
+   if (msd->output_emitter) {
+     nsIMimeEmitter* emitter = (nsIMimeEmitter*)msd->output_emitter;
+     return emitter->StartAttachment(nsDependentCString(name), contentType, url,
+-                                    aIsExternalAttachment);
++                                    aIsExternalAttachment, aIsDeleted);
+   }
+ 
+   return NS_ERROR_FAILURE;
+ }
+ 
+ extern "C" nsresult mimeEmitterEndAttachment(MimeDisplayOptions* opt) {
+   // Check for draft processing...
+   if (NoEmitterProcessing(opt->format_out)) return NS_OK;
+diff --git a/mailnews/mime/src/mimemoz2.h b/mailnews/mime/src/mimemoz2.h
+--- a/mailnews/mime/src/mimemoz2.h
++++ b/mailnews/mime/src/mimemoz2.h
+@@ -149,17 +149,18 @@ extern "C" nsresult mimeEmitterAddHeader
+                                               const char* value);
+ extern "C" nsresult mimeEmitterAddAllHeaders(MimeDisplayOptions* opt,
+                                              const char* allheaders,
+                                              const int32_t allheadersize);
+ extern "C" nsresult mimeEmitterStartAttachment(MimeDisplayOptions* opt,
+                                                const char* name,
+                                                const char* contentType,
+                                                const char* url,
+-                                               bool aIsExternalAttachment);
++                                               bool aIsExternalAttachment,
++                                               bool aIsDeleted);
+ extern "C" nsresult mimeEmitterEndAttachment(MimeDisplayOptions* opt);
+ extern "C" nsresult mimeEmitterEndAllAttachments(MimeDisplayOptions* opt);
+ extern "C" nsresult mimeEmitterStartBody(MimeDisplayOptions* opt, bool bodyOnly,
+                                          const char* msgID,
+                                          const char* outCharset);
+ extern "C" nsresult mimeEmitterEndBody(MimeDisplayOptions* opt);
+ extern "C" nsresult mimeEmitterEndHeader(MimeDisplayOptions* opt,
+                                          MimeObject* obj);
