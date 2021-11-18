@@ -1,0 +1,1194 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1637269007 -3600
+# Parent  421b9dd07e610947d5740c109fcfd893d15c1372
+Bug 1739814 - Change more URI APIs to from raw string to smart string, fixes saving drafts to non-ASCII folders.
+
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -514,18 +514,18 @@ interface nsIMsgFolder : nsISupports {
+   /**
+    * local path of this folder
+    */
+   attribute nsIFile filePath;
+ 
+   /// an nsIFile corresponding to the .msf file.
+   readonly attribute nsIFile summaryFile;
+ 
+-  readonly attribute ACString baseMessageURI;
+-  ACString generateMessageURI(in nsMsgKey msgKey);
++  readonly attribute AUTF8String baseMessageURI;
++  AUTF8String generateMessageURI(in nsMsgKey msgKey);
+ 
+   const nsMsgDispositionState nsMsgDispositionState_None = -1;
+   const nsMsgDispositionState nsMsgDispositionState_Replied = 0;
+   const nsMsgDispositionState nsMsgDispositionState_Forwarded = 1;
+   const nsMsgDispositionState nsMsgDispositionState_Redirected = 2;
+ 
+   void addMessageDispositionState(in nsIMsgDBHdr aMessage,
+                                   in nsMsgDispositionState aDispositionFlag);
+@@ -616,17 +616,17 @@ interface nsIMsgFolder : nsISupports {
+    * @param[out] aReusable set to true if the stream can be re-used, in which
+                            case the caller might not want to close it.
+    * @returns an input stream to read the message from
+    */
+   nsIInputStream getMsgInputStream(in nsIMsgDBHdr aHdr, out boolean aReusable);
+ 
+   void downloadMessagesForOffline(in Array<nsIMsgDBHdr> messages,
+                                   in nsIMsgWindow window);
+-  nsIMsgFolder getChildWithURI(in ACString uri, in boolean deep,
++  nsIMsgFolder getChildWithURI(in AUTF8String uri, in boolean deep,
+                                in boolean caseInsensitive);
+   void downloadAllForOffline(in nsIUrlListener listener, in nsIMsgWindow window);
+   /**
+    *  Turn notifications on/off for various notification types. Currently only
+    *  supporting allMessageCountNotifications which refers to both total and
+    *  unread message counts.
+    */
+   const unsigned long allMessageCountNotifications    = 0;
+diff --git a/mailnews/base/public/nsIMsgIncomingServer.idl b/mailnews/base/public/nsIMsgIncomingServer.idl
+--- a/mailnews/base/public/nsIMsgIncomingServer.idl
++++ b/mailnews/base/public/nsIMsgIncomingServer.idl
+@@ -158,17 +158,17 @@ interface nsIMsgIncomingServer : nsISupp
+ 
+   /* the on-disk path to message storage for this server */
+   attribute nsIFile localPath;
+ 
+   /// message store to use for the folders under this server.
+   readonly attribute nsIMsgPluggableStore msgStore;
+ 
+   /* the RDF URI for the root mail folder */
+-  readonly attribute ACString serverURI;
++  readonly attribute AUTF8String serverURI;
+ 
+   /* the root folder for this server, even if server is deferred */
+   attribute nsIMsgFolder rootFolder;
+ 
+   /* root folder for this account
+      - if account is deferred, root folder of deferred-to account */
+   readonly attribute nsIMsgFolder rootMsgFolder;
+ 
+@@ -485,17 +485,17 @@ interface nsIMsgIncomingServer : nsISupp
+   void clearTemporaryReturnReceiptsFilter();
+ 
+   /**
+    * spam settings
+    */
+   readonly attribute nsISpamSettings spamSettings;
+   readonly attribute nsIMsgFilterPlugin spamFilterPlugin;
+ 
+-  nsIMsgFolder getMsgFolderFromURI(in nsIMsgFolder aFolderResource, in ACString aURI);
++  nsIMsgFolder getMsgFolderFromURI(in nsIMsgFolder aFolderResource, in AUTF8String aURI);
+ 
+   /// Indicates if any other server has deferred storage to this account.
+   readonly attribute boolean isDeferredTo;
+ 
+   const long keepDups = 0;
+   const long deleteDups = 1;
+   const long moveDupsToTrash = 2;
+   const long markDupsRead = 3;
+diff --git a/mailnews/base/public/nsIMsgWindow.idl b/mailnews/base/public/nsIMsgWindow.idl
+--- a/mailnews/base/public/nsIMsgWindow.idl
++++ b/mailnews/base/public/nsIMsgWindow.idl
+@@ -13,18 +13,18 @@ interface mozIDOMWindowProxy;
+ interface nsIMsgHeaderSink;
+ interface nsIPrompt;
+ interface nsIInterfaceRequestor;
+ interface nsIAuthPrompt;
+ interface nsIPrincipal;
+ 
+ [scriptable, uuid(7B8F4A65-CFC4-4b3f-BF5C-152AA8D5CD10)]
+ interface nsIMsgWindowCommands : nsISupports {
+-  void selectFolder(in ACString folderUri);
+-  void selectMessage(in ACString messageUri);
++  void selectFolder(in AUTF8String folderUri);
++  void selectMessage(in AUTF8String messageUri);
+   void clearMsgPane();
+ };
+ 
+ [scriptable, uuid(a846fe48-4022-4296-a1c4-1dcd7eaecfe5)]
+ interface nsIMsgWindow : nsISupports {
+   attribute nsIMsgStatusFeedback statusFeedback;
+   attribute nsIMsgWindowCommands windowCommands;
+   attribute nsIMsgHeaderSink msgHeaderSink;
+diff --git a/mailnews/base/src/nsMsgContentPolicy.cpp b/mailnews/base/src/nsMsgContentPolicy.cpp
+--- a/mailnews/base/src/nsMsgContentPolicy.cpp
++++ b/mailnews/base/src/nsMsgContentPolicy.cpp
+@@ -609,17 +609,17 @@ void nsMsgContentPolicy::NotifyContentWa
+   rv = msgUrl->GetUri(resourceURI);
+   NS_ENSURE_SUCCESS_VOID(rv);
+ 
+   nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl(
+       do_QueryInterface(aOriginatorLocation, &rv));
+   NS_ENSURE_SUCCESS_VOID(rv);
+ 
+   nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-  rv = GetMsgDBHdrFromURI(resourceURI.get(), getter_AddRefs(msgHdr));
++  rv = GetMsgDBHdrFromURI(resourceURI, getter_AddRefs(msgHdr));
+   if (NS_FAILED(rv)) {
+     // Maybe we can get a dummy header.
+     nsCOMPtr<nsIMsgWindow> msgWindow;
+     rv = mailnewsUrl->GetMsgWindow(getter_AddRefs(msgWindow));
+     if (msgWindow) {
+       nsCOMPtr<nsIMsgHeaderSink> msgHdrSink;
+       rv = msgWindow->GetMsgHeaderSink(getter_AddRefs(msgHdrSink));
+       if (msgHdrSink)
+@@ -667,17 +667,17 @@ void nsMsgContentPolicy::ShouldAcceptCon
+   rv = msgUrl->GetUri(resourceURI);
+   NS_ENSURE_SUCCESS_VOID(rv);
+ 
+   nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl(
+       do_QueryInterface(aOriginatorLocation, &rv));
+   NS_ENSURE_SUCCESS_VOID(rv);
+ 
+   nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-  rv = GetMsgDBHdrFromURI(resourceURI.get(), getter_AddRefs(msgHdr));
++  rv = GetMsgDBHdrFromURI(resourceURI, getter_AddRefs(msgHdr));
+   if (NS_FAILED(rv)) {
+     // Maybe we can get a dummy header.
+     nsCOMPtr<nsIMsgWindow> msgWindow;
+     rv = mailnewsUrl->GetMsgWindow(getter_AddRefs(msgWindow));
+     if (msgWindow) {
+       nsCOMPtr<nsIMsgHeaderSink> msgHdrSink;
+       rv = msgWindow->GetMsgHeaderSink(getter_AddRefs(msgHdrSink));
+       if (msgHdrSink)
+@@ -713,34 +713,34 @@ void nsMsgContentPolicy::ShouldAcceptCon
+ void nsMsgContentPolicy::ComposeShouldLoad(nsIMsgCompose* aMsgCompose,
+                                            nsISupports* aRequestingContext,
+                                            nsIURI* aContentLocation,
+                                            int16_t* aDecision) {
+   NS_ASSERTION(*aDecision == nsIContentPolicy::REJECT_REQUEST,
+                "ComposeShouldLoad expects default decision to be reject!");
+ 
+   nsCString originalMsgURI;
+-  nsresult rv = aMsgCompose->GetOriginalMsgURI(getter_Copies(originalMsgURI));
++  nsresult rv = aMsgCompose->GetOriginalMsgURI(originalMsgURI);
+   NS_ENSURE_SUCCESS_VOID(rv);
+ 
+   MSG_ComposeType composeType;
+   rv = aMsgCompose->GetType(&composeType);
+   NS_ENSURE_SUCCESS_VOID(rv);
+ 
+   // Only allow remote content for new mail compositions or mailto
+   // Block remote content for all other types (drafts, templates, forwards,
+   // replies, etc) unless there is an associated msgHdr which allows the load,
+   // or unless the image is being added by the user and not the quoted message
+   // content...
+   if (composeType == nsIMsgCompType::New ||
+       composeType == nsIMsgCompType::MailToUrl)
+     *aDecision = nsIContentPolicy::ACCEPT;
+   else if (!originalMsgURI.IsEmpty()) {
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-    rv = GetMsgDBHdrFromURI(originalMsgURI.get(), getter_AddRefs(msgHdr));
++    rv = GetMsgDBHdrFromURI(originalMsgURI, getter_AddRefs(msgHdr));
+     NS_ENSURE_SUCCESS_VOID(rv);
+     *aDecision =
+         ShouldAcceptRemoteContentForMsgHdr(msgHdr, nullptr, aContentLocation);
+ 
+     // Special case image elements. When replying to a message, we want to allow
+     // the user to add remote images to the message. But we don't want remote
+     // images that are a part of the quoted content to load. Hence we block them
+     // while the reply is created (insertingQuotedContent==true), but allow them
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -2113,17 +2113,17 @@ nsMsgDBFolder::OnMessageClassified(const
+   rv = GetServer(getter_AddRefs(server));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsISpamSettings> spamSettings;
+   rv = server->GetSpamSettings(getter_AddRefs(spamSettings));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-  rv = GetMsgDBHdrFromURI(aMsgURI, getter_AddRefs(msgHdr));
++  rv = GetMsgDBHdrFromURI(nsDependentCString(aMsgURI), getter_AddRefs(msgHdr));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsMsgKey msgKey;
+   rv = msgHdr->GetMessageKey(&msgKey);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // check if this message needs junk classification
+   uint32_t processingFlags;
+@@ -2171,17 +2171,17 @@ nsMsgDBFolder::OnMessageTraitsClassified
+                                          const nsTArray<uint32_t>& aPercents) {
+   if (!aMsgURI)    // This signifies end of batch
+     return NS_OK;  // We are not handling batching
+ 
+   MOZ_ASSERT(aTraits.Length() == aPercents.Length());
+ 
+   nsresult rv;
+   nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-  rv = GetMsgDBHdrFromURI(aMsgURI, getter_AddRefs(msgHdr));
++  rv = GetMsgDBHdrFromURI(nsDependentCString(aMsgURI), getter_AddRefs(msgHdr));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsMsgKey msgKey;
+   rv = msgHdr->GetMessageKey(&msgKey);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   uint32_t processingFlags;
+   GetProcessingFlags(msgKey, &processingFlags);
+diff --git a/mailnews/base/src/nsMsgFolderCompactor.cpp b/mailnews/base/src/nsMsgFolderCompactor.cpp
+--- a/mailnews/base/src/nsMsgFolderCompactor.cpp
++++ b/mailnews/base/src/nsMsgFolderCompactor.cpp
+@@ -636,17 +636,17 @@ nsresult nsFolderCompactState::CompactNe
+     return folder->CompactAllOfflineStores(this, m_window,
+                                            m_offlineFolderArray);
+   }
+   nsCOMPtr<nsIMsgFolder> folder(m_folderArray[m_folderIndex]);
+   return Compact(folder, m_compactingOfflineFolders, m_listener, m_window);
+ }
+ 
+ nsresult nsFolderCompactState::GetMessage(nsIMsgDBHdr** message) {
+-  return GetMsgDBHdrFromURI(m_messageUri.get(), message);
++  return GetMsgDBHdrFromURI(m_messageUri, message);
+ }
+ 
+ NS_IMETHODIMP
+ nsFolderCompactState::OnStartRequest(nsIRequest* request) {
+   return StartMessage();
+ }
+ 
+ NS_IMETHODIMP
+diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
+--- a/mailnews/base/src/nsMsgUtils.cpp
++++ b/mailnews/base/src/nsMsgUtils.cpp
+@@ -143,24 +143,24 @@ nsresult GetMessageServiceFromURI(const 
+   nsCOMPtr<nsIMsgMessageService> msgService =
+       do_GetService(contractID.get(), &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   msgService.forget(aMessageService);
+   return rv;
+ }
+ 
+-nsresult GetMsgDBHdrFromURI(const char* uri, nsIMsgDBHdr** msgHdr) {
++nsresult GetMsgDBHdrFromURI(const nsACString& uri, nsIMsgDBHdr** msgHdr) {
+   nsCOMPtr<nsIMsgMessageService> msgMessageService;
+-  nsresult rv = GetMessageServiceFromURI(nsDependentCString(uri),
++  nsresult rv = GetMessageServiceFromURI(uri,
+                                          getter_AddRefs(msgMessageService));
+   NS_ENSURE_SUCCESS(rv, rv);
+   if (!msgMessageService) return NS_ERROR_FAILURE;
+ 
+-  return msgMessageService->MessageURIToMsgHdr(nsDependentCString(uri), msgHdr);
++  return msgMessageService->MessageURIToMsgHdr(uri, msgHdr);
+ }
+ 
+ // Where should this live? It's a utility used to convert a string priority,
+ //  e.g., "High, Low, Normal" to an enum.
+ // Perhaps we should have an interface that groups together all these
+ //  utilities...
+ nsresult NS_MsgGetPriorityFromString(const char* const priority,
+                                      nsMsgPriorityValue& outPriority) {
+diff --git a/mailnews/base/src/nsMsgUtils.h b/mailnews/base/src/nsMsgUtils.h
+--- a/mailnews/base/src/nsMsgUtils.h
++++ b/mailnews/base/src/nsMsgUtils.h
+@@ -43,17 +43,17 @@ class nsIMsgSearchTerm;
+ // These are utility functions that can used throughout the mailnews code
+ 
+ NS_MSG_BASE nsresult GetMessageServiceContractIDForURI(const char* uri,
+                                                        nsCString& contractID);
+ 
+ NS_MSG_BASE nsresult GetMessageServiceFromURI(
+     const nsACString& uri, nsIMsgMessageService** aMessageService);
+ 
+-NS_MSG_BASE nsresult GetMsgDBHdrFromURI(const char* uri, nsIMsgDBHdr** msgHdr);
++NS_MSG_BASE nsresult GetMsgDBHdrFromURI(const nsACString& uri, nsIMsgDBHdr** msgHdr);
+ 
+ NS_MSG_BASE nsresult NS_MsgGetPriorityFromString(
+     const char* const priority, nsMsgPriorityValue& outPriority);
+ 
+ NS_MSG_BASE nsresult NS_MsgGetPriorityValueString(const nsMsgPriorityValue p,
+                                                   nsACString& outValueString);
+ 
+ NS_MSG_BASE nsresult NS_MsgGetUntranslatedPriorityName(
+diff --git a/mailnews/compose/public/nsIMsgCompFields.idl b/mailnews/compose/public/nsIMsgCompFields.idl
+--- a/mailnews/compose/public/nsIMsgCompFields.idl
++++ b/mailnews/compose/public/nsIMsgCompFields.idl
+@@ -31,18 +31,19 @@ interface nsIMsgCompFields : msgIWritabl
+   attribute AString subject;
+ 
+   attribute AString organization;
+   attribute string  references;
+   attribute string  priority;
+   attribute string  messageId;
+ 
+   attribute AString templateName;
+-  attribute string  draftId;
+-  attribute string  templateId;
++  // The so-called draft/template ID is a URI in reality.
++  attribute AUTF8String draftId;
++  attribute AUTF8String templateId;
+ 
+   attribute boolean returnReceipt;
+   attribute long receiptHeaderType;
+   attribute boolean DSN;
+   attribute boolean attachVCard;
+   attribute boolean forcePlainText;
+   attribute boolean useMultipartAlternative;
+   attribute boolean bodyIsAsciiOnly;
+diff --git a/mailnews/compose/public/nsIMsgCompose.idl b/mailnews/compose/public/nsIMsgCompose.idl
+--- a/mailnews/compose/public/nsIMsgCompose.idl
++++ b/mailnews/compose/public/nsIMsgCompose.idl
+@@ -234,17 +234,17 @@ interface nsIMsgCompose : nsIMsgSendList
+   void initEditor(in nsIEditor editor, in mozIDOMWindowProxy contentWindow);
+ 
+   /* The following functions are for internal use, essentially for the listener */
+ 
+   /* ... */
+   [noscript] void setCiteReference(in nsString citeReference);
+ 
+   /* Set the URI of the folder where the message has been saved */
+-  attribute string savedFolderURI;
++  attribute AUTF8String savedFolderURI;
+ 
+   /* Append the signature defined in the identity to the msgBody */
+   [noscript] void processSignature(in nsIMsgIdentity identity,
+                                    in boolean aQuoted,
+                                    inout nsString aMsgBody);
+ 
+   /* set any reply flags on the original message's folder */
+   [noscript] void processReplyFlags();
+@@ -271,17 +271,17 @@ interface nsIMsgCompose : nsIMsgSendList
+   void buildBodyMessageAndSignature();
+ 
+   /* ... */
+   [noscript] void buildQuotedMessageAndSignature();
+ 
+   /* ... */
+   [noscript] void getQuotingToFollow(out boolean quotingToFollow);
+ 
+-  readonly attribute string originalMsgURI;
++  readonly attribute AUTF8String originalMsgURI;
+ 
+   attribute boolean deleteDraft;
+ 
+   /* true when the compose window is in the process of inserting quoted content
+      (i.e. via reply, forward inline or a quoting operation) into the document
+    */
+   attribute boolean insertingQuotedContent;
+ 
+diff --git a/mailnews/compose/public/nsIMsgSend.idl b/mailnews/compose/public/nsIMsgSend.idl
+--- a/mailnews/compose/public/nsIMsgSend.idl
++++ b/mailnews/compose/public/nsIMsgSend.idl
+@@ -323,17 +323,17 @@ interface nsIMsgSend : nsISupports
+     void sendDeliveryCallback(in nsIURI aUrl, in boolean inIsNewsDelivery, in nsresult aExitCode);
+ 
+     /* methods for copy listener ... */
+     void notifyListenerOnStartCopy();
+     void notifyListenerOnProgressCopy(in unsigned long aProgress, in unsigned long aProgressMax);
+     void notifyListenerOnStopCopy(in nsresult aStatus);
+     void getMessageId(out ACString messageID);
+     /// When saving as draft, the folder uri we saved to.
+-    readonly attribute ACString folderUri;
++    readonly attribute AUTF8String folderUri;
+ 
+     /**
+      * After a draft is saved, use this to get the mime part number for the dom
+      * node in the editor embedded object list with the passed in index.
+      *
+      * @param aDomIndex - index in the editor dom embedded object list of
+      * the part we're interested in. These are generally images.
+      *
+diff --git a/mailnews/compose/public/nsIMsgSendListener.idl b/mailnews/compose/public/nsIMsgSendListener.idl
+--- a/mailnews/compose/public/nsIMsgSendListener.idl
++++ b/mailnews/compose/public/nsIMsgSendListener.idl
+@@ -42,17 +42,17 @@ interface nsIMsgSendListener : nsISuppor
+      * returnFileSpec The returned file spec for save to file operations.
+      */
+     void onStopSending(in string aMsgID, in nsresult aStatus, in wstring aMsg,
+                        in nsIFile aReturnFile);
+ 
+     /**
+      * Notify the observer with the folder uri before the draft is copied.
+      */
+-    void onGetDraftFolderURI(in string aFolderURI);
++    void onGetDraftFolderURI(in AUTF8String aFolderURI);
+ 
+     /**
+      * Notify the observer when the user aborts the send without actually doing the send
+      * eg : by closing the compose window without Send.
+      */
+     void onSendNotPerformed(in string aMsgID, in nsresult aStatus);
+ 
+     /**
+diff --git a/mailnews/compose/src/nsMsgCompFields.cpp b/mailnews/compose/src/nsMsgCompFields.cpp
+--- a/mailnews/compose/src/nsMsgCompFields.cpp
++++ b/mailnews/compose/src/nsMsgCompFields.cpp
+@@ -281,32 +281,32 @@ NS_IMETHODIMP nsMsgCompFields::GetMessag
+ NS_IMETHODIMP nsMsgCompFields::SetTemplateName(const nsAString& value) {
+   return SetUnicodeHeader(MSG_X_TEMPLATE_HEADER_ID, value);
+ }
+ 
+ NS_IMETHODIMP nsMsgCompFields::GetTemplateName(nsAString& _retval) {
+   return GetUnicodeHeader(MSG_X_TEMPLATE_HEADER_ID, _retval);
+ }
+ 
+-NS_IMETHODIMP nsMsgCompFields::SetDraftId(const char* value) {
+-  return SetAsciiHeader(MSG_DRAFT_ID_HEADER_ID, value);
++NS_IMETHODIMP nsMsgCompFields::SetDraftId(const nsACString& value) {
++  return SetAsciiHeader(MSG_DRAFT_ID_HEADER_ID, PromiseFlatCString(value).get());
+ }
+ 
+-NS_IMETHODIMP nsMsgCompFields::GetDraftId(char** _retval) {
+-  *_retval = strdup(GetAsciiHeader(MSG_DRAFT_ID_HEADER_ID));
+-  return *_retval ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
++NS_IMETHODIMP nsMsgCompFields::GetDraftId(nsACString& _retval) {
++  _retval.Assign(GetAsciiHeader(MSG_DRAFT_ID_HEADER_ID));
++  return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgCompFields::SetTemplateId(const char* value) {
+-  return SetAsciiHeader(MSG_TEMPLATE_ID_HEADER_ID, value);
++NS_IMETHODIMP nsMsgCompFields::SetTemplateId(const nsACString& value) {
++  return SetAsciiHeader(MSG_TEMPLATE_ID_HEADER_ID, PromiseFlatCString(value).get());
+ }
+ 
+-NS_IMETHODIMP nsMsgCompFields::GetTemplateId(char** _retval) {
+-  *_retval = strdup(GetAsciiHeader(MSG_TEMPLATE_ID_HEADER_ID));
+-  return *_retval ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
++NS_IMETHODIMP nsMsgCompFields::GetTemplateId(nsACString& _retval) {
++  _retval.Assign(GetAsciiHeader(MSG_TEMPLATE_ID_HEADER_ID));
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgCompFields::SetReturnReceipt(bool value) {
+   m_returnReceipt = value;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgCompFields::GetReturnReceipt(bool* _retval) {
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -892,17 +892,17 @@ nsMsgCompose::Initialize(nsIMsgComposePa
+   } else {
+     Telemetry::ScalarAdd(Telemetry::ScalarID::TB_COMPOSE_FORMAT_PLAIN_TEXT, 1);
+   }
+   Telemetry::Accumulate(Telemetry::TB_COMPOSE_TYPE, type);
+ #endif
+ 
+   if (composeFields) {
+     nsAutoCString draftId;  // will get set for drafts and templates
+-    rv = composeFields->GetDraftId(getter_Copies(draftId));
++    rv = composeFields->GetDraftId(draftId);
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     // Set return receipt flag and type, and if we should attach a vCard
+     // by checking the identity prefs - but don't clobber the values for
+     // drafts and templates as they were set up already by mime when
+     // initializing the message.
+     if (m_identity && draftId.IsEmpty() && type != nsIMsgCompType::Template) {
+       bool requestReturnReceipt = false;
+@@ -1544,21 +1544,21 @@ nsresult nsMsgCompose::CreateMessage(con
+         bccList.Append(resultStr);
+       }
+       m_compFields->SetBcc(bccList.get());
+     }
+   }
+ 
+   if (mType == nsIMsgCompType::Draft) {
+     nsCString curDraftIdURL;
+-    rv = m_compFields->GetDraftId(getter_Copies(curDraftIdURL));
++    rv = m_compFields->GetDraftId(curDraftIdURL);
+     // Skip if no draft id (probably a new draft msg).
+     if (NS_SUCCEEDED(rv) && !curDraftIdURL.IsEmpty()) {
+       nsCOMPtr<nsIMsgDBHdr> msgDBHdr;
+-      rv = GetMsgDBHdrFromURI(curDraftIdURL.get(), getter_AddRefs(msgDBHdr));
++      rv = GetMsgDBHdrFromURI(curDraftIdURL, getter_AddRefs(msgDBHdr));
+       NS_ASSERTION(NS_SUCCEEDED(rv),
+                    "CreateMessage can't get msg header DB interface pointer.");
+       if (msgDBHdr) {
+         nsCString queuedDisposition;
+         msgDBHdr->GetStringProperty(QUEUED_DISPOSITION_PROPERTY,
+                                     getter_Copies(queuedDisposition));
+         // We need to retrieve the original URI from the database so we can
+         // set the disposition flags correctly if the draft is a reply or
+@@ -1593,17 +1593,17 @@ nsresult nsMsgCompose::CreateMessage(con
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // "Forward inline" and "Reply with template" processing.
+   // Note the early return at the end of the block.
+   if (type == nsIMsgCompType::ForwardInline ||
+       type == nsIMsgCompType::ReplyWithTemplate) {
+     // We want to treat this message as a reference too
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-    rv = GetMsgDBHdrFromURI(originalMsgURI, getter_AddRefs(msgHdr));
++    rv = GetMsgDBHdrFromURI(nsDependentCString(originalMsgURI), getter_AddRefs(msgHdr));
+     if (NS_SUCCEEDED(rv)) {
+       nsAutoCString messageId;
+       msgHdr->GetMessageId(getter_Copies(messageId));
+ 
+       nsAutoCString reference;
+       // When forwarding we only use the original message for "References:" -
+       // recipients don't have the other messages anyway.
+       // For reply with template we want to preserve all the references.
+@@ -1666,17 +1666,17 @@ nsresult nsMsgCompose::CreateMessage(con
+         *saveNextUri = ':';
+       }
+     }
+ 
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+     if (mOrigMsgHdr)
+       msgHdr = mOrigMsgHdr;
+     else {
+-      rv = GetMsgDBHdrFromURI(uri, getter_AddRefs(msgHdr));
++      rv = GetMsgDBHdrFromURI(nsDependentCString(uri), getter_AddRefs(msgHdr));
+       NS_ENSURE_SUCCESS(rv, rv);
+     }
+     if (msgHdr) {
+       nsCString decodedCString;
+       nsString subject;
+       rv = msgHdr->GetMime2DecodedSubject(subject);
+       if (NS_FAILED(rv)) return rv;
+ 
+@@ -1895,31 +1895,29 @@ NS_IMETHODIMP nsMsgCompose::ClearMessage
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgCompose::SetCiteReference(nsString citeReference) {
+   mCiteReference = citeReference;
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgCompose::SetSavedFolderURI(const char* folderURI) {
++NS_IMETHODIMP nsMsgCompose::SetSavedFolderURI(const nsACString& folderURI) {
+   m_folderName = folderURI;
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgCompose::GetSavedFolderURI(char** folderURI) {
+-  NS_ENSURE_ARG_POINTER(folderURI);
+-  *folderURI = ToNewCString(m_folderName);
+-  return (*folderURI) ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
++NS_IMETHODIMP nsMsgCompose::GetSavedFolderURI(nsACString& folderURI) {
++  folderURI = m_folderName;
++  return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgCompose::GetOriginalMsgURI(char** originalMsgURI) {
+-  NS_ENSURE_ARG_POINTER(originalMsgURI);
+-  *originalMsgURI = ToNewCString(mOriginalMsgURI);
+-  return (*originalMsgURI) ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
++NS_IMETHODIMP nsMsgCompose::GetOriginalMsgURI(nsACString& originalMsgURI) {
++  originalMsgURI = mOriginalMsgURI;
++  return NS_OK;
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////////
+ // THIS IS THE CLASS THAT IS THE STREAM CONSUMER OF THE HTML OUTPUT
+ // FROM LIBMIME. THIS IS FOR QUOTING
+ ////////////////////////////////////////////////////////////////////////////////////
+ QuotingOutputStreamListener::~QuotingOutputStreamListener() {}
+ 
+@@ -2727,18 +2725,17 @@ nsMsgCompose::QuoteMessage(const nsACStr
+   nsresult rv;
+   mQuotingToFollow = false;
+ 
+   // Create a mime parser (nsIStreamConverter)!
+   mQuote = do_CreateInstance(NS_MSGQUOTE_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-  rv = GetMsgDBHdrFromURI(PromiseFlatCString(msgURI).get(),
+-                          getter_AddRefs(msgHdr));
++  rv = GetMsgDBHdrFromURI(msgURI, getter_AddRefs(msgHdr));
+ 
+   // Create the consumer output stream.. this will receive all the HTML from
+   // libmime
+   mQuoteStreamListener = new QuotingOutputStreamListener(
+       msgHdr, false, !mHtmlToQuote.IsEmpty(), m_identity, mQuote,
+       mCharsetOverride || mAnswerDefaultCharset, false, mHtmlToQuote);
+ 
+   mQuoteStreamListener->SetComposeObj(this);
+@@ -2758,17 +2755,17 @@ nsresult nsMsgCompose::QuoteOriginalMess
+   mQuote = do_CreateInstance(NS_MSGQUOTE_CONTRACTID, &rv);
+   if (NS_FAILED(rv) || !mQuote) return NS_ERROR_FAILURE;
+ 
+   bool bAutoQuote = true;
+   m_identity->GetAutoQuote(&bAutoQuote);
+ 
+   nsCOMPtr<nsIMsgDBHdr> originalMsgHdr = mOrigMsgHdr;
+   if (!originalMsgHdr) {
+-    rv = GetMsgDBHdrFromURI(mOriginalMsgURI.get(),
++    rv = GetMsgDBHdrFromURI(mOriginalMsgURI,
+                             getter_AddRefs(originalMsgHdr));
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   bool fileUrl = StringBeginsWith(mOriginalMsgURI, "file:"_ns);
+   if (fileUrl) {
+     mOriginalMsgURI.Replace(0, 5, "mailbox:"_ns);
+     mOriginalMsgURI.AppendLiteral("?number=0");
+@@ -2849,21 +2846,21 @@ NS_IMETHODIMP nsMsgCompose::RememberQueu
+     dispositionSetting.AssignLiteral("replied");
+   } else if (mType == nsIMsgCompType::ForwardAsAttachment ||
+              mType == nsIMsgCompType::ForwardInline) {
+     dispositionSetting.AssignLiteral("forwarded");
+   } else if (mType == nsIMsgCompType::Redirect) {
+     dispositionSetting.AssignLiteral("redirected");
+   } else if (mType == nsIMsgCompType::Draft) {
+     nsAutoCString curDraftIdURL;
+-    rv = m_compFields->GetDraftId(getter_Copies(curDraftIdURL));
++    rv = m_compFields->GetDraftId(curDraftIdURL);
+     NS_ENSURE_SUCCESS(rv, rv);
+     if (!curDraftIdURL.IsEmpty()) {
+       nsCOMPtr<nsIMsgDBHdr> draftHdr;
+-      rv = GetMsgDBHdrFromURI(curDraftIdURL.get(), getter_AddRefs(draftHdr));
++      rv = GetMsgDBHdrFromURI(curDraftIdURL, getter_AddRefs(draftHdr));
+       NS_ENSURE_SUCCESS(rv, rv);
+       draftHdr->GetStringProperty(QUEUED_DISPOSITION_PROPERTY,
+                                   getter_Copies(dispositionSetting));
+     }
+   }
+ 
+   nsMsgKey msgKey;
+   if (mMsgSend) {
+@@ -2932,17 +2929,17 @@ nsresult nsMsgCompose::ProcessReplyFlags
+       mType == nsIMsgCompType::Redirect ||
+       mDraftDisposition != nsIMsgFolder::nsMsgDispositionState_None) {
+     if (!mOriginalMsgURI.IsEmpty()) {
+       nsCString msgUri(mOriginalMsgURI);
+       char* newStr = msgUri.BeginWriting();
+       char* uri;
+       while (nullptr != (uri = NS_strtok(",", &newStr))) {
+         nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-        rv = GetMsgDBHdrFromURI(uri, getter_AddRefs(msgHdr));
++        rv = GetMsgDBHdrFromURI(nsDependentCString(uri), getter_AddRefs(msgHdr));
+         NS_ENSURE_SUCCESS(rv, rv);
+         if (msgHdr) {
+           // get the folder for the message resource
+           nsCOMPtr<nsIMsgFolder> msgFolder;
+           msgHdr->GetFolder(getter_AddRefs(msgFolder));
+           if (msgFolder) {
+             // If it's a draft with disposition, default to replied, otherwise,
+             // check if it's a forward.
+@@ -3045,17 +3042,17 @@ NS_IMETHODIMP nsMsgCompose::OnSendNotPer
+ 
+   while (iter.HasMore()) {
+     externalSendListener = iter.GetNext();
+     externalSendListener->OnSendNotPerformed(aMsgID, aStatus);
+   }
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgCompose::OnGetDraftFolderURI(const char* aFolderURI) {
++NS_IMETHODIMP nsMsgCompose::OnGetDraftFolderURI(const nsACString& aFolderURI) {
+   m_folderName = aFolderURI;
+   nsTObserverArray<nsCOMPtr<nsIMsgSendListener>>::ForwardIterator iter(
+       mExternalSendListeners);
+   nsCOMPtr<nsIMsgSendListener> externalSendListener;
+ 
+   while (iter.HasMore()) {
+     externalSendListener = iter.GetNext();
+     externalSendListener->OnGetDraftFolderURI(aFolderURI);
+@@ -3237,17 +3234,17 @@ nsresult nsMsgComposeSendListener::OnSto
+   nsCOMPtr<nsIMsgSendListener> composeSendListener =
+       do_QueryReferent(mWeakComposeObj, &rv);
+   if (NS_SUCCEEDED(rv) && composeSendListener)
+     composeSendListener->OnStopSending(aMsgID, aStatus, aMsg, returnFile);
+ 
+   return rv;
+ }
+ 
+-nsresult nsMsgComposeSendListener::OnGetDraftFolderURI(const char* aFolderURI) {
++nsresult nsMsgComposeSendListener::OnGetDraftFolderURI(const nsACString& aFolderURI) {
+   nsresult rv;
+   nsCOMPtr<nsIMsgSendListener> composeSendListener =
+       do_QueryReferent(mWeakComposeObj, &rv);
+   if (NS_SUCCEEDED(rv) && composeSendListener)
+     composeSendListener->OnGetDraftFolderURI(aFolderURI);
+ 
+   return NS_OK;
+ }
+@@ -3310,29 +3307,29 @@ nsresult nsMsgComposeSendListener::OnSto
+ 
+   return rv;
+ }
+ 
+ nsresult nsMsgComposeSendListener::GetMsgFolder(nsIMsgCompose* compObj,
+                                                 nsIMsgFolder** msgFolder) {
+   nsCString folderUri;
+ 
+-  nsresult rv = compObj->GetSavedFolderURI(getter_Copies(folderUri));
++  nsresult rv = compObj->GetSavedFolderURI(folderUri);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   return GetOrCreateFolder(folderUri, msgFolder);
+ }
+ 
+ nsresult nsMsgComposeSendListener::RemoveDraftOrTemplate(nsIMsgCompose* compObj,
+                                                          nsCString msgURI,
+                                                          bool isSaveTemplate) {
+   nsresult rv;
+   nsCOMPtr<nsIMsgFolder> msgFolder;
+   nsCOMPtr<nsIMsgDBHdr> msgDBHdr;
+-  rv = GetMsgDBHdrFromURI(msgURI.get(), getter_AddRefs(msgDBHdr));
++  rv = GetMsgDBHdrFromURI(msgURI, getter_AddRefs(msgDBHdr));
+   NS_ASSERTION(
+       NS_SUCCEEDED(rv),
+       "RemoveDraftOrTemplate can't get msg header DB interface pointer");
+   if (NS_SUCCEEDED(rv) && msgDBHdr) {
+     do {  // Break on failure or removal not needed.
+       // Get the folder for the message resource.
+       rv = msgDBHdr->GetFolder(getter_AddRefs(msgFolder));
+       NS_ASSERTION(
+@@ -3424,29 +3421,29 @@ nsresult nsMsgComposeSendListener::Remov
+   nsCOMPtr<nsIMsgCompFields> compFields = nullptr;
+ 
+   rv = compObj->GetCompFields(getter_AddRefs(compFields));
+   NS_ASSERTION(NS_SUCCEEDED(rv),
+                "RemoveCurrentDraftMessage can't get compose fields");
+   if (NS_FAILED(rv) || !compFields) return rv;
+ 
+   nsCString curDraftIdURL;
+-  rv = compFields->GetDraftId(getter_Copies(curDraftIdURL));
++  rv = compFields->GetDraftId(curDraftIdURL);
+ 
+   // Skip if no draft id (probably a new draft msg).
+   if (NS_SUCCEEDED(rv) && !curDraftIdURL.IsEmpty()) {
+     rv = RemoveDraftOrTemplate(compObj, curDraftIdURL, isSaveTemplate);
+     if (NS_FAILED(rv)) NS_WARNING("Removing current draft failed");
+   } else {
+     NS_WARNING("RemoveCurrentDraftMessage can't get draft id");
+   }
+ 
+   if (isSaveTemplate) {
+     nsCString templateIdURL;
+-    rv = compFields->GetTemplateId(getter_Copies(templateIdURL));
++    rv = compFields->GetTemplateId(templateIdURL);
+     if (NS_SUCCEEDED(rv) && !templateIdURL.Equals(curDraftIdURL)) {
+       // Above we deleted an auto-saved draft, so here we need to delete
+       // the original template.
+       rv = RemoveDraftOrTemplate(compObj, templateIdURL, isSaveTemplate);
+       if (NS_FAILED(rv)) NS_WARNING("Removing original template failed");
+     }
+   }
+ 
+@@ -3470,18 +3467,18 @@ nsresult nsMsgComposeSendListener::Remov
+     if (savedToFolder && newUid != nsMsgKey_None) {
+       uint32_t folderFlags;
+       savedToFolder->GetFlags(&folderFlags);
+       if (folderFlags &
+           (nsMsgFolderFlags::Drafts | nsMsgFolderFlags::Templates)) {
+         nsCString newDraftIdURL;
+         rv = savedToFolder->GenerateMessageURI(newUid, newDraftIdURL);
+         NS_ENSURE_SUCCESS(rv, rv);
+-        compFields->SetDraftId(newDraftIdURL.get());
+-        if (isSaveTemplate) compFields->SetTemplateId(newDraftIdURL.get());
++        compFields->SetDraftId(newDraftIdURL);
++        if (isSaveTemplate) compFields->SetTemplateId(newDraftIdURL);
+       }
+     }
+   }
+   return rv;
+ }
+ 
+ nsresult nsMsgComposeSendListener::SetMessageKey(nsMsgKey aMessageKey) {
+   return NS_OK;
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -88,20 +88,20 @@ using namespace mozilla;
+ #define HTMLDOMAINUPDATE_DOMAINLIST_PREF_NAME "global_html_domains"
+ #define USER_CURRENT_HTMLDOMAINLIST_PREF_NAME "html_domains"
+ #define USER_CURRENT_PLAINTEXTDOMAINLIST_PREF_NAME "plaintext_domains"
+ #define DOMAIN_DELIMITER ','
+ 
+ #ifdef MSGCOMP_TRACE_PERFORMANCE
+ static mozilla::LazyLogModule MsgComposeLogModule("MsgCompose");
+ 
+-static uint32_t GetMessageSizeFromURI(const char* originalMsgURI) {
++static uint32_t GetMessageSizeFromURI(const nsACString& originalMsgURI) {
+   uint32_t msgSize = 0;
+ 
+-  if (originalMsgURI && *originalMsgURI) {
++  if (!originalMsgURI.IsEmpty()) {
+     nsCOMPtr<nsIMsgDBHdr> originalMsgHdr;
+     GetMsgDBHdrFromURI(originalMsgURI, getter_AddRefs(originalMsgHdr));
+     if (originalMsgHdr) originalMsgHdr->GetMessageSize(&msgSize);
+   }
+ 
+   return msgSize;
+ }
+ #endif
+@@ -453,17 +453,17 @@ nsMsgComposeService::OpenComposeWindow(
+ 
+       if (mLogComposePerformance) {
+ #ifdef MSGCOMP_TRACE_PERFORMANCE
+         // ducarroz, properly fix this in the case of new message (not a reply)
+         if (type != nsIMsgCompType::NewsPost) {
+           char buff[256];
+           sprintf(
+               buff, "Start opening the window, message size = %d",
+-              GetMessageSizeFromURI(PromiseFlatCString(originalMsgURI).get()));
++              GetMessageSizeFromURI(originalMsgURI));
+           TimeStamp(buff, true);
+         }
+ #endif
+       }  // end if(mLogComposePerformance)
+ 
+       rv = OpenComposeWindowWithParams(
+           PromiseFlatCString(msgComposeWindowURL).get(), pMsgComposeParams);
+     }
+diff --git a/mailnews/compose/src/nsMsgSend.cpp b/mailnews/compose/src/nsMsgSend.cpp
+--- a/mailnews/compose/src/nsMsgSend.cpp
++++ b/mailnews/compose/src/nsMsgSend.cpp
+@@ -2174,18 +2174,17 @@ nsresult nsMsgComposeAndSend::InitCompos
+            aType == nsIMsgCompType::ReplyToSender ||
+            aType == nsIMsgCompType::ReplyToSenderAndGroup ||
+            aType == nsIMsgCompType::ReplyToList ||
+            aType == nsIMsgCompType::ReplyWithTemplate)) {
+         nsCOMPtr<nsIMsgAccountManager> accountManager =
+             do_GetService(NS_MSGACCOUNTMANAGER_CONTRACTID, &rv);
+         if (NS_SUCCEEDED(rv)) {
+           nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-          rv = GetMsgDBHdrFromURI(PromiseFlatCString(aOriginalMsgURI).get(),
+-                                  getter_AddRefs(msgHdr));
++          rv = GetMsgDBHdrFromURI(aOriginalMsgURI, getter_AddRefs(msgHdr));
+           if (NS_SUCCEEDED(rv)) {
+             nsCOMPtr<nsIMsgFolder> folder;
+             msgHdr->GetFolder(getter_AddRefs(folder));
+             if (NS_SUCCEEDED(rv)) {
+               bool canFileMessages;
+               rv = folder->GetCanFileMessages(&canFileMessages);
+               if (NS_SUCCEEDED(rv) && canFileMessages) {
+                 nsCOMPtr<nsIMsgIncomingServer> incomingServer;
+@@ -4179,17 +4178,17 @@ nsresult nsMsgComposeAndSend::StartMessa
+   // default to the default "Flagged" folder choices
+   //
+   nsresult rv;
+   if (!dest_uri.IsEmpty())
+     m_folderName = dest_uri;
+   else
+     GetFolderURIFromUserPrefs(mode, mUserIdentity, m_folderName);
+ 
+-  if (mListener) mListener->OnGetDraftFolderURI(m_folderName.get());
++  if (mListener) mListener->OnGetDraftFolderURI(m_folderName);
+ 
+   rv = mCopyObj->StartCopyOperation(mUserIdentity, aFile, mode, this,
+                                     m_folderName, mMsgToReplace);
+   return rv;
+ }
+ 
+ // I'm getting this each time without holding onto the feedback so that 3 pane
+ // windows can be closed without any chance of crashing due to holding onto a
+diff --git a/mailnews/compose/src/nsMsgSendLater.cpp b/mailnews/compose/src/nsMsgSendLater.cpp
+--- a/mailnews/compose/src/nsMsgSendLater.cpp
++++ b/mailnews/compose/src/nsMsgSendLater.cpp
+@@ -360,17 +360,17 @@ NS_IMPL_ISUPPORTS(SendOperationListener,
+                   nsIMsgCopyServiceListener)
+ 
+ SendOperationListener::SendOperationListener(nsMsgSendLater* aSendLater)
+     : mSendLater(aSendLater) {}
+ 
+ SendOperationListener::~SendOperationListener(void) {}
+ 
+ NS_IMETHODIMP
+-SendOperationListener::OnGetDraftFolderURI(const char* aFolderURI) {
++SendOperationListener::OnGetDraftFolderURI(const nsACString& aFolderURI) {
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ SendOperationListener::OnStartSending(const char* aMsgID, uint32_t aMsgSize) {
+ #ifdef NS_DEBUG
+   printf("SendOperationListener::OnStartSending()\n");
+ #endif
+@@ -763,17 +763,17 @@ nsresult nsMsgSendLater::SetOrigMsgDispo
+   mMessage->GetStringProperty(QUEUED_DISPOSITION_PROPERTY,
+                               getter_Copies(queuedDisposition));
+   if (!queuedDisposition.IsEmpty()) {
+     nsTArray<nsCString> uriArray;
+     ParseString(originalMsgURIs, ',', uriArray);
+     for (uint32_t i = 0; i < uriArray.Length(); i++) {
+       nsCOMPtr<nsIMsgDBHdr> msgHdr;
+       nsresult rv =
+-          GetMsgDBHdrFromURI(uriArray[i].get(), getter_AddRefs(msgHdr));
++          GetMsgDBHdrFromURI(uriArray[i], getter_AddRefs(msgHdr));
+       NS_ENSURE_SUCCESS(rv, rv);
+       if (msgHdr) {
+         // get the folder for the message resource
+         nsCOMPtr<nsIMsgFolder> msgFolder;
+         msgHdr->GetFolder(getter_AddRefs(msgFolder));
+         if (msgFolder) {
+           nsMsgDispositionState dispositionSetting =
+               nsIMsgFolder::nsMsgDispositionState_None;
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -8261,17 +8261,17 @@ nsImapMailFolder::OnMessageClassified(co
+                                       uint32_t aJunkPercent) {
+   nsCOMPtr<nsIMsgIncomingServer> server;
+   nsresult rv = GetServer(getter_AddRefs(server));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (aMsgURI)  // not end of batch
+   {
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-    rv = GetMsgDBHdrFromURI(aMsgURI, getter_AddRefs(msgHdr));
++    rv = GetMsgDBHdrFromURI(nsDependentCString(aMsgURI), getter_AddRefs(msgHdr));
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     nsMsgKey msgKey;
+     rv = msgHdr->GetMessageKey(&msgKey);
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     // check if this message needs junk classification
+ 
+diff --git a/mailnews/imap/src/nsImapUrl.cpp b/mailnews/imap/src/nsImapUrl.cpp
+--- a/mailnews/imap/src/nsImapUrl.cpp
++++ b/mailnews/imap/src/nsImapUrl.cpp
+@@ -1298,17 +1298,17 @@ nsresult nsImapUrl::GetMsgFolder(nsIMsgF
+   // if we have a RDF URI, then try to get the folder for that URI and then ask
+   // the folder for it's charset....
+ 
+   nsCString uri;
+   GetUri(uri);
+   NS_ENSURE_TRUE(!uri.IsEmpty(), NS_ERROR_FAILURE);
+ 
+   nsCOMPtr<nsIMsgDBHdr> msg;
+-  GetMsgDBHdrFromURI(uri.get(), getter_AddRefs(msg));
++  GetMsgDBHdrFromURI(uri, getter_AddRefs(msg));
+   NS_ENSURE_TRUE(msg, NS_ERROR_FAILURE);
+   nsresult rv = msg->GetFolder(msgFolder);
+   NS_ENSURE_SUCCESS(rv, rv);
+   NS_ENSURE_TRUE(msgFolder, NS_ERROR_FAILURE);
+ 
+   return NS_OK;
+ }
+ 
+@@ -1345,14 +1345,14 @@ NS_IMETHODIMP nsImapUrl::SetStoreOffline
+   m_storeOfflineOnFallback = aStoreOfflineOnFallback;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsImapUrl::GetMessageHeader(nsIMsgDBHdr** aMsgHdr) {
+   nsCString uri;
+   nsresult rv = GetUri(uri);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  return GetMsgDBHdrFromURI(uri.get(), aMsgHdr);
++  return GetMsgDBHdrFromURI(uri, aMsgHdr);
+ }
+ 
+ NS_IMETHODIMP nsImapUrl::SetMessageHeader(nsIMsgDBHdr* aMsgHdr) {
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+diff --git a/mailnews/import/src/nsOutlookCompose.cpp b/mailnews/import/src/nsOutlookCompose.cpp
+--- a/mailnews/import/src/nsOutlookCompose.cpp
++++ b/mailnews/import/src/nsOutlookCompose.cpp
+@@ -150,17 +150,17 @@ class OutlookSendListener : public nsIMs
+   }
+ 
+   /* void OnSendNotPerformed */
+   NS_IMETHOD OnSendNotPerformed(const char* aMsgID, nsresult aStatus) {
+     return NS_OK;
+   }
+ 
+   /* void OnGetDraftFolderURI (); */
+-  NS_IMETHOD OnGetDraftFolderURI(const char* aFolderURI) { return NS_OK; }
++  NS_IMETHOD OnGetDraftFolderURI(const nsACString& aFolderURI) { return NS_OK; }
+ 
+   static nsresult CreateSendListener(nsIMsgSendListener** ppListener);
+   void Reset() {
+     m_done = false;
+     m_location = nullptr;
+   }
+ 
+  public:
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -2852,17 +2852,17 @@ nsMsgLocalMailFolder::OnStopRunningUrl(n
+     if (strstr(aSpec.get(), "uidl=")) {
+       nsCOMPtr<nsIPop3URL> popurl = do_QueryInterface(aUrl, &rv);
+       if (NS_SUCCEEDED(rv)) {
+         nsCString messageuri;
+         rv = popurl->GetMessageUri(getter_Copies(messageuri));
+         if (NS_SUCCEEDED(rv)) {
+           NS_ENSURE_SUCCESS(rv, rv);
+           nsCOMPtr<nsIMsgDBHdr> msgDBHdr;
+-          rv = GetMsgDBHdrFromURI(messageuri.get(), getter_AddRefs(msgDBHdr));
++          rv = GetMsgDBHdrFromURI(messageuri, getter_AddRefs(msgDBHdr));
+           if (NS_SUCCEEDED(rv)) {
+             GetDatabase();
+             if (mDatabase)
+               mDatabase->DeleteHeader(msgDBHdr, nullptr, true, true);
+           }
+ 
+           nsCOMPtr<nsIPop3Sink> pop3sink;
+           nsCString newMessageUri;
+@@ -3081,17 +3081,17 @@ nsMsgLocalMailFolder::OnMessageClassifie
+ 
+   nsCString spamFolderURI;
+   rv = spamSettings->GetSpamFolderURI(getter_Copies(spamFolderURI));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (aMsgURI)  // not end of batch
+   {
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-    rv = GetMsgDBHdrFromURI(aMsgURI, getter_AddRefs(msgHdr));
++    rv = GetMsgDBHdrFromURI(nsDependentCString(aMsgURI), getter_AddRefs(msgHdr));
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     nsMsgKey msgKey;
+     rv = msgHdr->GetMessageKey(&msgKey);
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     // check if this message needs junk classification
+     uint32_t processingFlags;
+diff --git a/mailnews/local/src/nsMailboxUrl.cpp b/mailnews/local/src/nsMailboxUrl.cpp
+--- a/mailnews/local/src/nsMailboxUrl.cpp
++++ b/mailnews/local/src/nsMailboxUrl.cpp
+@@ -461,17 +461,17 @@ char* extractAttributeValue(const char* 
+ 
+ nsresult nsMailboxUrl::GetFolder(nsIMsgFolder** msgFolder) {
+   // if we have a RDF URI, then try to get the folder for that URI and then ask
+   // the folder for it's charset....
+   nsCString uri;
+   GetUri(uri);
+   NS_ENSURE_TRUE(!uri.IsEmpty(), NS_ERROR_FAILURE);
+   nsCOMPtr<nsIMsgDBHdr> msg;
+-  GetMsgDBHdrFromURI(uri.get(), getter_AddRefs(msg));
++  GetMsgDBHdrFromURI(uri, getter_AddRefs(msg));
+   if (!msg) return NS_ERROR_FAILURE;
+   return msg->GetFolder(msgFolder);
+ }
+ 
+ NS_IMETHODIMP nsMailboxUrl::GetOverRideCharset(bool* aOverride) {
+   *aOverride = mOverrideCharset;
+   return NS_OK;
+ }
+diff --git a/mailnews/local/src/nsPop3Sink.cpp b/mailnews/local/src/nsPop3Sink.cpp
+--- a/mailnews/local/src/nsPop3Sink.cpp
++++ b/mailnews/local/src/nsPop3Sink.cpp
+@@ -717,17 +717,17 @@ nsPop3Sink::IncorporateComplete(nsIMsgWi
+       (void)localFolder->DeleteDownloadMsg(hdr, &doSelect);
+ 
+     // If a header already exists for this message (for example, when
+     // getting a complete message when a partial exists), then update the new
+     // header from the old.
+     if (!m_origMessageUri.IsEmpty() && localFolder) {
+       nsCOMPtr<nsIMsgDBHdr> oldMsgHdr;
+       rv =
+-          GetMsgDBHdrFromURI(m_origMessageUri.get(), getter_AddRefs(oldMsgHdr));
++          GetMsgDBHdrFromURI(m_origMessageUri, getter_AddRefs(oldMsgHdr));
+       if (NS_SUCCEEDED(rv) && oldMsgHdr)
+         localFolder->UpdateNewMsgHdr(oldMsgHdr, hdr);
+     }
+ 
+     if (m_downloadingToTempFile) {
+       // close file to give virus checkers a chance to do their thing...
+       m_outFileStream->Flush();
+       m_outFileStream->Close();
+diff --git a/mailnews/mapi/mapihook/src/msgMapiHook.cpp b/mailnews/mapi/mapihook/src/msgMapiHook.cpp
+--- a/mailnews/mapi/mapihook/src/msgMapiHook.cpp
++++ b/mailnews/mapi/mapihook/src/msgMapiHook.cpp
+@@ -89,17 +89,17 @@ class MAPISendListener : public nsIMsgSe
+   }
+ 
+   /* void OnSendNotPerformed */
+   NS_IMETHOD OnSendNotPerformed(const char* aMsgID, nsresult aStatus) {
+     return OnStopSending(aMsgID, aStatus, nullptr, nullptr);
+   }
+ 
+   /* void OnGetDraftFolderURI (); */
+-  NS_IMETHOD OnGetDraftFolderURI(const char* aFolderURI) { return NS_OK; }
++  NS_IMETHOD OnGetDraftFolderURI(const nsACString& aFolderURI) { return NS_OK; }
+ 
+   bool IsDone() { return m_done; }
+ 
+  private:
+   bool m_done;
+   virtual ~MAPISendListener() {}
+ };
+ 
+diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
+--- a/mailnews/mime/src/mimedrft.cpp
++++ b/mailnews/mime/src/mimedrft.cpp
+@@ -1518,19 +1518,19 @@ static void mime_parse_stream_complete(n
+       // the message store.
+       //
+       if (mdd->format_out == nsMimeOutput::nsMimeMessageEditorTemplate) {
+         // Set the draft ID when editing a template so the original is
+         // overwritten when saving the template again.
+         // Note that always setting the draft ID here would cause drafts to be
+         // overwritten when edited "as new", which is undesired.
+         if (msgComposeType == nsIMsgCompType::EditTemplate) {
+-          fields->SetDraftId(mdd->url_name);
++          fields->SetDraftId(nsDependentCString(mdd->url_name));
+           fields->SetTemplateId(
+-              mdd->url_name);  // Remember original template ID.
++              nsDependentCString(mdd->url_name));  // Remember original template ID.
+         }
+ 
+         if (convertToPlainText) fields->ConvertBodyToPlainText();
+ 
+         CreateTheComposeWindow(fields, newAttachData, msgComposeType,
+                                composeFormat, mdd->identity,
+                                mdd->originalMsgURI, mdd->origMsgHdr);
+       } else {
+@@ -1545,17 +1545,17 @@ static void mime_parse_stream_complete(n
+                              mdd->origMsgHdr);
+           } else
+             CreateTheComposeWindow(fields, newAttachData,
+                                    nsIMsgCompType::ForwardInline, composeFormat,
+                                    mdd->identity, mdd->originalMsgURI,
+                                    mdd->origMsgHdr);
+         } else {
+           if (convertToPlainText) fields->ConvertBodyToPlainText();
+-          fields->SetDraftId(mdd->url_name);
++          fields->SetDraftId(nsDependentCString(mdd->url_name));
+           CreateTheComposeWindow(fields, newAttachData, nsIMsgCompType::Draft,
+                                  composeFormat, mdd->identity,
+                                  mdd->originalMsgURI, mdd->origMsgHdr);
+         }
+       }
+     } else {
+       //
+       // At this point, we need to create a message compose window via
+@@ -1579,17 +1579,17 @@ static void mime_parse_stream_complete(n
+           MSG_ComposeFormat composeFormat =
+               (mdd->overrideComposeFormat) ? nsIMsgCompFormat::OppositeOfDefault
+                                            : nsIMsgCompFormat::Default;
+           CreateTheComposeWindow(fields, newAttachData,
+                                  nsIMsgCompType::ForwardInline, composeFormat,
+                                  mdd->identity, mdd->originalMsgURI,
+                                  mdd->origMsgHdr);
+         } else {
+-          fields->SetDraftId(mdd->url_name);
++          fields->SetDraftId(nsDependentCString(mdd->url_name));
+           CreateTheComposeWindow(fields, newAttachData, nsIMsgCompType::Draft,
+                                  nsIMsgCompFormat::Default, mdd->identity,
+                                  nullptr, mdd->origMsgHdr);
+         }
+       }
+     }
+   } else {
+     CreateCompositionFields(from, repl, to, cc, bcc, fcc, grps, foll, org, subj,
+diff --git a/mailnews/mime/src/mimei.cpp b/mailnews/mime/src/mimei.cpp
+--- a/mailnews/mime/src/mimei.cpp
++++ b/mailnews/mime/src/mimei.cpp
+@@ -333,17 +333,17 @@ void getMsgHdrForCurrentURL(MimeDisplayO
+       msgURI = do_QueryInterface(uri);
+       if (msgURI) {
+         msgURI->GetMessageHeader(aMsgHdr);
+         if (*aMsgHdr) return;
+         nsCString rdfURI;
+         msgURI->GetUri(rdfURI);
+         if (!rdfURI.IsEmpty()) {
+           nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-          GetMsgDBHdrFromURI(rdfURI.get(), getter_AddRefs(msgHdr));
++          GetMsgDBHdrFromURI(rdfURI, getter_AddRefs(msgHdr));
+           NS_IF_ADDREF(*aMsgHdr = msgHdr);
+         }
+       }
+     }
+   }
+ 
+   return;
+ }
