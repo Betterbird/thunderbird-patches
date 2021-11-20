@@ -70,3 +70,6 @@ sed -i -e 's/other-cases-label/other-cases-text-label/'                      loc
 %lecho% "add-opensearch-provider-text = Enter the URL of the OpenSearch provider to add. Either use the direct URL of the OpenSearch Description file, or a URL where it can be auto-discovered." >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "adding-opensearch-provider-failed-title = Adding OpenSearch Provider Failed" >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "adding-opensearch-provider-failed-text = Could not add OpenSearch Provider for { $url }." >> localization\de\messenger\preferences\preferences.ftl
+
+:: And more strings from bug 1724090.
+%lecho% "calendar-print-back-button = Zurück" >> localization\de\calendar\calendar-print.ftl
