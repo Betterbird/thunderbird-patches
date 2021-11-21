@@ -1,9 +1,71 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1637486783 -3600
+# Date 1637531641 -3600
 # Parent  058f0e3a497b5fe49e7b92e1b5be13ff1705a9c5
-Bug 1739609 - Fix communication of charset back to UI.
+Bug 1739609 - Fix communication of charset back to UI. Also fix the subject in "Repair Text Encoding".
 
+diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
+--- a/mail/base/content/mailWindow.js
++++ b/mail/base/content/mailWindow.js
+@@ -1103,16 +1103,58 @@ nsBrowserAccess.prototype = {
+ 
+ function MailSetCharacterSet() {
+   msgWindow.charsetOverride = true;
+   gMessageDisplay.keyForCharsetOverride =
+     "messageKey" in gMessageDisplay.displayedMessage
+       ? gMessageDisplay.displayedMessage.messageKey
+       : null;
+   messenger.forceDetectDocumentCharset();
++
++  // Fix the subject. This is rather hacky since we don't know when the
++  // message re-display will have finished.
++  setTimeout(() => {
++    const { selectedMessage, tree } = gFolderDisplay;
++    if (selectedMessage) {
++      let subjectBox = document.getElementById("expandedsubjectBox");
++      // The selected message still has the raw header, so get it and decode it.
++      let buffer = new Uint8Array(
++        Array.from(selectedMessage.subject, c => c.charCodeAt(0))
++      );
++      let subject;
++      let subjectChanged = false;
++      try {
++        // Check whether this is already UTF-8.
++        subject = new TextDecoder("UTF-8", { fatal: true }).decode(buffer);
++      } catch (ex) {
++        try {
++          subject = new TextDecoder(msgWindow.mailCharacterSet).decode(buffer);
++          subjectChanged = true;
++        } catch (ex) {
++          return;
++        }
++      }
++      subjectBox.headerValue = subject;
++      if (subjectChanged) {
++        let subjectUTF8 = String.fromCharCode.apply(
++          undefined,
++          new TextEncoder("UTF-8").encode(subject)
++        );
++        selectedMessage.subject = subjectUTF8;
++        if (
++          tree &&
++          tree.view &&
++          tree.view.selection &&
++          tree.view.selection.currentIndex >= 0
++        ) {
++          tree.invalidateRow(tree.view.selection.currentIndex);
++        }
++      }
++    }
++  }, 100);
+ }
+ 
+ /**
+  * Called from the extensions manager to open an add-on options XUL document.
+  * Only the "open in tab" option is supported, so that's what we'll do here.
+  */
+ function switchToTabHavingURI(aURI, aOpenNew, aOpenParams = {}) {
+   let tabmail = document.getElementById("tabmail");
 diff --git a/mailnews/mime/src/mimetext.cpp b/mailnews/mime/src/mimetext.cpp
 --- a/mailnews/mime/src/mimetext.cpp
 +++ b/mailnews/mime/src/mimetext.cpp
@@ -45,3 +107,27 @@ diff --git a/mailnews/mime/src/mimetext.cpp b/mailnews/mime/src/mimetext.cpp
        }
      }
    }
+diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
+--- a/mailnews/mime/src/nsStreamConverter.cpp
++++ b/mailnews/mime/src/nsStreamConverter.cpp
+@@ -111,16 +111,20 @@ nsresult bridge_new_new_uri(void* bridge
+         if (i18nUrl) {
+           bool overrideCharset = false;
+ 
+           // check to see if we have a charset override...and if we do, set that
+           // field appropriately too...
+           nsresult rv = i18nUrl->GetOverRideCharset(&overrideCharset);
+           if (NS_SUCCEEDED(rv) && overrideCharset) {
+             *override_charset = true;
++            // Previously we set `default_charset` to the user-selected
++            // charset with the effect that the subject header was fixed, too.
++            // Now we set it to `nullptr` to trigger auto-detection.
++            // We need to fix the subject later.
+             *default_charset = nullptr;
+           } else {
+             *override_charset = false;
+             // Special treatment for news: URLs. Get the server default charset.
+             nsCOMPtr<nsINntpUrl> nntpURL(do_QueryInterface(aURI));
+             if (nntpURL) {
+               nsCString charset;
+               rv = nntpURL->GetCharset(charset);
