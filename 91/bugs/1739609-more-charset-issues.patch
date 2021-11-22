@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1637531641 -3600
-# Parent  058f0e3a497b5fe49e7b92e1b5be13ff1705a9c5
+# Date 1637616586 -3600
+# Parent  b7f7279009669467f172184178dfb90814a5f154
 Bug 1739609 - Fix communication of charset back to UI. Also fix the subject in "Repair Text Encoding".
 
 diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
 --- a/mail/base/content/mailWindow.js
 +++ b/mail/base/content/mailWindow.js
-@@ -1103,16 +1103,58 @@ nsBrowserAccess.prototype = {
+@@ -1103,16 +1103,61 @@ nsBrowserAccess.prototype = {
  
  function MailSetCharacterSet() {
    msgWindow.charsetOverride = true;
@@ -42,6 +42,9 @@ diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
 +      }
 +      subjectBox.headerValue = subject;
 +      if (subjectChanged) {
++        // Keep the charset for the next time we display the message.
++        // Note the upper-case `Charset` attribute in nsIMsgHdr.idl.
++        selectedMessage.Charset = msgWindow.mailCharacterSet;
 +        let subjectUTF8 = String.fromCharCode.apply(
 +          undefined,
 +          new TextEncoder("UTF-8").encode(subject)
@@ -110,9 +113,23 @@ diff --git a/mailnews/mime/src/mimetext.cpp b/mailnews/mime/src/mimetext.cpp
 diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
 --- a/mailnews/mime/src/nsStreamConverter.cpp
 +++ b/mailnews/mime/src/nsStreamConverter.cpp
-@@ -111,16 +111,20 @@ nsresult bridge_new_new_uri(void* bridge
+@@ -99,46 +99,66 @@ nsresult bridge_new_new_uri(void* bridge
+           default_charset = &(msd->options->default_charset);
+           override_charset = &(msd->options->override_charset);
+           url_name = &(msd->url_name);
+           fixup_pointer = &(msd->options->url);
+         }
+       }
+ 
+       if ((default_charset) && (override_charset) && (url_name)) {
+-        //
+-        // set the default charset to be the folder charset if we have one
+-        // associated with this url...
++        // Get the override flag.
+         nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(aURI));
          if (i18nUrl) {
            bool overrideCharset = false;
++          bool forceFixWindow = false;
  
            // check to see if we have a charset override...and if we do, set that
            // field appropriately too...
@@ -131,3 +148,42 @@ diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStrea
              if (nntpURL) {
                nsCString charset;
                rv = nntpURL->GetCharset(charset);
+               *default_charset =
+                   NS_SUCCEEDED(rv) ? ToNewCString(charset) : strdup("UTF-8");
+             } else {
+-              *default_charset = strdup("UTF-8");
++              // Let's see whether the user repaired this before.
++              nsCOMPtr<nsIMsgMessageUrl> msgUrl(do_QueryInterface(aURI));
++              *default_charset = nullptr;
++              if (msgUrl) {
++                nsCOMPtr<nsIMsgDBHdr> hdr;
++                msgUrl->GetMessageHeader(getter_AddRefs(hdr));
++                if (hdr) {
++                  hdr->GetCharset(default_charset);
++                }
++              }
++              if (*default_charset && **default_charset) {
++                // Pretend that we're repeating the override from last time.
++                *override_charset = true;
++                // We want to update the window now in case the message
++                // doesn't carry any charset information.
++                forceFixWindow = true;
++              } else {
++                *default_charset = strdup("UTF-8");
++              }
+             }
+           }
+ 
+-          // if there is no manual override and a folder charset exists
+-          // then check if we have a folder level override
+-          if (!(*override_charset) && *default_charset && **default_charset) {
++          if ((!(*override_charset) && *default_charset && **default_charset) ||
++              forceFixWindow) {
+             // notify the default to msgWindow (for the menu check mark)
+             // do not set the default in case of nsMimeMessageDraftOrTemplate
+             // or nsMimeMessageEditorTemplate because it is already set
+             // when the message is displayed and doing it again may overwrite
+             // the correct MIME charset parsed from the message header
+             if (aOutputType != nsMimeOutput::nsMimeMessageDraftOrTemplate &&
+                 aOutputType != nsMimeOutput::nsMimeMessageEditorTemplate) {
+               nsCOMPtr<nsIMsgMailNewsUrl> msgurl(do_QueryInterface(aURI));
