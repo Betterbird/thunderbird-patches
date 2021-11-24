@@ -1,0 +1,941 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1637777635 -3600
+# Parent  93f2c51935a835a984fe649ba513db2be33e1875
+Bug 1739814 - Change remaining URI APIs to from raw string to smart string.
+
+diff --git a/mailnews/compose/public/nsIMsgComposeService.idl b/mailnews/compose/public/nsIMsgComposeService.idl
+--- a/mailnews/compose/public/nsIMsgComposeService.idl
++++ b/mailnews/compose/public/nsIMsgComposeService.idl
+@@ -125,17 +125,17 @@ interface nsIMsgComposeService : nsISupp
+   /**
+    * Allow filters to automatically reply to a message. The reply message is
+    * based on the given template.
+    * @param msgHdr the header of the message being replied to
+    * @param templateUri uri of the template to base ther reply on
+    * @param msgWindow message window to use
+    * @param server server to use for determining which account to send from
+    */
+-  void replyWithTemplate(in nsIMsgDBHdr msgHdr, in string templateUri,
++  void replyWithTemplate(in nsIMsgDBHdr msgHdr, in AUTF8String templateUri,
+                          in nsIMsgWindow msgWindow, in nsIMsgIncomingServer server);
+ 
+   /**
+    * The docShell of each editor element used for composing should be registered
+    * with this service. docShells passed to initCompose get registered
+    * automatically. The registrations are typically used to get the msgCompose
+    * window when determining what remote content to allow to be displayed.
+    *
+diff --git a/mailnews/compose/src/nsMsgAttachmentHandler.cpp b/mailnews/compose/src/nsMsgAttachmentHandler.cpp
+--- a/mailnews/compose/src/nsMsgAttachmentHandler.cpp
++++ b/mailnews/compose/src/nsMsgAttachmentHandler.cpp
+@@ -549,17 +549,17 @@ nsresult nsMsgAttachmentHandler::SnarfMs
+ 
+       // Set us as the output stream for HTML data from libmime...
+       nsCOMPtr<nsIMimeStreamConverter> mimeConverter =
+           do_QueryInterface(m_mime_parser);
+       if (mimeConverter) {
+         mimeConverter->SetMimeOutputType(nsMimeOutput::nsMimeMessageDecrypt);
+         mimeConverter->SetForwardInline(false);
+         mimeConverter->SetIdentity(nullptr);
+-        mimeConverter->SetOriginalMsgURI(nullptr);
++        mimeConverter->SetOriginalMsgURI(EmptyCString());
+       }
+ 
+       nsCOMPtr<nsIURI> aURL;
+       rv = messageService->GetUrlForUri(uri, nullptr, getter_AddRefs(aURL));
+       if (NS_FAILED(rv)) goto done;
+ 
+       nsCOMPtr<nsIPrincipal> nullPrincipal =
+           NullPrincipal::CreateWithoutOriginAttributes();
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -942,17 +942,17 @@ nsMsgCompose::Initialize(nsIMsgComposePa
+   aParams->GetHtmlToQuote(mHtmlToQuote);
+ 
+   if (aDocShell) {
+     mDocShell = aDocShell;
+     // register the compose object with the compose service
+     rv = composeService->RegisterComposeDocShell(aDocShell, this);
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+-  return CreateMessage(originalMsgURI.get(), type, composeFields);
++  return CreateMessage(originalMsgURI, type, composeFields);
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgCompose::RegisterStateListener(
+     nsIMsgComposeStateListener* aStateListener) {
+   NS_ENSURE_ARG_POINTER(aStateListener);
+   mStateListeners.AppendElement(aStateListener);
+   return NS_OK;
+@@ -1455,17 +1455,17 @@ nsresult nsMsgCompose::GetWrapLength(int
+   nsresult rv;
+   nsCOMPtr<nsIPrefBranch> prefBranch(
+       do_GetService(NS_PREFSERVICE_CONTRACTID, &rv));
+   if (NS_FAILED(rv)) return rv;
+ 
+   return prefBranch->GetIntPref("mailnews.wraplength", aWrapLength);
+ }
+ 
+-nsresult nsMsgCompose::CreateMessage(const char* originalMsgURI,
++nsresult nsMsgCompose::CreateMessage(const nsACString& originalMsgURI,
+                                      MSG_ComposeType type,
+                                      nsIMsgCompFields* compFields) {
+   nsresult rv = NS_OK;
+   mType = type;
+   mDraftDisposition = nsIMsgFolder::nsMsgDispositionState_None;
+ 
+   mDeleteDraft = (type == nsIMsgCompType::Draft);
+   nsAutoCString msgUri(originalMsgURI);
+@@ -1483,17 +1483,16 @@ nsresult nsMsgCompose::CreateMessage(con
+       if (msgUri.CharAt(msgUri.Length() - 1) == '?')
+         msgUri.Cut(msgUri.Length() - 1, 1);
+     } else  // we're dealing with a message/rfc822 attachment
+     {
+       // nsURLFetcher will check for "realtype=message/rfc822" and will set the
+       // content type to message/rfc822 in the forwarded message.
+       msgUri.AppendLiteral("&realtype=message/rfc822");
+     }
+-    originalMsgURI = msgUri.get();
+   }
+ 
+   if (compFields) {
+     m_compFields = reinterpret_cast<nsMsgCompFields*>(compFields);
+   } else {
+     m_compFields = new nsMsgCompFields();
+   }
+ 
+@@ -1577,33 +1576,33 @@ nsresult nsMsgCompose::CreateMessage(con
+         }
+       }
+     } else {
+       NS_WARNING("CreateMessage can't get draft id");
+     }
+   }
+ 
+   // If we don't have an original message URI, nothing else to do...
+-  if (!originalMsgURI || *originalMsgURI == 0) return NS_OK;
++  if (msgUri.IsEmpty()) return NS_OK;
+ 
+   // store the original message URI so we can extract it after we send the
+   // message to properly mark any disposition flags like replied or forwarded on
+   // the message.
+-  if (mOriginalMsgURI.IsEmpty()) mOriginalMsgURI = originalMsgURI;
++  if (mOriginalMsgURI.IsEmpty()) mOriginalMsgURI = msgUri;
+ 
+   nsCOMPtr<nsIPrefBranch> prefs(do_GetService(NS_PREFSERVICE_CONTRACTID, &rv));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // "Forward inline" and "Reply with template" processing.
+   // Note the early return at the end of the block.
+   if (type == nsIMsgCompType::ForwardInline ||
+       type == nsIMsgCompType::ReplyWithTemplate) {
+     // We want to treat this message as a reference too
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+-    rv = GetMsgDBHdrFromURI(nsDependentCString(originalMsgURI), getter_AddRefs(msgHdr));
++    rv = GetMsgDBHdrFromURI(msgUri, getter_AddRefs(msgHdr));
+     if (NS_SUCCEEDED(rv)) {
+       nsAutoCString messageId;
+       msgHdr->GetMessageId(getter_Copies(messageId));
+ 
+       nsAutoCString reference;
+       // When forwarding we only use the original message for "References:" -
+       // recipients don't have the other messages anyway.
+       // For reply with template we want to preserve all the references.
+@@ -1628,34 +1627,33 @@ nsresult nsMsgCompose::CreateMessage(con
+       m_compFields->SetReferences(reference.get());
+     }
+ 
+     // Early return for "Forward inline" and "Reply with template" processing.
+     return NS_OK;
+   }
+ 
+   // All other processing.
+-  char* uriList = PL_strdup(originalMsgURI);
+-  if (!uriList) return NS_ERROR_OUT_OF_MEMORY;
+ 
+   // Check for the charset of the last displayed message, it
+   // will be used for quoting and as override.
+   nsCString windowCharset;
+   mCharsetOverride = false;
+   mAnswerDefaultCharset = false;
+   GetTopmostMsgWindowCharacterSet(windowCharset, &mCharsetOverride);
+ 
+   // Note the following:
+   // LoadDraftOrTemplate() is run in nsMsgComposeService::OpenComposeWindow()
+   // for five compose types: ForwardInline, ReplyWithTemplate (both covered
+   // in the code block above) and Draft, Template and Redirect. For these
+   // compose types, the charset is already correct (incl. MIME-applied override)
+   // unless the default charset should be used.
+ 
+   bool isFirstPass = true;
++  char* uriList = ToNewCString(msgUri);
+   char* uri = uriList;
+   char* nextUri;
+   do {
+     nextUri = strstr(uri, "://");
+     if (nextUri) {
+       // look for next ://, and then back up to previous ','
+       nextUri = strstr(nextUri + 1, "://");
+       if (nextUri) {
+diff --git a/mailnews/compose/src/nsMsgCompose.h b/mailnews/compose/src/nsMsgCompose.h
+--- a/mailnews/compose/src/nsMsgCompose.h
++++ b/mailnews/compose/src/nsMsgCompose.h
+@@ -65,17 +65,17 @@ class nsMsgCompose : public nsIMsgCompos
+ 
+   bool CheckIncludeSignaturePrefs(nsIMsgIdentity* identity);
+   // m_folderName to store the value of the saved drafts folder.
+   nsCString m_folderName;
+   void InsertDivWrappedTextAtSelection(const nsAString& aText,
+                                        const nsAString& classStr);
+ 
+  protected:
+-  nsresult CreateMessage(const char* originalMsgURI, MSG_ComposeType type,
++  nsresult CreateMessage(const nsACString& originalMsgURI, MSG_ComposeType type,
+                          nsIMsgCompFields* compFields);
+   void CleanUpRecipients(nsString& recipients);
+   nsresult GetABDirAndMailLists(const nsACString& aDirUri,
+                                 nsCOMArray<nsIAbDirectory>& aDirArray,
+                                 nsTArray<nsMsgMailList>& aMailListArray);
+   nsresult ResolveMailList(nsIAbDirectory* aMailList,
+                            nsCOMArray<nsIAbDirectory>& allDirectoriesArray,
+                            nsTArray<nsMsgMailList>& allMailListArray,
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -387,17 +387,17 @@ nsMsgComposeService::OpenComposeWindow(
+     else if (type == nsIMsgCompType::EditTemplate)
+       uriToOpen.AppendLiteral("&edittempl=true");
+ 
+     return LoadDraftOrTemplate(
+         uriToOpen,
+         type == nsIMsgCompType::ForwardInline || type == nsIMsgCompType::Draft
+             ? nsMimeOutput::nsMimeMessageDraftOrTemplate
+             : nsMimeOutput::nsMimeMessageEditorTemplate,
+-        identity, PromiseFlatCString(originalMsgURI).get(), origMsgHdr,
++        identity, originalMsgURI, origMsgHdr,
+         type == nsIMsgCompType::ForwardInline,
+         format == nsIMsgCompFormat::OppositeOfDefault, aMsgWindow);
+   }
+ 
+   nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams(
+       do_CreateInstance(NS_MSGCOMPOSEPARAMS_CONTRACTID, &rv));
+   if (NS_SUCCEEDED(rv) && pMsgComposeParams) {
+     nsCOMPtr<nsIMsgCompFields> pMsgCompFields(
+@@ -822,22 +822,23 @@ nsMsgTemplateReplyHelper::OnDataAvailabl
+         strncpy(mLastBlockChars, readBuf + readCount - 3, 3);
+     }
+     mTemplateBody.Append(readBuf + bodyOffset);
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgComposeService::ReplyWithTemplate(
+-    nsIMsgDBHdr* aMsgHdr, const char* templateUri, nsIMsgWindow* aMsgWindow,
+-    nsIMsgIncomingServer* aServer) {
++    nsIMsgDBHdr* aMsgHdr, const nsACString& templateUri,
++    nsIMsgWindow* aMsgWindow, nsIMsgIncomingServer* aServer) {
+   // To reply with template, we need the message body of the template.
+   // I think we're going to need to stream the template message to ourselves,
+   // and construct the body, and call setBody on the compFields.
+   nsresult rv;
++  const nsPromiseFlatCString& templateUriFlat = PromiseFlatCString(templateUri);
+   nsCOMPtr<nsIMsgAccountManager> accountManager =
+       do_GetService(NS_MSGACCOUNTMANAGER_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgAccount> account;
+   rv = accountManager->FindAccountForServer(aServer, getter_AddRefs(account));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+@@ -877,26 +878,26 @@ NS_IMETHODIMP nsMsgComposeService::Reply
+   nsAutoCString replyTo;
+   aMsgHdr->GetStringProperty("replyTo", getter_Copies(replyTo));
+   if (replyTo.IsEmpty()) aMsgHdr->GetAuthor(getter_Copies(replyTo));
+   if (replyTo.IsEmpty()) return NS_ERROR_FAILURE;  // nowhere to send the reply
+ 
+   nsCOMPtr<nsIMsgFolder> templateFolder;
+   nsCOMPtr<nsIMsgDatabase> templateDB;
+   nsCString templateMsgHdrUri;
+-  const char* query = PL_strstr(templateUri, "?messageId=");
++  const char* query = PL_strstr(templateUriFlat.get(), "?messageId=");
+   if (!query) return NS_ERROR_FAILURE;
+ 
+-  nsAutoCString folderUri(Substring(templateUri, query));
++  nsAutoCString folderUri(Substring(templateUriFlat.get(), query));
+   rv = GetExistingFolder(folderUri, getter_AddRefs(templateFolder));
+   NS_ENSURE_SUCCESS(rv, rv);
+   rv = templateFolder->GetMsgDatabase(getter_AddRefs(templateDB));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  const char* subject = PL_strstr(templateUri, "&subject=");
++  const char* subject = PL_strstr(templateUriFlat.get(), "&subject=");
+   if (subject) {
+     const char* subjectEnd = subject + strlen(subject);
+     nsAutoCString messageId(Substring(query + 11, subject));
+     nsAutoCString subjectString(Substring(subject + 9, subjectEnd));
+     templateDB->GetMsgHdrForMessageID(messageId.get(),
+                                       getter_AddRefs(helper->mTemplateHdr));
+     if (helper->mTemplateHdr)
+       templateFolder->GetUriForMsg(helper->mTemplateHdr, templateMsgHdrUri);
+@@ -984,17 +985,17 @@ nsMsgComposeService::ForwardMessage(cons
+   if (NS_FAILED(rv) || !identity) {
+     rv = GetDefaultIdentity(getter_AddRefs(identity));
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   if (aForwardType == nsIMsgComposeService::kForwardInline)
+     return RunMessageThroughMimeDraft(
+         uriToOpen, nsMimeOutput::nsMimeMessageDraftOrTemplate, identity,
+-        uriToOpen.get(), aMsgHdr, true, forwardTo, false, aMsgWindow);
++        uriToOpen, aMsgHdr, true, forwardTo, false, aMsgWindow);
+ 
+   nsCOMPtr<mozIDOMWindowProxy> parentWindow;
+   if (aMsgWindow) {
+     nsCOMPtr<nsIDocShell> docShell;
+     rv = aMsgWindow->GetRootDocShell(getter_AddRefs(docShell));
+     NS_ENSURE_SUCCESS(rv, rv);
+     parentWindow = do_GetInterface(docShell);
+     NS_ENSURE_TRUE(parentWindow, NS_ERROR_FAILURE);
+@@ -1200,17 +1201,17 @@ nsMsgComposeService::GetMsgComposeForDoc
+ 
+ /**
+  * LoadDraftOrTemplate
+  *   Helper routine used to run msgURI through libmime in order to fetch the
+  * contents for a draft or template.
+  */
+ nsresult nsMsgComposeService::LoadDraftOrTemplate(
+     const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-    nsIMsgIdentity* aIdentity, const char* aOriginalMsgURI,
++    nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+     nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, bool overrideComposeFormat,
+     nsIMsgWindow* aMsgWindow) {
+   return RunMessageThroughMimeDraft(
+       aMsgURI, aOutType, aIdentity, aOriginalMsgURI, aOrigMsgHdr,
+       aForwardInline, EmptyString(), overrideComposeFormat, aMsgWindow);
+ }
+ 
+ /**
+@@ -1233,17 +1234,17 @@ nsresult nsMsgComposeService::LoadDraftO
+  * @param aOverrideComposeFormat True if the user had shift key down when
+                                  doing a command that opens the compose window,
+  *                               which means we switch the compose window used
+  *                               from the default.
+  * @param aMsgWindow msgWindow to pass into DisplayMessage.
+  */
+ nsresult nsMsgComposeService::RunMessageThroughMimeDraft(
+     const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-    nsIMsgIdentity* aIdentity, const char* aOriginalMsgURI,
++    nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+     nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, const nsAString& aForwardTo,
+     bool aOverrideComposeFormat, nsIMsgWindow* aMsgWindow) {
+   nsCOMPtr<nsIMsgMessageService> messageService;
+   nsresult rv =
+       GetMessageServiceFromURI(aMsgURI, getter_AddRefs(messageService));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // Create a mime parser (nsIMimeStreamConverter)to do the conversion.
+@@ -1267,17 +1268,17 @@ nsresult nsMsgComposeService::RunMessage
+   bool fileUrl = StringBeginsWith(aMsgURI, "file:"_ns);
+   nsCString mailboxUri(aMsgURI);
+   if (fileUrl) {
+     // We loaded a .eml file from a file: url. Construct equivalent mailbox url.
+     mailboxUri.Replace(0, 5, "mailbox:"_ns);
+     mailboxUri.AppendLiteral("&number=0");
+     // Need this to prevent nsMsgCompose::TagEmbeddedObjects from setting
+     // inline images as moz-do-not-send.
+-    mimeConverter->SetOriginalMsgURI(mailboxUri.get());
++    mimeConverter->SetOriginalMsgURI(mailboxUri);
+   }
+   if (fileUrl || PromiseFlatCString(aMsgURI).Find(
+                      "&type=application/x-message-display") >= 0)
+     rv = NS_NewURI(getter_AddRefs(url), mailboxUri);
+   else
+     rv = messageService->GetUrlForUri(aMsgURI, aMsgWindow, getter_AddRefs(url));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+diff --git a/mailnews/compose/src/nsMsgComposeService.h b/mailnews/compose/src/nsMsgComposeService.h
+--- a/mailnews/compose/src/nsMsgComposeService.h
++++ b/mailnews/compose/src/nsMsgComposeService.h
+@@ -35,24 +35,24 @@ class nsMsgComposeService : public nsIMs
+ 
+  private:
+   virtual ~nsMsgComposeService();
+   bool mLogComposePerformance;
+ 
+   nsresult LoadDraftOrTemplate(const nsACString& aMsgURI,
+                                nsMimeOutputType aOutType,
+                                nsIMsgIdentity* aIdentity,
+-                               const char* aOriginalMsgURI,
++                               const nsACString& aOriginalMsgURI,
+                                nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline,
+                                bool overrideComposeFormat,
+                                nsIMsgWindow* aMsgWindow);
+ 
+   nsresult RunMessageThroughMimeDraft(
+       const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-      nsIMsgIdentity* aIdentity, const char* aOriginalMsgURI,
++      nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+       nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, const nsAString& forwardTo,
+       bool overrideComposeFormat, nsIMsgWindow* aMsgWindow);
+ 
+   // hash table mapping dom windows to nsIMsgCompose objects
+   nsInterfaceHashtable<nsISupportsHashKey, nsIWeakReference>
+       mOpenComposeWindows;
+ 
+   // When doing a reply and the settings are enabled, get the HTML of the
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -3376,18 +3376,18 @@ NS_IMETHODIMP nsImapMailFolder::ApplyFil
+           filterAction->GetStrValue(replyTemplateUri);
+           nsCOMPtr<nsIMsgIncomingServer> server;
+           rv = GetServer(getter_AddRefs(server));
+           if (NS_FAILED(rv)) break;
+           if (!replyTemplateUri.IsEmpty()) {
+             nsCOMPtr<nsIMsgComposeService> compService =
+                 do_GetService(NS_MSGCOMPOSESERVICE_CONTRACTID, &rv);
+             if (NS_SUCCEEDED(rv) && compService) {
+-              rv = compService->ReplyWithTemplate(
+-                  msgHdr, replyTemplateUri.get(), msgWindow, server);
++              rv = compService->ReplyWithTemplate(msgHdr, replyTemplateUri,
++                                                  msgWindow, server);
+               if (NS_FAILED(rv)) {
+                 NS_WARNING("ReplyWithTemplate failed");
+                 if (rv == NS_ERROR_ABORT) {
+                   (void)filter->LogRuleHitFail(
+                       filterAction, msgHdr, rv,
+                       "filterFailureSendingReplyAborted"_ns);
+                 } else {
+                   (void)filter->LogRuleHitFail(
+diff --git a/mailnews/local/public/nsIPop3Sink.idl b/mailnews/local/public/nsIPop3Sink.idl
+--- a/mailnews/local/public/nsIPop3Sink.idl
++++ b/mailnews/local/public/nsIPop3Sink.idl
+@@ -8,23 +8,23 @@
+ #include "nsIMsgFolder.idl"
+ 
+ interface nsIURI;
+ 
+ [scriptable, uuid(ceabfc6b-f139-4c25-890f-efb7c3069d40)]
+ interface nsIPop3Sink : nsISupports {
+ 
+   attribute boolean userAuthenticated;
+-  attribute ACString mailAccountURL;
++  attribute AUTF8String mailAccountURL;
+   attribute boolean buildMessageUri;
+-  attribute string messageUri;
+-  attribute string baseMessageUri;
++  attribute AUTF8String messageUri;
++  attribute AUTF8String baseMessageUri;
+ 
+   /// message uri for header-only message version
+-  attribute ACString origMessageUri;
++  attribute AUTF8String origMessageUri;
+ 
+   boolean BeginMailDelivery(in boolean uidlDownload, in nsIMsgWindow msgWindow);
+   void endMailDelivery(in nsIPop3Protocol protocol);
+   void AbortMailDelivery(in nsIPop3Protocol protocol);
+ 
+   /* returns a closure ? */
+   [noscript] voidPtr IncorporateBegin(in string uidlString, in nsIURI aURL,
+                                       in unsigned long flags);
+diff --git a/mailnews/local/public/nsIPop3URL.idl b/mailnews/local/public/nsIPop3URL.idl
+--- a/mailnews/local/public/nsIPop3URL.idl
++++ b/mailnews/local/public/nsIPop3URL.idl
+@@ -4,16 +4,16 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "nsISupports.idl"
+ #include "nsIPop3Sink.idl"
+ 
+ [scriptable, uuid(5fb87ae7-a3a0-440a-8b49-6bca42fb7ff2)]
+ interface nsIPop3URL : nsISupports {
+   attribute nsIPop3Sink pop3Sink;
+-  attribute string messageUri;
++  attribute AUTF8String messageUri;
+ 
+   /// Constant for the default POP3 port number
+   const int32_t DEFAULT_POP3_PORT = 110;
+ 
+   /// Constant for the default POP3 over ssl port number
+   const int32_t DEFAULT_POP3S_PORT = 995;
+ };
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -2811,19 +2811,19 @@ nsMsgLocalMailFolder::OnStartRunningUrl(
+   if (NS_SUCCEEDED(rv)) {
+     nsAutoCString aSpec;
+     rv = aUrl->GetSpec(aSpec);
+     NS_ENSURE_SUCCESS(rv, rv);
+     if (strstr(aSpec.get(), "uidl=")) {
+       nsCOMPtr<nsIPop3Sink> popsink;
+       rv = popurl->GetPop3Sink(getter_AddRefs(popsink));
+       if (NS_SUCCEEDED(rv)) {
+-        popsink->SetBaseMessageUri(mBaseMessageURI.get());
++        popsink->SetBaseMessageUri(mBaseMessageURI);
+         nsCString messageuri;
+-        popurl->GetMessageUri(getter_Copies(messageuri));
++        popurl->GetMessageUri(messageuri);
+         popsink->SetOrigMessageUri(messageuri);
+       }
+     }
+   }
+   return nsMsgDBFolder::OnStartRunningUrl(aUrl);
+ }
+ 
+ NS_IMETHODIMP
+@@ -2848,32 +2848,32 @@ nsMsgLocalMailFolder::OnStopRunningUrl(n
+       rv = aUrl->GetSpec(aSpec);
+       NS_ENSURE_SUCCESS(rv, rv);
+     }
+ 
+     if (strstr(aSpec.get(), "uidl=")) {
+       nsCOMPtr<nsIPop3URL> popurl = do_QueryInterface(aUrl, &rv);
+       if (NS_SUCCEEDED(rv)) {
+         nsCString messageuri;
+-        rv = popurl->GetMessageUri(getter_Copies(messageuri));
++        rv = popurl->GetMessageUri(messageuri);
+         if (NS_SUCCEEDED(rv)) {
+           NS_ENSURE_SUCCESS(rv, rv);
+           nsCOMPtr<nsIMsgDBHdr> msgDBHdr;
+           rv = GetMsgDBHdrFromURI(messageuri, getter_AddRefs(msgDBHdr));
+           if (NS_SUCCEEDED(rv)) {
+             GetDatabase();
+             if (mDatabase)
+               mDatabase->DeleteHeader(msgDBHdr, nullptr, true, true);
+           }
+ 
+           nsCOMPtr<nsIPop3Sink> pop3sink;
+           nsCString newMessageUri;
+           rv = popurl->GetPop3Sink(getter_AddRefs(pop3sink));
+           if (NS_SUCCEEDED(rv)) {
+-            pop3sink->GetMessageUri(getter_Copies(newMessageUri));
++            pop3sink->GetMessageUri(newMessageUri);
+             if (msgWindow) {
+               nsCOMPtr<nsIMsgWindowCommands> windowCommands;
+               msgWindow->GetWindowCommands(getter_AddRefs(windowCommands));
+               if (windowCommands) windowCommands->SelectMessage(newMessageUri);
+             }
+           }
+         }
+       }
+diff --git a/mailnews/local/src/nsParseMailbox.cpp b/mailnews/local/src/nsParseMailbox.cpp
+--- a/mailnews/local/src/nsParseMailbox.cpp
++++ b/mailnews/local/src/nsParseMailbox.cpp
+@@ -2203,19 +2203,18 @@ nsresult nsParseNewMailState::ApplyForwa
+     if (!m_replyTemplateUri[i].IsEmpty()) {
+       // copy this and truncate the original, so we don't accidentally re-use it
+       // on the next hdr.
+       rv = m_rootFolder->GetServer(getter_AddRefs(server));
+       if (server) {
+         nsCOMPtr<nsIMsgComposeService> compService =
+             do_GetService(NS_MSGCOMPOSESERVICE_CONTRACTID);
+         if (compService) {
+-          rv = compService->ReplyWithTemplate(m_msgToForwardOrReply,
+-                                              m_replyTemplateUri[i].get(),
+-                                              msgWindow, server);
++          rv = compService->ReplyWithTemplate(
++              m_msgToForwardOrReply, m_replyTemplateUri[i], msgWindow, server);
+           if (NS_FAILED(rv)) {
+             NS_WARNING("ReplyWithTemplate failed");
+             MOZ_LOG(FILTERLOGMODULE, LogLevel::Error,
+                     ("(Local) Replying failed"));
+             if (rv == NS_ERROR_ABORT) {
+               (void)m_filter->LogRuleHitFail(
+                   m_ruleAction, m_msgToForwardOrReply, rv,
+                   "filterFailureSendingReplyAborted"_ns);
+diff --git a/mailnews/local/src/nsPop3Service.cpp b/mailnews/local/src/nsPop3Service.cpp
+--- a/mailnews/local/src/nsPop3Service.cpp
++++ b/mailnews/local/src/nsPop3Service.cpp
+@@ -373,17 +373,17 @@ nsresult nsPop3Service::NewURI(const nsA
+ 
+   nsAutoCString messageUri(aSpec);
+   if (!strncmp(messageUri.get(), "mailbox:", 8))
+     messageUri.Replace(0, 8, "mailbox-message:");
+   offset = messageUri.Find("?number=");
+   if (offset != kNotFound) messageUri.Replace(offset, 8, "#");
+   offset = messageUri.FindChar('&');
+   if (offset != kNotFound) messageUri.SetLength(offset);
+-  popurl->SetMessageUri(messageUri.get());
++  popurl->SetMessageUri(messageUri);
+   nsCOMPtr<nsIPop3Sink> pop3Sink;
+   rv = popurl->GetPop3Sink(getter_AddRefs(pop3Sink));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   pop3Sink->SetBuildMessageUri(true);
+ 
+   newUri.forget(_retval);
+   return NS_OK;
+diff --git a/mailnews/local/src/nsPop3Sink.cpp b/mailnews/local/src/nsPop3Sink.cpp
+--- a/mailnews/local/src/nsPop3Sink.cpp
++++ b/mailnews/local/src/nsPop3Sink.cpp
+@@ -838,41 +838,37 @@ nsPop3Sink::GetBuildMessageUri(bool* bVa
+ 
+ NS_IMETHODIMP
+ nsPop3Sink::SetBuildMessageUri(bool bVal) {
+   m_buildMessageUri = bVal;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsPop3Sink::GetMessageUri(char** messageUri) {
+-  NS_ENSURE_ARG_POINTER(messageUri);
++nsPop3Sink::GetMessageUri(nsACString& messageUri) {
+   NS_ENSURE_TRUE(!m_messageUri.IsEmpty(), NS_ERROR_FAILURE);
+-  *messageUri = ToNewCString(m_messageUri);
++  messageUri = m_messageUri;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsPop3Sink::SetMessageUri(const char* messageUri) {
+-  NS_ENSURE_ARG_POINTER(messageUri);
++nsPop3Sink::SetMessageUri(const nsACString& messageUri) {
+   m_messageUri = messageUri;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsPop3Sink::GetBaseMessageUri(char** baseMessageUri) {
+-  NS_ENSURE_ARG_POINTER(baseMessageUri);
++nsPop3Sink::GetBaseMessageUri(nsACString& baseMessageUri) {
+   NS_ENSURE_TRUE(!m_baseMessageUri.IsEmpty(), NS_ERROR_FAILURE);
+-  *baseMessageUri = ToNewCString(m_baseMessageUri);
++  baseMessageUri = m_baseMessageUri;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsPop3Sink::SetBaseMessageUri(const char* baseMessageUri) {
+-  NS_ENSURE_ARG_POINTER(baseMessageUri);
++nsPop3Sink::SetBaseMessageUri(const nsACString& baseMessageUri) {
+   m_baseMessageUri = baseMessageUri;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsPop3Sink::GetOrigMessageUri(nsACString& aOrigMessageUri) {
+   aOrigMessageUri.Assign(m_origMessageUri);
+   return NS_OK;
+diff --git a/mailnews/local/src/nsPop3URL.cpp b/mailnews/local/src/nsPop3URL.cpp
+--- a/mailnews/local/src/nsPop3URL.cpp
++++ b/mailnews/local/src/nsPop3URL.cpp
+@@ -31,19 +31,19 @@ nsresult nsPop3URL::GetPop3Sink(nsIPop3S
+   if (aPop3Sink) {
+     *aPop3Sink = m_pop3Sink;
+     NS_IF_ADDREF(*aPop3Sink);
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsPop3URL::GetMessageUri(char** aMessageUri) {
+-  if (!aMessageUri || m_messageUri.IsEmpty()) return NS_ERROR_NULL_POINTER;
+-  *aMessageUri = ToNewCString(m_messageUri);
++nsPop3URL::GetMessageUri(nsACString& aMessageUri) {
++  if (m_messageUri.IsEmpty()) return NS_ERROR_NULL_POINTER;
++  aMessageUri = m_messageUri;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsPop3URL::SetMessageUri(const char* aMessageUri) {
+-  if (aMessageUri) m_messageUri = aMessageUri;
++nsPop3URL::SetMessageUri(const nsACString& aMessageUri) {
++  m_messageUri = aMessageUri;
+   return NS_OK;
+ }
+diff --git a/mailnews/mime/public/nsIMimeStreamConverter.idl b/mailnews/mime/public/nsIMimeStreamConverter.idl
+--- a/mailnews/mime/public/nsIMimeStreamConverter.idl
++++ b/mailnews/mime/public/nsIMimeStreamConverter.idl
+@@ -83,11 +83,11 @@ interface nsIMimeStreamConverter : nsISu
+    * Use the opposite compose format, used for forward inline.
+    */
+   attribute boolean overrideComposeFormat;
+ 
+   /**
+    * This is used for OpenDraft, OpenEditorTemplate and Forward inline (which use OpenDraft)
+    */
+   attribute nsIMsgIdentity identity;
+-  attribute string originalMsgURI;
++  attribute AUTF8String originalMsgURI;
+   attribute nsIMsgDBHdr origMsgHdr;
+ };
+diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
+--- a/mailnews/mime/src/mimedrft.cpp
++++ b/mailnews/mime/src/mimedrft.cpp
+@@ -86,17 +86,16 @@ mime_draft_data::mime_draft_data()
+       headers(nullptr),
+       messageBody(nullptr),
+       curAttachment(nullptr),
+       decoder_data(nullptr),
+       mailcharset(nullptr),
+       forwardInline(false),
+       forwardInlineFilter(false),
+       overrideComposeFormat(false),
+-      originalMsgURI(nullptr),
+       autodetectCharset(false) {}
+ ////////////////////////////////////////////////////////////////////////////////////
+ ////////////////////////////////////////////////////////////////////////////////////
+ // THIS SHOULD ALL MOVE TO ANOTHER FILE AFTER LANDING!
+ ////////////////////////////////////////////////////////////////////////////////////
+ ////////////////////////////////////////////////////////////////////////////////////
+ 
+ // safe filename for all OSes
+@@ -163,17 +162,17 @@ extern "C" void mime_dump_attachments(ns
+ #endif
+ 
+ nsresult CreateComposeParams(nsCOMPtr<nsIMsgComposeParams>& pMsgComposeParams,
+                              nsIMsgCompFields* compFields,
+                              nsMsgAttachmentData* attachmentList,
+                              MSG_ComposeType composeType,
+                              MSG_ComposeFormat composeFormat,
+                              nsIMsgIdentity* identity,
+-                             const char* originalMsgURI,
++                             const nsACString& originalMsgURI,
+                              nsIMsgDBHdr* origMsgHdr) {
+ #ifdef NS_DEBUG
+   mime_dump_attachments(attachmentList);
+ #endif
+ 
+   nsresult rv;
+   nsMsgAttachmentData* curAttachment = attachmentList;
+   if (curAttachment) {
+@@ -232,28 +231,28 @@ nsresult CreateComposeParams(nsCOMPtr<ns
+ 
+   pMsgComposeParams = do_CreateInstance(NS_MSGCOMPOSEPARAMS_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   pMsgComposeParams->SetType(composeType);
+   pMsgComposeParams->SetFormat(format);
+   pMsgComposeParams->SetIdentity(identity);
+   pMsgComposeParams->SetComposeFields(compFields);
+-  if (originalMsgURI)
+-    pMsgComposeParams->SetOriginalMsgURI(nsDependentCString(originalMsgURI));
++  if (!originalMsgURI.IsEmpty())
++    pMsgComposeParams->SetOriginalMsgURI(originalMsgURI);
+   if (origMsgHdr) pMsgComposeParams->SetOrigMsgHdr(origMsgHdr);
+   return NS_OK;
+ }
+ 
+ nsresult CreateTheComposeWindow(nsIMsgCompFields* compFields,
+                                 nsMsgAttachmentData* attachmentList,
+                                 MSG_ComposeType composeType,
+                                 MSG_ComposeFormat composeFormat,
+                                 nsIMsgIdentity* identity,
+-                                const char* originalMsgURI,
++                                const nsACString& originalMsgURI,
+                                 nsIMsgDBHdr* origMsgHdr) {
+   nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams;
+   nsresult rv = CreateComposeParams(pMsgComposeParams, compFields,
+                                     attachmentList, composeType, composeFormat,
+                                     identity, originalMsgURI, origMsgHdr);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgComposeService> msgComposeService =
+@@ -262,17 +261,18 @@ nsresult CreateTheComposeWindow(nsIMsgCo
+ 
+   return msgComposeService->OpenComposeWindowWithParams(
+       nullptr /* default chrome */, pMsgComposeParams);
+ }
+ 
+ nsresult ForwardMsgInline(nsIMsgCompFields* compFields,
+                           nsMsgAttachmentData* attachmentList,
+                           MSG_ComposeFormat composeFormat,
+-                          nsIMsgIdentity* identity, const char* originalMsgURI,
++                          nsIMsgIdentity* identity,
++                          const nsACString& originalMsgURI,
+                           nsIMsgDBHdr* origMsgHdr) {
+   nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams;
+   nsresult rv =
+       CreateComposeParams(pMsgComposeParams, compFields, attachmentList,
+                           nsIMsgCompType::ForwardInline, composeFormat,
+                           identity, originalMsgURI, origMsgHdr);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+@@ -1565,45 +1565,45 @@ static void mime_parse_stream_complete(n
+       if (mdd->format_out == nsMimeOutput::nsMimeMessageEditorTemplate) {
+ #ifdef NS_DEBUG
+         printf(
+             "RICHIE: Time to create the EDITOR with this template - NO "
+             "body!!!!\n");
+ #endif
+         CreateTheComposeWindow(fields, newAttachData, nsIMsgCompType::Template,
+                                nsIMsgCompFormat::Default, mdd->identity,
+-                               nullptr, mdd->origMsgHdr);
++                               EmptyCString(), mdd->origMsgHdr);
+       } else {
+ #ifdef NS_DEBUG
+         printf("Time to create the composition window WITHOUT a body!!!!\n");
+ #endif
+         if (mdd->forwardInline) {
+           MSG_ComposeFormat composeFormat =
+               (mdd->overrideComposeFormat) ? nsIMsgCompFormat::OppositeOfDefault
+                                            : nsIMsgCompFormat::Default;
+           CreateTheComposeWindow(fields, newAttachData,
+                                  nsIMsgCompType::ForwardInline, composeFormat,
+                                  mdd->identity, mdd->originalMsgURI,
+                                  mdd->origMsgHdr);
+         } else {
+           fields->SetDraftId(nsDependentCString(mdd->url_name));
+           CreateTheComposeWindow(fields, newAttachData, nsIMsgCompType::Draft,
+                                  nsIMsgCompFormat::Default, mdd->identity,
+-                                 nullptr, mdd->origMsgHdr);
++                                 EmptyCString(), mdd->origMsgHdr);
+         }
+       }
+     }
+   } else {
+     CreateCompositionFields(from, repl, to, cc, bcc, fcc, grps, foll, org, subj,
+                             refs, priority, news_host, mdd->mailcharset,
+                             getter_AddRefs(fields));
+     if (fields)
+       CreateTheComposeWindow(fields, newAttachData, nsIMsgCompType::New,
+-                             nsIMsgCompFormat::Default, mdd->identity, nullptr,
+-                             mdd->origMsgHdr);
++                             nsIMsgCompFormat::Default, mdd->identity,
++                             EmptyCString(), mdd->origMsgHdr);
+   }
+ 
+   if (mdd->headers) MimeHeaders_free(mdd->headers);
+ 
+   //
+   // Free the original attachment structure...
+   // Make sure we only cleanup the local copy of the memory and not kill
+   // files we need on disk
+@@ -1617,17 +1617,16 @@ static void mime_parse_stream_complete(n
+ 
+   for (uint32_t i = 0; i < mdd->attachments.Length(); i++)
+     mdd->attachments[i]->m_tmpFile = nullptr;
+ 
+   PR_FREEIF(mdd->mailcharset);
+ 
+   mdd->identity = nullptr;
+   PR_Free(mdd->url_name);
+-  PR_Free(mdd->originalMsgURI);
+   mdd->origMsgHdr = nullptr;
+   PR_Free(mdd);
+ 
+   PR_FREEIF(host);
+   PR_FREEIF(to_and_cc);
+   PR_FREEIF(re_subject);
+   PR_FREEIF(new_refs);
+   PR_FREEIF(from);
+@@ -2020,17 +2019,17 @@ extern "C" void* mime_bridge_create_draf
+     if (!(mdd->url_name)) goto FAIL;
+   }
+ 
+   newPluginObj2->GetForwardInline(&mdd->forwardInline);
+   newPluginObj2->GetForwardInlineFilter(&mdd->forwardInlineFilter);
+   newPluginObj2->GetForwardToAddress(mdd->forwardToAddress);
+   newPluginObj2->GetOverrideComposeFormat(&mdd->overrideComposeFormat);
+   newPluginObj2->GetIdentity(getter_AddRefs(mdd->identity));
+-  newPluginObj2->GetOriginalMsgURI(&mdd->originalMsgURI);
++  newPluginObj2->GetOriginalMsgURI(mdd->originalMsgURI);
+   newPluginObj2->GetOrigMsgHdr(getter_AddRefs(mdd->origMsgHdr));
+   mdd->format_out = format_out;
+   mdd->options = new MimeDisplayOptions;
+   if (!mdd->options) goto FAIL;
+ 
+   mdd->options->url = strdup(mdd->url_name);
+   mdd->options->format_out = format_out;  // output format
+   mdd->options->decompose_file_p = true;  /* new field in MimeDisplayOptions */
+@@ -2073,17 +2072,16 @@ extern "C" void* mime_bridge_create_draf
+   if (status >= 0) status = obj->clazz->parse_begin(obj);
+   if (status < 0) goto FAIL;
+ 
+   return stream;
+ 
+ FAIL:
+   if (mdd) {
+     PR_Free(mdd->url_name);
+-    PR_Free(mdd->originalMsgURI);
+     if (mdd->options) delete mdd->options;
+     PR_Free(mdd);
+   }
+   PR_Free(stream);
+   PR_Free(obj);
+ 
+   return nullptr;
+ }
+diff --git a/mailnews/mime/src/mimemoz2.h b/mailnews/mime/src/mimemoz2.h
+--- a/mailnews/mime/src/mimemoz2.h
++++ b/mailnews/mime/src/mimemoz2.h
+@@ -117,18 +117,18 @@ class mime_draft_data {
+ 
+   MimeDecoderData* decoder_data;
+   char* mailcharset;  // get it from CHARSET of Content-Type
+   bool forwardInline;
+   bool forwardInlineFilter;
+   bool overrideComposeFormat;  // Override compose format (for forward inline).
+   nsString forwardToAddress;
+   nsCOMPtr<nsIMsgIdentity> identity;
+-  char* originalMsgURI;  // the original URI of the message we are currently
+-                         // processing
++  nsCString originalMsgURI;  // the original URI of the message we are currently
++                             // processing
+   nsCOMPtr<nsIMsgDBHdr> origMsgHdr;
+   bool autodetectCharset; // Used to indicate pending autodetection while streaming contents.
+ };
+ 
+ ////////////////////////////////////////////////////////////////
+ // Bridge routines for legacy mime code
+ ////////////////////////////////////////////////////////////////
+ 
+diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
+--- a/mailnews/mime/src/nsStreamConverter.cpp
++++ b/mailnews/mime/src/nsStreamConverter.cpp
+@@ -725,25 +725,24 @@ nsStreamConverter::GetIdentity(nsIMsgIde
+ 
+ NS_IMETHODIMP
+ nsStreamConverter::SetIdentity(nsIMsgIdentity* aIdentity) {
+   mIdentity = aIdentity;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsStreamConverter::SetOriginalMsgURI(const char* originalMsgURI) {
++nsStreamConverter::SetOriginalMsgURI(const nsACString& originalMsgURI) {
+   mOriginalMsgURI = originalMsgURI;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsStreamConverter::GetOriginalMsgURI(char** result) {
+-  if (!result) return NS_ERROR_NULL_POINTER;
+-  *result = ToNewCString(mOriginalMsgURI);
++nsStreamConverter::GetOriginalMsgURI(nsACString& result) {
++  result = mOriginalMsgURI;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsStreamConverter::SetOrigMsgHdr(nsIMsgDBHdr* aMsgHdr) {
+   mOrigMsgHdr = aMsgHdr;
+   return NS_OK;
+ }
+diff --git a/mailnews/search/src/nsMsgFilterService.cpp b/mailnews/search/src/nsMsgFilterService.cpp
+--- a/mailnews/search/src/nsMsgFilterService.cpp
++++ b/mailnews/search/src/nsMsgFilterService.cpp
+@@ -879,17 +879,17 @@ nsresult nsMsgFilterAfterTheFact::ApplyF
+           nsCOMPtr<nsIMsgIncomingServer> server;
+           rv = curFolder->GetServer(getter_AddRefs(server));
+           BREAK_ACTION_IF_FAILURE(rv, "Could not get server");
+ 
+           nsCOMPtr<nsIMsgComposeService> compService =
+               do_GetService(NS_MSGCOMPOSESERVICE_CONTRACTID, &rv);
+           BREAK_ACTION_IF_FAILURE(rv, "Could not get compose service");
+           for (auto msgHdr : m_searchHitHdrs) {
+-            rv = compService->ReplyWithTemplate(msgHdr, replyTemplateUri.get(),
++            rv = compService->ReplyWithTemplate(msgHdr, replyTemplateUri,
+                                                 m_msgWindow, server);
+             if (NS_FAILED(rv)) {
+               if (rv == NS_ERROR_ABORT) {
+                 (void)curFilter->LogRuleHitFail(
+                     filterAction, msgHdr, rv,
+                     "filterFailureSendingReplyAborted"_ns);
+               } else {
+                 (void)curFilter->LogRuleHitFail(
