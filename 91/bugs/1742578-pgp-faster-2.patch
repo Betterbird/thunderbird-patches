@@ -1,0 +1,732 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1638484644 -3600
+# Node ID 4a4bc0a21f8bc41cbcdd120b622ec5d5546e898d
+# Parent  5868e017ba6bfffcae2b4aa1352e0b226aaa5eab
+Bug 1742578 - make getKeyListFromKeyBlock (and call chains) async. r=kaie
+
+Differential Revision: https://phabricator.services.mozilla.com/D132487
+
+diff --git a/mail/extensions/openpgp/content/modules/decryption.jsm b/mail/extensions/openpgp/content/modules/decryption.jsm
+--- a/mail/extensions/openpgp/content/modules/decryption.jsm
++++ b/mail/extensions/openpgp/content/modules/decryption.jsm
+@@ -519,17 +519,17 @@ var EnigmailDecryption = {
+ 
+   getPlaintextFromDecryptResult(result) {
+     if (this.isDecryptFailureResult(result)) {
+       return "";
+     }
+     return EnigmailData.getUnicodeData(result.decryptedData);
+   },
+ 
+-  decryptAttachment(
++  async decryptAttachment(
+     parent,
+     outFile,
+     displayName,
+     byteData,
+     exitCodeObj,
+     statusFlagsObj,
+     errorMsgObj
+   ) {
+@@ -548,17 +548,17 @@ var EnigmailDecryption = {
+       if (
+         EnigmailDialog.confirmDlg(
+           parent,
+           l10n.formatValueSync("attachment-pgp-key", { name: displayName }),
+           l10n.formatValueSync("key-man-button-import"),
+           l10n.formatValueSync("dlg-button-view")
+         )
+       ) {
+-        let preview = EnigmailKey.getKeyListFromKeyBlock(
++        let preview = await EnigmailKey.getKeyListFromKeyBlock(
+           byteData,
+           errorMsgObj,
+           true,
+           true,
+           false
+         );
+         exitCodeObj.keyList = preview;
+         if (preview && errorMsgObj.value === "") {
+@@ -604,17 +604,17 @@ var EnigmailDecryption = {
+       }
+       statusFlagsObj.ext = 0;
+       return true;
+     }
+ 
+     //var outFileName = EnigmailFiles.getEscapedFilename(EnigmailFiles.getFilePathReadonly(outFile.QueryInterface(Ci.nsIFile), NS_WRONLY));
+ 
+     const cApi = EnigmailCryptoAPI();
+-    let result = cApi.sync(cApi.decryptAttachment(byteData));
++    let result = await cApi.decryptAttachment(byteData);
+     if (!result) {
+       console.debug(
+         "EnigmailCryptoAPI.decryptAttachment() failed with empty result"
+       );
+       return false;
+     }
+ 
+     exitCodeObj.value = result.exitCode;
+diff --git a/mail/extensions/openpgp/content/modules/key.jsm b/mail/extensions/openpgp/content/modules/key.jsm
+--- a/mail/extensions/openpgp/content/modules/key.jsm
++++ b/mail/extensions/openpgp/content/modules/key.jsm
+@@ -123,23 +123,23 @@ var EnigmailKey = {
+ 
+   /**
+    * Get details (key ID, UID) of the data contained in a OpenPGP key block
+    *
+    * @param keyBlockStr  String: the contents of one or more public keys
+    * @param errorMsgObj  Object: obj.value will contain an error message in case of failures
+    * @param interactive  Boolean: if in interactive mode, may display dialogs (default: true)
+    *
+-   * @return Array of objects with the following structure:
++   * @return {Object[]} an array of objects with the following structure:
+    *          - id (key ID)
+    *          - fpr
+    *          - name (the UID of the key)
+    *          - state (one of "old" [existing key], "new" [new key], "invalid" [key cannot not be imported])
+    */
+-  getKeyListFromKeyBlock(
++  async getKeyListFromKeyBlock(
+     keyBlockStr,
+     errorMsgObj,
+     interactive = true,
+     pubkey,
+     seckey
+   ) {
+     EnigmailLog.DEBUG("key.jsm: getKeyListFromKeyBlock\n");
+ 
+@@ -218,19 +218,19 @@ var EnigmailKey = {
+ 
+   /**
+    * Get details of a key block to import. Works identically as getKeyListFromKeyBlock();
+    * except that the input is a file instead of a string
+    *
+    * @param file         nsIFile object - file to read
+    * @param errorMsgObj  Object - obj.value will contain error message
+    *
+-   * @return Array (same as for getKeyListFromKeyBlock())
++   * @return {Object[]} An array of objects; see getKeyListFromKeyBlock()
+    */
+-  getKeyListFromKeyFile(path, errorMsgObj, pubkey, seckey) {
++  async getKeyListFromKeyFile(path, errorMsgObj, pubkey, seckey) {
+     var contents = EnigmailFiles.readFile(path);
+     return this.getKeyListFromKeyBlock(
+       contents,
+       errorMsgObj,
+       true,
+       pubkey,
+       seckey
+     );
+diff --git a/mail/extensions/openpgp/content/modules/keyLookupHelper.jsm b/mail/extensions/openpgp/content/modules/keyLookupHelper.jsm
+--- a/mail/extensions/openpgp/content/modules/keyLookupHelper.jsm
++++ b/mail/extensions/openpgp/content/modules/keyLookupHelper.jsm
+@@ -30,17 +30,17 @@ var KeyLookupHelper = {
+     let defKs = EnigmailKeyserverURIs.getDefaultKeyServer();
+     if (!defKs) {
+       return false;
+     }
+ 
+     let somethingWasImported = false;
+     let vks = await EnigmailKeyServer.downloadNoImport(identifier, defKs);
+     if (vks && "keyData" in vks) {
+-      let keyList = EnigmailKey.getKeyListFromKeyBlock(
++      let keyList = await EnigmailKey.getKeyListFromKeyBlock(
+         vks.keyData,
+         {},
+         false,
+         true,
+         false
+       );
+       if (keyList) {
+         somethingWasImported = EnigmailKeyRing.importKeyDataWithConfirmation(
+@@ -98,17 +98,17 @@ var KeyLookupHelper = {
+     );
+   },
+ 
+   async lookupAndImportByEmail(window, email, giveFeedbackToUser, whenDoneCB) {
+     let wkdKeys = await EnigmailWkdLookup.downloadKey(email);
+     if (!wkdKeys) {
+       console.debug("searchKeysOnInternet no wkd data for " + email);
+     } else {
+-      let keyList = EnigmailKey.getKeyListFromKeyBlock(
++      let keyList = await EnigmailKey.getKeyListFromKeyBlock(
+         wkdKeys.keyData,
+         {},
+         false,
+         true,
+         false
+       );
+       if (!keyList) {
+         EnigmailDialog.alert(window, await l10n.formatValue("preview-failed"));
+diff --git a/mail/extensions/openpgp/content/modules/persistentCrypto.jsm b/mail/extensions/openpgp/content/modules/persistentCrypto.jsm
+--- a/mail/extensions/openpgp/content/modules/persistentCrypto.jsm
++++ b/mail/extensions/openpgp/content/modules/persistentCrypto.jsm
+@@ -431,17 +431,17 @@ CryptMessageIntoFolder.prototype = {
+ 
+     if (this.isBrokenByExchange(mimePart)) {
+       this.fixExchangeMessage(mimePart);
+     }
+ 
+     if (this.isPgpMime(mimePart)) {
+       this.decryptPGPMIME(mimePart);
+     } else if (isAttachment(mimePart)) {
+-      this.decryptAttachment(mimePart);
++      this.pgpDecryptAttachment(mimePart);
+     } else {
+       this.decryptINLINE(mimePart);
+     }
+ 
+     for (let i in mimePart.subParts) {
+       await this.decryptMimeTree(mimePart.subParts[i]);
+     }
+   },
+@@ -654,18 +654,18 @@ CryptMessageIntoFolder.prototype = {
+         },
+         subParts: [],
+       },
+     ];
+ 
+     this.messageDecrypted = true;
+   },
+ 
+-  decryptAttachment(mimePart) {
+-    EnigmailLog.DEBUG("persistentCrypto.jsm: decryptAttachment()\n");
++  pgpDecryptAttachment(mimePart) {
++    EnigmailLog.DEBUG("persistentCrypto.jsm: pgpDecryptAttachment()\n");
+     let attachmentHead = mimePart.body.substr(0, 30);
+     if (attachmentHead.search(/-----BEGIN PGP \w{5,10} KEY BLOCK-----/) >= 0) {
+       // attachment appears to be a PGP key file, we just go-a-head
+       return;
+     }
+ 
+     const uiFlags =
+       EnigmailConstants.UI_INTERACTIVE |
+@@ -704,46 +704,46 @@ CryptMessageIntoFolder.prototype = {
+       encToDetailsObj
+     );
+ 
+     if (
+       (data && data.length > 0) ||
+       statusFlagsObj.value & EnigmailConstants.DECRYPTION_OKAY
+     ) {
+       EnigmailLog.DEBUG(
+-        "persistentCrypto.jsm: decryptAttachment: decryption OK\n"
++        "persistentCrypto.jsm: pgpDecryptAttachment: decryption OK\n"
+       );
+     } else if (
+       statusFlagsObj.value &
+       (EnigmailConstants.DECRYPTION_FAILED | EnigmailConstants.MISSING_MDC)
+     ) {
+       EnigmailLog.DEBUG(
+-        "persistentCrypto.jsm: decryptAttachment: decryption without MDC protection\n"
++        "persistentCrypto.jsm: pgpDecryptAttachment: decryption without MDC protection\n"
+       );
+     } else if (statusFlagsObj.value & EnigmailConstants.DECRYPTION_FAILED) {
+       EnigmailLog.DEBUG(
+-        "persistentCrypto.jsm: decryptAttachment: decryption failed\n"
++        "persistentCrypto.jsm: pgpDecryptAttachment: decryption failed\n"
+       );
+       // Enigmail promts the user here, but we just keep going.
+     } else if (statusFlagsObj.value & EnigmailConstants.DECRYPTION_INCOMPLETE) {
+       // failure; message not complete
+       EnigmailLog.DEBUG(
+-        "persistentCrypto.jsm: decryptAttachment: decryption incomplete\n"
++        "persistentCrypto.jsm: pgpDecryptAttachment: decryption incomplete\n"
+       );
+       return;
+     } else {
+       // there is nothing to be decrypted
+       EnigmailLog.DEBUG(
+-        "persistentCrypto.jsm: decryptAttachment: no decryption required\n"
++        "persistentCrypto.jsm: pgpDecryptAttachment: no decryption required\n"
+       );
+       return;
+     }
+ 
+     EnigmailLog.DEBUG(
+-      "persistentCrypto.jsm: decryptAttachment: decrypted to " +
++      "persistentCrypto.jsm: pgpDecryptAttachment: decrypted to " +
+         data.length +
+         " bytes\n"
+     );
+     if (
+       statusFlagsObj.encryptedFileName &&
+       statusFlagsObj.encryptedFileName.length > 0
+     ) {
+       attachmentName = statusFlagsObj.encryptedFileName;
+diff --git a/mail/extensions/openpgp/content/ui/commonWorkflows.js b/mail/extensions/openpgp/content/ui/commonWorkflows.js
+--- a/mail/extensions/openpgp/content/ui/commonWorkflows.js
++++ b/mail/extensions/openpgp/content/ui/commonWorkflows.js
+@@ -93,17 +93,17 @@ function getKeyBlockFromFile(path, wantS
+   }
+   return "";
+ }
+ 
+ /**
+  * import OpenPGP keys from file
+  * @param {string} what - "rev" for revocation, "pub" for public keys, "sec" for secret keys.
+  */
+-function EnigmailCommon_importObjectFromFile(what) {
++async function EnigmailCommon_importObjectFromFile(what) {
+   let importingRevocation = what == "rev";
+   let promptStr = importingRevocation ? "import-rev-file" : "import-key-file";
+ 
+   let files = EnigmailDialog.filePicker(
+     window,
+     l10n.formatValueSync(promptStr),
+     "",
+     false,
+@@ -137,18 +137,18 @@ function EnigmailCommon_importObjectFrom
+     let keyBlock = getKeyBlockFromFile(file, isSecret);
+ 
+     // if we don't find an ASCII block, try to import as binary.
+     if (!keyBlock) {
+       importBinary = true;
+       keyBlock = EnigmailFiles.readFile(file);
+     }
+ 
+-    // Generat a preview of the imported key.
+-    let preview = EnigmailKey.getKeyListFromKeyBlock(
++    // Generate a preview of the imported key.
++    let preview = await EnigmailKey.getKeyListFromKeyBlock(
+       keyBlock,
+       errorMsgObj,
+       true, // interactive
+       !isSecret,
+       isSecret
+     );
+ 
+     if (!preview || !preview.length || errorMsgObj.value) {
+diff --git a/mail/extensions/openpgp/content/ui/enigmailKeyManager.js b/mail/extensions/openpgp/content/ui/enigmailKeyManager.js
+--- a/mail/extensions/openpgp/content/ui/enigmailKeyManager.js
++++ b/mail/extensions/openpgp/content/ui/enigmailKeyManager.js
+@@ -572,30 +572,30 @@ function enigmailManageUids() {
+ 
+ function enigGetClipboard() {
+   return EnigmailClipboard.getClipboardContent(
+     window,
+     Ci.nsIClipboard.kGlobalClipboard
+   );
+ }
+ 
+-function enigmailImportFromClipbrd() {
++async function enigmailImportFromClipbrd() {
+   if (
+     !EnigmailDialog.confirmDlg(
+       window,
+       l10n.formatValueSync("import-from-clip"),
+       l10n.formatValueSync("key-man-button-import")
+     )
+   ) {
+     return;
+   }
+ 
+   var cBoardContent = enigGetClipboard();
+   var errorMsgObj = {};
+-  var preview = EnigmailKey.getKeyListFromKeyBlock(
++  var preview = await EnigmailKey.getKeyListFromKeyBlock(
+     cBoardContent,
+     errorMsgObj,
+     true,
+     true,
+     false
+   );
+   // should we allow importing secret keys?
+   if (preview && preview.length > 0) {
+@@ -956,17 +956,17 @@ function enigmailImportKeysFromUrl() {
+       value
+     )
+   ) {
+     var p = new Promise(function(resolve, reject) {
+       var cbFunc = async function(data) {
+         EnigmailLog.DEBUG("enigmailImportKeysFromUrl: _cbFunc()\n");
+         var errorMsgObj = {};
+ 
+-        var preview = EnigmailKey.getKeyListFromKeyBlock(
++        var preview = await EnigmailKey.getKeyListFromKeyBlock(
+           data,
+           errorMsgObj,
+           true,
+           true,
+           false
+         );
+         // should we allow importing secret keys?
+         if (preview && preview.length > 0) {
+diff --git a/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js b/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js
+--- a/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js
++++ b/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js
+@@ -501,17 +501,17 @@ Enigmail.msg = {
+   // callback function for automatic decryption
+   async messageAutoDecrypt() {
+     EnigmailLog.DEBUG("enigmailMessengerOverlay.js: messageAutoDecrypt:\n");
+     await Enigmail.msg.messageDecrypt(null, true);
+   },
+ 
+   async notifyMessageDecryptDone() {
+     Enigmail.msg.messageDecryptDone = true;
+-    Enigmail.msg.processAfterAttachmentsAndDecrypt();
++    await Enigmail.msg.processAfterAttachmentsAndDecrypt();
+ 
+     document.dispatchEvent(
+       new CustomEvent("openpgpprocessed", {
+         detail: { messageDecryptDone: true },
+       })
+     );
+ 
+     // Show the partial inline encryption reminder only if the decryption action
+@@ -1358,17 +1358,17 @@ Enigmail.msg = {
+     var encToDetailsObj = {};
+ 
+     var blockSeparationObj = {
+       value: "",
+     };
+ 
+     if (importOnly) {
+       // Import public key
+-      this.importKeyFromMsgBody(msgText);
++      await this.importKeyFromMsgBody(msgText);
+       return;
+     }
+     let armorHeaders = EnigmailArmor.getArmorHeaders(msgText);
+     if ("charset" in armorHeaders) {
+       charset = armorHeaders.charset;
+       EnigmailLog.DEBUG(
+         "enigmailMessengerOverlay.js: messageParseCallback: OVERRIDING charset=" +
+           charset +
+@@ -1781,17 +1781,17 @@ Enigmail.msg = {
+     }
+     if (!sigKeyIsAttached) {
+       let b = document.getElementById("signatureKeyBox");
+       b.removeAttribute("hidden");
+       b.setAttribute("keyid", Enigmail.msg.missingSigKey);
+     }
+   },
+ 
+-  importKeyFromMsgBody(msgData) {
++  async importKeyFromMsgBody(msgData) {
+     let beginIndexObj = {};
+     let endIndexObj = {};
+     let indentStrObj = {};
+     let blockType = EnigmailArmor.locateArmoredBlock(
+       msgData,
+       0,
+       "",
+       beginIndexObj,
+@@ -1800,17 +1800,17 @@ Enigmail.msg = {
+     );
+     if (!blockType || blockType !== "PUBLIC KEY BLOCK") {
+       return;
+     }
+ 
+     let keyData = msgData.substring(beginIndexObj.value, endIndexObj.value);
+ 
+     let errorMsgObj = {};
+-    let preview = EnigmailKey.getKeyListFromKeyBlock(
++    let preview = await EnigmailKey.getKeyListFromKeyBlock(
+       keyData,
+       errorMsgObj,
+       true,
+       true,
+       false
+     );
+     if (preview && errorMsgObj.value === "") {
+       EnigmailKeyRing.importKeyDataWithConfirmation(
+@@ -2494,17 +2494,17 @@ Enigmail.msg = {
+       return;
+     }
+     outFile1.append(EnigmailMsgRead.getAttachmentName(origAtt));
+     outFile1.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
+     EnigmailFiles.writeUrlToFile(origAtt.url, outFile1);
+ 
+     if (isEncrypted) {
+       // Try to decrypt message if we suspect the message is encrypted. If it fails we will just verify the encrypted data.
+-      EnigmailDecryption.decryptAttachment(
++      await EnigmailDecryption.decryptAttachment(
+         window,
+         outFile1,
+         EnigmailMsgRead.getAttachmentName(origAtt),
+         EnigmailFiles.readBinaryFile(outFile1),
+         {},
+         {},
+         {}
+       );
+@@ -2537,42 +2537,37 @@ Enigmail.msg = {
+           err
+       );
+     });
+ 
+     outFile1.remove(false);
+     outFile2.remove(false);
+   },
+ 
+-  handleAttachment(actionType, anAttachment) {
++  handleAttachment(actionType, attachment) {
+     EnigmailLog.DEBUG(
+       "enigmailMessengerOverlay.js: handleAttachment: actionType=" +
+         actionType +
+-        ", anAttachment(url)=" +
+-        anAttachment.url +
++        ", attachment(url)=" +
++        attachment.url +
+         "\n"
+     );
+ 
+-    var argumentsObj = {
+-      actionType,
+-      attachment: anAttachment,
+-      forceBrowser: false,
+-      data: "",
+-    };
+-
+-    var f = function(data) {
+-      argumentsObj.data = data;
+-      Enigmail.msg.decryptAttachmentCallback([argumentsObj]);
+-    };
+-
+-    var bufferListener = EnigmailStreams.newStringStreamListener(f);
+-    var ioServ = Services.io;
+-    var msgUri = ioServ.newURI(argumentsObj.attachment.url);
+-
+-    var channel = EnigmailStreams.createChannel(msgUri);
++    let bufferListener = EnigmailStreams.newStringStreamListener(async data => {
++      Enigmail.msg.decryptAttachmentCallback([
++        {
++          actionType,
++          attachment,
++          forceBrowser: false,
++          data,
++        },
++      ]);
++    });
++    let msgUri = Services.io.newURI(attachment.url);
++    let channel = EnigmailStreams.createChannel(msgUri);
+     channel.asyncOpen(bufferListener, msgUri);
+   },
+ 
+   setAttachmentName(attachment, newLabel, index) {
+     EnigmailLog.DEBUG(
+       "enigmailMessengerOverlay.js: setAttachmentName (" + newLabel + "):\n"
+     );
+ 
+@@ -2665,39 +2660,39 @@ Enigmail.msg = {
+         outFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
+       } catch (ex) {
+         errorMsgObj.value = l10n.formatValueSync("no-temp-dir");
+         return;
+       }
+     }
+ 
+     if (callbackArg.actionType == "importKey") {
+-      var preview = EnigmailKey.getKeyListFromKeyBlock(
++      var preview = await EnigmailKey.getKeyListFromKeyBlock(
+         callbackArg.data,
+         errorMsgObj,
+         true,
+         true,
+         false
+       );
+ 
+       if (errorMsgObj.value !== "" || !preview || preview.length === 0) {
+         // try decrypting the attachment
+-        exitStatus = EnigmailDecryption.decryptAttachment(
++        exitStatus = await EnigmailDecryption.decryptAttachment(
+           window,
+           outFile,
+           EnigmailMsgRead.getAttachmentName(callbackArg.attachment),
+           callbackArg.data,
+           exitCodeObj,
+           statusFlagsObj,
+           errorMsgObj
+         );
+         if (exitStatus && exitCodeObj.value === 0) {
+           // success decrypting, let's try again
+           callbackArg.data = EnigmailFiles.readBinaryFile(outFile);
+-          preview = EnigmailKey.getKeyListFromKeyBlock(
++          preview = await EnigmailKey.getKeyListFromKeyBlock(
+             callbackArg.data,
+             errorMsgObj,
+             true,
+             true,
+             false
+           );
+         }
+       }
+@@ -2713,17 +2708,17 @@ Enigmail.msg = {
+         document.l10n.formatValue("preview-failed").then(value => {
+           EnigmailDialog.alert(window, value + "\n" + errorMsgObj.value);
+         });
+       }
+       outFile.remove(true);
+       return;
+     }
+ 
+-    exitStatus = EnigmailDecryption.decryptAttachment(
++    exitStatus = await EnigmailDecryption.decryptAttachment(
+       window,
+       outFile,
+       EnigmailMsgRead.getAttachmentName(callbackArg.attachment),
+       callbackArg.data,
+       exitCodeObj,
+       statusFlagsObj,
+       errorMsgObj
+     );
+@@ -3120,22 +3115,22 @@ Enigmail.msg = {
+     }
+     if (Enigmail.hdrView) {
+       Enigmail.hdrView.onUnloadEnigmail();
+     }
+ 
+     Enigmail = undefined;
+   },
+ 
+-  commonProcessAttachedKey(keyData, isBinaryAutocrypt) {
++  async commonProcessAttachedKey(keyData, isBinaryAutocrypt) {
+     if (!keyData) {
+       return;
+     }
+     let errorMsgObj = {};
+-    let preview = EnigmailKey.getKeyListFromKeyBlock(
++    let preview = await EnigmailKey.getKeyListFromKeyBlock(
+       keyData,
+       errorMsgObj,
+       true,
+       true,
+       false
+     );
+ 
+     if (!preview || !preview.length || errorMsgObj.value) {
+@@ -3275,28 +3270,31 @@ Enigmail.msg = {
+       );
+     }
+ 
+     if (!senderAutocryptKey) {
+       return;
+     }
+ 
+     let keyData = EnigmailData.decodeBase64(senderAutocryptKey);
+-    this.commonProcessAttachedKey(keyData, true);
++    // Make sure to let the message load before doing potentially *very*
++    // time consuming auto processing (seconds!?).
++    await new Promise(resolve => ChromeUtils.idleDispatch(resolve));
++    await this.commonProcessAttachedKey(keyData, true);
+ 
+     if (Enigmail.msg.attachedSenderEmailKeysIndex.length) {
+       this.unhideImportKeyBox();
+     }
+   },
+ 
+   async notifyEndAllAttachments() {
+     Enigmail.msg.allAttachmentsDone = true;
+ 
+     if (!Enigmail.msg.autoProcessPgpKeyAttachmentCount) {
+-      Enigmail.msg.processAfterAttachmentsAndDecrypt();
++      await Enigmail.msg.processAfterAttachmentsAndDecrypt();
+     }
+   },
+ 
+   authorEmailFetched: false,
+   authorEmail: "",
+   attachedKeys: [],
+   attachedSenderEmailKeysIndex: [], // each: {idx (to-attachedKeys), keyInfo, binary}
+ 
+@@ -3334,62 +3332,44 @@ Enigmail.msg = {
+         EnigmailFuncs.getEmailFromUserID(id.userId).toLowerCase() == authorEmail
+       ) {
+         return true;
+       }
+     }
+     return false;
+   },
+ 
+-  async autoProcessPgpKeyCallback(callbackArg) {
+-    if (
+-      callbackArg.transaction !=
+-      Enigmail.msg.autoProcessPgpKeyAttachmentTransactionID
+-    ) {
+-      return;
+-    }
+-
+-    this.commonProcessAttachedKey(callbackArg.data, false);
+-
+-    Enigmail.msg.autoProcessPgpKeyAttachmentProcessed++;
+-
+-    if (
+-      Enigmail.msg.autoProcessPgpKeyAttachmentProcessed ==
+-      Enigmail.msg.autoProcessPgpKeyAttachmentCount
+-    ) {
+-      Enigmail.msg.processAfterAttachmentsAndDecrypt();
+-    }
+-  },
+-
+   autoProcessPgpKeyAttachmentTransactionID: 0,
+   autoProcessPgpKeyAttachmentCount: 0,
+   autoProcessPgpKeyAttachmentProcessed: 0,
+   unhideMissingSigKeyBoxIsTODO: false,
+   unhideMissingSigKey: null,
+ 
+   autoProcessPgpKeyAttachment(attachment) {
+     if (attachment.contentType != "application/pgp-keys") {
+       return;
+     }
+ 
+     Enigmail.msg.autoProcessPgpKeyAttachmentCount++;
+ 
+-    var argumentsObj = {
+-      attachment,
+-      data: "",
+-      transaction: Enigmail.msg.autoProcessPgpKeyAttachmentTransactionID,
+-    };
+-
+-    var bufferListener = EnigmailStreams.newStringStreamListener(data => {
+-      argumentsObj.data = data;
+-      Enigmail.msg.autoProcessPgpKeyCallback(argumentsObj);
++    let bufferListener = EnigmailStreams.newStringStreamListener(async data => {
++      // Make sure to let the message load before doing potentially *very*
++      // time consuming auto processing (seconds!?).
++      await new Promise(resolve => ChromeUtils.idleDispatch(resolve));
++      await this.commonProcessAttachedKey(data, false);
++      Enigmail.msg.autoProcessPgpKeyAttachmentProcessed++;
++      if (
++        Enigmail.msg.autoProcessPgpKeyAttachmentProcessed ==
++        Enigmail.msg.autoProcessPgpKeyAttachmentCount
++      ) {
++        await Enigmail.msg.processAfterAttachmentsAndDecrypt();
++      }
+     });
+-    var msgUri = Services.io.newURI(argumentsObj.attachment.url);
+-
+-    var channel = EnigmailStreams.createChannel(msgUri);
++    let msgUri = Services.io.newURI(attachment.url);
++    let channel = EnigmailStreams.createChannel(msgUri);
+     channel.asyncOpen(bufferListener, msgUri);
+   },
+ };
+ 
+ window.addEventListener(
+   "load-enigmail",
+   Enigmail.msg.messengerStartup.bind(Enigmail.msg)
+ );
+diff --git a/mail/extensions/openpgp/content/ui/keyWizard.js b/mail/extensions/openpgp/content/ui/keyWizard.js
+--- a/mail/extensions/openpgp/content/ui/keyWizard.js
++++ b/mail/extensions/openpgp/content/ui/keyWizard.js
+@@ -796,17 +796,17 @@ async function importSecretKey() {
+         await addImportWarningNotification(),
+         "import-error-file-size"
+       );
+       continue;
+     }
+ 
+     let errorMsgObj = {};
+     // Fetch the list of all the available keys inside the selected file.
+-    let importKeys = EnigmailKey.getKeyListFromKeyFile(
++    let importKeys = await EnigmailKey.getKeyListFromKeyFile(
+       file,
+       errorMsgObj,
+       false,
+       true
+     );
+ 
+     // Skip the file and show a warning message if the import failed.
+     if (!importKeys || !importKeys.length || errorMsgObj.value) {
