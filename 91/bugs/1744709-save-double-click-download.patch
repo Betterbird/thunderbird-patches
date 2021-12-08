@@ -1,0 +1,133 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1638991905 -3600
+# Parent  5c04fc484ace54b7cbde83f6ab5345f75dba8744
+Bug 1744709 - Create a download when saving to file via double-click.
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -1969,70 +1969,98 @@ AttachmentInfo.prototype = {
+       if (!gHandlerService.exists(mimeInfo)) {
+         mimeInfo.alwaysAskBeforeHandling = true;
+         mimeInfo.preferredAction = Ci.nsIHandlerInfo.alwaysAsk;
+       }
+ 
+       // If we know what to do, do it.
+ 
+       let { name, url } = this;
+-      async function saveToFile(path) {
++      let sourceURI = Services.io.newURI(url);
++      async function saveToFile(destFile, makeDownload = true) {
+         let buffer = await new Promise(function(resolve, reject) {
+           NetUtil.asyncFetch(
+             {
+-              uri: Services.io.newURI(url),
++              uri: sourceURI,
+               loadUsingSystemPrincipal: true,
+             },
+             function(inputStream, status) {
+               if (Components.isSuccessCode(status)) {
+                 resolve(NetUtil.readInputStream(inputStream));
+               } else {
+                 reject(
+                   new Components.Exception("Failed to fetch attachment", status)
+                 );
+               }
+             }
+           );
+         });
+-        await IOUtils.write(path, new Uint8Array(buffer));
++        await IOUtils.write(destFile.path, new Uint8Array(buffer));
++
++        if (makeDownload) {
++          // Create download.
++          let persist = Cc[
++            "@mozilla.org/embedding/browser/nsWebBrowserPersist;1"
++          ].createInstance(Ci.nsIWebBrowserPersist);
++          let tr = Cc["@mozilla.org/transfer;1"].createInstance(Ci.nsITransfer);
++          tr.init(
++            sourceURI,
++            Services.io.newFileURI(destFile),
++            "",
++            null,
++            null,
++            null,
++            persist,
++            false,
++            Ci.nsITransfer.DOWNLOAD_ACCEPTABLE,
++            null
++          );
++          tr.onStateChange(
++            null,
++            null,
++            Ci.nsIWebProgressListener.STATE_STOP |
++              Ci.nsIWebProgressListener.STATE_IS_NETWORK,
++            0
++          );
++        }
+       }
+ 
+       async function saveAndOpen(mimeInfo) {
+         let tempFile = Services.dirsvc.get("TmpD", Ci.nsIFile);
+         tempFile.append(name);
+         tempFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o755);
+         tempFile.remove(false);
+ 
+         Cc["@mozilla.org/mime;1"]
+           .getService(Ci.nsPIExternalAppLauncher)
+           .deleteTemporaryFileOnExit(tempFile);
+ 
+-        await saveToFile(tempFile.path);
++        await saveToFile(tempFile, false);
+         mimeInfo.launchWithFile(tempFile);
+       }
+ 
+       if (!mimeInfo.alwaysAskBeforeHandling) {
+         switch (mimeInfo.preferredAction) {
+           case Ci.nsIHandlerInfo.saveToDisk:
+             if (Services.prefs.getBoolPref("browser.download.useDownloadDir")) {
+               let destFile = new FileUtils.File(
+                 await Downloads.getPreferredDownloadsDirectory()
+               );
+               destFile.append(name);
+               destFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o755);
+               destFile.remove(false);
+-              await saveToFile(destFile.path);
++              await saveToFile(destFile);
+             } else {
+               let filePicker = Cc["@mozilla.org/filepicker;1"].createInstance(
+                 Ci.nsIFilePicker
+               );
+               filePicker.init(window, "title", Ci.nsIFilePicker.modeSave);
+               let rv = await new Promise(resolve => filePicker.open(resolve));
+               if (rv != Ci.nsIFilePicker.returnCancel) {
+-                await saveToFile(filePicker.file.path);
++                await saveToFile(filePicker.file);
+               }
+             }
+             return;
+           case Ci.nsIHandlerInfo.useHelperApp:
+           case Ci.nsIHandlerInfo.useSystemDefault:
+             await saveAndOpen(mimeInfo);
+             return;
+         }
+@@ -2059,17 +2087,17 @@ AttachmentInfo.prototype = {
+               false
+             );
+           },
+           async launchWithApplication(handleInternally, file) {
+             await saveAndOpen(mimeInfo);
+           },
+           async saveDestinationAvailable(file) {
+             if (file) {
+-              await saveToFile(file.path);
++              await saveToFile(file);
+             }
+           },
+           setWebProgressListener(webProgressListener) {},
+           targetFile: null,
+           targetFileIsExecutable: null,
+           timeDownloadStarted: null,
+           contentLength: this.size,
+           browsingContextId: null,
