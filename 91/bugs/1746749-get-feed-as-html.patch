@@ -1,0 +1,86 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1639874514 -3600
+# Parent  287cbcba7e9f63a247dd4204c3fff3f8f908571b
+Bug 1746749 - Get feed as HTML for more robustness. Hidden behind pref rss.get_feeds_as_html.
+
+diff --git a/mailnews/extensions/newsblog/Feed.jsm b/mailnews/extensions/newsblog/Feed.jsm
+--- a/mailnews/extensions/newsblog/Feed.jsm
++++ b/mailnews/extensions/newsblog/Feed.jsm
+@@ -180,17 +180,21 @@ Feed.prototype = {
+     // not sent If-Modified-Since, as in the case of an unsubscribe and new
+     // subscribe.  Send start of century date to force a download; some servers
+     // will 304 on older dates (such as epoch 1970).
+     let lastModified = this.lastModified || "Sat, 01 Jan 2000 00:00:00 GMT";
+     this.request.setRequestHeader("If-Modified-Since", lastModified);
+ 
+     // Only order what you're going to eat...
+     this.request.responseType = "document";
+-    this.request.overrideMimeType("text/xml");
++    if (Services.prefs.getBoolPref("rss.get_feeds_as_html", false)) {
++      this.request.overrideMimeType("text/html");
++    } else {
++      this.request.overrideMimeType("text/xml");
++    }
+     this.request.setRequestHeader("Accept", FeedUtils.REQUEST_ACCEPT);
+     this.request.timeout = FeedUtils.REQUEST_TIMEOUT;
+     this.request.onload = this.onDownloaded;
+     this.request.onreadystatechange = this.onReadyStateChange;
+     this.request.onerror = this.onDownloadError;
+     this.request.ontimeout = this.onDownloadError;
+     FeedCache.putFeed(this);
+     this.request.send(null);
+@@ -440,19 +444,31 @@ Feed.prototype = {
+   set link(aNewLink) {
+     if (!aNewLink) {
+       return;
+     }
+     FeedUtils.setSubscriptionAttr(this.url, this.server, "link", aNewLink);
+   },
+ 
+   parse() {
++    let doc;
++    if (Services.prefs.getBoolPref("rss.get_feeds_as_html", false)) {
++      let xml = new XMLSerializer().serializeToString(this.request.responseXML);
++      // No idea why links have a closing tag missing.
++      xml = xml.replace(/<link \/>(.*)/g, "<link>$1</link>");
++      xml = xml.replace(/!--\[CDATA\[(.*?)-->/g, "![CDATA[$1>");
++      xml = xml.replace(/\]\]&gt;/g, "]]>");
++      doc = new DOMParser().parseFromString(xml, "text/xml");
++    } else {
++      doc = this.request.responseXML;
++    }
++
+     // Create a feed parser which will parse the feed.
+     let parser = new FeedParser();
+-    this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
++    this.itemsToStore = parser.parseFeed(this, doc);
+     parser = null;
+ 
+     if (this.mInvalidFeed) {
+       this.request = null;
+       this.mInvalidFeed = false;
+       return;
+     }
+ 
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -773,16 +773,17 @@ pref("rss.show.content-base", 0);
+ // 1 - load web page in default browser, on select
+ pref("rss.message.loadWebPageOnSelect", 0);
+ 
+ // Feed auto updates / "Pause Updates"
+ // true  = If updating a feed results in an error code, disable the feed until next manual check or application restart.
+ // false = Keep feed automatic updates scheduled, even if the feed source responds with an error code.
+ pref("rss.disable_feeds_on_update_failure", true);
+ 
++pref("rss.get_feeds_as_html", false);
+ pref("feeds.loglevel", "Warn");
+ 
+ // 0=default as attachment
+ // 1=forward as quoted (mapped to 2 in mozilla)
+ // 2=forward as inline with attachments, (obsolete 4.x value)
+ pref("mail.forward_message_mode", 0);
+ // add .eml extension when forwarding as attachment
+ pref("mail.forward_add_extension", true);
