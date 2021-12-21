@@ -1,0 +1,607 @@
+# HG changeset patch
+# User Rachel Martin <rachel@betterbird.eu>
+# Date 1640110679 -3600
+# Parent  f0a9e72c110458d19c8dd4b22ba29887add7bd52
+Bug 1746695 - Improve method and variable names related to charset detection. r=mkmelin
+
+diff --git a/mailnews/base/public/nsIMsgMailNewsUrl.idl b/mailnews/base/public/nsIMsgMailNewsUrl.idl
+--- a/mailnews/base/public/nsIMsgMailNewsUrl.idl
++++ b/mailnews/base/public/nsIMsgMailNewsUrl.idl
+@@ -200,11 +200,11 @@ interface nsIMsgMessageUrl : nsISupports
+ // This is a very small interface which I'm grouping with the mailnewsUrl interface.
+ // I want to isolate out all the I18N specific information that may be associated with
+ // any given mailnews url. This gives I18N their own "sandbox" of routines they can add
+ // and tweak as they see fit. For now it contains mostly charset information.
+ //////////////////////////////////////////////////////////////////////////////////
+ 
+ [scriptable, uuid(D71E0785-2862-11d4-98C1-001083010E9B)]
+ interface nsIMsgI18NUrl : nsISupports {
+-  // when true the user wants us to auto detect the character set.
+-  attribute boolean overRideCharset;
++  // when true the user wants us to auto-detect the character set.
++  attribute boolean autodetectCharset;
+ };
+diff --git a/mailnews/base/public/nsIMsgMessageService.idl b/mailnews/base/public/nsIMsgMessageService.idl
+--- a/mailnews/base/public/nsIMsgMessageService.idl
++++ b/mailnews/base/public/nsIMsgMessageService.idl
+@@ -74,24 +74,24 @@ interface nsIMsgMessageService : nsISupp
+    * When you want a message displayed....
+    *
+    * @param aMessageURI Is a uri representing the message to display.
+    * @param aDisplayConsumer Is (for now) an nsIDocShell which we'll use to load
+    *                         the message into.
+    *                         XXXbz Should it be an nsIWebNavigation or something?
+    * @param aMsgWindow
+    * @param aUrlListener
+-   * @param aCharsetOverride (optional) if the characterset should be overridden.
++   * @param aAutodetectCharset (optional) if the characterset should be auto-detected.
+    * @param aURL
+    */
+   void DisplayMessage(in AUTF8String aMessageURI,
+             in nsISupports aDisplayConsumer,
+             in nsIMsgWindow aMsgWindow,
+             in nsIUrlListener aUrlListener,
+-            in boolean aCharsetOverride,
++            in boolean aAutodetectCharset,
+             out nsIURI aURL);
+ 
+   /**
+    * When you want an attachment downloaded
+    *
+    * @param aContentType We need to know the content type of the attachment
+    * @param aFileName The name of the attachment.
+    * @param aUrl String representation of the original url associated with the msg.
+diff --git a/mailnews/compose/public/nsIMsgQuote.idl b/mailnews/compose/public/nsIMsgQuote.idl
+--- a/mailnews/compose/public/nsIMsgQuote.idl
++++ b/mailnews/compose/public/nsIMsgQuote.idl
+@@ -15,17 +15,17 @@ interface nsIMsgQuote : nsISupports {
+  /**
+   * Quote a particular message specified by its URI.
+   *
+   * @param charset optional parameter - if set, force the message to be
+   *                quoted using this particular charset
+   */
+   void quoteMessage(in AUTF8String msgURI, in boolean quoteHeaders,
+                     in nsIMsgQuotingOutputStreamListener streamListener,
+-                    in bool overrideCharset, in boolean headersOnly,
++                    in bool autodetectCharset, in boolean headersOnly,
+                     in nsIMsgDBHdr aOrigHdr);
+ 
+   readonly attribute nsIMimeStreamConverterListener quoteListener;
+   readonly attribute nsIChannel quoteChannel;
+   readonly attribute nsIMsgQuotingOutputStreamListener streamListener;
+ };
+ 
+ [scriptable, uuid(1EC75AD9-88DE-11d3-989D-001083010E9B)]
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -1288,24 +1288,24 @@ nsresult nsMsgComposeService::RunMessage
+         "nsIMsgMailNewsUrl?");
+     return NS_ERROR_UNEXPECTED;
+   }
+   // SetSpecInternal must not fail, or else the URL won't have a base URL and
+   // we'll crash later.
+   rv = mailnewsurl->SetSpecInternal(mailboxUri);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  // if we are forwarding a message and that message used a charset over ride
+-  // then forward the override flag, too.
+-  bool charsetOverride = false;
++  // if we are forwarding a message and that message used a charset override
++  // then forward that as auto-detect flag, too.
++  bool autodetectCharset = false;
+   if (aMsgWindow) {
+-    if (NS_SUCCEEDED(aMsgWindow->GetCharsetOverride(&charsetOverride)) &&
+-        charsetOverride) {
++    if (NS_SUCCEEDED(aMsgWindow->GetCharsetOverride(&autodetectCharset)) &&
++        autodetectCharset) {
+       nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(url));
+-      if (i18nUrl) (void)i18nUrl->SetOverRideCharset(true);
++      if (i18nUrl) (void)i18nUrl->SetAutodetectCharset(true);
+     }
+   }
+ 
+   nsCOMPtr<nsIPrincipal> nullPrincipal =
+       NullPrincipal::CreateWithoutOriginAttributes();
+ 
+   nsCOMPtr<nsIChannel> channel;
+   rv = NS_NewInputStreamChannel(
+@@ -1318,17 +1318,17 @@ nsresult nsMsgComposeService::RunMessage
+   nsCOMPtr<nsIStreamConverter> converter = do_QueryInterface(mimeConverter);
+   rv = converter->AsyncConvertData(nullptr, nullptr, nullptr, channel);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // Now, just plug the two together and get the hell out of the way!
+   nsCOMPtr<nsIStreamListener> streamListener = do_QueryInterface(mimeConverter);
+   nsCOMPtr<nsIURI> dummyNull;
+   return messageService->DisplayMessage(aMsgURI, streamListener, aMsgWindow,
+-                                        nullptr, charsetOverride,
++                                        nullptr, autodetectCharset,
+                                         getter_AddRefs(dummyNull));
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgComposeService::Handle(nsICommandLine* aCmdLine) {
+   NS_ENSURE_ARG_POINTER(aCmdLine);
+ 
+   nsresult rv;
+diff --git a/mailnews/compose/src/nsMsgQuote.cpp b/mailnews/compose/src/nsMsgQuote.cpp
+--- a/mailnews/compose/src/nsMsgQuote.cpp
++++ b/mailnews/compose/src/nsMsgQuote.cpp
+@@ -85,17 +85,17 @@ NS_IMETHODIMP nsMsgQuote::GetStreamListe
+   }
+   NS_IF_ADDREF(*aStreamListener = streamListener);
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgQuote::QuoteMessage(
+     const nsACString& msgURI, bool quoteHeaders,
+     nsIMsgQuotingOutputStreamListener* aQuoteMsgStreamListener,
+-    bool aOverRideCharSet, bool headersOnly, nsIMsgDBHdr* aMsgHdr) {
++    bool aAutodetectCharset, bool headersOnly, nsIMsgDBHdr* aMsgHdr) {
+   nsresult rv;
+ 
+   mQuoteHeaders = quoteHeaders;
+   mStreamListener = do_GetWeakReference(aQuoteMsgStreamListener);
+ 
+   nsAutoCString msgUri(msgURI);
+   bool fileUrl = StringBeginsWith(msgUri, "file:"_ns);
+   bool forwardedMessage = msgUri.Find("&realtype=message/rfc822") >= 0;
+@@ -125,20 +125,20 @@ nsresult nsMsgQuote::QuoteMessage(
+     queryPart.AppendLiteral("header=only");
+   else if (quoteHeaders)
+     queryPart.AppendLiteral("header=quote");
+   else
+     queryPart.AppendLiteral("header=quotebody");
+   rv = NS_MutateURI(newURI).SetQuery(queryPart).Finalize(newURI);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  // if we were told to autodetect the charset, pass that on.
+-  if (aOverRideCharSet) {
++  // if we were told to auto-detect the charset, pass that on.
++  if (aAutodetectCharset) {
+     nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(newURI));
+-    if (i18nUrl) i18nUrl->SetOverRideCharset(true);
++    if (i18nUrl) i18nUrl->SetAutodetectCharset(true);
+   }
+ 
+   mQuoteListener = do_CreateInstance(NS_MSGQUOTELISTENER_CONTRACTID, &rv);
+   if (NS_FAILED(rv)) return rv;
+   mQuoteListener->SetMsgQuote(this);
+ 
+   // funky magic go get the isupports for this class which inherits from
+   // multiple interfaces.
+diff --git a/mailnews/imap/src/nsImapService.cpp b/mailnews/imap/src/nsImapService.cpp
+--- a/mailnews/imap/src/nsImapService.cpp
++++ b/mailnews/imap/src/nsImapService.cpp
+@@ -376,17 +376,17 @@ NS_IMETHODIMP nsImapService::FetchMimePa
+   }
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsImapService::DisplayMessage(const nsACString& aMessageURI,
+                                             nsISupports* aDisplayConsumer,
+                                             nsIMsgWindow* aMsgWindow,
+                                             nsIUrlListener* aUrlListener,
+-                                            bool aOverrideCharset,
++                                            bool aAutodetectCharset,
+                                             nsIURI** aURL) {
+   nsresult rv;
+ 
+   nsCOMPtr<nsIMsgFolder> folder;
+   nsAutoCString msgKey;
+   nsAutoCString mimePart;
+   nsAutoCString folderURI;
+   nsMsgKey key;
+@@ -452,17 +452,17 @@ NS_IMETHODIMP nsImapService::DisplayMess
+ 
+         return FetchMimePart(imapUrl, nsIImapUrl::nsImapMsgFetch, folder,
+                              imapMessageSink, aURL, aDisplayConsumer, msgKey,
+                              mimePart);
+       }
+ 
+       nsCOMPtr<nsIMsgMailNewsUrl> msgurl(do_QueryInterface(imapUrl));
+       nsCOMPtr<nsIMsgI18NUrl> i18nurl(do_QueryInterface(imapUrl));
+-      i18nurl->SetOverRideCharset(aOverrideCharset);
++      i18nurl->SetAutodetectCharset(aAutodetectCharset);
+ 
+       uint32_t messageSize;
+       bool useMimePartsOnDemand = gMIMEOnDemand;
+       bool shouldStoreMsgOffline = false;
+       bool hasMsgOffline = false;
+ 
+       nsCOMPtr<nsIMsgIncomingServer> aMsgIncomingServer;
+ 
+diff --git a/mailnews/imap/src/nsImapUrl.cpp b/mailnews/imap/src/nsImapUrl.cpp
+--- a/mailnews/imap/src/nsImapUrl.cpp
++++ b/mailnews/imap/src/nsImapUrl.cpp
+@@ -54,17 +54,17 @@ nsImapUrl::nsImapUrl() : mLock("nsImapUr
+   m_externalLinkUrl = true;  // we'll start this at true, and set it false in
+                              // nsImapService::CreateStartOfImapUrl
+   m_contentModified = IMAP_CONTENT_NOT_MODIFIED;
+   m_validUrl = true;  // assume the best.
+   m_flags = 0;
+   m_extraStatus = ImapStatusNone;
+   m_onlineSubDirSeparator = '/';
+   m_imapAction = 0;
+-  mOverrideCharset = false;
++  mAutodetectCharset = false;
+ 
+   // ** jt - the following are not ref counted
+   m_copyState = nullptr;
+   m_file = nullptr;
+   m_imapMailFolderSink = nullptr;
+   m_imapMessageSink = nullptr;
+   m_addDummyEnvelope = false;
+   m_canonicalLineEnding = false;
+@@ -1307,23 +1307,23 @@ nsresult nsImapUrl::GetMsgFolder(nsIMsgF
+   NS_ENSURE_TRUE(msg, NS_ERROR_FAILURE);
+   nsresult rv = msg->GetFolder(msgFolder);
+   NS_ENSURE_SUCCESS(rv, rv);
+   NS_ENSURE_TRUE(msgFolder, NS_ERROR_FAILURE);
+ 
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsImapUrl::GetOverRideCharset(bool* aOverride) {
+-  *aOverride = mOverrideCharset;
++NS_IMETHODIMP nsImapUrl::GetAutodetectCharset(bool* aAutodetectCharset) {
++  *aAutodetectCharset = mAutodetectCharset;
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsImapUrl::SetOverRideCharset(bool aOverride) {
+-  mOverrideCharset = aOverride;
++NS_IMETHODIMP nsImapUrl::SetAutodetectCharset(bool aAutodetectCharset) {
++  mAutodetectCharset = aAutodetectCharset;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsImapUrl::GetStoreResultsOffline(bool* aStoreResultsOffline) {
+   NS_ENSURE_ARG_POINTER(aStoreResultsOffline);
+   *aStoreResultsOffline = m_storeResultsOffline;
+   return NS_OK;
+ }
+diff --git a/mailnews/imap/src/nsImapUrl.h b/mailnews/imap/src/nsImapUrl.h
+--- a/mailnews/imap/src/nsImapUrl.h
++++ b/mailnews/imap/src/nsImapUrl.h
+@@ -121,14 +121,14 @@ class nsImapUrl : public nsIImapUrl,
+   nsCOMPtr<nsIFile> m_file;
+   nsWeakPtr m_channelWeakPtr;
+ 
+   // used by save message to disk
+   nsCOMPtr<nsIFile> m_messageFile;
+   bool m_addDummyEnvelope;
+   bool m_canonicalLineEnding;  // CRLF
+ 
+-  nsCString mURI;         // the RDF URI associated with this url.
+-  bool mOverrideCharset;  // used by nsIMsgI18NUrl...
++  nsCString mURI;           // the RDF URI associated with this url.
++  bool mAutodetectCharset;  // used by nsIMsgI18NUrl...
+   mozilla::Mutex mLock;
+ };
+ 
+ #endif /* nsImapUrl_h___ */
+diff --git a/mailnews/local/src/nsMailboxService.cpp b/mailnews/local/src/nsMailboxService.cpp
+--- a/mailnews/local/src/nsMailboxService.cpp
++++ b/mailnews/local/src/nsMailboxService.cpp
+@@ -134,17 +134,17 @@ nsresult nsMailboxService::CopyMessages(
+ 
+   return rv;
+ }
+ 
+ nsresult nsMailboxService::FetchMessage(
+     const nsACString& aMessageURI, nsISupports* aDisplayConsumer,
+     nsIMsgWindow* aMsgWindow, nsIUrlListener* aUrlListener,
+     const char* aFileName, /* only used by open attachment... */
+-    nsMailboxAction mailboxAction, bool aOverrideCharset, nsIURI** aURL) {
++    nsMailboxAction mailboxAction, bool aAutodetectCharset, nsIURI** aURL) {
+   nsresult rv = NS_OK;
+   nsCOMPtr<nsIMailboxUrl> mailboxurl;
+   nsMailboxAction actionToUse = mailboxAction;
+   nsCOMPtr<nsIURI> url;
+   nsCOMPtr<nsIMsgMailNewsUrl> msgUrl;
+   nsAutoCString uriString(aMessageURI);
+ 
+   if (StringBeginsWith(aMessageURI, "file:"_ns)) {
+@@ -195,17 +195,17 @@ nsresult nsMailboxService::FetchMessage(
+       url = do_QueryInterface(mailboxurl);
+       msgUrl = do_QueryInterface(url);
+       msgUrl->SetMsgWindow(aMsgWindow);
+       if (aFileName) msgUrl->SetFileNameInternal(nsDependentCString(aFileName));
+     }
+   }
+ 
+   nsCOMPtr<nsIMsgI18NUrl> i18nurl(do_QueryInterface(msgUrl));
+-  if (i18nurl) i18nurl->SetOverRideCharset(aOverrideCharset);
++  if (i18nurl) i18nurl->SetAutodetectCharset(aAutodetectCharset);
+ 
+   // instead of running the mailbox url like we used to, let's try to run the
+   // url in the docshell...
+   nsCOMPtr<nsIDocShell> docShell(do_QueryInterface(aDisplayConsumer, &rv));
+   // if we were given a docShell, run the url in the docshell..otherwise just
+   // run it normally.
+   if (NS_SUCCEEDED(rv) && docShell && url) {
+     // DIRTY LITTLE HACK --> if we are opening an attachment we want the
+diff --git a/mailnews/local/src/nsMailboxService.h b/mailnews/local/src/nsMailboxService.h
+--- a/mailnews/local/src/nsMailboxService.h
++++ b/mailnews/local/src/nsMailboxService.h
+@@ -46,15 +46,15 @@ class nsMailboxService : public nsIMailb
+ 
+   nsresult RunMailboxUrl(nsIURI* aMailboxUrl,
+                          nsISupports* aDisplayConsumer = nullptr);
+ 
+   nsresult FetchMessage(
+       const nsACString& aMessageURI, nsISupports* aDisplayConsumer,
+       nsIMsgWindow* aMsgWindow, nsIUrlListener* aUrlListener,
+       const char* aFileName, /* only used by open attachment */
+-      nsMailboxAction mailboxAction, bool aOverrideCharset, nsIURI** aURL);
++      nsMailboxAction mailboxAction, bool aAutodetectCharset, nsIURI** aURL);
+ 
+   nsresult DecomposeMailboxURI(const nsACString& aMessageURI,
+                                nsIMsgFolder** aFolder, nsMsgKey* aMsgKey);
+ };
+ 
+ #endif /* nsMailboxService_h___ */
+diff --git a/mailnews/local/src/nsMailboxUrl.cpp b/mailnews/local/src/nsMailboxUrl.cpp
+--- a/mailnews/local/src/nsMailboxUrl.cpp
++++ b/mailnews/local/src/nsMailboxUrl.cpp
+@@ -42,17 +42,17 @@ nsMailboxUrl::nsMailboxUrl() {
+   m_filePath = nullptr;
+   m_messageID = nullptr;
+   m_messageKey = nsMsgKey_None;
+   m_messageSize = 0;
+   m_messageFile = nullptr;
+   m_addDummyEnvelope = false;
+   m_canonicalLineEnding = false;
+   m_curMsgIndex = 0;
+-  mOverrideCharset = false;
++  mAutodetectCharset = false;
+ }
+ 
+ nsMailboxUrl::~nsMailboxUrl() { PR_Free(m_messageID); }
+ 
+ NS_IMPL_ADDREF_INHERITED(nsMailboxUrl, nsMsgMailNewsUrl)
+ NS_IMPL_RELEASE_INHERITED(nsMailboxUrl, nsMsgMailNewsUrl)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsMailboxUrl)
+@@ -466,23 +466,23 @@ nsresult nsMailboxUrl::GetFolder(nsIMsgF
+   GetUri(uri);
+   NS_ENSURE_TRUE(!uri.IsEmpty(), NS_ERROR_FAILURE);
+   nsCOMPtr<nsIMsgDBHdr> msg;
+   GetMsgDBHdrFromURI(uri, getter_AddRefs(msg));
+   if (!msg) return NS_ERROR_FAILURE;
+   return msg->GetFolder(msgFolder);
+ }
+ 
+-NS_IMETHODIMP nsMailboxUrl::GetOverRideCharset(bool* aOverride) {
+-  *aOverride = mOverrideCharset;
++NS_IMETHODIMP nsMailboxUrl::GetAutodetectCharset(bool* aAutodetectCharset) {
++  *aAutodetectCharset = mAutodetectCharset;
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMailboxUrl::SetOverRideCharset(bool aOverride) {
+-  mOverrideCharset = aOverride;
++NS_IMETHODIMP nsMailboxUrl::SetAutodetectCharset(bool aAutodetectCharset) {
++  mAutodetectCharset = aAutodetectCharset;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMailboxUrl::SetMoveCopyMsgKeys(
+     const nsTArray<nsMsgKey>& keysToFlag) {
+   m_keys = keysToFlag.Clone();
+   if (!m_keys.IsEmpty() && m_messageKey == nsMsgKey_None)
+     m_messageKey = m_keys[0];
+diff --git a/mailnews/local/src/nsMailboxUrl.h b/mailnews/local/src/nsMailboxUrl.h
+--- a/mailnews/local/src/nsMailboxUrl.h
++++ b/mailnews/local/src/nsMailboxUrl.h
+@@ -97,13 +97,13 @@ class nsMailboxUrl : public nsIMailboxUr
+   nsresult ParseSearchPart();
+ 
+   // for multiple msg move/copy
+   nsTArray<nsMsgKey> m_keys;
+   int32_t m_curMsgIndex;
+ 
+   // truncated message support
+   nsCString m_originalSpec;
+-  nsCString mURI;         // the RDF URI associated with this url.
+-  bool mOverrideCharset;  // used by nsIMsgI18NUrl...
++  nsCString mURI;           // the RDF URI associated with this url.
++  bool mAutodetectCharset;  // used by nsIMsgI18NUrl...
+ };
+ 
+ #endif  // nsMailboxUrl_h__
+diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
+--- a/mailnews/mime/src/nsStreamConverter.cpp
++++ b/mailnews/mime/src/nsStreamConverter.cpp
+@@ -98,28 +98,23 @@ nsresult bridge_new_new_uri(void* bridge
+         if (msd->options) {
+           default_charset = &(msd->options->default_charset);
+           override_charset = &(msd->options->override_charset);
+           url_name = &(msd->url_name);
+           fixup_pointer = &(msd->options->url);
+         }
+       }
+ 
+-      if ((default_charset) && (override_charset) && (url_name)) {
+-        //
+-        // set the default charset to be the folder charset if we have one
+-        // associated with this url...
++      if (default_charset && override_charset && url_name) {
++        // Check whether we need to auto-detect the charset.
+         nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(aURI));
+         if (i18nUrl) {
+-          bool overrideCharset = false;
+-
+-          // check to see if we have a charset override...and if we do, set that
+-          // field appropriately too...
+-          nsresult rv = i18nUrl->GetOverRideCharset(&overrideCharset);
+-          if (NS_SUCCEEDED(rv) && overrideCharset) {
++          bool autodetectCharset = false;
++          nsresult rv = i18nUrl->GetAutodetectCharset(&autodetectCharset);
++          if (NS_SUCCEEDED(rv) && autodetectCharset) {
+             *override_charset = true;
+             *default_charset = nullptr;
+           } else {
+             *override_charset = false;
+             // Special treatment for news: URLs. Get the server default charset.
+             nsCOMPtr<nsINntpUrl> nntpURL(do_QueryInterface(aURI));
+             if (nntpURL) {
+               nsCString charset;
+@@ -129,18 +124,18 @@ nsresult bridge_new_new_uri(void* bridge
+               } else {
+                 *default_charset = strdup("UTF-8");
+               }
+             } else {
+               *default_charset = strdup("UTF-8");
+             }
+           }
+ 
+-          // if there is no manual override and a folder charset exists
+-          // then check if we have a folder level override
++          // If there is no override and a default charset exists,
++          // update the message window.
+           if (!(*override_charset) && *default_charset && **default_charset) {
+             // notify the default to msgWindow (for the menu check mark)
+             // do not set the default in case of nsMimeMessageDraftOrTemplate
+             // or nsMimeMessageEditorTemplate because it is already set
+             // when the message is displayed and doing it again may overwrite
+             // the correct MIME charset parsed from the message header
+             if (aOutputType != nsMimeOutput::nsMimeMessageDraftOrTemplate &&
+                 aOutputType != nsMimeOutput::nsMimeMessageEditorTemplate) {
+diff --git a/mailnews/news/src/nsNntpService.cpp b/mailnews/news/src/nsNntpService.cpp
+--- a/mailnews/news/src/nsNntpService.cpp
++++ b/mailnews/news/src/nsNntpService.cpp
+@@ -124,17 +124,17 @@ nsNntpService::SaveMessageToDisk(const n
+ 
+   if (mailNewsUrl) {
+     nsCOMPtr<nsIStreamListener> saveAsListener;
+     mailNewsUrl->GetSaveAsListener(aAddDummyEnvelope, aFile,
+                                    getter_AddRefs(saveAsListener));
+ 
+     rv = DisplayMessage(aMessageURI, saveAsListener,
+                         /* nsIMsgWindow *aMsgWindow */ nullptr, aUrlListener,
+-                        false /*aOverrideCharset */, aURL);
++                        false /*aAutodetectCharset */, aURL);
+   }
+   return rv;
+ }
+ 
+ nsresult nsNntpService::CreateMessageIDURL(nsIMsgFolder* folder, nsMsgKey key,
+                                            char** url) {
+   NS_ENSURE_ARG_POINTER(folder);
+   NS_ENSURE_ARG_POINTER(url);
+@@ -181,17 +181,17 @@ nsresult nsNntpService::CreateMessageIDU
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsNntpService::DisplayMessage(const nsACString& aMessageURI,
+                               nsISupports* aDisplayConsumer,
+                               nsIMsgWindow* aMsgWindow,
+                               nsIUrlListener* aUrlListener,
+-                              bool aOverrideCharset, nsIURI** aURL) {
++                              bool aAutodetectCharset, nsIURI** aURL) {
+   nsresult rv = NS_OK;
+ 
+   nsCOMPtr<nsIMsgFolder> folder;
+   nsMsgKey key = nsMsgKey_None;
+   rv = DecomposeNewsMessageURI(aMessageURI, getter_AddRefs(folder), &key);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsAutoCString urlStr;
+@@ -216,17 +216,17 @@ nsNntpService::DisplayMessage(const nsAC
+   nsCOMPtr<nsIURI> url;
+   rv = ConstructNntpUrl(urlStr, aUrlListener, aMsgWindow, aMessageURI, action,
+                         getter_AddRefs(url));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgI18NUrl> i18nurl = do_QueryInterface(url, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  i18nurl->SetOverRideCharset(aOverrideCharset);
++  i18nurl->SetAutodetectCharset(aAutodetectCharset);
+ 
+   bool shouldStoreMsgOffline = false;
+ 
+   if (folder) {
+     nsCOMPtr<nsIMsgIncomingServer> server;
+     // We need to set the port on the url, just like
+     // nsNNTPProtocol::Initialize does, so the specs will be the same.
+     // we can ignore errors here - worst case, we'll display the
+diff --git a/mailnews/news/src/nsNntpUrl.cpp b/mailnews/news/src/nsNntpUrl.cpp
+--- a/mailnews/news/src/nsNntpUrl.cpp
++++ b/mailnews/news/src/nsNntpUrl.cpp
+@@ -26,17 +26,17 @@
+ nsNntpUrl::nsNntpUrl() {
+   m_newsgroupPost = nullptr;
+   m_newsAction = nsINntpUrl::ActionUnknown;
+   m_addDummyEnvelope = false;
+   m_canonicalLineEnding = false;
+   m_filePath = nullptr;
+   m_getOldMessages = false;
+   m_key = nsMsgKey_None;
+-  mOverrideCharset = false;
++  mAutodetectCharset = false;
+ }
+ 
+ nsNntpUrl::~nsNntpUrl() {}
+ 
+ NS_IMPL_ADDREF_INHERITED(nsNntpUrl, nsMsgMailNewsUrl)
+ NS_IMPL_RELEASE_INHERITED(nsNntpUrl, nsMsgMailNewsUrl)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsNntpUrl)
+@@ -459,23 +459,23 @@ NS_IMETHODIMP nsNntpUrl::GetFolder(nsIMs
+   nsCOMPtr<nsIMsgNewsFolder> newsFolder;
+   rv = nntpServer->FindGroup(m_group, getter_AddRefs(newsFolder));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   return newsFolder->QueryInterface(NS_GET_IID(nsIMsgFolder),
+                                     (void**)msgFolder);
+ }
+ 
+-NS_IMETHODIMP nsNntpUrl::GetOverRideCharset(bool* aOverride) {
+-  *aOverride = mOverrideCharset;
++NS_IMETHODIMP nsNntpUrl::GetAutodetectCharset(bool* aAutodetectCharset) {
++  *aAutodetectCharset = mAutodetectCharset;
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsNntpUrl::SetOverRideCharset(bool aOverride) {
+-  mOverrideCharset = aOverride;
++NS_IMETHODIMP nsNntpUrl::SetAutodetectCharset(bool aAutodetectCharset) {
++  mAutodetectCharset = aAutodetectCharset;
+   return NS_OK;
+ }
+ 
+ nsresult nsNntpUrl::Clone(nsIURI** _retval) {
+   nsresult rv;
+   rv = nsMsgMailNewsUrl::Clone(_retval);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+diff --git a/mailnews/news/src/nsNntpUrl.h b/mailnews/news/src/nsNntpUrl.h
+--- a/mailnews/news/src/nsNntpUrl.h
++++ b/mailnews/news/src/nsNntpUrl.h
+@@ -40,18 +40,18 @@ class nsNntpUrl : public nsINntpUrl,
+   nsresult DetermineNewsAction();
+   nsresult ParseNewsURL();
+   nsresult ParseNntpURL();
+ 
+   nsCOMPtr<nsINNTPNewsgroupPost> m_newsgroupPost;
+   nsNewsAction m_newsAction;  // the action this url represents...parse mailbox,
+                               // display messages, etc.
+ 
+-  nsCString mURI;         // the RDF URI associated with this url.
+-  bool mOverrideCharset;  // used by nsIMsgI18NUrl...
++  nsCString mURI;           // the RDF URI associated with this url.
++  bool mAutodetectCharset;  // used by nsIMsgI18NUrl...
+ 
+   nsCString mOriginalSpec;
+   nsCOMPtr<nsIFile> m_filePath;
+ 
+   // used by save message to disk
+   nsCOMPtr<nsIFile> m_messageFile;
+ 
+   bool m_addDummyEnvelope;

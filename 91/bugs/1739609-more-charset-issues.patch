@@ -1,8 +1,8 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1638299526 -3600
-# Parent  640021e378342aba8e9d69e722efdd4b667d1400
-Bug 1739609 - Fix communication of charset back to UI. Also fix the subject in "Repair Text Encoding".
+# Date 1640111068 -3600
+# Parent  0c1f3bd93218976e1ad6386ab4e590c19a43d60b
+Bug 1739609 - Fix the subject in "Repair Text Encoding".
 
 diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
 --- a/mail/base/content/mailWindow.js
@@ -95,72 +95,21 @@ diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
   */
  function switchToTabHavingURI(aURI, aOpenNew, aOpenParams = {}) {
    let tabmail = document.getElementById("tabmail");
-diff --git a/mailnews/mime/src/mimetext.cpp b/mailnews/mime/src/mimetext.cpp
---- a/mailnews/mime/src/mimetext.cpp
-+++ b/mailnews/mime/src/mimetext.cpp
-@@ -73,17 +73,19 @@ static int MimeInlineText_initializeChar
-   text->charsetOverridable = false;
- 
-   // Figure out an appropriate charset for this object.
-   if (!text->charset && obj->headers) {
-     if (obj->options && obj->options->override_charset) {
-       if (obj->options->default_charset) {
-         text->charset = strdup(obj->options->default_charset);
-       } else {
-+        text->charsetOverridable = true;
-         text->inputAutodetect = true;
-+        text->needUpdateMsgWinCharset = true;
-         text->charset = strdup("");
-       }
-     } else {
-       char* ct =
-           MimeHeaders_get(obj->headers, HEADER_CONTENT_TYPE, false, false);
-       if (ct) {
-         text->charset = MimeHeaders_get_parameter(ct, "charset", NULL, NULL);
-         PR_Free(ct);
-@@ -104,16 +106,17 @@ static int MimeInlineText_initializeChar
-       // files default to UTF-8 (RFC 2445, section 4.1.4).
-       if (!text->charset && obj->content_type &&
-           !PL_strcasecmp(obj->content_type, TEXT_CALENDAR))
-         text->charset = strdup("UTF-8");
- 
-       if (!text->charset) {
-         text->charsetOverridable = true;
-         text->inputAutodetect = true;
-+        text->needUpdateMsgWinCharset = true;
- 
-         if (obj->options && obj->options->default_charset)
-           text->charset = strdup(obj->options->default_charset);
-         else
-           text->charset = strdup("UTF-8");
-       }
-     }
-   }
 diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
 --- a/mailnews/mime/src/nsStreamConverter.cpp
 +++ b/mailnews/mime/src/nsStreamConverter.cpp
-@@ -99,49 +99,69 @@ nsresult bridge_new_new_uri(void* bridge
-           default_charset = &(msd->options->default_charset);
-           override_charset = &(msd->options->override_charset);
-           url_name = &(msd->url_name);
-           fixup_pointer = &(msd->options->url);
+@@ -103,40 +103,64 @@ nsresult bridge_new_new_uri(void* bridge
          }
        }
  
-       if ((default_charset) && (override_charset) && (url_name)) {
--        //
--        // set the default charset to be the folder charset if we have one
--        // associated with this url...
-+        // Get the override flag.
+       if (default_charset && override_charset && url_name) {
+         // Check whether we need to auto-detect the charset.
          nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(aURI));
          if (i18nUrl) {
-           bool overrideCharset = false;
+           bool autodetectCharset = false;
 +          bool forceFixWindow = false;
- 
-           // check to see if we have a charset override...and if we do, set that
-           // field appropriately too...
-           nsresult rv = i18nUrl->GetOverRideCharset(&overrideCharset);
-           if (NS_SUCCEEDED(rv) && overrideCharset) {
+           nsresult rv = i18nUrl->GetAutodetectCharset(&autodetectCharset);
+           if (NS_SUCCEEDED(rv) && autodetectCharset) {
              *override_charset = true;
 +            // Previously we set `default_charset` to the user-selected
 +            // charset with the effect that the subject header was fixed, too.
@@ -203,8 +152,8 @@ diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStrea
              }
            }
  
--          // if there is no manual override and a folder charset exists
--          // then check if we have a folder level override
+           // If there is no override and a default charset exists,
+           // update the message window.
 -          if (!(*override_charset) && *default_charset && **default_charset) {
 +          if ((!(*override_charset) && *default_charset && **default_charset) ||
 +              forceFixWindow) {
