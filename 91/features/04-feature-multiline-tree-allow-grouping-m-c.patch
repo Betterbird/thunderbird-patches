@@ -1,0 +1,299 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1640987252 -3600
+# Parent  daf4be0250ce3db9e67c7baa84ad89b292b83302
+Feature: Multi-line tree follow-up: Allow "group by sort" again.
+
+diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFrame.cpp
+--- a/layout/xul/tree/nsTreeBodyFrame.cpp
++++ b/layout/xul/tree/nsTreeBodyFrame.cpp
+@@ -2920,17 +2920,17 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+       }
+       nsRect cellRect;
+       rv = currCol->GetRect(this, rowRect.y, rowRect.height, &cellRect);
+       // Don't paint cells in hidden columns.
+       if (NS_FAILED(rv) || cellRect.width == 0) continue;
+ 
+       // Find cell to align with.
+       if (multilineView && xColspanIndent == -1) {
+-        bool alignWith;
++        bool alignWith = false;
+         multilineView->AlignWith(aRowIndex, currCol, &alignWith);
+         if (alignWith) xColspanIndent = cellRect.x;
+       }
+ 
+       if (OffsetForHorzScroll(cellRect, false)) {
+         cellRect.x += aPt.x;
+ 
+         // for primary columns, use the row's vertical size so that the
+@@ -2964,65 +2964,29 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+       if (colspanContext) {
+         const nsStyleDisplay* display = colspanContext->StyleDisplay();
+         if (display->mDisplay == StyleDisplay::None) {
+           displayColspan = false;
+         }
+       }
+ 
+       if (displayColspan) {
+-        int32_t xOffSet = 0;
+-#if 0
+         nsTreeColumn* primaryCol = mColumns->GetPrimaryColumn();
++        bool indentColspan = false;
+         if (primaryCol) {
+-          bool isRTL = StyleVisibility()->mDirection == StyleDirection::Rtl;
+-
+-          nsMargin borderPadding(0, 0, 0, 0);
+-          ComputedStyle* rowContext =
+-              GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeRow());
+-          GetBorderPadding(rowContext, borderPadding);
+-          xOffSet += borderPadding.left;
+-          ComputedStyle* cellContext =
+-              GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeCell());
+-          GetBorderPadding(cellContext, borderPadding);
+-          xOffSet += borderPadding.left;
+-
+-          if (!isRTL) {
+-            int32_t level;
+-            mView->GetLevel(aRowIndex, &level);
+-            xOffSet += mIndentation * level;
+-
+-            nsRect imageRect;
+-            nsRect twistyRect(rowRect);
+-            ComputedStyle* twistyContext =
+-                GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeTwisty());
+-            GetTwistyRect(aRowIndex, primaryCol, imageRect, twistyRect,
+-                          PresContext(), twistyContext);
+-
+-            nsMargin twistyMargin;
+-            twistyContext->StyleMargin()->GetMargin(twistyMargin);
+-            twistyRect.Inflate(twistyMargin);
+-            xOffSet += twistyRect.width;
+-          }
+-
+-          nscoord colWidth;
+-          primaryCol->GetWidthInTwips(this, &colWidth);
+-          if (xOffSet > colWidth) {
+-            xOffSet = colWidth;
+-          }
++          nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
++          multilineView->IsColspanCol(primaryCol, &indentColspan);
+         }
+-#endif
+-
+-        nsRect colspanRect(originalRowRect.x + xOffSet + xColspanIndent, originalRowRect.y,
++        nsRect colspanRect(originalRowRect.x + xColspanIndent, originalRowRect.y,
+                            originalRowRect.width - xColspanIndent, originalRowRect.height);
+         nsRect dirtyRect;
+         if (dirtyRect.IntersectRect(aDirtyRect, colspanRect)) {
+           result &=
+-              PaintColspan(aRowIndex, colspanCol, colspanRect, aPresContext,
+-                           aRenderingContext, aDirtyRect, aBuilder);
++              PaintColspan(aRowIndex, colspanCol, indentColspan, colspanRect, aPresContext,
++                           aRenderingContext, aDirtyRect, aPt, aBuilder);
+         }
+       }
+     }
+   }
+ 
+   return result;
+ }
+ 
+@@ -3263,19 +3227,20 @@ ImgDrawResult nsTreeBodyFrame::PaintCell
+   }
+ 
+   aCurrX = currX;
+ 
+   return result;
+ }
+ 
+ ImgDrawResult nsTreeBodyFrame::PaintColspan(
+-    int32_t aRowIndex, nsTreeColumn* aColspanColumn, const nsRect& aColspanRect,
++    int32_t aRowIndex, nsTreeColumn* aColspanColumn, bool aColspanIsPrimary,
++    const nsRect& aColspanRect,
+     nsPresContext* aPresContext, gfxContext& aRenderingContext,
+-    const nsRect& aDirtyRect, nsDisplayListBuilder* aBuilder) {
++    const nsRect& aDirtyRect, nsPoint aPt, nsDisplayListBuilder* aBuilder) {
+   PrefillPropertyArray(aRowIndex, nullptr);
+   nsAutoString properties;
+   mView->GetRowProperties(aRowIndex, properties);
+   nsTreeUtils::TokenizeProperties(properties, mScratchArray);
+ 
+   ComputedStyle* colspanContext =
+       GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeColspan());
+ 
+@@ -3292,19 +3257,126 @@ ImgDrawResult nsTreeBodyFrame::PaintCols
+   AdjustForBorderPadding(colspanContext, colspanRect);
+ 
+   // Add the colspan's properties. We also need them for the image.
+   nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
+   nsAutoString props;
+   multilineView->GetColspanTextProperties(aRowIndex, props);
+   nsTreeUtils::TokenizeProperties(props, mScratchArray);
+ 
+-  // Now paint the icon for our colspan.
+   nscoord currX = colspanRect.x;
+   nscoord remainingWidth = colspanRect.width;
++
++  if (aColspanIsPrimary) {
++    bool isRTL = StyleVisibility()->mDirection == StyleDirection::Rtl;
++
++    // If we're the primary column, we need to indent and paint the twisty and
++    // any connecting lines between siblings.
++
++    int32_t level;
++    mView->GetLevel(aRowIndex, &level);
++
++    if (!isRTL) currX += mIndentation * level;
++    remainingWidth -= mIndentation * level;
++
++    // Resolve the style to use for the connecting lines.
++    ComputedStyle* lineContext =
++        GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeLine());
++
++    if (mIndentation && level &&
++        lineContext->StyleVisibility()->IsVisibleOrCollapsed()) {
++      // Paint the thread lines.
++
++      // Get the size of the twisty. We don't want to paint the twisty
++      // before painting of connecting lines since it would paint lines over
++      // the twisty. But we need to leave a place for it.
++      ComputedStyle* twistyContext =
++          GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeTwisty());
++
++      nsRect imageSize;
++      nsRect twistyRect(aColspanRect);
++      GetTwistyRect(aRowIndex, aColspanColumn, imageSize, twistyRect, aPresContext,
++                    twistyContext);
++
++      nsMargin twistyMargin;
++      twistyContext->StyleMargin()->GetMargin(twistyMargin);
++      twistyRect.Inflate(twistyMargin);
++
++      const nsStyleBorder* borderStyle = lineContext->StyleBorder();
++      // Resolve currentcolor values against the treeline context
++      nscolor color = borderStyle->mBorderLeftColor.CalcColor(*lineContext);
++      ColorPattern colorPatt(ToDeviceColor(color));
++
++      StyleBorderStyle style = borderStyle->GetBorderStyle(eSideLeft);
++      StrokeOptions strokeOptions;
++      nsLayoutUtils::InitDashPattern(strokeOptions, style);
++
++      nscoord srcX = currX + twistyRect.width - mIndentation / 2;
++      nscoord lineY = (aRowIndex - mTopRowIndex) * mRowHeight + aPt.y;
++
++      DrawTarget* drawTarget = aRenderingContext.GetDrawTarget();
++      nsPresContext* pc = PresContext();
++
++      // Don't paint off our cell.
++      if (srcX <= colspanRect.x + colspanRect.width) {
++        nscoord destX = currX + twistyRect.width;
++        if (destX > colspanRect.x + colspanRect.width)
++          destX = colspanRect.x + colspanRect.width;
++        if (isRTL) {
++          srcX = currX + remainingWidth - (srcX - colspanRect.x);
++          destX = currX + remainingWidth - (destX - colspanRect.x);
++        }
++        Point p1(pc->AppUnitsToGfxUnits(srcX),
++                 pc->AppUnitsToGfxUnits(lineY + mRowHeight / 2));
++        Point p2(pc->AppUnitsToGfxUnits(destX),
++                 pc->AppUnitsToGfxUnits(lineY + mRowHeight / 2));
++        SnapLineToDevicePixelsForStroking(p1, p2, *drawTarget,
++                                          strokeOptions.mLineWidth);
++        drawTarget->StrokeLine(p1, p2, colorPatt, strokeOptions);
++      }
++
++      int32_t currentParent = aRowIndex;
++      for (int32_t i = level; i > 0; i--) {
++        if (srcX <= colspanRect.x + colspanRect.width) {
++          // Paint full vertical line only if we have next sibling.
++          bool hasNextSibling;
++          mView->HasNextSibling(currentParent, aRowIndex, &hasNextSibling);
++          if (hasNextSibling || i == level) {
++            Point p1(pc->AppUnitsToGfxUnits(srcX),
++                     pc->AppUnitsToGfxUnits(lineY));
++            Point p2;
++            p2.x = pc->AppUnitsToGfxUnits(srcX);
++
++            if (hasNextSibling)
++              p2.y = pc->AppUnitsToGfxUnits(lineY + mRowHeight);
++            else if (i == level)
++              p2.y = pc->AppUnitsToGfxUnits(lineY + mRowHeight / 2);
++
++            SnapLineToDevicePixelsForStroking(p1, p2, *drawTarget,
++                                              strokeOptions.mLineWidth);
++            drawTarget->StrokeLine(p1, p2, colorPatt, strokeOptions);
++          }
++        }
++
++        int32_t parent;
++        if (NS_FAILED(mView->GetParentIndex(currentParent, &parent)) ||
++            parent < 0)
++          break;
++        currentParent = parent;
++        srcX -= mIndentation;
++      }
++    }
++
++    // Always leave space for the twisty.
++    nsRect twistyRect(currX, colspanRect.y, remainingWidth, colspanRect.height);
++    result &= PaintTwisty(aRowIndex, aColspanColumn, twistyRect, aPresContext,
++                          aRenderingContext, aDirtyRect, remainingWidth, currX);
++  }
++
++  // Now paint the icon for our colspan.
+   nsRect iconRect(currX, colspanRect.y, remainingWidth, colspanRect.height);
+   nsRect dirtyRect;
+   if (dirtyRect.IntersectRect(aDirtyRect, iconRect)) {
+     result &= PaintImage(aRowIndex, aColspanColumn, iconRect, aPresContext,
+                          aRenderingContext, aDirtyRect, remainingWidth, currX,
+                          aBuilder);
+   }
+ 
+diff --git a/layout/xul/tree/nsTreeBodyFrame.h b/layout/xul/tree/nsTreeBodyFrame.h
+--- a/layout/xul/tree/nsTreeBodyFrame.h
++++ b/layout/xul/tree/nsTreeBodyFrame.h
+@@ -228,20 +228,21 @@ class nsTreeBodyFrame final : public nsL
+                           const nsRect& aCellRect, nsPresContext* aPresContext,
+                           gfxContext& aRenderingContext,
+                           const nsRect& aDirtyRect, nscoord& aCurrX,
+                           nsPoint aPt, nsDisplayListBuilder* aBuilder);
+ 
+   // This method pains the content into the "colspan" of the row, typically
+   // underneath the cells of the row and spanning many cells
+   ImgDrawResult PaintColspan(int32_t aRowIndex, nsTreeColumn* aColspanColumn,
++                             bool aColspanIsPrimary,
+                              const nsRect& aColspanRect,
+                              nsPresContext* aPresContext,
+                              gfxContext& aRenderingContext,
+-                             const nsRect& aDirtyRect,
++                             const nsRect& aDirtyRect, nsPoint aPt,
+                              nsDisplayListBuilder* aBuilder);
+ 
+   // This method paints the twisty inside a cell in the primary column of an
+   // tree.
+   ImgDrawResult PaintTwisty(int32_t aRowIndex, nsTreeColumn* aColumn,
+                             const nsRect& aTwistyRect,
+                             nsPresContext* aPresContext,
+                             gfxContext& aRenderingContext,
+diff --git a/toolkit/content/widgets/tree.js b/toolkit/content/widgets/tree.js
+--- a/toolkit/content/widgets/tree.js
++++ b/toolkit/content/widgets/tree.js
+@@ -306,17 +306,17 @@
+           if (currCol.id == "subjectCol") {
+             let isMultiline = Services.prefs.getBoolPref("mail.pane_config.multiline_all", false);
+             if (isMultiline) {
+               popupChild.setAttribute("disabled", "true");
+             } else {
+               popupChild.removeAttribute("disabled");
+             }
+           }
+-          if (currCol.primary) {
++          if (currCol.primary && currCol.id != "subjectCol") {
+             popupChild.setAttribute("disabled", "true");
+           }
+           if (currElement.hasAttribute("closemenu")) {
+             popupChild.setAttribute(
+               "closemenu",
+               currElement.getAttribute("closemenu")
+             );
+           }
