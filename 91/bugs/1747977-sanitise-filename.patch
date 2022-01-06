@@ -1,0 +1,108 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1641495012 -3600
+# Parent  3d6d158746b07ddcb716d3c44d56c06b44790ec9
+Bug 1747977 - Sanitise filename before saving.
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -1901,29 +1901,43 @@ AttachmentInfo.prototype = {
+       let prompt = bundleMessenger.getString(
+         this.isExternalAttachment
+           ? "externalAttachmentNotFound"
+           : "emptyAttachment"
+       );
+       msgWindow.promptDialog.alert(null, prompt);
+     } else {
+       // @see MsgComposeCommands.js which has simililar opening functionality
+-      if (this.contentType == "application/pdf" || /\.pdf$/i.test(this.name)) {
++      let { name, url } = this;
++      // Split into name and extension once and for all.
++      // Note that the trick `name.split(".").pop()` to get the extension
++      // doesn't work if there is no extension, so do it the old-fashioned way.
++      let dotPos = name.lastIndexOf(".");
++      let filename;
++      let extension;
++      if (dotPos < 0) {
++        filename = name;
++        extension = "";
++      } else {
++        filename = name.substr(0, dotPos);
++        extension = name.substr(dotPos + 1);
++      }
++
++      if (this.contentType == "application/pdf" || /\.pdf$/i.test(name)) {
+         let handlerInfo = gMIMEService.getFromTypeAndExtension(
+           this.contentType,
+-          this.name.split(".").pop()
++          extension
+         );
+         // Only open a new tab for pdfs if we are handling them internally.
+         if (
+           !handlerInfo.alwaysAskBeforeHandling &&
+           handlerInfo.preferredAction == Ci.nsIHandlerInfo.handleInternally
+         ) {
+           // Add the content type to avoid a "how do you want to open this?"
+           // dialog. The type may already be there, but that doesn't matter.
+-          let url = this.url;
+           if (!url.includes("type=")) {
+             url += url.includes("?") ? "&" : "?";
+             url += "type=application/pdf";
+           }
+           let tabmail = document.getElementById("tabmail");
+           if (!tabmail) {
+             // If no tabmail available in this window, try and find it in
+             // another.
+@@ -1939,46 +1953,44 @@ AttachmentInfo.prototype = {
+             tabmail.ownerGlobal.focus();
+             return;
+           }
+           // If no tabmail, open PDF same as other attachments.
+         }
+       }
+ 
+       // Just use the old method for handling messages, it works.
+-
+       if (this.contentType == "message/rfc822") {
+         messenger.openAttachment(
+           this.contentType,
+-          this.url,
+-          encodeURIComponent(this.name),
++          url,
++          encodeURIComponent(name),
+           this.uri,
+           this.isExternalAttachment
+         );
+         return;
+       }
+ 
+       // Get the MIME info from the service.
+-
+-      let match = this.name.match(/\.([^.]+)$/);
+-      let extension = match ? match[1] : null;
+       let mimeInfo = gMIMEService.getFromTypeAndExtension(
+         this.contentType,
+         extension
+       );
+       // The default action is saveToDisk, which is not what we want.
+       // If we don't have a stored handler, ask before handling.
+       if (!gHandlerService.exists(mimeInfo)) {
+         mimeInfo.alwaysAskBeforeHandling = true;
+         mimeInfo.preferredAction = Ci.nsIHandlerInfo.alwaysAsk;
+       }
+ 
+       // If we know what to do, do it.
+ 
+-      let { name, url } = this;
++      // `GenerateValidFilename()` doesn't join name and extension if the
++      // name is empty.
++      name = GenerateValidFilename(filename, "") + "." + extension;
+       let sourceURI = Services.io.newURI(url);
+       async function saveToFile(destFile) {
+         let buffer = await new Promise(function(resolve, reject) {
+           NetUtil.asyncFetch(
+             {
+               uri: sourceURI,
+               loadUsingSystemPrincipal: true,
+             },
