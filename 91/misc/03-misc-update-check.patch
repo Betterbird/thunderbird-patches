@@ -1,8 +1,10 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1629360268 -7200
-# Parent  6d6eeb4c595f797f56d6cce8ba544f3837da9282
+# Date 1641576006 -3600
+# Parent  031621243a6f87d12b04783b36dc082598f84e49
 Misc: Add update check and fix release notes link.
+* * *
+Misc: Startup update check.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
@@ -29,7 +31,7 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
 diff --git a/mail/base/content/aboutDialog.css b/mail/base/content/aboutDialog.css
 --- a/mail/base/content/aboutDialog.css
 +++ b/mail/base/content/aboutDialog.css
-@@ -126,8 +126,15 @@
+@@ -127,8 +127,15 @@
    color: var(--link-color);
  }
  
@@ -63,11 +65,11 @@ diff --git a/mail/base/content/aboutDialog.js b/mail/base/content/aboutDialog.js
      return;
    }
  
-   try {
-     var distroId = Services.prefs.getCharPref("distribution.id");
-     if (distroId) {
-       var distroVersion = Services.prefs.getCharPref("distribution.version");
-@@ -87,26 +87,62 @@ function init(aEvent) {
+   var distroId = Services.prefs.getCharPref("distribution.id", "");
+   if (distroId) {
+     var distroAbout = Services.prefs.getStringPref("distribution.about", "");
+     // If there is about text, we always show it.
+@@ -86,26 +86,75 @@ function init(aEvent) {
    if (AppConstants.MOZ_UPDATER) {
      gAppUpdater = new appUpdater({ buttonAutoFocus: true });
  
@@ -76,7 +78,7 @@ diff --git a/mail/base/content/aboutDialog.js b/mail/base/content/aboutDialog.js
      channelLabel.value = defaults.getCharPref("app.update.channel");
    }
  
-+  await BetterbirdUpdateCheck();
++  await BetterbirdUpdateCheck(window);
 +
    window.sizeToContent();
  
@@ -88,38 +90,51 @@ diff --git a/mail/base/content/aboutDialog.js b/mail/base/content/aboutDialog.js
    }
  }
  
-+async function BetterbirdUpdateCheck() {
-+  try {
-+    let response = await fetch("https://www.betterbird.eu/start/versions.txt", {cache: "no-store"});
-+    if (!response.ok) {
-+      return;
-+    }
-+    let content = await response.text();
-+    let lines = content.split("\n");
-+    let version = Services.appinfo.version;
-+    let buildID = Services.appinfo.appBuildID;
-+    let appLocale = Services.locale.appLocalesAsBCP47[0];
-+    for (let l of lines) {
-+      let parts = l.split(",");
-+      // Format is locale,version,buildid.
-+      if (version.startsWith(parts[1]) && appLocale == parts[0]) {
-+        if (parts[2] <= buildID) {
-+          // Up to date.
-+          let el = document.getElementById("noUpdatesFound");
-+          el.hidden = false;
-+        } else {
-+          // Needs update.
-+          let el = document.getElementById("manualUpdate");
-+          el.hidden = false;
-+          el = document.getElementById("manualLink");
-+          el.setAttribute(
-+            "onclick",
-+            'openLink("https://www.betterbird.eu/downloads/");'
-+          );
++async function BetterbirdUpdateCheck(win) {
++  let needsUpdate = "arguments" in win && win.arguments[0].needsUpdate;
++  if (!needsUpdate) {
++    try {
++      let response = await fetch(
++        "https://www.betterbird.eu/start/versions.txt",
++        { cache: "no-store" }
++      );
++      if (!response.ok) {
++        return;
++      }
++      let content = await response.text();
++      let lines = content.split("\n");
++      let version = Services.appinfo.version;
++      let buildID = Services.appinfo.appBuildID;
++      let appLocale = Services.locale.appLocalesAsBCP47[0];
++      for (let l of lines) {
++        let parts = l.split(",");
++        // Format is locale,version,buildid.
++        if (version.startsWith(parts[1]) && appLocale == parts[0]) {
++          if (parts[2] > buildID) {
++            needsUpdate = true;
++            console.info(
++              `Betterbird update available for locale ${appLocale}, new build ${parts[2]}`
++            );
++          }
++          break;
 +        }
 +      }
-+    }
-+  } catch (ex) {}
++    } catch (ex) {}
++  }
++
++  if (needsUpdate) {
++    let el = document.getElementById("manualUpdate");
++    el.hidden = false;
++    el = document.getElementById("manualLink");
++    el.setAttribute(
++      "onclick",
++      'openLink("https://www.betterbird.eu/downloads/");'
++    );
++  } else {
++    // Up to date.
++    let el = document.getElementById("noUpdatesFound");
++    el.hidden = false;
++  }
 +}
 +
  // This function is used to open about: tabs. The caller should ensure the url
@@ -158,3 +173,116 @@ diff --git a/mail/base/content/aboutDialog.xhtml b/mail/base/content/aboutDialog
                          accesskey="&update.checkForUpdatesButton.accesskey;"
                          oncommand="gAppUpdater.checkForUpdates();"/>
                  <spacer flex="1"/>
+diff --git a/mail/components/MailGlue.jsm b/mail/components/MailGlue.jsm
+--- a/mail/components/MailGlue.jsm
++++ b/mail/components/MailGlue.jsm
+@@ -542,26 +542,32 @@ MailGlue.prototype = {
+    * _scheduleBestEffortUserIdleTasks.
+    * Don't be fooled by thinking that the use of the timeout parameter
+    * will delay your function: it will just ensure that it potentially
+    * happens _earlier_ than expected (when the timeout limit has been reached),
+    * but it will not make it happen later (and out of order) compared
+    * to the other ones scheduled together.
+    */
+   _scheduleStartupIdleTasks() {
++    let self = this;
+     const idleTasks = [
+       {
+         task() {
+           // This module needs to be loaded so it registers to receive
+           // FormAutoComplete:GetSelectedIndex messages and respond
+           // appropriately, otherwise we get error messages like the one
+           // reported in bug 1635422.
+           ChromeUtils.import("resource://gre/actors/AutoCompleteParent.jsm");
+         },
+       },
++      {
++        task() {
++          self.BetterbirdUpdateCheck();
++        },
++      },
+       // WebDriver components (Remote Agent and Marionette) need to be
+       // initialized as very last step.
+       {
+         condition: AppConstants.ENABLE_WEBDRIVER,
+         task: () => {
+           // Use idleDispatch a second time to run this after the per-window
+           // idle tasks.
+           ChromeUtils.idleDispatch(() => {
+@@ -664,11 +670,76 @@ MailGlue.prototype = {
+         "_blank",
+         "chrome,dialog=no,all",
+         { type: "contentTab", tabParams }
+       );
+       linkHandled.data = true;
+     }
+   },
+ 
++  async BetterbirdUpdateCheck() {
++    let lastCheckTime = Services.prefs.getIntPref(
++      "betterbird.update.lastCheckTime",
++      0
++    );
++    let now = Math.round(Date.now() / 1000);
++    // We check once a week. 604800 = 7 * 24 * 60 * 60.
++    if (now - lastCheckTime < 604800) {
++      console.info(
++        `Betterbird skipping update check, last done ${new Date(lastCheckTime * 1000).toLocaleString()}`
++      );
++      return;
++    }
++    Services.prefs.setIntPref("betterbird.update.lastCheckTime", now);
++    let needsUpdate = false;
++    try {
++      let response = await fetch(
++        "https://www.betterbird.eu/start/versions.txt",
++        { cache: "no-store" }
++      );
++      if (!response.ok) {
++        return;
++      }
++      let content = await response.text();
++      let lines = content.split("\n");
++      let version = Services.appinfo.version;
++      let buildID = Services.appinfo.appBuildID;
++      let appLocale = Services.locale.appLocalesAsBCP47[0];
++      for (let l of lines) {
++        let parts = l.split(",");
++        // Format is locale,version,buildid.
++        if (version.startsWith(parts[1]) && appLocale == parts[0]) {
++          if (parts[2] > buildID) {
++            needsUpdate = true;
++            console.info(
++              `Betterbird update available for locale ${appLocale}, new build ${parts[2]}`
++            );
++          }
++          break;
++        }
++      }
++    } catch (ex) {}
++    if (!needsUpdate) {
++      return;
++    }
++    let win = Services.wm.getMostRecentWindow("mail:3pane");
++    if (!win) {
++      return;
++    }
++    let features = "chrome,";
++    if (AppConstants.platform == "win") {
++      features += "centerscreen,dependent";
++    } else if (AppConstants.platform == "macosx") {
++      features += "resizable=no,minimizable=no";
++    } else {
++      features += "centerscreen,dependent,dialog=no";
++    }
++    win.openDialog(
++      "chrome://messenger/content/aboutDialog.xhtml",
++      "",
++      features,
++      { needsUpdate }
++    );
++  },
++
+   // for XPCOM
+   QueryInterface: ChromeUtils.generateQI(["nsIObserver"]),
+ };
