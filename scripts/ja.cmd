@@ -27,7 +27,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: <!ENTITY quickFilterBar.untagged.tooltip "Show messages with no tags">
 :: <!ENTITY quickFilterBar.tagged.tooltip "Show messages with one or more tags. Right-click to clear individual tag selection.">
 %lecho% "<!ENTITY quickFilterBar.untagged.tooltip \"タグなしのメッセージを表示する\">" >> chrome\ja\locale\ja\messenger\quickFilterBar.dtd
-%lecho% "<!ENTITY quickFilterBar.tagged.tooltip \"つまたは複数のタグを持つメッセージを表示します。右クリックで個々のタグの選択を解除します。\">" >> chrome\ja\locale\ja\messenger\quickFilterBar.dtd
+%lecho% "<!ENTITY quickFilterBar.tagged.tooltip \"1つまたは複数のタグを持つメッセージを表示します。右クリックで個々のタグの選択を解除します。\">" >> chrome\ja\locale\ja\messenger\quickFilterBar.dtd
 
 :: Original strings:
 :: enable-gloda-search-encrypted-label =
