@@ -19,15 +19,15 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: decryptToFolder.desc=This will decrypt messages to a folder which is not local. Are you sure you want to continue?
 :: decryptToFolder.dontAsk.label=Don't ask me again.
 %lecho% "decryptToFolder.title=Confirmer le décryptage " >> chrome\fr\locale\fr\messenger\messenger.properties
-%lecho% "decryptToFolder.desc=Déchiffrer les messages dans un dossier qui n'est pas local. Voulez-vous vraiment continuer ?" >> chrome\fr\locale\fr\messenger\messenger.properties
+%lecho% "decryptToFolder.desc=Déchiffrer les messages dans un dossier qui n’est pas local. Voulez-vous vraiment continuer ?" >> chrome\fr\locale\fr\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=Ne plus demander à l’avenir." >> chrome\fr\locale\fr\messenger\messenger.properties
 
 
 :: Original strings:
 :: <!ENTITY quickFilterBar.untagged.tooltip "Show messages with no tags">
 :: <!ENTITY quickFilterBar.tagged.tooltip "Show messages with one or more tags. Right-click to clear individual tag selection.">
-%lecho% "<!ENTITY quickFilterBar.untagged.tooltip \"Afficher les messages sans balises\">" >> chrome\fr\locale\fr\messenger\quickFilterBar.dtd
-%lecho% "<!ENTITY quickFilterBar.tagged.tooltip \"Afficher les messages avec une ou plusieurs balises. Cliquez avec le bouton droit pour effacer la sélection de balise individuelle.\">" >> chrome\fr\locale\fr\messenger\quickFilterBar.dtd
+%lecho% "<!ENTITY quickFilterBar.untagged.tooltip \"Afficher les messages sans étiquettes\">" >> chrome\fr\locale\fr\messenger\quickFilterBar.dtd
+%lecho% "<!ENTITY quickFilterBar.tagged.tooltip \"Afficher les messages avec une ou plusieurs étiquettes. Cliquez avec le bouton droit pour effacer la sélection d’étiquette individuelle.\">" >> chrome\fr\locale\fr\messenger\quickFilterBar.dtd
 
 :: Original strings:
 :: enable-gloda-search-encrypted-label =
