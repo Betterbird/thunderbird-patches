@@ -1,10 +1,11 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <objbase.h>
+#define MAX_PATH_PROFILE MAX_PATH + 50
 
 int main() {
   TCHAR appPath[MAX_PATH];
-  TCHAR profilePath[MAX_PATH];
+  TCHAR profilePath[MAX_PATH_PROFILE];
   SHELLEXECUTEINFO ShExecInfo;
 
   GetModuleFileName(NULL, appPath, MAX_PATH);
@@ -14,9 +15,9 @@ int main() {
 
   // Prepare profile folder path.
   wcscpy_s(profilePath, appPath);
-  wcscpy_s(profilePath, L"-profile \"");
-  wcscat_s(profilePath, MAX_PATH, appPath);
-  wcscat_s(profilePath, MAX_PATH, L"\\profile\"");
+  wcscpy_s(profilePath, L"-profile -no-remote \"");
+  wcscat_s(profilePath, MAX_PATH_PROFILE, appPath);
+  wcscat_s(profilePath, MAX_PATH_PROFILE, L"\\profile\"");
 
   // Add executable.
   wcscat_s(appPath, MAX_PATH, L"\\core\\betterbird.exe");
