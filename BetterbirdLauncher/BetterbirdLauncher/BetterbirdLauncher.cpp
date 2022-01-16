@@ -29,7 +29,7 @@ int main() {
   ShExecInfo.lpFile = appPath;
   ShExecInfo.lpParameters = profilePath;
   ShExecInfo.lpDirectory = NULL;
-  ShExecInfo.nShow = SW_MAXIMIZE;
+  ShExecInfo.nShow = SW_NORMAL;
   ShExecInfo.hInstApp = NULL;
 
   ShellExecuteEx(&ShExecInfo);
