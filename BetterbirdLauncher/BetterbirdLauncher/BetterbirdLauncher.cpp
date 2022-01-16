@@ -3,7 +3,7 @@
 #include <objbase.h>
 #define MAX_PATH_PROFILE MAX_PATH + 50
 
-int main() {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
   TCHAR appPath[MAX_PATH];
   TCHAR profilePath[MAX_PATH_PROFILE];
   SHELLEXECUTEINFO ShExecInfo;
