@@ -1,0 +1,220 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1642620402 -3600
+# Parent  5f4969f3e65932debc22c1d1c63bcdba6930dd1d
+Bug 697031 - prefs mail.addressDisplayAuthor/mail.addressDisplayRecipients to determine display.
+
+Includes fix for fault introduced here: https://hg.mozilla.org/comm-central/rev/64ff1c8a6ad0#l2.24
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -272,16 +272,19 @@ pref("mailnews.headers.show_n_lines_befo
+ // The value will always be set by startup code and must not be changed
+ // here. A value of 0 means a new profile.
+ pref("mail.ui-rdf.version", 0);
+ 
+ /////////////////////////////////////////////////////////////////
+ // Overrides of the core mailnews.js and composer.js prefs
+ /////////////////////////////////////////////////////////////////
+ pref("mail.showCondensedAddresses", true); // show the friendly display name for people I know
++// 1: Show display name, 2: Show e-mail address, 3: Show both.
++pref("mail.addressDisplayAuthor", 1);
++pref("mail.addressDisplayRecipients", 1);
+ 
+ pref("mailnews.attachments.display.start_expanded", false);
+ // hidden pref for changing how we present attachments in the message pane
+ pref("mailnews.attachments.display.view", 0);
+ pref("mail.pane_config.dynamic",            0);
+ pref("mailnews.reuse_thread_window2",     true);
+ pref("editor.singleLine.pasteNewlines", 4);  // substitute commas for new lines in single line text boxes
+ pref("editor.CR_creates_new_p", true);
+diff --git a/mail/base/content/msgMail3PaneWindow.js b/mail/base/content/msgMail3PaneWindow.js
+--- a/mail/base/content/msgMail3PaneWindow.js
++++ b/mail/base/content/msgMail3PaneWindow.js
+@@ -433,20 +433,24 @@ function UpdateMailPaneConfig(aMsgWindow
+ }
+ 
+ var MailPrefObserver = {
+   observe(subject, topic, prefName) {
+     // verify that we're changing the mail pane config pref
+     if (topic == "nsPref:changed") {
+       if (prefName == "mail.pane_config.dynamic") {
+         UpdateMailPaneConfig(true);
+-      } else if (prefName == "mail.showCondensedAddresses") {
++      } else if (
++        prefName == "mail.showCondensedAddresses" ||
++        prefName == "mail.addressDisplayAuthor" ||
++        prefName == "mail.addressDisplayRecipients"
++      ) {
+         let version = Services.prefs.getIntPref("mail.displayname.version", 0);
+ 
+-        Services.prefs.setIntPref("mail.displayname.version", version++);
++        Services.prefs.setIntPref("mail.displayname.version", ++version);
+ 
+         // refresh the thread pane
+         document.getElementById("threadTree").invalidate();
+       } else if (prefName == "mail.openpgp.enable") {
+         if (
+           MailConstants.MOZ_OPENPGP &&
+           Services.prefs.getBoolPref("mail.openpgp.enable")
+         ) {
+@@ -568,16 +572,21 @@ var gMailInit = {
+     TagUtils.loadTagsIntoCSS(document);
+ 
+     // update the pane config before we exit onload otherwise the user may see a flicker if we poke the document
+     // in delayedOnLoadMessenger...
+     UpdateMailPaneConfig(false);
+ 
+     Services.prefs.addObserver("mail.pane_config.dynamic", MailPrefObserver);
+     Services.prefs.addObserver("mail.showCondensedAddresses", MailPrefObserver);
++    Services.prefs.addObserver("mail.addressDisplayAuthor", MailPrefObserver);
++    Services.prefs.addObserver(
++      "mail.addressDisplayRecipients",
++      MailPrefObserver
++    );
+     Services.prefs.addObserver("mail.openpgp.enable", MailPrefObserver);
+ 
+     CreateMailWindowGlobals();
+     GetMessagePaneWrapper().collapsed = true;
+ 
+     if (!Services.policies.isAllowed("devtools")) {
+       let devtoolsMenu = document.getElementById("devtoolsMenu");
+       if (devtoolsMenu) {
+@@ -731,16 +740,24 @@ var gMailInit = {
+     accountManager.removeIncomingServerListener(
+       gThreePaneIncomingServerListener
+     );
+     Services.prefs.removeObserver("mail.pane_config.dynamic", MailPrefObserver);
+     Services.prefs.removeObserver(
+       "mail.showCondensedAddresses",
+       MailPrefObserver
+     );
++    Services.prefs.removeObserver(
++      "mail.addressDisplayAuthor",
++      MailPrefObserver
++    );
++    Services.prefs.removeObserver(
++      "mail.addressDisplayRecipients",
++      MailPrefObserver
++    );
+     Services.prefs.removeObserver("mail.openpgp.enable", MailPrefObserver);
+ 
+     if (gRightMouseButtonSavedSelection) {
+       // Avoid possible cycle leaks.
+       gRightMouseButtonSavedSelection.view = null;
+       gRightMouseButtonSavedSelection = null;
+     }
+ 
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -350,16 +350,23 @@ nsresult nsMsgDBView::FetchAuthor(nsIMsg
+   if (!unparsedAuthor.IsEmpty()) {
+     nsCString cachedDisplayName;
+     GetCachedName(unparsedAuthor, currentDisplayNameVersion, cachedDisplayName);
+     if (!cachedDisplayName.IsEmpty()) {
+       CopyUTF8toUTF16(cachedDisplayName, aSenderString);
+       return NS_OK;
+     }
+   }
++#define DISPLAY_NAME_ONLY 1
++#define DISPLAY_EMAIL_ONLY 2
++#define DISPLAY_NAME_EMAIL 3
++  int32_t addressDisplay = DISPLAY_NAME_ONLY;
++  prefs->GetIntPref("mail.addressDisplayAuthor", &addressDisplay);
++  if (addressDisplay < DISPLAY_NAME_ONLY ||
++      addressDisplay > DISPLAY_NAME_EMAIL) addressDisplay = DISPLAY_NAME_ONLY;
+ 
+   nsCString author;
+   (void)aHdr->GetAuthor(getter_Copies(author));
+ 
+   nsCString headerCharset;
+   aHdr->GetEffectiveCharset(headerCharset);
+ 
+   nsString name;
+@@ -371,25 +378,27 @@ nsresult nsMsgDBView::FetchAuthor(nsIMsg
+   ExtractFirstAddress(addresses, name, emailAddress);
+ 
+   if (showCondensedAddresses)
+     GetDisplayNameInAddressBook(emailAddress, aSenderString);
+ 
+   if (aSenderString.IsEmpty()) {
+     // We can't use the display name in the card; use the name contained in
+     // the header or email address.
+-    if (name.IsEmpty()) {
++    if (name.IsEmpty() || addressDisplay == DISPLAY_EMAIL_ONLY) {
+       CopyUTF8toUTF16(emailAddress, aSenderString);
+     } else {
+       int32_t atPos;
+-      if ((atPos = name.FindChar('@')) == kNotFound ||
+-          name.FindChar('.', atPos) == kNotFound) {
++      if (addressDisplay == DISPLAY_NAME_ONLY &&
++          ((atPos = name.FindChar('@')) == kNotFound ||
++           name.FindChar('.', atPos) == kNotFound)) {
+         aSenderString = name;
+       } else {
+-        // Found @ followed by a dot, so this looks like a spoofing case.
++        // Full display requested or
++        // found @ followed by a dot, which looks like a spoofing case.
+         aSenderString = name;
+         aSenderString.AppendLiteral(" <");
+         AppendUTF8toUTF16(emailAddress, aSenderString);
+         aSenderString.Append('>');
+       }
+     }
+   }
+ 
+@@ -451,16 +460,20 @@ nsresult nsMsgDBView::FetchRecipients(ns
+ 
+     // Recipients have already been cached, check if the addressbook
+     // was changed after cache.
+     if (!cachedRecipients.IsEmpty()) {
+       CopyUTF8toUTF16(cachedRecipients, aRecipientsString);
+       return NS_OK;
+     }
+   }
++  int32_t addressDisplay = DISPLAY_NAME_ONLY;
++  prefs->GetIntPref("mail.addressDisplayRecipients", &addressDisplay);
++  if (addressDisplay < DISPLAY_NAME_ONLY ||
++      addressDisplay > DISPLAY_NAME_EMAIL) addressDisplay = DISPLAY_NAME_ONLY;
+ 
+   nsCString unparsedRecipients;
+   nsresult rv = aHdr->GetRecipients(getter_Copies(unparsedRecipients));
+ 
+   nsCString headerCharset;
+   aHdr->GetEffectiveCharset(headerCharset);
+ 
+   nsTArray<nsString> names;
+@@ -483,25 +496,27 @@ nsresult nsMsgDBView::FetchRecipients(ns
+     nsString& curName = names[i];
+ 
+     if (showCondensedAddresses)
+       GetDisplayNameInAddressBook(curAddress, recipient);
+ 
+     if (recipient.IsEmpty()) {
+       // We can't use the display name in the card; use the name contained in
+       // the header or email address.
+-      if (curName.IsEmpty()) {
++      if (curName.IsEmpty() || addressDisplay == DISPLAY_EMAIL_ONLY) {
+         CopyUTF8toUTF16(curAddress, recipient);
+       } else {
+         int32_t atPos;
+-        if ((atPos = curName.FindChar('@')) == kNotFound ||
+-            curName.FindChar('.', atPos) == kNotFound) {
++        if (addressDisplay == DISPLAY_NAME_ONLY &&
++            ((atPos = curName.FindChar('@')) == kNotFound ||
++             curName.FindChar('.', atPos) == kNotFound)) {
+           recipient = curName;
+         } else {
+-          // Found @ followed by a dot, so this looks like a spoofing case.
++          // Full display requested or
++          // found @ followed by a dot, which looks like a spoofing case.
+           recipient = curName;
+           recipient.AppendLiteral(" <");
+           AppendUTF8toUTF16(curAddress, recipient);
+           recipient.Append('>');
+         }
+       }
+     }
+ 
