@@ -9,7 +9,7 @@ del ..\omni.ja
 
 :: Get language pack
 :: wget http://ftp.mozilla.org/pub/thunderbird/releases/91.3.2/linux-x86_64/xpi/%~1.xpi
-wget http://ftp.mozilla.org/pub/thunderbird/candidates/91.4.0-candidates/build1/linux-x86_64/xpi/%~1.xpi
+wget http://ftp.mozilla.org/pub/thunderbird/candidates/91.5.1-candidates/build1/linux-x86_64/xpi/%~1.xpi
 
 :: Remove stuff we don't want from the language pack
 7z d %~1.xpi manifest.json
@@ -48,5 +48,9 @@ copy betterbird-%~2.en-US.win64.installer.exe betterbird-%~2.%~1.win64.installer
 mkdir core
 mv %~1\omni.ja core\omni.ja
 7z u betterbird-%~2.%~1.win64.installer.exe core\omni.ja
+:: Keep omni.ja for later
+mkdir omni-win
+rm omni-win\omni-%~1.ja
+mv core\omni.ja omni-win\omni-%~1.ja
 rmdir /s /q core
 rmdir /s /q %~1

@@ -11,7 +11,7 @@ del ..\omni.ja
 
 :: Get language pack
 :: wget http://ftp.mozilla.org/pub/thunderbird/releases/91.3.2/linux-x86_64/xpi/%~1.xpi
-wget http://ftp.mozilla.org/pub/thunderbird/candidates/91.4.0-candidates/build1/linux-x86_64/xpi/%~1.xpi
+wget http://ftp.mozilla.org/pub/thunderbird/candidates/91.5.1-candidates/build1/linux-x86_64/xpi/%~1.xpi
 
 :: Remove stuff we don't want from the language pack
 7z d %~1.xpi manifest.json
