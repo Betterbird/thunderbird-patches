@@ -49,16 +49,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: -- Already correct in the language pack --
 
 :: Fix more mess from bug 1734933 and bug 1718411.
-%lecho% "type-column-header = ファイルの種類" >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "action-column-header = 動作設定" >> localization\ja\messenger\preferences\preferences.ftl
-
-%lecho% "add-web-search-engine =" >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "  .label = 追加..."  >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "  .accesskey = A"        >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "add-opensearch-provider-title = OpenSearch プロバイダーの追加" >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "add-opensearch-provider-text = 追加する OpenSearch プロバイダーの URL を入力してください。OpenSearch Description ファイルの URL を直接使用するか、このファイルを自動的に発見できる URL を入力してください。" >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "adding-opensearch-provider-failed-title = OpenSearch プロバイダーの追加に失敗しました" >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "adding-opensearch-provider-failed-text = { $url } の OpenSearch プロバイダーを追加できませんでした。" >> localization\ja\messenger\preferences\preferences.ftl
+:: -- Already correct in the language pack --
 
 :: And more strings from bug 1724090.
-%lecho% "calendar-print-back-button = 元の設定へ" >> localization\ja\calendar\calendar-print.ftl
+:: -- Already correct in the language pack --
