@@ -1,0 +1,62 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1643146296 -3600
+# Parent  d817f2c93a55d29eaa401077763bfe3b94cbbd8f
+Bug 799040 - If ignored thread received new message, don't increase unread count.
+
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -1464,17 +1464,23 @@ nsMsgDBView::GetCellProperties(int32_t a
+   }
+ #endif
+ 
+   nsCOMPtr<nsIMsgThread> thread;
+   rv = GetThreadContainingIndex(aRow, getter_AddRefs(thread));
+   if (NS_SUCCEEDED(rv) && thread) {
+     uint32_t numUnreadChildren;
+     thread->GetNumUnreadChildren(&numUnreadChildren);
+-    if (numUnreadChildren > 0) properties.AppendLiteral(" hasUnread");
++    // Due to bug 799040 ignored threads had phantom unread messages.
++    if (numUnreadChildren > 0) {
++      uint32_t tflags;
++      thread->GetFlags(&tflags);
++      if (!(tflags & nsMsgMessageFlags::Ignored))
++        properties.AppendLiteral(" hasUnread");
++    }
+ 
+     // For threaded display add the ignore/watch properties to the
+     // thread top row. For non-threaded add it to all rows.
+     if (!(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) ||
+         ((m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) &&
+          (m_flags[aRow] & MSG_VIEW_FLAG_ISTHREAD))) {
+       thread->GetFlags(&flags);
+       if (flags & nsMsgMessageFlags::Watched)
+diff --git a/mailnews/db/msgdb/src/nsMsgThread.cpp b/mailnews/db/msgdb/src/nsMsgThread.cpp
+--- a/mailnews/db/msgdb/src/nsMsgThread.cpp
++++ b/mailnews/db/msgdb/src/nsMsgThread.cpp
+@@ -353,18 +353,23 @@ NS_IMETHODIMP nsMsgThread::AddChild(nsIM
+   if (!hdrMoved && moveIndex > 0) {
+     mdb_pos outPos;
+     m_mdbTable->MoveRow(m_mdbDB->GetEnv(), hdrRow, -1, moveIndex, &outPos);
+   }
+ 
+   // do this after we've put the new hdr in the thread
+   bool isKilled;
+   child->GetIsKilled(&isKilled);
+-  if ((m_flags & nsMsgMessageFlags::Ignored || isKilled) && m_mdbDB)
++  if ((m_flags & nsMsgMessageFlags::Ignored || isKilled) && m_mdbDB) {
+     m_mdbDB->MarkHdrRead(child, true, nullptr);
++    // If we don't count down the unread child count, the thread will
++    // carry an invisible unread child forever. It would be sufficient
++    // to count down by 1, but we repair any prior damage.
++    ChangeUnreadChildCount(-(int32_t)m_numUnreadChildren);
++  }
+ #ifdef DEBUG_David_Bienvenu
+   nsMsgKey msgHdrThreadKey;
+   child->GetThreadId(&msgHdrThreadKey);
+   NS_ASSERTION(msgHdrThreadKey == m_threadKey,
+                "adding msg to thread it doesn't belong to");
+ #endif
+   return rv;
+ }
