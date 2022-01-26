@@ -1,9 +1,103 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1643141900 -3600
+# Date 1643222600 -3600
 # Parent  d817f2c93a55d29eaa401077763bfe3b94cbbd8f
 Bug 799040 - If ignored thread received new message, don't increase unread count.
 
+diff --git a/mailnews/base/public/nsIMsgThread.idl b/mailnews/base/public/nsIMsgThread.idl
+--- a/mailnews/base/public/nsIMsgThread.idl
++++ b/mailnews/base/public/nsIMsgThread.idl
+@@ -21,15 +21,16 @@ interface nsIMsgThread : nsISupports {
+ 
+   void addChild(in nsIMsgDBHdr child, in nsIMsgDBHdr inReplyTo, in boolean threadInThread, in nsIDBChangeAnnouncer announcer);
+   nsMsgKey getChildKeyAt(in unsigned long index);
+   nsIMsgDBHdr getChild(in nsMsgKey msgKey);
+   nsIMsgDBHdr getChildHdrAt(in unsigned long index);
+   nsIMsgDBHdr getRootHdr(out long index);
+   void removeChildAt(in unsigned long index);
+   void removeChildHdr(in nsIMsgDBHdr child, in nsIDBChangeAnnouncer announcer);
++  void resetNumUnreadChildren();
+ 
+   void markChildRead(in boolean bRead);
+ 
+   nsIMsgDBHdr getFirstUnreadChild();
+ 
+   nsIMsgEnumerator enumerateMessages(in nsMsgKey parent);
+ };
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -6294,16 +6294,22 @@ nsresult nsMsgDBView::MarkThreadRead(nsI
+     if (isRead != bRead) {
+       // MarkHdrRead will change the unread count on the thread.
+       db->MarkHdrRead(msgHdr, bRead, nullptr);
+       // Insert at the front. Should we insert at the end?
+       idsMarkedRead.InsertElementAt(0, hdrMsgId);
+     }
+   }
+ 
++  uint32_t numUnreadChildren;
++  threadHdr->GetNumUnreadChildren(&numUnreadChildren);
++  if (numUnreadChildren > 0) {
++    // Repair damage from bug 799040.
++    threadHdr->ResetNumUnreadChildren();
++  }
+   return NS_OK;
+ }
+ 
+ bool nsMsgDBView::AdjustReadFlag(nsIMsgDBHdr* msgHdr, uint32_t* msgFlags) {
+   // If we're a cross-folder view, just bail on this.
+   if (GetFolders()) return *msgFlags & nsMsgMessageFlags::Read;
+ 
+   bool isRead = false;
+diff --git a/mailnews/base/src/nsMsgGroupThread.cpp b/mailnews/base/src/nsMsgGroupThread.cpp
+--- a/mailnews/base/src/nsMsgGroupThread.cpp
++++ b/mailnews/base/src/nsMsgGroupThread.cpp
+@@ -76,16 +76,20 @@ uint32_t nsMsgGroupThread::NumRealChildr
+ 
+ NS_IMETHODIMP nsMsgGroupThread::GetNumUnreadChildren(
+     uint32_t* aNumUnreadChildren) {
+   NS_ENSURE_ARG_POINTER(aNumUnreadChildren);
+   *aNumUnreadChildren = m_numUnreadChildren;
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgGroupThread::ResetNumUnreadChildren() {
++  return NS_OK;  // No-op, only used for repair in nsMsgThread.
++}
++
+ void nsMsgGroupThread::InsertMsgHdrAt(nsMsgViewIndex index, nsIMsgDBHdr* hdr) {
+   nsMsgKey msgKey;
+   hdr->GetMessageKey(&msgKey);
+   m_keys.InsertElementAt(index, msgKey);
+ }
+ 
+ void nsMsgGroupThread::SetMsgHdrAt(nsMsgViewIndex index, nsIMsgDBHdr* hdr) {
+   nsMsgKey msgKey;
+diff --git a/mailnews/base/src/nsMsgXFViewThread.cpp b/mailnews/base/src/nsMsgXFViewThread.cpp
+--- a/mailnews/base/src/nsMsgXFViewThread.cpp
++++ b/mailnews/base/src/nsMsgXFViewThread.cpp
+@@ -69,16 +69,20 @@ nsMsgXFViewThread::GetNumChildren(uint32
+ 
+ NS_IMETHODIMP
+ nsMsgXFViewThread::GetNumUnreadChildren(uint32_t* aNumUnreadChildren) {
+   NS_ENSURE_ARG_POINTER(aNumUnreadChildren);
+   *aNumUnreadChildren = m_numUnreadChildren;
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgXFViewThread::ResetNumUnreadChildren() {
++  return NS_OK;  // No-op, only used for repair in nsMsgThread.
++}
++
+ NS_IMETHODIMP
+ nsMsgXFViewThread::AddChild(nsIMsgDBHdr* aNewHdr, nsIMsgDBHdr* aInReplyTo,
+                             bool aThreadInThread,
+                             nsIDBChangeAnnouncer* aAnnouncer) {
+   uint32_t whereInserted;
+   return AddHdr(aNewHdr, false, whereInserted, nullptr);
+ }
+ 
 diff --git a/mailnews/db/msgdb/src/nsMsgThread.cpp b/mailnews/db/msgdb/src/nsMsgThread.cpp
 --- a/mailnews/db/msgdb/src/nsMsgThread.cpp
 +++ b/mailnews/db/msgdb/src/nsMsgThread.cpp
@@ -31,3 +125,27 @@ diff --git a/mailnews/db/msgdb/src/nsMsgThread.cpp b/mailnews/db/msgdb/src/nsMsg
  #endif
    return rv;
  }
+@@ -881,16 +885,23 @@ nsresult nsMsgThread::ChangeChildCount(i
+     childCount = 0;
+ 
+   rv = m_mdbDB->UInt32ToRowCellColumn(
+       m_metaRow, m_mdbDB->m_threadChildrenColumnToken, childCount);
+   m_numChildren = childCount;
+   return rv;
+ }
+ 
++NS_IMETHODIMP nsMsgThread::ResetNumUnreadChildren() {
++  nsresult rv = m_mdbDB->UInt32ToRowCellColumn(
++      m_metaRow, m_mdbDB->m_threadUnreadChildrenColumnToken, 0);
++  m_numUnreadChildren = 0;
++  return rv;
++}
++
+ nsresult nsMsgThread::ChangeUnreadChildCount(int32_t delta) {
+   nsresult rv;
+ 
+   uint32_t childCount = 0;
+   m_mdbDB->RowCellColumnToUInt32(
+       m_metaRow, m_mdbDB->m_threadUnreadChildrenColumnToken, childCount);
+   childCount += delta;
+   if ((int32_t)childCount < 0) {
