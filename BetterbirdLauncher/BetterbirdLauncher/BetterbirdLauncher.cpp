@@ -15,7 +15,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
   // Prepare profile folder path.
   wcscpy_s(profilePath, appPath);
-  wcscpy_s(profilePath, L"-profile -no-remote \"");
+  wcscpy_s(profilePath, L"-new-instance -profile \"");
   wcscat_s(profilePath, MAX_PATH_PROFILE, appPath);
   wcscat_s(profilePath, MAX_PATH_PROFILE, L"\\profile\"");
 
