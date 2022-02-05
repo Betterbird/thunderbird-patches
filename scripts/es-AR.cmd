@@ -51,5 +51,11 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: Fix more mess from bug 1734933 and bug 1718411.
 :: -- Already correct in the language pack --
 
+:: Fix more mess from bug 1753824.
+%lecho% "attachment-bucket-count = { $count ->"     >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    [1]      { $count } archivo adjunto"   >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    *[other] { $count } archivos adjuntos" >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+%lecho% "}"                                         >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+
 :: And more strings from bug 1724090.
 :: -- Already correct in the language pack --
