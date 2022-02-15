@@ -22,6 +22,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "decryptToFolder.desc=Dies wird die Nachrichten in einen nicht lokalen Ordner entschlüsseln. Sind Sie sicher, dass Sie fortsetzen möchten?" >> chrome\de\locale\de\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=Diese Meldung nicht mehr anzeigen" >> chrome\de\locale\de\messenger\messenger.properties
 
+:: Original string:
+:: <!ENTITY folderContextStartupFolder.label "Startup Folder">
+%lecho% "<!ENTITY folderContextStartupFolder.label \"Startordner\">" >> chrome\de\locale\de\messenger\messenger.dtd
 
 :: Original strings:
 :: <!ENTITY quickFilterBar.untagged.tooltip "Show messages with no tags">
