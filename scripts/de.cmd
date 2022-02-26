@@ -39,6 +39,16 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = Verschlüsselte Nachrichten durchsuchbar machen (speichert entschlüsselte Kopie lokal)" >> localization\de\messenger\preferences\preferences.ftl
 
 :: Original strings:
+:: menuitem-recent-files =
+::     .label = Recent File(s)…
+:: context-menuitem-recent-files =
+::     .label = Attach Recent File(s)…
+%lecho% "menuitem-recent-files ="                   >> localization\de\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Zuletzt geöffnete Datei(en)…" >> localization\de\messenger\messengercompose\messengercompose.ftl
+%lecho% "context-menuitem-recent-files ="           >> localization\de\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Zuletzt geöffnete Datei(en) anhängen…" >> localization\de\messenger\messengercompose\messengercompose.ftl
+
+:: Original strings:
 :: dock-options-show-badge =
 ::     .label = Show badge icon
 ::     .accesskey = b

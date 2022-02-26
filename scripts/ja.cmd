@@ -39,6 +39,16 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = 暗号化されたメッセージの検索を有効にする（復号化されたコピーをローカルに保存する）" >> localization\ja\messenger\preferences\preferences.ftl
 
 :: Original strings:
+:: menuitem-recent-files =
+::     .label = Recent File(s)…
+:: context-menuitem-recent-files =
+::     .label = Attach Recent File(s)…
+%lecho% "menuitem-recent-files ="          >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近のファイル…"         >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "context-menuitem-recent-files ="  >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近のファイルを添付する…" >> localization\ja\messenger\messengercompose\messengercompose.ftl
+
+:: Original strings:
 :: dock-options-show-badge =
 ::     .label = Show badge icon
 ::     .accesskey = b

@@ -39,6 +39,16 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = Habilitar la búsqueda en mensajes cifrados (almacena una copia descifrada localmente)" >> localization\es-AR\messenger\preferences\preferences.ftl
 
 :: Original strings:
+:: menuitem-recent-files =
+::     .label = Recent File(s)…
+:: context-menuitem-recent-files =
+::     .label = Attach Recent File(s)…
+%lecho% "menuitem-recent-files ="            >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Archivo(s) recientes…" >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+%lecho% "context-menuitem-recent-files ="    >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Adjuntar archivo(s) recientes…" >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
+
+:: Original strings:
 :: dock-options-show-badge =
 ::     .label = Show badge icon
 ::     .accesskey = b
