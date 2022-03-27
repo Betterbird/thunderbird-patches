@@ -52,11 +52,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: dock-options-show-badge =
 ::     .label = Show badge icon
 ::     .accesskey = b
-:: Will need to translate these. "Icon" is usually "Symbol" in German and "badge" was never translated. Good luck to the translators.
-:: "Badge icon" already seems to be a misnomer.
-%lecho% "dock-options-show-badge =" >> localization\zh-CN\messenger\preferences\dock-options.ftl
-%lecho% "    .label = 显示通知标记(M)" >> localization\zh-CN\messenger\preferences\dock-options.ftl
-%lecho% "    .accesskey = M" >> localization\zh-CN\messenger\preferences\dock-options.ftl
+:: -- Already correct in the language pack --
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
@@ -74,7 +70,4 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: https://searchfox.org/l10n/search?q=calendar-print-back-button&path=&case=false&regexp=false
 
 :: Fix more mess from bug 1753824.
-%lecho% "attachment-bucket-count = { $count ->"  >> localization\fr\messenger\messengercompose\messengercompose.ftl
-%lecho% "    [1]      { $count } 个附件"   >> localization\fr\messenger\messengercompose\messengercompose.ftl
-%lecho% "    *[other] { $count } 个附件" >> localization\fr\messenger\messengercompose\messengercompose.ftl
-%lecho% "}"                                      >> localization\fr\messenger\messengercompose\messengercompose.ftl
+%lecho% "attachment-bucket-count = { $count } 个附件" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
