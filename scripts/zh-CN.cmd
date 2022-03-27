@@ -79,3 +79,9 @@ sed -i -e 's/other-cases-label/other-cases-text-label/'                      loc
 :: And more strings from bug 1724090.
 :: -- Already correct in the language pack --
 :: https://searchfox.org/l10n/search?q=calendar-print-back-button&path=&case=false&regexp=false
+
+:: Fix more mess from bug 1753824.
+%lecho% "attachment-bucket-count = { $count ->"  >> localization\fr\messenger\messengercompose\messengercompose.ftl
+%lecho% "    [1]      { $count } 个附件"   >> localization\fr\messenger\messengercompose\messengercompose.ftl
+%lecho% "    *[other] { $count } 个附件" >> localization\fr\messenger\messengercompose\messengercompose.ftl
+%lecho% "}"                                      >> localization\fr\messenger\messengercompose\messengercompose.ftl
