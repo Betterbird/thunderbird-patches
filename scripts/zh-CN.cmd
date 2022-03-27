@@ -63,14 +63,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "<!ENTITY multilineAllFolders.label \"在所有文件夹启用多行视图\">" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.dtd
 
 :: Fix mess from https://bugzilla.mozilla.org/show_bug.cgi?id=1728893#c24
-sed -i -e 's/return-receipt-checkbox/return-receipt-checkbox-control/'       localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-leave-radio/receipt-leave-radio-control/'               localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-move-radio/receipt-move-radio-control/'                 localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-return-never-radio/receipt-return-never-radio-control/' localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-return-some-radio/receipt-return-some-radio-control/'   localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-not-to-cc/receipt-not-to-cc-label/'                     localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/sender-outside-domain/sender-outside-domain-label/'             localization\zh-CN\messenger\preferences\receipts.ftl
-sed -i -e 's/other-cases-label/other-cases-text-label/'                      localization\zh-CN\messenger\preferences\receipts.ftl
+:: -- Already correct in the language pack --
 
 :: Fix more mess from bug 1734933 and bug 1718411.
 :: -- Already correct in the language pack --
