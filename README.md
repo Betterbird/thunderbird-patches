@@ -42,4 +42,4 @@ Read [www.betterbird.eu/support/](https://www.betterbird.eu//support/). Here is 
 1. First step: Check whether the bug exists in Thunderbird. If so, check whether it has been reported at [Bugzilla](https://bugzilla.mozilla.org/).
 1. If the bug is also in Thunderbird, let us know that it's important to you, we'll check whether we deem it "must have" enough to fix it considering the necessary effort.
 1. If the bug is only in Betterbird, let us know, we'll endeavour to fix it asap, usually within days.
-1. Common sense bug reporting rules apply: Need to be reproducible, user needs to cooperate in debugging.
+1. Common sense bug reporting rules apply: Bug needs to be reproducible, user needs to cooperate in debugging.
