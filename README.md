@@ -30,16 +30,16 @@ Linux users also can use [Ansible-betterbird](https://github.com/4ch1m/ansible-b
 
 Visit [www.betterbird.eu](https://www.betterbird.eu/) for details.
 
-## Translations
-
-Translation strings are found [here](./scripts).
-
-## Support
+## Bug Reporting / Support
 
 Read [www.betterbird.eu/support/](https://www.betterbird.eu//support/). Here is an abridged version:
 
 1. Thunderbird has 14.000+ bugs which won't be fixed as part of Betterbird.
-1. First step: Check whether the bug exists in Thunderbird. If so, check whether it has been reported at [Bugzilla](https://bugzilla.mozilla.org/).
-1. If the bug is also in Thunderbird, let us know that it's important to you, we'll check whether we deem it "must have" enough to fix it considering the necessary effort.
+1. First step: Check whether the bug exists in Thunderbird. If so, check whether it has been reported at [Bugzilla](https://bugzilla.mozilla.org/). If reported, please let us know the bug number. If not reported, either you or our project will need to report it (see following item).
+1. If the bug is also in Thunderbird, let us know that it's important to you, please provide reasons why Betterbird should fix it and not upstream Thunderbird. We'll check whether we deem it "must have" enough to fix it considering the necessary effort.
 1. If the bug is only in Betterbird, let us know, we'll endeavour to fix it asap, usually within days.
 1. Common sense bug reporting rules apply: Bug needs to be reproducible, user needs to cooperate in debugging.
+
+## Translations
+
+Translation strings are found [here](./scripts).
