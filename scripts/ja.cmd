@@ -49,20 +49,5 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = 最近のファイルを添付する…" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
-:: dock-options-show-badge =
-::     .label = Show badge icon
-::     .accesskey = b
-:: -- Already correct in the language pack --
-
-:: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"すべてのフォルダーでマルチラインビュー\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
-
-:: Fix mess from https://bugzilla.mozilla.org/show_bug.cgi?id=1728893#c24
-:: -- Already correct in the language pack --
-
-:: Fix more mess from bug 1734933 and bug 1718411.
-:: -- Already correct in the language pack --
-
-:: And more strings from bug 1724090.
-:: -- Already correct in the language pack --

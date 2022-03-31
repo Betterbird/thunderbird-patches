@@ -49,42 +49,14 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = Zuletzt geöffnete Datei(en) anhängen…" >> localization\de\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
-:: dock-options-show-badge =
-::     .label = Show badge icon
-::     .accesskey = b
-:: Will need to translate these. "Icon" is usually "Symbol" in German and "badge" was never translated. Good luck to the translators.
-:: "Badge icon" already seems to be a misnomer.
-%lecho% "dock-options-show-badge =" >> localization\de\messenger\preferences\dock-options.ftl
-%lecho% "    .label = Show badge icon" >> localization\de\messenger\preferences\dock-options.ftl
-%lecho% "    .accesskey = b" >> localization\de\messenger\preferences\dock-options.ftl
-
-:: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"Mehrzeilen-Ansicht für alle Ordner\">" >> chrome\de\locale\de\messenger\messenger.dtd
 
-:: Fix mess from https://bugzilla.mozilla.org/show_bug.cgi?id=1728893#c24
-sed -i -e 's/return-receipt-checkbox/return-receipt-checkbox-control/'       localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-leave-radio/receipt-leave-radio-control/'               localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-move-radio/receipt-move-radio-control/'                 localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-return-never-radio/receipt-return-never-radio-control/' localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-return-some-radio/receipt-return-some-radio-control/'   localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/receipt-not-to-cc/receipt-not-to-cc-label/'                     localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/sender-outside-domain/sender-outside-domain-label/'             localization\de\messenger\preferences\receipts.ftl
-sed -i -e 's/other-cases-label/other-cases-text-label/'                      localization\de\messenger\preferences\receipts.ftl
-
-:: Fix more mess from bug 1734933 and bug 1718411.
-%lecho% "type-column-header = Dateityp" >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "action-column-header = Aktion" >> localization\de\messenger\preferences\preferences.ftl
-
-%lecho% "add-web-search-engine =" >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "  .label = Hinzufügen…"  >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "  .accesskey = H"        >> localization\de\messenger\preferences\preferences.ftl
-:: TODO: The following four are still missing translation into German. We're waiting for the official L10N:
-:: https://searchfox.org/l10n/search?q=add-opensearch-provider-title&path=&case=false&regexp=false
-%lecho% "add-opensearch-provider-title = Add OpenSearch Provider" >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "add-opensearch-provider-text = Enter the URL of the OpenSearch provider to add. Either use the direct URL of the OpenSearch Description file, or a URL where it can be auto-discovered." >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "adding-opensearch-provider-failed-title = Adding OpenSearch Provider Failed" >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "adding-opensearch-provider-failed-text = Could not add OpenSearch Provider for { $url }." >> localization\de\messenger\preferences\preferences.ftl
+:: Fix more mess from bug 1753824.
+%lecho% "attachment-bucket-count-value = { $count ->" >> localization\de\messenger\messengercompose\messengercompose.ftl
+%lecho% "    [1]      { $count } Anhang"  >> localization\de\messenger\messengercompose\messengercompose.ftl
+%lecho% "    *[other] { $count } Anhänge" >> localization\de\messenger\messengercompose\messengercompose.ftl
+%lecho% "}"                               >> localization\de\messenger\messengercompose\messengercompose.ftl
 
 :: And more strings from bug 1724090.
 %lecho% "calendar-print-back-button = Zurück" >> localization\de\calendar\calendar-print.ftl

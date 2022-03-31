@@ -49,26 +49,5 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = Adjuntar archivo(s) recientes…" >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
-:: dock-options-show-badge =
-::     .label = Show badge icon
-::     .accesskey = b
-:: -- Already correct in the language pack --
-
-:: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"Vista multilínea en todas las carpetas\">" >> chrome\es-AR\locale\es-AR\messenger\messenger.dtd
-
-:: Fix mess from https://bugzilla.mozilla.org/show_bug.cgi?id=1728893#c24
-:: -- Already correct in the language pack --
-
-:: Fix more mess from bug 1734933 and bug 1718411.
-:: -- Already correct in the language pack --
-
-:: Fix more mess from bug 1753824.
-%lecho% "attachment-bucket-count = { $count ->"     >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
-%lecho% "    [1]      { $count } archivo adjunto"   >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
-%lecho% "    *[other] { $count } archivos adjuntos" >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
-%lecho% "}"                                         >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
-
-:: And more strings from bug 1724090.
-:: -- Already correct in the language pack --
