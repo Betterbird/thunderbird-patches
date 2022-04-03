@@ -1,5 +1,5 @@
 # thunderbird-patches
-Betterbird is a fork of Mozilla Thunderbird. Here are the patches that provide all the goodness.
+Betterbird is a fork of Mozilla Thunderbird. Here are the patches that provide all the goodness. Visit [www.betterbird.eu](https://www.betterbird.eu/) for details.
 
 ## Building Betterbird
 These instruction assume that you know how to build Thunderbird. The following instructions are specific to Betterbird.
@@ -28,7 +28,20 @@ However, that part of the build system should not be triggered for Linux builds.
 
 Linux users also can use [Ansible-betterbird](https://github.com/4ch1m/ansible-betterbird) for an automated "one click" build, well, "one command" build. To build successfully on Linux, you need at least 16 GB of memory or swap space.
 
-Visit [www.betterbird.eu](https://www.betterbird.eu/) for details.
+Mac users follow these instructions (WIP!):
+You need to have at least macOS 12 (Monterey) and you need to install Xcode from the Apple App Store (which requires an Apple ID).
+Then follow the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html), the Thunderbird documentation is incomplete.
+1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
+1. Xcode modifications: `xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`.
+1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.zshenv` and `python3 -m pip install --user mercurial`.
+1. In a new shell, then: `hg version`.
+1. Install Rust: `brew install rustup`.
+1. In a new shell: `rustup-init` and `rustup override set 1.53.0`, the latter is needed for Mozilla ESR 91 code.
+1. In a new shell install ansible: `python3 -m pip install --upgrade pip` and `python3 -m pip install --user ansible`.
+1. `git clone https://github.com/4ch1m/ansible-betterbird`
+1. `cd ansible-betterbird`
+1. Remove `name: install necessary packages` section from betterbird.yml, those packages are already installed.
+1. `./betterbird.sh`
 
 ## Bug Reporting / Support
 
