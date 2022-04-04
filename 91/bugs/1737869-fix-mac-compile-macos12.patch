@@ -1,0 +1,1014 @@
+# HG changeset patch
+# User Markus Stange <mstange.moz@gmail.com>
+# Date 1649064445 -7200
+# Node ID 6e7687693cfc8bba0ca63471c2a1e6d7d5dd2e17
+# Parent  abc02df41cc9810cf2c8928e1966bcbcd3044805
+Bug 1737869 - Fix build with the macOS 12 SDK, by using AXTextMarker(Range)Ref instead of id and by ifdefing the declarations that are now public in the new SDK. r=eeejay
+
+--> Rebased to mozilla-esr91 by the Betterbird project.
+
+I think this patch is functionally neutral.
+I'm not completely sure about the best way to do these casts - the __bridge may not be
+necessary since we don't use ARC yet. But it's probably fine to add it anyway.
+Also, returning autoreleased CFTypeRef objects seems a bit weird, but it's what we've
+already been doing and it's probably fine.
+And some of these nils should maybe be nullptrs, but the compiler doesn't seem to care.
+
+Differential Revision: https://phabricator.services.mozilla.com/D129559
+
+diff --git a/accessible/mac/GeckoTextMarker.h b/accessible/mac/GeckoTextMarker.h
+--- a/accessible/mac/GeckoTextMarker.h
++++ b/accessible/mac/GeckoTextMarker.h
+@@ -4,18 +4,22 @@
+ /* vim: set ts=2 et sw=2 tw=80: */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #ifndef _GeckoTextMarker_H_
+ #define _GeckoTextMarker_H_
+ 
+-typedef CFTypeRef AXTextMarkerRef;
+-typedef CFTypeRef AXTextMarkerRangeRef;
++#include <ApplicationServices/ApplicationServices.h>
++#include <Foundation/Foundation.h>
++
++#include "HyperTextAccessibleWrap.h"
++#include "PlatformExtTypes.h"
++#include "SDKDeclarations.h"
+ 
+ namespace mozilla {
+ namespace a11y {
+ 
+ class AccessibleOrProxy;
+ class GeckoTextMarkerRange;
+ 
+ class GeckoTextMarker final {
+@@ -28,17 +32,17 @@ class GeckoTextMarker final {
+ 
+   GeckoTextMarker(AccessibleOrProxy aDoc, AXTextMarkerRef aTextMarker);
+ 
+   GeckoTextMarker() : mContainer(nullptr), mOffset(0) {}
+ 
+   static GeckoTextMarker MarkerFromIndex(const AccessibleOrProxy& aRoot,
+                                          int32_t aIndex);
+ 
+-  id CreateAXTextMarker();
++  AXTextMarkerRef CreateAXTextMarker();
+ 
+   bool Next();
+ 
+   bool Previous();
+ 
+   // Return a range with the given type relative to this marker.
+   GeckoTextMarkerRange Range(EWhichRange aRangeType);
+ 
+@@ -74,17 +78,17 @@ class GeckoTextMarkerRange final {
+ 
+   GeckoTextMarkerRange() {}
+ 
+   GeckoTextMarkerRange(AccessibleOrProxy aDoc,
+                        AXTextMarkerRangeRef aTextMarkerRange);
+ 
+   explicit GeckoTextMarkerRange(const AccessibleOrProxy& aAccessible);
+ 
+-  id CreateAXTextMarkerRange();
++  AXTextMarkerRangeRef CreateAXTextMarkerRange();
+ 
+   bool IsValid() const {
+     return !mStart.mContainer.IsNull() && !mEnd.mContainer.IsNull();
+   };
+ 
+   /**
+    * Return text enclosed by the range.
+    */
+diff --git a/accessible/mac/GeckoTextMarker.mm b/accessible/mac/GeckoTextMarker.mm
+--- a/accessible/mac/GeckoTextMarker.mm
++++ b/accessible/mac/GeckoTextMarker.mm
+@@ -1,48 +1,27 @@
+ /* clang-format off */
+ /* -*- Mode: Objective-C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* clang-format on */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++#import "GeckoTextMarker.h"
++
++#include "DocAccessible.h"
+ #include "DocAccessibleParent.h"
+ #include "AccAttributes.h"
+ #include "AccessibleOrProxy.h"
+ #include "nsCocoaUtils.h"
++#include "MOXAccessibleBase.h"
++#include "mozAccessible.h"
+ 
+ #include "mozilla/a11y/DocAccessiblePlatformExtParent.h"
+ 
+-#import "GeckoTextMarker.h"
+-
+-extern "C" {
+-
+-CFTypeID AXTextMarkerGetTypeID();
+-
+-AXTextMarkerRef AXTextMarkerCreate(CFAllocatorRef allocator, const UInt8* bytes,
+-                                   CFIndex length);
+-
+-const UInt8* AXTextMarkerGetBytePtr(AXTextMarkerRef text_marker);
+-
+-size_t AXTextMarkerGetLength(AXTextMarkerRef text_marker);
+-
+-CFTypeID AXTextMarkerRangeGetTypeID();
+-
+-AXTextMarkerRangeRef AXTextMarkerRangeCreate(CFAllocatorRef allocator,
+-                                             AXTextMarkerRef start_marker,
+-                                             AXTextMarkerRef end_marker);
+-
+-AXTextMarkerRef AXTextMarkerRangeCopyStartMarker(
+-    AXTextMarkerRangeRef text_marker_range);
+-
+-AXTextMarkerRef AXTextMarkerRangeCopyEndMarker(
+-    AXTextMarkerRangeRef text_marker_range);
+-}
+-
+ namespace mozilla {
+ namespace a11y {
+ 
+ struct OpaqueGeckoTextMarker {
+   OpaqueGeckoTextMarker(uintptr_t aDoc, uintptr_t aID, int32_t aOffset)
+       : mDoc(aDoc), mID(aID), mOffset(aOffset) {}
+   OpaqueGeckoTextMarker() {}
+   uintptr_t mDoc;
+@@ -117,17 +96,17 @@ GeckoTextMarker GeckoTextMarker::MarkerF
+     HyperTextAccessible* container = nullptr;
+     htWrap->OffsetAtIndex(aIndex, &container, &offset);
+     return GeckoTextMarker(container, offset);
+   }
+ 
+   return GeckoTextMarker();
+ }
+ 
+-id GeckoTextMarker::CreateAXTextMarker() {
++AXTextMarkerRef GeckoTextMarker::CreateAXTextMarker() {
+   if (!IsValid()) {
+     return nil;
+   }
+ 
+   AccessibleOrProxy doc;
+   if (mContainer.IsProxy()) {
+     doc = mContainer.AsProxy()->Document();
+   } else {
+@@ -139,17 +118,17 @@ id GeckoTextMarker::CreateAXTextMarker()
+           ? mContainer.AsProxy()->ID()
+           : reinterpret_cast<uintptr_t>(mContainer.AsAccessible()->UniqueID());
+ 
+   OpaqueGeckoTextMarker opaqueMarker(doc.Bits(), identifier, mOffset);
+   AXTextMarkerRef cf_text_marker = AXTextMarkerCreate(
+       kCFAllocatorDefault, reinterpret_cast<const UInt8*>(&opaqueMarker),
+       sizeof(OpaqueGeckoTextMarker));
+ 
+-  return [static_cast<id>(cf_text_marker) autorelease];
++  return (__bridge AXTextMarkerRef)[(__bridge id)(cf_text_marker)autorelease];
+ }
+ 
+ bool GeckoTextMarker::operator<(const GeckoTextMarker& aPoint) const {
+   if (mContainer == aPoint.mContainer) return mOffset < aPoint.mOffset;
+ 
+   // Build the chain of parents
+   AutoTArray<AccessibleOrProxy, 30> parents1, parents2;
+   AccessibleOrProxy p1 = mContainer;
+@@ -373,25 +352,27 @@ GeckoTextMarkerRange::GeckoTextMarkerRan
+           &mStart.mOffset, &mEnd.mOffset);
+     } else if (auto htWrap = mStart.ContainerAsHyperTextWrap()) {
+       htWrap->RangeOfChild(aAccessible.AsAccessible(), &mStart.mOffset,
+                            &mEnd.mOffset);
+     }
+   }
+ }
+ 
+-id GeckoTextMarkerRange::CreateAXTextMarkerRange() {
++AXTextMarkerRangeRef GeckoTextMarkerRange::CreateAXTextMarkerRange() {
+   if (!IsValid()) {
+     return nil;
+   }
+ 
+   AXTextMarkerRangeRef cf_text_marker_range =
+       AXTextMarkerRangeCreate(kCFAllocatorDefault, mStart.CreateAXTextMarker(),
+                               mEnd.CreateAXTextMarker());
+-  return [static_cast<id>(cf_text_marker_range) autorelease];
++
++  return (__bridge AXTextMarkerRangeRef)[(__bridge id)(
++      cf_text_marker_range)autorelease];
+ }
+ 
+ NSString* GeckoTextMarkerRange::Text() const {
+   nsAutoString text;
+   if (mStart.mContainer.IsProxy() && mEnd.mContainer.IsProxy()) {
+     DocAccessibleParent* ipcDoc = mStart.mContainer.AsProxy()->Document();
+     Unused << ipcDoc->GetPlatformExtension()->SendTextForRange(
+         mStart.mContainer.AsProxy()->ID(), mStart.mOffset,
+diff --git a/accessible/mac/MOXAccessibleProtocol.h b/accessible/mac/MOXAccessibleProtocol.h
+--- a/accessible/mac/MOXAccessibleProtocol.h
++++ b/accessible/mac/MOXAccessibleProtocol.h
+@@ -1,16 +1,19 @@
+ /* clang-format off */
+ /* -*- Mode: Objective-C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* clang-format on */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++#include "SDKDeclarations.h"
++
+ @protocol MOXTextMarkerSupport;
++@protocol mozAccessible;
+ 
+ // This protocol's primary use is for abstracting the NSAccessibility informal
+ // protocol into a formal internal API. Conforming classes get to choose a
+ // subset of the optional methods to implement. Those methods will be mapped to
+ // NSAccessibility attributes or actions. A conforming class can implement
+ // moxBlockSelector to control which of its implemented methods should be
+ // exposed to NSAccessibility.
+ 
+@@ -413,98 +416,110 @@
+ 
+ // This protocol maps text marker and text marker range parameters to
+ // methods. It is implemented by a delegate of a MOXAccessible.
+ @protocol MOXTextMarkerSupport
+ 
+ #pragma mark - TextAttributeGetters
+ 
+ // AXStartTextMarker
+-- (id _Nullable)moxStartTextMarker;
++- (AXTextMarkerRef _Nullable)moxStartTextMarker;
+ 
+ // AXEndTextMarker
+-- (id _Nullable)moxEndTextMarker;
++- (AXTextMarkerRef _Nullable)moxEndTextMarker;
+ 
+ // AXSelectedTextMarkerRange
+-- (id _Nullable)moxSelectedTextMarkerRange;
++- (AXTextMarkerRangeRef _Nullable)moxSelectedTextMarkerRange;
+ 
+ #pragma mark - ParameterizedTextAttributeGetters
+ 
+ // AXLengthForTextMarkerRange
+-- (NSNumber* _Nullable)moxLengthForTextMarkerRange:(id _Nonnull)textMarkerRange;
++- (NSNumber* _Nullable)moxLengthForTextMarkerRange:
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ // AXStringForTextMarkerRange
+-- (NSString* _Nullable)moxStringForTextMarkerRange:(id _Nonnull)textMarkerRange;
++- (NSString* _Nullable)moxStringForTextMarkerRange:
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ // AXTextMarkerRangeForUnorderedTextMarkers
+-- (id _Nullable)moxTextMarkerRangeForUnorderedTextMarkers:
++- (AXTextMarkerRangeRef _Nullable)moxTextMarkerRangeForUnorderedTextMarkers:
+     (NSArray* _Nonnull)textMarkers;
+ 
+ // AXLeftWordTextMarkerRangeForTextMarker
+-- (id _Nullable)moxLeftWordTextMarkerRangeForTextMarker:(id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxLeftWordTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXRightWordTextMarkerRangeForTextMarker
+-- (id _Nullable)moxRightWordTextMarkerRangeForTextMarker:
+-    (id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxRightWordTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXStartTextMarkerForTextMarkerRange
+-- (id _Nullable)moxStartTextMarkerForTextMarkerRange:
+-    (id _Nonnull)textMarkerRange;
++- (AXTextMarkerRef _Nullable)moxStartTextMarkerForTextMarkerRange:
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ // AXEndTextMarkerForTextMarkerRange
+-- (id _Nullable)moxEndTextMarkerForTextMarkerRange:(id _Nonnull)textMarkerRange;
++- (AXTextMarkerRef _Nullable)moxEndTextMarkerForTextMarkerRange:
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ // AXNextTextMarkerForTextMarker
+-- (id _Nullable)moxNextTextMarkerForTextMarker:(id _Nonnull)textMarker;
++- (AXTextMarkerRef _Nullable)moxNextTextMarkerForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXPreviousTextMarkerForTextMarker
+-- (id _Nullable)moxPreviousTextMarkerForTextMarker:(id _Nonnull)textMarker;
++- (AXTextMarkerRef _Nullable)moxPreviousTextMarkerForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXAttributedStringForTextMarkerRange
+ - (NSAttributedString* _Nullable)moxAttributedStringForTextMarkerRange:
+-    (id _Nonnull)textMarkerRange;
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ // AXBoundsForTextMarkerRange
+-- (NSValue* _Nullable)moxBoundsForTextMarkerRange:(id _Nonnull)textMarkerRange;
++- (NSValue* _Nullable)moxBoundsForTextMarkerRange:
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ // AXIndexForTextMarker
+-- (NSNumber* _Nullable)moxIndexForTextMarker:(id _Nonnull)textMarker;
++- (NSNumber* _Nullable)moxIndexForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXTextMarkerForIndex
+-- (id _Nullable)moxTextMarkerForIndex:(NSNumber* _Nonnull)index;
++- (AXTextMarkerRef _Nullable)moxTextMarkerForIndex:(NSNumber* _Nonnull)index;
+ 
+ // AXUIElementForTextMarker
+-- (id _Nullable)moxUIElementForTextMarker:(id _Nonnull)textMarker;
++- (id _Nullable)moxUIElementForTextMarker:(AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXTextMarkerRangeForUIElement
+-- (id _Nullable)moxTextMarkerRangeForUIElement:(id _Nonnull)element;
++- (AXTextMarkerRangeRef _Nullable)moxTextMarkerRangeForUIElement:
++    (id _Nonnull)element;
+ 
+ // AXLineTextMarkerRangeForTextMarker
+-- (id _Nullable)moxLineTextMarkerRangeForTextMarker:(id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXLeftLineTextMarkerRangeForTextMarker
+-- (id _Nullable)moxLeftLineTextMarkerRangeForTextMarker:(id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxLeftLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXRightLineTextMarkerRangeForTextMarker
+-- (id _Nullable)moxRightLineTextMarkerRangeForTextMarker:
+-    (id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxRightLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXParagraphTextMarkerRangeForTextMarker
+-- (id _Nullable)moxParagraphTextMarkerRangeForTextMarker:
+-    (id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxParagraphTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXStyleTextMarkerRangeForTextMarker
+-- (id _Nullable)moxStyleTextMarkerRangeForTextMarker:(id _Nonnull)textMarker;
++- (AXTextMarkerRangeRef _Nullable)moxStyleTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXMozDebugDescriptionForTextMarker
+ - (NSString* _Nullable)moxMozDebugDescriptionForTextMarker:
+-    (id _Nonnull)textMarker;
++    (AXTextMarkerRef _Nonnull)textMarker;
+ 
+ // AXMozDebugDescriptionForTextMarkerRange
+ - (NSString* _Nullable)moxMozDebugDescriptionForTextMarkerRange:
+-    (id _Nonnull)textMarkerRange;
++    (AXTextMarkerRangeRef _Nonnull)textMarkerRange;
+ 
+ #pragma mark - TextAttributeSetters
+ 
+ // AXSelectedTextMarkerRange
+ - (void)moxSetSelectedTextMarkerRange:(id _Nullable)textMarkerRange;
+ 
+ @end
+diff --git a/accessible/mac/MOXTextMarkerDelegate.h b/accessible/mac/MOXTextMarkerDelegate.h
+--- a/accessible/mac/MOXTextMarkerDelegate.h
++++ b/accessible/mac/MOXTextMarkerDelegate.h
+@@ -9,19 +9,19 @@
+ 
+ #import "MOXAccessibleProtocol.h"
+ #import "GeckoTextMarker.h"
+ 
+ #include "AccessibleOrProxy.h"
+ 
+ @interface MOXTextMarkerDelegate : NSObject <MOXTextMarkerSupport> {
+   mozilla::a11y::AccessibleOrProxy mGeckoDocAccessible;
+-  id mSelection;
+-  id mCaret;
+-  id mPrevCaret;
++  AXTextMarkerRangeRef mSelection;
++  AXTextMarkerRef mCaret;
++  AXTextMarkerRef mPrevCaret;
+ }
+ 
+ + (id)getOrCreateForDoc:(mozilla::a11y::AccessibleOrProxy)aDoc;
+ 
+ + (void)destroyForDoc:(mozilla::a11y::AccessibleOrProxy)aDoc;
+ 
+ - (id)initWithDoc:(mozilla::a11y::AccessibleOrProxy)aDoc;
+ 
+@@ -37,84 +37,95 @@
+ 
+ - (NSDictionary*)selectionChangeInfo;
+ 
+ - (void)invalidateSelection;
+ 
+ - (mozilla::a11y::GeckoTextMarkerRange)selection;
+ 
+ // override
+-- (id)moxStartTextMarker;
++- (AXTextMarkerRef)moxStartTextMarker;
+ 
+ // override
+-- (id)moxEndTextMarker;
++- (AXTextMarkerRef)moxEndTextMarker;
+ 
+ // override
+-- (id)moxSelectedTextMarkerRange;
++- (AXTextMarkerRangeRef)moxSelectedTextMarkerRange;
++
++// override
++- (NSNumber*)moxLengthForTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange;
+ 
+ // override
+-- (NSNumber*)moxLengthForTextMarkerRange:(id)textMarkerRange;
++- (NSString*)moxStringForTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange;
+ 
+ // override
+-- (NSString*)moxStringForTextMarkerRange:(id)textMarkerRange;
++- (AXTextMarkerRangeRef)moxTextMarkerRangeForUnorderedTextMarkers:
++    (NSArray*)textMarkers;
+ 
+ // override
+-- (id)moxTextMarkerRangeForUnorderedTextMarkers:(NSArray*)textMarkers;
++- (AXTextMarkerRef)moxStartTextMarkerForTextMarkerRange:
++    (AXTextMarkerRangeRef)textMarkerRange;
+ 
+ // override
+-- (id)moxStartTextMarkerForTextMarkerRange:(id)textMarkerRange;
+-
+-// override
+-- (id)moxEndTextMarkerForTextMarkerRange:(id)textMarkerRange;
++- (AXTextMarkerRef)moxEndTextMarkerForTextMarkerRange:
++    (AXTextMarkerRangeRef)textMarkerRange;
+ 
+ // override
+-- (id)moxLeftWordTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxLeftWordTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxRightWordTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxRightWordTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxLineTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxLeftLineTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxLeftLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxRightLineTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxRightLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxParagraphTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxParagraphTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxStyleTextMarkerRangeForTextMarker:(id)textMarker;
++- (AXTextMarkerRangeRef)moxStyleTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxNextTextMarkerForTextMarker:(id)textMarker;
++- (AXTextMarkerRef)moxNextTextMarkerForTextMarker:(AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxPreviousTextMarkerForTextMarker:(id)textMarker;
++- (AXTextMarkerRef)moxPreviousTextMarkerForTextMarker:
++    (AXTextMarkerRef)textMarker;
+ 
+ // override
+ - (NSAttributedString*)moxAttributedStringForTextMarkerRange:
+-    (id)textMarkerRange;
++    (AXTextMarkerRangeRef)textMarkerRange;
+ 
+ // override
+-- (NSValue*)moxBoundsForTextMarkerRange:(id)textMarkerRange;
++- (NSValue*)moxBoundsForTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange;
+ 
+ // override
+-- (id)moxUIElementForTextMarker:(id)textMarker;
++- (id)moxUIElementForTextMarker:(AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (id)moxTextMarkerRangeForUIElement:(id)element;
++- (AXTextMarkerRangeRef)moxTextMarkerRangeForUIElement:(id)element;
+ 
+ // override
+-- (NSString*)moxMozDebugDescriptionForTextMarker:(id)textMarker;
++- (NSString*)moxMozDebugDescriptionForTextMarker:(AXTextMarkerRef)textMarker;
+ 
+ // override
+-- (void)moxSetSelectedTextMarkerRange:(id)textMarkerRange;
++- (void)moxSetSelectedTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange;
+ 
+ @end
+ 
+ namespace mozilla {
+ namespace a11y {
+ 
+ enum AXTextEditType {
+   AXTextEditTypeUnknown,
+diff --git a/accessible/mac/MOXTextMarkerDelegate.mm b/accessible/mac/MOXTextMarkerDelegate.mm
+--- a/accessible/mac/MOXTextMarkerDelegate.mm
++++ b/accessible/mac/MOXTextMarkerDelegate.mm
+@@ -1,21 +1,23 @@
+ /* clang-format off */
+ /* -*- Mode: Objective-C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* clang-format on */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #import <Cocoa/Cocoa.h>
+-
+-#include "mozilla/Preferences.h"
++#include "DocAccessible.h"
+ 
+ #import "MOXTextMarkerDelegate.h"
+ 
++#include "mozAccessible.h"
++#include "mozilla/Preferences.h"
++
+ using namespace mozilla::a11y;
+ 
+ #define PREF_ACCESSIBILITY_MAC_DEBUG "accessibility.mac.debug"
+ 
+ static nsTHashMap<nsUint64HashKey, MOXTextMarkerDelegate*> sDelegates;
+ 
+ @implementation MOXTextMarkerDelegate
+ 
+@@ -62,42 +64,45 @@ static nsTHashMap<nsUint64HashKey, MOXTe
+                       at:(int32_t)endOffset {
+   GeckoTextMarkerRange selection(GeckoTextMarker(startContainer, startOffset),
+                                  GeckoTextMarker(endContainer, endOffset));
+ 
+   // We store it as an AXTextMarkerRange because it is a safe
+   // way to keep a weak reference - when we need to use the
+   // range we can convert it back to a GeckoTextMarkerRange
+   // and check that it's valid.
+-  mSelection = [selection.CreateAXTextMarkerRange() retain];
++  mSelection = selection.CreateAXTextMarkerRange();
++  CFRetain(mSelection);
+ }
+ 
+ - (void)setCaretOffset:(mozilla::a11y::AccessibleOrProxy)container
+                     at:(int32_t)offset {
+   GeckoTextMarker caretMarker(container, offset);
+ 
+   mPrevCaret = mCaret;
+-  mCaret = [caretMarker.CreateAXTextMarker() retain];
++  mCaret = caretMarker.CreateAXTextMarker();
++  CFRetain(mCaret);
+ }
+ 
+ // This returns an info object to pass with AX SelectedTextChanged events.
+ // It uses the current and previous caret position to make decisions
+ // regarding which attributes to add to the info object.
+ - (NSDictionary*)selectionChangeInfo {
+   GeckoTextMarkerRange selectedGeckoRange =
+       GeckoTextMarkerRange(mGeckoDocAccessible, mSelection);
+   int32_t stateChangeType = selectedGeckoRange.mStart == selectedGeckoRange.mEnd
+                                 ? AXTextStateChangeTypeSelectionMove
+                                 : AXTextStateChangeTypeSelectionExtend;
+ 
+   // This is the base info object, includes the selected marker range and
+   // the change type depending on the collapsed state of the selection.
+   NSMutableDictionary* info = [[@{
+-    @"AXSelectedTextMarkerRange" : selectedGeckoRange.IsValid() ? mSelection
+-                                                                : [NSNull null],
++    @"AXSelectedTextMarkerRange" : selectedGeckoRange.IsValid()
++        ? (__bridge id)mSelection
++        : [NSNull null],
+     @"AXTextStateChangeType" : @(stateChangeType),
+   } mutableCopy] autorelease];
+ 
+   GeckoTextMarker caretMarker(mGeckoDocAccessible, mCaret);
+   GeckoTextMarker prevCaretMarker(mGeckoDocAccessible, mPrevCaret);
+   if (!caretMarker.IsValid()) {
+     // If the current caret is invalid, stop here and return base info.
+     return info;
+@@ -153,292 +158,306 @@ static nsTHashMap<nsUint64HashKey, MOXTe
+         ? @(AXTextSelectionGranularityCharacter)
+         : @(AXTextSelectionGranularityWord)
+   }];
+ 
+   return info;
+ }
+ 
+ - (void)invalidateSelection {
+-  [mSelection release];
+-  [mCaret release];
+-  [mPrevCaret release];
++  CFRelease(mSelection);
++  CFRelease(mCaret);
++  CFRelease(mPrevCaret);
+   mSelection = nil;
+ }
+ 
+ - (mozilla::a11y::GeckoTextMarkerRange)selection {
+   return mozilla::a11y::GeckoTextMarkerRange(mGeckoDocAccessible, mSelection);
+ }
+ 
+-- (id)moxStartTextMarker {
++- (AXTextMarkerRef)moxStartTextMarker {
+   GeckoTextMarker geckoTextPoint(mGeckoDocAccessible, 0);
+   return geckoTextPoint.CreateAXTextMarker();
+ }
+ 
+-- (id)moxEndTextMarker {
++- (AXTextMarkerRef)moxEndTextMarker {
+   uint32_t characterCount =
+       mGeckoDocAccessible.IsProxy()
+           ? mGeckoDocAccessible.AsProxy()->CharacterCount()
+           : mGeckoDocAccessible.AsAccessible()
+                 ->Document()
+                 ->AsHyperText()
+                 ->CharacterCount();
+   GeckoTextMarker geckoTextPoint(mGeckoDocAccessible, characterCount);
+   return geckoTextPoint.CreateAXTextMarker();
+ }
+ 
+-- (id)moxSelectedTextMarkerRange {
++- (AXTextMarkerRangeRef)moxSelectedTextMarkerRange {
+   return mSelection &&
+                  GeckoTextMarkerRange(mGeckoDocAccessible, mSelection).IsValid()
+              ? mSelection
+              : nil;
+ }
+ 
+-- (NSString*)moxStringForTextMarkerRange:(id)textMarkerRange {
++- (NSString*)moxStringForTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange {
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+   if (!range.IsValid()) {
+     return @"";
+   }
+ 
+   return range.Text();
+ }
+ 
+-- (NSNumber*)moxLengthForTextMarkerRange:(id)textMarkerRange {
++- (NSNumber*)moxLengthForTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange {
+   return @([[self moxStringForTextMarkerRange:textMarkerRange] length]);
+ }
+ 
+-- (id)moxTextMarkerRangeForUnorderedTextMarkers:(NSArray*)textMarkers {
++- (AXTextMarkerRangeRef)moxTextMarkerRangeForUnorderedTextMarkers:
++    (NSArray*)textMarkers {
+   if ([textMarkers count] != 2) {
+     // Don't allow anything but a two member array.
+     return nil;
+   }
+ 
+-  GeckoTextMarker p1(mGeckoDocAccessible, textMarkers[0]);
+-  GeckoTextMarker p2(mGeckoDocAccessible, textMarkers[1]);
++  GeckoTextMarker p1(mGeckoDocAccessible,
++                     (__bridge AXTextMarkerRef)textMarkers[0]);
++  GeckoTextMarker p2(mGeckoDocAccessible,
++                     (__bridge AXTextMarkerRef)textMarkers[1]);
+ 
+   if (!p1.IsValid() || !p2.IsValid()) {
+     // If either marker is invalid, return nil.
+     return nil;
+   }
+ 
+   bool ordered = p1 < p2;
+   GeckoTextMarkerRange range(ordered ? p1 : p2, ordered ? p2 : p1);
+ 
+   return range.CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxStartTextMarkerForTextMarkerRange:(id)textMarkerRange {
++- (AXTextMarkerRef)moxStartTextMarkerForTextMarkerRange:
++    (AXTextMarkerRangeRef)textMarkerRange {
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+ 
+   return range.IsValid() ? range.mStart.CreateAXTextMarker() : nil;
+ }
+ 
+-- (id)moxEndTextMarkerForTextMarkerRange:(id)textMarkerRange {
++- (AXTextMarkerRef)moxEndTextMarkerForTextMarkerRange:
++    (AXTextMarkerRangeRef)textMarkerRange {
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+ 
+   return range.IsValid() ? range.mEnd.CreateAXTextMarker() : nil;
+ }
+ 
+-- (id)moxLeftWordTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxLeftWordTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eLeftWord)
+       .CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxRightWordTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxRightWordTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eRightWord)
+       .CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxLineTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eLine).CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxLeftLineTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxLeftLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eLeftLine)
+       .CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxRightLineTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxRightLineTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eRightLine)
+       .CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxParagraphTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxParagraphTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eParagraph)
+       .CreateAXTextMarkerRange();
+ }
+ 
+ // override
+-- (id)moxStyleTextMarkerRangeForTextMarker:(id)textMarker {
++- (AXTextMarkerRangeRef)moxStyleTextMarkerRangeForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.Range(EWhichRange::eStyle).CreateAXTextMarkerRange();
+ }
+ 
+-- (id)moxNextTextMarkerForTextMarker:(id)textMarker {
++- (AXTextMarkerRef)moxNextTextMarkerForTextMarker:(AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   if (!geckoTextMarker.Next()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.CreateAXTextMarker();
+ }
+ 
+-- (id)moxPreviousTextMarkerForTextMarker:(id)textMarker {
++- (AXTextMarkerRef)moxPreviousTextMarkerForTextMarker:
++    (AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   if (!geckoTextMarker.Previous()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.CreateAXTextMarker();
+ }
+ 
+ - (NSAttributedString*)moxAttributedStringForTextMarkerRange:
+-    (id)textMarkerRange {
++    (AXTextMarkerRangeRef)textMarkerRange {
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+   if (!range.IsValid()) {
+     return nil;
+   }
+ 
+   return range.AttributedText();
+ }
+ 
+-- (NSValue*)moxBoundsForTextMarkerRange:(id)textMarkerRange {
++- (NSValue*)moxBoundsForTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange {
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+   if (!range.IsValid()) {
+     return nil;
+   }
+ 
+   return range.Bounds();
+ }
+ 
+-- (NSNumber*)moxIndexForTextMarker:(id)textMarker {
++- (NSNumber*)moxIndexForTextMarker:(AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   GeckoTextMarkerRange range(GeckoTextMarker(mGeckoDocAccessible, 0),
+                              geckoTextMarker);
+ 
+   return @(range.Length());
+ }
+ 
+-- (id)moxTextMarkerForIndex:(NSNumber*)index {
++- (AXTextMarkerRef)moxTextMarkerForIndex:(NSNumber*)index {
+   GeckoTextMarker geckoTextMarker = GeckoTextMarker::MarkerFromIndex(
+       mGeckoDocAccessible, [index integerValue]);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   return geckoTextMarker.CreateAXTextMarker();
+ }
+ 
+-- (id)moxUIElementForTextMarker:(id)textMarker {
++- (id)moxUIElementForTextMarker:(AXTextMarkerRef)textMarker {
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return nil;
+   }
+ 
+   AccessibleOrProxy leaf = geckoTextMarker.Leaf();
+   if (leaf.IsNull()) {
+     return nil;
+   }
+ 
+   return GetNativeFromGeckoAccessible(leaf);
+ }
+ 
+-- (id)moxTextMarkerRangeForUIElement:(id)element {
++- (AXTextMarkerRangeRef)moxTextMarkerRangeForUIElement:(id)element {
+   if (![element isKindOfClass:[mozAccessible class]]) {
+     return nil;
+   }
+ 
+   GeckoTextMarkerRange range([element geckoAccessible]);
+   return range.CreateAXTextMarkerRange();
+ }
+ 
+-- (NSString*)moxMozDebugDescriptionForTextMarker:(id)textMarker {
+-  if (!Preferences::GetBool(PREF_ACCESSIBILITY_MAC_DEBUG)) {
++- (NSString*)moxMozDebugDescriptionForTextMarker:(AXTextMarkerRef)textMarker {
++  if (!mozilla::Preferences::GetBool(PREF_ACCESSIBILITY_MAC_DEBUG)) {
+     return nil;
+   }
+ 
+   GeckoTextMarker geckoTextMarker(mGeckoDocAccessible, textMarker);
+   if (!geckoTextMarker.IsValid()) {
+     return @"<GeckoTextMarker 0x0 [0]>";
+   }
+ 
+   return [NSString stringWithFormat:@"<GeckoTextMarker 0x%lx [%d]>",
+                                     geckoTextMarker.mContainer.Bits(),
+                                     geckoTextMarker.mOffset];
+ }
+ 
+-- (NSString*)moxMozDebugDescriptionForTextMarkerRange:(id)textMarkerRange {
+-  if (!Preferences::GetBool(PREF_ACCESSIBILITY_MAC_DEBUG)) {
++- (NSString*)moxMozDebugDescriptionForTextMarkerRange:
++    (AXTextMarkerRangeRef)textMarkerRange {
++  if (!mozilla::Preferences::GetBool(PREF_ACCESSIBILITY_MAC_DEBUG)) {
+     return nil;
+   }
+ 
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+   if (!range.IsValid()) {
+     return @"<GeckoTextMarkerRange 0x0 [0] - 0x0 [0]>";
+   }
+ 
+   return [NSString
+       stringWithFormat:@"<GeckoTextMarkerRange 0x%lx [%d] - 0x%lx [%d]>",
+                        range.mStart.mContainer.Bits(), range.mStart.mOffset,
+                        range.mEnd.mContainer.Bits(), range.mEnd.mOffset];
+ }
+ 
+-- (void)moxSetSelectedTextMarkerRange:(id)textMarkerRange {
++- (void)moxSetSelectedTextMarkerRange:(AXTextMarkerRangeRef)textMarkerRange {
+   mozilla::a11y::GeckoTextMarkerRange range(mGeckoDocAccessible,
+                                             textMarkerRange);
+   if (range.IsValid()) {
+     range.Select();
+   }
+ }
+ 
+ @end
+diff --git a/accessible/mac/mozTextAccessible.mm b/accessible/mac/mozTextAccessible.mm
+--- a/accessible/mac/mozTextAccessible.mm
++++ b/accessible/mac/mozTextAccessible.mm
+@@ -299,17 +299,18 @@ inline NSString* ToNSString(id aValue) {
+                             inContainer:(const AccessibleOrProxy&)container
+                                      at:(int32_t)start {
+   GeckoTextMarker startMarker(container, start);
+   NSDictionary* userInfo = @{
+     @"AXTextChangeElement" : self,
+     @"AXTextStateChangeType" : @(AXTextStateChangeTypeEdit),
+     @"AXTextChangeValues" : @[ @{
+       @"AXTextChangeValue" : (change ? change : @""),
+-      @"AXTextChangeValueStartMarker" : startMarker.CreateAXTextMarker(),
++      @"AXTextChangeValueStartMarker" :
++          (__bridge id)startMarker.CreateAXTextMarker(),
+       @"AXTextEditType" : isInserted ? @(AXTextEditTypeTyping)
+                                      : @(AXTextEditTypeDelete)
+     } ]
+   };
+ 
+   mozAccessible* webArea = [self topWebArea];
+   [webArea moxPostNotification:NSAccessibilityValueChangedNotification
+                   withUserInfo:userInfo];
+diff --git a/widget/cocoa/SDKDeclarations.h b/widget/cocoa/SDKDeclarations.h
+--- a/widget/cocoa/SDKDeclarations.h
++++ b/widget/cocoa/SDKDeclarations.h
+@@ -85,9 +85,28 @@ typedef NS_ENUM(NSInteger, NSTitlebarSep
+ // In reality, NSMenu implements the NSAppearanceCustomization protocol, and picks up the appearance
+ // property from that protocol. But we can't tack on protocol implementations, so we just declare
+ // the property setter here.
+ - (void)setAppearance:(NSAppearance*)appearance;
+ @end
+ 
+ #endif
+ 
++#if !defined(MAC_OS_VERSION_12_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_12_0
++
++typedef CFTypeRef AXTextMarkerRef;
++typedef CFTypeRef AXTextMarkerRangeRef;
++
++extern "C" {
++CFTypeID AXTextMarkerGetTypeID();
++AXTextMarkerRef AXTextMarkerCreate(CFAllocatorRef allocator, const UInt8* bytes, CFIndex length);
++const UInt8* AXTextMarkerGetBytePtr(AXTextMarkerRef text_marker);
++CFIndex AXTextMarkerGetLength(AXTextMarkerRef text_marker);
++CFTypeID AXTextMarkerRangeGetTypeID();
++AXTextMarkerRangeRef AXTextMarkerRangeCreate(CFAllocatorRef allocator, AXTextMarkerRef start_marker,
++                                             AXTextMarkerRef end_marker);
++AXTextMarkerRef AXTextMarkerRangeCopyStartMarker(AXTextMarkerRangeRef text_marker_range);
++AXTextMarkerRef AXTextMarkerRangeCopyEndMarker(AXTextMarkerRangeRef text_marker_range);
++}
++
++#endif
++
+ #endif  // SDKDefines_h
+diff --git a/widget/cocoa/moz.build b/widget/cocoa/moz.build
+--- a/widget/cocoa/moz.build
++++ b/widget/cocoa/moz.build
+@@ -22,16 +22,17 @@ EXPORTS += [
+     "DesktopBackgroundImage.h",
+     "MediaHardwareKeysEventSourceMac.h",
+     "MediaHardwareKeysEventSourceMacMediaCenter.h",
+     "mozView.h",
+     "nsBidiKeyboard.h",
+     "nsChangeObserver.h",
+     "nsCocoaFeatures.h",
+     "nsCocoaUtils.h",
++    "SDKDeclarations.h",
+ ]
+ 
+ EXPORTS.mozilla.widget += [
+     "NativeMenuSupport.h",
+ ]
+ 
+ UNIFIED_SOURCES += [
+     "AppearanceOverride.mm",
