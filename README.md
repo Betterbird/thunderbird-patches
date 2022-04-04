@@ -32,7 +32,7 @@ Mac users follow these instructions (WIP!):
 You need to have at least macOS 12 (Monterey) and you need to install Xcode from the Apple App Store (which requires an Apple ID).
 Then follow the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html), the Thunderbird documentation is incomplete.
 1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
-1. Xcode modifications: `xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`.
+1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`.
 1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.zshenv` and `python3 -m pip install --user mercurial`.
 1. In a new shell, then: `hg version`.
 1. Install Rust: `brew install rustup`.
