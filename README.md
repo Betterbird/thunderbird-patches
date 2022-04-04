@@ -42,7 +42,8 @@ Then follow the first part of the [Firefox build instructions](https://firefox-s
 1. `cd ansible-betterbird`
 1. Remove `name: install necessary packages` section from betterbird.yml, those packages are already installed.
 1. `./betterbird.sh`
-1. The Ansible build fails during the bootstrap stage, but it does pull the repositories and applies the patches. You can finish the build with `./mach build` and `./mach package`.
+1. The Ansible build fails during the bootstrap stage, but it does pull the repositories and applies the patches.
+1. Copy `.mozconfig-Mac` as `.mozconfig` to the source directory and finish the build with `./mach build` and `./mach package`.
 
 ## Bug Reporting / Support
 
