@@ -1,0 +1,191 @@
+
+# HG changeset patch
+# User Sean Burke <sean@thunderbird.net>
+# Date 1649537148 -7200
+# Node ID d0347a62229e31633c5efc765194b4060483b3ca
+# Parent  72937e8c5e4858cf2de38aa3faada237da17b5b8
+Bug 1761973 - open detached attachments from location on disk. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D143079
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -1920,17 +1920,17 @@ AttachmentInfo.prototype = {
+           ? "externalAttachmentNotFound"
+           : "emptyAttachment"
+       );
+       msgWindow.promptDialog.alert(null, prompt);
+     } else {
+       // @see MsgComposeCommands.js which has simililar opening functionality
+       let dotPos = this.name.lastIndexOf(".");
+       let extension =
+-        dotPos >= 0 ? this.name.substr(dotPos + 1).toLowerCase() : "";
++        dotPos >= 0 ? this.name.substring(dotPos + 1).toLowerCase() : "";
+       if (this.contentType == "application/pdf" || extension == "pdf") {
+         let handlerInfo = gMIMEService.getFromTypeAndExtension(
+           this.contentType,
+           extension
+         );
+         // Only open a new tab for pdfs if we are handling them internally.
+         if (
+           !handlerInfo.alwaysAskBeforeHandling &&
+@@ -2020,17 +2020,17 @@ AttachmentInfo.prototype = {
+                 );
+               }
+             }
+           );
+         });
+         await IOUtils.write(path, new Uint8Array(buffer));
+       }
+ 
+-      let saveAndOpen = async mimeInfo => {
++      let createTemporaryFileAndOpen = async mimeInfo => {
+         let tmpPath = PathUtils.join(
+           Services.dirsvc.get("TmpD", Ci.nsIFile).path,
+           "pid-" + Services.appinfo.processID
+         );
+         await IOUtils.makeDirectory(tmpPath, { permissions: 0o700 });
+         let tempFile = Cc["@mozilla.org/file/local;1"].createInstance(
+           Ci.nsIFile
+         );
+@@ -2043,17 +2043,32 @@ AttachmentInfo.prototype = {
+         Cc["@mozilla.org/mime;1"]
+           .getService(Ci.nsPIExternalAppLauncher)
+           .deleteTemporaryFileOnExit(tempFile);
+ 
+         await saveToFile(tempFile.path);
+         // Before opening from the temp dir, make the file read only so that
+         // users don't edit and lose their edits...
+         tempFile.permissions = 0o400;
+-        this._openTemporaryFile(mimeInfo, tempFile);
++        this._openFile(mimeInfo, tempFile);
++      };
++
++      let openLocalFile = mimeInfo => {
++        let fileHandler = Services.io
++          .getProtocolHandler("file")
++          .QueryInterface(Ci.nsIFileProtocolHandler);
++
++        try {
++          let externalFile = fileHandler.getFileFromURLSpec(this.displayUrl);
++          this._openFile(mimeInfo, externalFile);
++        } catch (ex) {
++          Cu.reportError(
++            "AttachmentInfo.open: file - " + this.displayUrl + ", " + ex
++          );
++        }
+       };
+ 
+       if (!mimeInfo.alwaysAskBeforeHandling) {
+         switch (mimeInfo.preferredAction) {
+           case Ci.nsIHandlerInfo.saveToDisk:
+             if (Services.prefs.getBoolPref("browser.download.useDownloadDir")) {
+               let destFile = new FileUtils.File(
+                 await Downloads.getPreferredDownloadsDirectory()
+@@ -2076,44 +2091,59 @@ AttachmentInfo.prototype = {
+               let rv = await new Promise(resolve => filePicker.open(resolve));
+               if (rv != Ci.nsIFilePicker.returnCancel) {
+                 await saveToFile(filePicker.file.path);
+               }
+             }
+             return;
+           case Ci.nsIHandlerInfo.useHelperApp:
+           case Ci.nsIHandlerInfo.useSystemDefault:
+-            await saveAndOpen(mimeInfo);
++            // Attachments can be detached and, if this is the case, opened from
++            // their location on disk instead of copied to a temporary file.
++            if (this.isExternalAttachment) {
++              openLocalFile(mimeInfo);
++
++              return;
++            }
++
++            await createTemporaryFileAndOpen(mimeInfo);
+             return;
+         }
+       }
+ 
+       // Ask what to do, then do it.
+-
+       let appLauncherDialog = Cc[
+         "@mozilla.org/helperapplauncherdialog;1"
+       ].createInstance(Ci.nsIHelperAppLauncherDialog);
++      let self = this;
+       appLauncherDialog.show(
+         {
+           QueryInterface: ChromeUtils.generateQI(["nsIHelperAppLauncher"]),
+           MIMEInfo: mimeInfo,
+           source: Services.io.newURI(this.url),
+           suggestedFileName: this.name,
+           cancel(reason) {},
+           promptForSaveDestination() {
+             appLauncherDialog.promptForSaveToFileAsync(
+               this,
+               window,
+               this.suggestedFileName,
+               "." + extension, // Dot stripped by promptForSaveToFileAsync.
+               false
+             );
+           },
++          launchLocalFile() {
++            openLocalFile(mimeInfo);
++          },
+           async launchWithApplication(handleInternally, file) {
+-            await saveAndOpen(mimeInfo);
++            if (self.isExternalAttachment) {
++              openLocalFile(mimeInfo);
++              return;
++            }
++            await createTemporaryFileAndOpen(mimeInfo);
+           },
+           async saveDestinationAvailable(file) {
+             if (file) {
+               await saveToFile(file.path);
+             }
+           },
+           setWebProgressListener(webProgressListener) {},
+           targetFile: null,
+@@ -2127,20 +2157,20 @@ AttachmentInfo.prototype = {
+       );
+     }
+   },
+ 
+   /**
+    * Unless overridden by a test, opens a saved attachment when called by `open`.
+    *
+    * @param {nsIMIMEInfo} mimeInfo
+-   * @param {nsIFile} tempFile
++   * @param {nsIFile} file
+    */
+-  _openTemporaryFile(mimeInfo, tempFile) {
+-    mimeInfo.launchWithFile(tempFile);
++  _openFile(mimeInfo, file) {
++    mimeInfo.launchWithFile(file);
+   },
+ 
+   /**
+    * Detach this attachment from the message.
+    *
+    * @param {Boolean} aSaveFirst - true if the attachment should be saved
+    *                               before detaching, false otherwise.
+    */
+@@ -2325,17 +2355,17 @@ AttachmentInfo.prototype = {
+     // The file url is stored in the attachment info part with unix path and
+     // needs to be converted to os path for nsIFile.
+     let fileHandler = Services.io
+       .getProtocolHandler("file")
+       .QueryInterface(Ci.nsIFileProtocolHandler);
+     try {
+       fileHandler.getFileFromURLSpec(this.displayUrl).reveal();
+     } catch (ex) {
+-      console.error(
++      Cu.reportError(
+         "AttachmentInfo.openFolder: file - " + this.displayUrl + ", " + ex
+       );
+     }
+   },
+ };
+ 
+ /**
+  * Return true if possible attachments in the currently loaded message can be
