@@ -1,0 +1,146 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1649527408 -7200
+# Parent  fcef4f919384f8b7daa5f57672ab36e721f0e0b4
+Bug 1744709 - Create a download when saving to file via double-click.
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -2156,35 +2156,61 @@ AttachmentInfo.prototype = {
+         mimeInfo.preferredAction = Ci.nsIHandlerInfo.alwaysAsk;
+       }
+ 
+       // If we know what to do, do it.
+ 
+       let { name, url } = this;
+       name = DownloadPaths.sanitize(name);
+ 
+-      async function saveToFile(path) {
++      let sourceURI = Services.io.newURI(url);
++      async function saveToFile(destFile) {
+         let buffer = await new Promise(function(resolve, reject) {
+           NetUtil.asyncFetch(
+             {
+-              uri: Services.io.newURI(url),
++              uri: sourceURI,
+               loadUsingSystemPrincipal: true,
+             },
+             function(inputStream, status) {
+               if (Components.isSuccessCode(status)) {
+                 resolve(NetUtil.readInputStream(inputStream));
+               } else {
+                 reject(
+                   new Components.Exception("Failed to fetch attachment", status)
+                 );
+               }
+             }
+           );
+         });
+-        await IOUtils.write(path, new Uint8Array(buffer));
++        await IOUtils.write(destFile.path, new Uint8Array(buffer));
++
++        // Create download.
++        let persist = Cc[
++          "@mozilla.org/embedding/browser/nsWebBrowserPersist;1"
++        ].createInstance(Ci.nsIWebBrowserPersist);
++        let tr = Cc["@mozilla.org/transfer;1"].createInstance(Ci.nsITransfer);
++        tr.init(
++          sourceURI,
++          Services.io.newFileURI(destFile),
++          "",
++          null,
++          null,
++          null,
++          persist,
++          false,
++          Ci.nsITransfer.DOWNLOAD_ACCEPTABLE,
++          null
++        );
++        tr.onStateChange(
++          null,
++          null,
++          Ci.nsIWebProgressListener.STATE_STOP |
++            Ci.nsIWebProgressListener.STATE_IS_NETWORK,
++          0
++        );
+       }
+ 
+       let createTemporaryFileAndOpen = async mimeInfo => {
+         let tmpPath = PathUtils.join(
+           Services.dirsvc.get("TmpD", Ci.nsIFile).path,
+           "pid-" + Services.appinfo.processID
+         );
+         await IOUtils.makeDirectory(tmpPath, { permissions: 0o700 });
+@@ -2196,17 +2222,17 @@ AttachmentInfo.prototype = {
+         tempFile.append(name);
+         tempFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
+         tempFile.remove(false);
+ 
+         Cc["@mozilla.org/uriloader/external-helper-app-service;1"]
+           .getService(Ci.nsPIExternalAppLauncher)
+           .deleteTemporaryFileOnExit(tempFile);
+ 
+-        await saveToFile(tempFile.path);
++        await saveToFile(tempFile);
+         // Before opening from the temp dir, make the file read only so that
+         // users don't edit and lose their edits...
+         tempFile.permissions = 0o400;
+         this._openFile(mimeInfo, tempFile);
+       };
+ 
+       let openLocalFile = mimeInfo => {
+         let fileHandler = Services.io
+@@ -2228,31 +2254,31 @@ AttachmentInfo.prototype = {
+           case Ci.nsIHandlerInfo.saveToDisk:
+             if (Services.prefs.getBoolPref("browser.download.useDownloadDir")) {
+               let destFile = new FileUtils.File(
+                 await Downloads.getPreferredDownloadsDirectory()
+               );
+               destFile.append(name);
+               destFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o755);
+               destFile.remove(false);
+-              await saveToFile(destFile.path);
++              await saveToFile(destFile);
+             } else {
+               let filePicker = Cc["@mozilla.org/filepicker;1"].createInstance(
+                 Ci.nsIFilePicker
+               );
+               filePicker.defaultString = this.name;
+               filePicker.defaultExtension = extension;
+               filePicker.init(
+                 window,
+                 bundleMessenger.getString("SaveAttachment"),
+                 Ci.nsIFilePicker.modeSave
+               );
+               let rv = await new Promise(resolve => filePicker.open(resolve));
+               if (rv != Ci.nsIFilePicker.returnCancel) {
+-                await saveToFile(filePicker.file.path);
++                await saveToFile(filePicker.file);
+               }
+             }
+             return;
+           case Ci.nsIHandlerInfo.useHelperApp:
+           case Ci.nsIHandlerInfo.useSystemDefault:
+             // Attachments can be detached and, if this is the case, opened from
+             // their location on disk instead of copied to a temporary file.
+             if (this.isExternalAttachment) {
+@@ -2289,17 +2315,17 @@ AttachmentInfo.prototype = {
+           launchLocalFile() {
+             openLocalFile(mimeInfo);
+           },
+           async setDownloadToLaunch(handleInternally, file) {
+             await createTemporaryFileAndOpen(mimeInfo);
+           },
+           async saveDestinationAvailable(file) {
+             if (file) {
+-              await saveToFile(file.path);
++              await saveToFile(file);
+             }
+           },
+           setWebProgressListener(webProgressListener) {},
+           targetFile: null,
+           targetFileIsExecutable: null,
+           timeDownloadStarted: null,
+           contentLength: this.size,
+           browsingContextId: getMessagePaneBrowser().browsingContext.id,
