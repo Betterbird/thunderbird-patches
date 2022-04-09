@@ -1,0 +1,167 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1649490045 -7200
+# Parent  4f871649c84eea26f755d8d952248725d85cf824
+Bug 1739609 - Fix the subject in "Repair Text Encoding".
+
+diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
+--- a/mail/base/content/mailWindow.js
++++ b/mail/base/content/mailWindow.js
+@@ -23,16 +23,17 @@ var { UIFontSize } = ChromeUtils.import(
+ var { XPCOMUtils } = ChromeUtils.import(
+   "resource://gre/modules/XPCOMUtils.jsm"
+ );
+ XPCOMUtils.defineLazyModuleGetters(this, {
+   appIdleManager: "resource:///modules/AppIdleManager.jsm",
+   Gloda: "resource:///modules/gloda/GlodaPublic.jsm",
+   MailE10SUtils: "resource:///modules/MailE10SUtils.jsm",
+   MailUtils: "resource:///modules/MailUtils.jsm",
++  jsmime: "resource:///modules/jsmime.jsm",
+ });
+ 
+ XPCOMUtils.defineLazyScriptGetter(
+   this,
+   "PrintUtils",
+   "chrome://messenger/content/printUtils.js"
+ );
+ 
+@@ -1030,16 +1031,69 @@ nsBrowserAccess.prototype = {
+ 
+ function MailSetCharacterSet() {
+   msgWindow.charsetOverride = true;
+   gMessageDisplay.keyForCharsetOverride =
+     "messageKey" in gMessageDisplay.displayedMessage
+       ? gMessageDisplay.displayedMessage.messageKey
+       : null;
+   messenger.forceDetectDocumentCharset();
++
++  // Fix the subject. This is rather hacky since we don't know when the
++  // message re-display will have finished.
++  setTimeout(() => {
++    const { selectedMessage, tree } = gFolderDisplay;
++    if (selectedMessage) {
++      let subjectBox = document.getElementById("expandedsubjectBox");
++      // The selected message still has the raw header, so get it and decode it.
++      let buffer = new Uint8Array(
++        Array.from(selectedMessage.subject, c => c.charCodeAt(0))
++      );
++      let subject;
++      let subjectChanged = false;
++      try {
++        // Check whether this is already UTF-8.
++        subject = new TextDecoder("UTF-8", { fatal: true }).decode(buffer);
++      } catch (ex) {
++        try {
++          subject = new TextDecoder(msgWindow.mailCharacterSet, {
++            fatal: true,
++          }).decode(buffer);
++          subjectChanged = true;
++        } catch (ex) {
++          Cu.reportError(
++            `Failed to decode subject with charset ${msgWindow.mailCharacterSet}`
++          );
++          return;
++        }
++      }
++      subjectBox.headerValue = jsmime.headerparser.decodeRFC2047Words(
++        subject,
++        "utf-8"
++      );
++      if (subjectChanged) {
++        // Keep the charset for the next time we display the message.
++        // Note the upper-case `Charset` attribute in nsIMsgHdr.idl.
++        selectedMessage.Charset = msgWindow.mailCharacterSet;
++        let subjectUTF8 = String.fromCharCode.apply(
++          undefined,
++          new TextEncoder("UTF-8").encode(subject)
++        );
++        selectedMessage.subject = subjectUTF8;
++        if (
++          tree &&
++          tree.view &&
++          tree.view.selection &&
++          tree.view.selection.currentIndex >= 0
++        ) {
++          tree.invalidateRow(tree.view.selection.currentIndex);
++        }
++      }
++    }
++  }, 100);
+ }
+ 
+ /**
+  * Called from the extensions manager to open an add-on options XUL document.
+  * Only the "open in tab" option is supported, so that's what we'll do here.
+  */
+ function switchToTabHavingURI(aURI, aOpenNew, aOpenParams = {}) {
+   let tabmail = document.getElementById("tabmail");
+diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
+--- a/mailnews/mime/src/nsStreamConverter.cpp
++++ b/mailnews/mime/src/nsStreamConverter.cpp
+@@ -103,40 +103,64 @@ nsresult bridge_new_new_uri(void* bridge
+         }
+       }
+ 
+       if (default_charset && override_charset && url_name) {
+         // Check whether we need to auto-detect the charset.
+         nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(aURI));
+         if (i18nUrl) {
+           bool autodetectCharset = false;
++          bool forceFixWindow = false;
+           nsresult rv = i18nUrl->GetAutodetectCharset(&autodetectCharset);
+           if (NS_SUCCEEDED(rv) && autodetectCharset) {
+             *override_charset = true;
++            // Previously we set `default_charset` to the user-selected
++            // charset with the effect that the subject header was fixed, too.
++            // Now we set it to `nullptr` to trigger auto-detection.
++            // We need to fix the subject later.
+             *default_charset = nullptr;
+           } else {
+             *override_charset = false;
+             // Special treatment for news: URLs. Get the server default charset.
+             nsCOMPtr<nsINntpUrl> nntpURL(do_QueryInterface(aURI));
+             if (nntpURL) {
+               nsCString charset;
+               rv = nntpURL->GetCharset(charset);
+               if (NS_SUCCEEDED(rv)) {
+                 *default_charset = ToNewCString(charset);
+               } else {
+                 *default_charset = strdup("UTF-8");
+               }
+             } else {
+-              *default_charset = strdup("UTF-8");
++              // Let's see whether the user repaired this before.
++              nsCOMPtr<nsIMsgMessageUrl> msgUrl(do_QueryInterface(aURI));
++              *default_charset = nullptr;
++              if (msgUrl) {
++                nsCOMPtr<nsIMsgDBHdr> hdr;
++                msgUrl->GetMessageHeader(getter_AddRefs(hdr));
++                if (hdr) {
++                  hdr->GetCharset(default_charset);
++                }
++              }
++              if (*default_charset && **default_charset) {
++                // Pretend that we're repeating the override from last time.
++                *override_charset = true;
++                // We want to update the window now in case the message
++                // doesn't carry any charset information.
++                forceFixWindow = true;
++              } else {
++                *default_charset = strdup("UTF-8");
++              }
+             }
+           }
+ 
+           // If there is no override and a default charset exists,
+           // update the message window.
+-          if (!(*override_charset) && *default_charset && **default_charset) {
++          if ((!(*override_charset) && *default_charset && **default_charset) ||
++              forceFixWindow) {
+             // notify the default to msgWindow (for the menu check mark)
+             // do not set the default in case of nsMimeMessageDraftOrTemplate
+             // or nsMimeMessageEditorTemplate because it is already set
+             // when the message is displayed and doing it again may overwrite
+             // the correct MIME charset parsed from the message header
+             if (aOutputType != nsMimeOutput::nsMimeMessageDraftOrTemplate &&
+                 aOutputType != nsMimeOutput::nsMimeMessageEditorTemplate) {
+               nsCOMPtr<nsIMsgMailNewsUrl> msgurl(do_QueryInterface(aURI));

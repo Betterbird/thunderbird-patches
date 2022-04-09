@@ -1,0 +1,175 @@
+# HG changeset patch
+# User it@henk.com.au
+# Date 1644790418 -3600
+# Parent  b68a518ab8020b723e020dd21a9c0dcbeb4d64a5
+Feature: Implement pref mail.tabs.firstTab.startupURI.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -516,16 +516,17 @@ pref("mail.openMessageBehavior.version",
+ pref("mail.tabs.loadInBackground", true);
+ 
+ // Tabs
+ pref("mail.tabs.tabMinWidth", 100);
+ pref("mail.tabs.tabMaxWidth", 210);
+ pref("mail.tabs.tabClipWidth", 140);
+ pref("mail.tabs.autoHide", false);
+ pref("mail.tabs.closeWindowWithLastTab", true);
++pref("mail.tabs.firstTab.startupURI", "");
+ 
+ // Allow the tabs to be in the titlebar on supported systems
+ #ifdef UNIX_BUT_NOT_MAC
+ pref("mail.tabs.drawInTitlebar", false);
+ #else
+ pref("mail.tabs.drawInTitlebar", true);
+ #endif
+ 
+diff --git a/mail/base/content/mailContextMenus.js b/mail/base/content/mailContextMenus.js
+--- a/mail/base/content/mailContextMenus.js
++++ b/mail/base/content/mailContextMenus.js
+@@ -502,16 +502,33 @@ function fillFolderPaneContextMenu(aEven
+     document
+       .getElementById("folderPaneContext-favoriteFolder")
+       .setAttribute(
+         "checked",
+         folders[0].getFlag(Ci.nsMsgFolderFlags.Favorite)
+       );
+   }
+ 
++  // --- Set up startup folder menu item.
++  ShowMenuItem(
++    "folderPaneContext-startupFolder",
++    numSelected == 1 && !folders[0].isServer
++  );
++  if (numSelected == 1 && !folders[0].isServer) {
++    let startup = Services.prefs.getStringPref(
++      "mail.tabs.firstTab.startupURI",
++      ""
++    );
++
++    // Adjust the checked state on the menu item.
++    document
++      .getElementById("folderPaneContext-startupFolder")
++      .setAttribute("checked", folders[0].URI == startup);
++  }
++
+   // --- Set up the empty trash menu item.
+   ShowMenuItem(
+     "folderPaneContext-emptyTrash",
+     numSelected == 1 && specialFolder == "Trash"
+   );
+ 
+   // --- Set up the empty junk menu item.
+   ShowMenuItem(
+diff --git a/mail/base/content/mailTabs.js b/mail/base/content/mailTabs.js
+--- a/mail/base/content/mailTabs.js
++++ b/mail/base/content/mailTabs.js
+@@ -242,16 +242,26 @@ var mailTabType = {
+               }
+ 
+               if (
+                 !(
+                   "dontRestoreFirstTab" in aPersistedState &&
+                   aPersistedState.dontRestoreFirstTab
+                 )
+               ) {
++                let startup = Services.prefs.getStringPref(
++                  "mail.tabs.firstTab.startupURI",
++                  ""
++                );
++                if (startup) {
++                  let f = MailUtils.getExistingFolder(startup);
++                  if (f) {
++                    folder = f;
++                  }
++                }
+                 gFolderTreeView.selectFolder(folder);
+               }
+ 
+               // We need to manually trigger the tab monitor restore trigger
+               // for this tab.  In theory this should be in tabmail, but the
+               // special nature of the first tab will last exactly long as this
+               // implementation right here so it does not particularly matter
+               // and is a bit more honest, if ugly, to do it here.
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -2337,16 +2337,31 @@ function MsgUnsubscribe(newsgroups) {
+   }
+ }
+ 
+ function ToggleFavoriteFolderFlag() {
+   var folder = GetFirstSelectedMsgFolder();
+   folder.toggleFlag(Ci.nsMsgFolderFlags.Favorite);
+ }
+ 
++function ToggleStartupFolder() {
++  let startup = Services.prefs.getStringPref(
++    "mail.tabs.firstTab.startupURI",
++    ""
++  );
++  let folder = GetFirstSelectedMsgFolder();
++  let newval;
++  if (folder.URI == startup) {
++    newval = "";
++  } else {
++    newval = folder.URI;
++  }
++  Services.prefs.setStringPref("mail.tabs.firstTab.startupURI", newval);
++}
++
+ function MsgSaveAsFile() {
+   SaveAsFile(gFolderDisplay.selectedMessageUris);
+ }
+ 
+ function MsgSaveAsTemplate() {
+   if (gFolderDisplay.selectedCount == 1) {
+     SaveAsTemplate(gFolderDisplay.selectedMessageUris[0]);
+   }
+diff --git a/mail/base/content/mainPopupSet.inc.xhtml b/mail/base/content/mainPopupSet.inc.xhtml
+--- a/mail/base/content/mainPopupSet.inc.xhtml
++++ b/mail/base/content/mainPopupSet.inc.xhtml
+@@ -529,16 +529,21 @@
+               oncommand="goDoCommand('cmd_sendUnsentMsgs')"/>
+     <menuseparator id="folderPaneContext-sep3"/>
+     <menuitem id="folderPaneContext-favoriteFolder"
+               type="checkbox"
+               label="&folderContextFavoriteFolder.label;"
+               accesskey="&folderContextFavoriteFolder.accesskey;"
+               checked="false"
+               oncommand="ToggleFavoriteFolderFlag();"/>
++    <menuitem id="folderPaneContext-startupFolder"
++              type="checkbox"
++              label="&folderContextStartupFolder.label;"
++              checked="false"
++              oncommand="ToggleStartupFolder();"/>
+     <menuitem id="folderPaneContext-properties"
+               label="&folderContextProperties2.label;"
+               accesskey="&folderContextProperties2.accesskey;"
+               oncommand="gFolderTreeController.editFolder();"/>
+     <menuitem id="folderPaneContext-markAllFoldersRead"
+               label="&folderContextMarkAllFoldersRead.label;"
+               oncommand="MsgMarkAllFoldersRead();"/>
+     <menuseparator id="folderPaneContext-sep4"/>
+diff --git a/mail/locales/en-US/chrome/messenger/messenger.dtd b/mail/locales/en-US/chrome/messenger/messenger.dtd
+--- a/mail/locales/en-US/chrome/messenger/messenger.dtd
++++ b/mail/locales/en-US/chrome/messenger/messenger.dtd
+@@ -651,16 +651,17 @@
+ <!ENTITY folderContextSubscribe.label "Subscribe…">
+ <!ENTITY folderContextSubscribe.accesskey "b">
+ <!ENTITY folderContextSearchForMessages.label "Search Messages…">
+ <!ENTITY folderContextSearchForMessages.accesskey "S">
+ <!ENTITY folderContextProperties2.label "Properties">
+ <!ENTITY folderContextProperties2.accesskey "P">
+ <!ENTITY folderContextFavoriteFolder.label "Favorite Folder">
+ <!ENTITY folderContextFavoriteFolder.accesskey "a">
++<!ENTITY folderContextStartupFolder.label "Startup Folder">
+ <!ENTITY folderContextSettings2.label "Settings">
+ <!ENTITY folderContextSettings2.accesskey "e">
+ 
+ <!-- Search Bar -->
+ <!ENTITY SearchNameOrEmail.label "Name or Email contains:">
+ <!ENTITY SearchNameOrEmail.accesskey "N">
+ 
+ <!-- Gloda Search Bar -->

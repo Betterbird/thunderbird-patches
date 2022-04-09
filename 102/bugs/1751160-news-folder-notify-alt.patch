@@ -1,0 +1,123 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Parent  b950574dd4483736c165617fb34ff1fea410812f
+Bug 1751160 - Use standard GetMsgDatabase() for news folder in filter processing.
+
+diff --git a/mailnews/news/public/nsIMsgNewsFolder.idl b/mailnews/news/public/nsIMsgNewsFolder.idl
+--- a/mailnews/news/public/nsIMsgNewsFolder.idl
++++ b/mailnews/news/public/nsIMsgNewsFolder.idl
+@@ -111,23 +111,16 @@ interface nsIMsgNewsFolder : nsISupports
+ 
+   ACString getMessageIdForKey(in nsMsgKey key);
+ 
+   void getNextNMessages(in nsIMsgWindow aMsgWindow);
+   void notifyDownloadedLine(in string line, in nsMsgKey key);
+   void notifyFinishedDownloadinghdrs();
+ 
+   /**
+-   * Retrieves the database, but does not cache it in mDatabase.
+-   *
+-   * This is useful for operations that shouldn't hold open the database.
+-   */
+-  nsIMsgDatabase getDatabaseWithoutCache();
+-
+-  /**
+    * Requests that a message be canceled.
+    *
+    * Note that, before sending the news cancel, this method will check to make
+    * sure that the user has proper permission to cancel the message.
+    *
+    * @param aMsgHdr     The header of the message to be canceled.
+    * @param aMsgWindow  The standard message window object, for error dialogs.
+    */
+diff --git a/mailnews/news/src/nsNNTPNewsgroupList.cpp b/mailnews/news/src/nsNNTPNewsgroupList.cpp
+--- a/mailnews/news/src/nsNNTPNewsgroupList.cpp
++++ b/mailnews/news/src/nsNNTPNewsgroupList.cpp
+@@ -91,20 +91,25 @@ NS_IMPL_ISUPPORTS(nsNNTPNewsgroupList, n
+                   nsIMsgFilterHitNotify)
+ 
+ nsresult nsNNTPNewsgroupList::Initialize(nsINntpUrl* runningURL,
+                                          nsIMsgNewsFolder* newsFolder) {
+   m_newsFolder = newsFolder;
+   m_runningURL = runningURL;
+   m_knownArts.set = nsMsgKeySet::Create();
+ 
+-  nsresult rv = m_newsFolder->GetDatabaseWithoutCache(getter_AddRefs(m_newsDB));
++  nsresult rv;
++  nsCOMPtr<nsIMsgFolder> folder = do_QueryInterface(m_newsFolder, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  nsCOMPtr<nsIMsgFolder> folder = do_QueryInterface(m_newsFolder, &rv);
++  nsCOMPtr<nsIMsgDatabase> db;
++  rv = folder->GetMsgDatabase(getter_AddRefs(db));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  m_newsDB = do_QueryInterface(db, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   rv = folder->GetFilterList(m_msgWindow, getter_AddRefs(m_filterList));
+   NS_ENSURE_SUCCESS(rv, rv);
+   nsCString ngHeaders;
+   m_filterList->GetArbitraryHeaders(ngHeaders);
+   ParseString(ngHeaders, ' ', m_filterHeaders);
+ 
+diff --git a/mailnews/news/src/nsNNTPNewsgroupList.h b/mailnews/news/src/nsNNTPNewsgroupList.h
+--- a/mailnews/news/src/nsNNTPNewsgroupList.h
++++ b/mailnews/news/src/nsNNTPNewsgroupList.h
+@@ -65,17 +65,16 @@ class nsNNTPNewsgroupList : public nsINN
+   nsresult CleanUp();
+ 
+   bool m_finishingXover;
+ 
+ #ifdef HAVE_CHANGELISTENER
+   virtual void OnAnnouncerGoingAway(ChangeAnnouncer* instigator);
+ #endif
+   nsresult ParseLine(char* line, uint32_t* message_number);
+-  nsresult GetDatabase(const char* uri, nsIMsgDatabase** db);
+   void SetProgressBarPercent(int32_t percent);
+   void SetProgressStatus(const nsString& aMessage);
+ 
+   void UpdateStatus(bool filtering, int32_t numDled, int32_t totToDL);
+ 
+   nsresult AddHeader(const char* header, const char* value);
+ 
+  protected:
+diff --git a/mailnews/news/src/nsNewsFolder.cpp b/mailnews/news/src/nsNewsFolder.cpp
+--- a/mailnews/news/src/nsNewsFolder.cpp
++++ b/mailnews/news/src/nsNewsFolder.cpp
+@@ -234,35 +234,16 @@ nsresult nsMsgNewsFolder::GetDatabase() 
+ 
+     rv = UpdateSummaryTotals(true);
+     if (NS_FAILED(rv)) return rv;
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+-nsMsgNewsFolder::GetDatabaseWithoutCache(nsIMsgDatabase** db) {
+-  NS_ENSURE_ARG_POINTER(db);
+-
+-  // The simplest way to perform this operation is to get the database normally
+-  // and then clear our information about it if we didn't already hold it open.
+-  bool wasCached = !!mDatabase;
+-  nsresult rv = GetDatabase();
+-  NS_IF_ADDREF(*db = mDatabase);
+-
+-  // If the DB was not open before, close our reference to it now.
+-  if (!wasCached && mDatabase) {
+-    mDatabase->RemoveListener(this);
+-    mDatabase = nullptr;
+-  }
+-
+-  return rv;
+-}
+-
+-NS_IMETHODIMP
+ nsMsgNewsFolder::UpdateFolder(nsIMsgWindow* aWindow) {
+   // Get news.get_messages_on_select pref
+   nsresult rv;
+   nsCOMPtr<nsIPrefBranch> prefBranch =
+       do_GetService(NS_PREFSERVICE_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+   bool getMessagesOnSelect = true;
+   prefBranch->GetBoolPref("news.get_messages_on_select", &getMessagesOnSelect);
