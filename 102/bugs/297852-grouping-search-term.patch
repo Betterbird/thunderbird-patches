@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1650192163 -7200
+# Date 1650227760 -7200
 # Parent  d762143accab5adb9f59e309b36edb32052e054f
 Bug 297852 - Allow grouping in search term UI.
 
@@ -9,6 +9,7 @@ This also does a general overhaul of searchTerm.js:
  - Removal of over-engineered global gTotalSearchTerms, badly tracking the length of the search term array
  - Removal of gLoading, as a consequence of the gTotalSearchTerms removal
  - Removal of gSearchRemovedTerms, we saw no use in tracking removed searchterms
+ - Moved badly conceived treecols for flex values out of the richlistbox, so the child count matches the richlist items
  - Fixed clumsiness in removeSearchRow(): Just remove the row at the given index instead of searching for in the DOM
  - Adding an empty search term for new rules, user might want to start off with a group instead
  - Mitigation of https://bugzilla.mozilla.org/show_bug.cgi?id=1765077 (missing highlight, focus).
@@ -160,23 +161,18 @@ diff --git a/mailnews/search/content/searchTerm.inc.xhtml b/mailnews/search/cont
 -            <hbox id="searchterms" class="themeable-brighttext"/>
 -            <richlistbox flex="1" id="searchTermList">
 -              <treecols hidden="true">
--                <treecol flex="&searchTermListAttributesFlexValue;"/>
--                <treecol flex="&searchTermListOperatorsFlexValue;"/>
--                <treecol flex="&searchTermListValueFlexValue;"/>
--                <treecol class="filler"/>
--              </treecols>
--            </richlistbox>
 +            <hbox class="themeable-brighttext"/>
++              <treecols id="flexcols" hidden="true">
+                 <treecol flex="&searchTermListAttributesFlexValue;"/>
+                 <treecol flex="&searchTermListOperatorsFlexValue;"/>
+                 <treecol flex="&searchTermListValueFlexValue;"/>
+                 <treecol class="filler"/>
+               </treecols>
+-            </richlistbox>
 +              <richlistbox flex="1" id="searchTermList">
-+                <treecols id="flexcols" hidden="true">
-+                  <treecol flex="&searchTermListAttributesFlexValue;"/>
-+                  <treecol flex="&searchTermListOperatorsFlexValue;"/>
-+                  <treecol flex="&searchTermListValueFlexValue;"/>
-+                  <treecol class="filler"/>
-+                </treecols>
 +                <richlistitem>
 +                  <radiogroup id="booleanAndGroup" orient="horizontal" value="and"
-+                              oncommand="booleanChanged(event);" flex="1">
++                              oncommand="booleanChanged(event);" flex="1" level="0">
 +                    <radio id="andRadio" value="and" label="&matchAll.label;"
 +                           accesskey="&matchAll.accesskey;" flex="1"/>
 +                    <radio id="orRadio" value="or" label="&matchAny.label;"
@@ -192,7 +188,7 @@ diff --git a/mailnews/search/content/searchTerm.inc.xhtml b/mailnews/search/cont
 diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/searchTerm.js
 --- a/mailnews/search/content/searchTerm.js
 +++ b/mailnews/search/content/searchTerm.js
-@@ -1,31 +1,134 @@
+@@ -1,31 +1,112 @@
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -284,42 +280,20 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +}
 +
 +function getLevel(index) {
-+  let level = 0;
++  let level;
 +  let richlistIdx = index - 1;
-+  for (let i = richlistIdx; i >= 0; i--) {
-+    let item = gSearchTermList.getItemAtIndex(i);
-+    if (item.firstChild.localName == "radiogroup") {
-+      level++;
-+    }
-+  }
-+  if (verbose) {
-+    dump(`searchTerm: getLevelInPx ${index} -> ${level} (first count)\n`);
++  let itemChild = gSearchTermList.getItemAtIndex(richlistIdx).firstChild;
++  if (itemChild.localName == "radiogroup") {
++    // If the user clicked onto a group, the level is the group's plus one.
++    level = itemChild.getAttribute("level");
++    level = parseInt(level) + 1;
++  } else {
++    let termIdx = termIdxFromRichlistIdx(richlistIdx);
++    level = gSearchTerms[termIdx].level;
 +  }
 +
-+  // Now subtract any closed groups.
-+  let termIdx = -1;
-+  // Ignore the richlistitem immediately before, since it still has the end group marker
-+  // when appending to a group.
-+  richlistIdx--;
-+  while (
-+    richlistIdx >= 0 &&
-+    (termIdx = termIdxFromRichlistIdx(richlistIdx)) == -1
-+  ) {
-+    richlistIdx--;
-+  }
-+  if (verbose) {
-+    dump(`searchTerm: getLevelInPx looking down from term ${termIdx}\n`);
-+  }
-+  for (let i = termIdx; i >= 0; i--) {
-+    if (gSearchTerms[i].obj.endsGrouping) {
-+      if (verbose) {
-+        dump(`searchTerm: getLevelInPx found group ending at ${i}\n`);
-+      }
-+      level--;
-+    }
-+  }
 +  // eslint-disable-next-line curly
-+  if (verbose) dump(`searchTerm: getLevelInPx ${index} -> ${level} (final)\n`);
++  if (verbose) dump(`searchTerm: getLevel ${index} -> ${level}\n`);
 +  return level;
 +}
 +
@@ -331,7 +305,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    get searchTerm() {
      return this.internalSearchTerm;
    },
-@@ -144,24 +247,33 @@ searchTermContainer.prototype = {
+@@ -144,24 +225,33 @@ searchTermContainer.prototype = {
    saveTo(searchTerm) {
      this.internalSearchTerm = searchTerm;
      this.save();
@@ -365,7 +339,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    // get the boolean value from the first term
    var firstTerm = gSearchTerms[0].searchTerm;
    if (firstTerm) {
-@@ -172,36 +284,41 @@ function initializeBooleanWidgets() {
+@@ -172,36 +262,41 @@ function initializeBooleanWidgets() {
      booleanAnd =
        gSearchTerms.length > 1
          ? gSearchTerms[1].searchTerm.booleanAnd
@@ -411,7 +385,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
   * @param matchAllValue boolean value from the first search term
   */
  function updateSearchTermsListbox(matchAllValue) {
-@@ -215,74 +332,247 @@ function updateSearchTermsListbox(matchA
+@@ -215,74 +310,232 @@ function updateSearchTermsListbox(matchA
    for (let i = 0; i < searchAttributeList.length; i++) {
      searchAttributeList[i].setAttribute("disabled", matchAllValue);
      searchOperatorList[i].setAttribute("disabled", matchAllValue);
@@ -503,7 +477,6 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      ) {
 +        gSearchTerms[nextTermIdx].obj.beginsGrouping = false;
 +        gSearchTerms[termIdx].obj.beginsGrouping = true;
-+        // eslint-disable-next-line curly
 +        if (verbose) {
 +          dump(`searchTerm: onMore begin moved ${nextTermIdx} to ${termIdx}\n`);
 +        }
@@ -522,10 +495,12 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        gSearchTerms[termIdx].obj.endsGrouping = true;
 +      }
 +    } catch (ex) {
-+      if (verbose) {
-+        dump(`searchTerm: onMore end (at end) ${termIdx}\n`);
++      if (richlistIdx > 1) {
++        if (verbose) {
++          dump(`searchTerm: onMore end (at end) ${termIdx}\n`);
++        }
++        gSearchTerms[termIdx].obj.endsGrouping = true;
 +      }
-+      gSearchTerms[termIdx].obj.endsGrouping = true;
 +    }
 +  } else if (gSearchTerms[termIdx].obj.endsGrouping) {
 +    gSearchTerms[termIdx].obj.endsGrouping = false;
@@ -551,54 +526,47 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  // eslint-disable-next-line curly
 +  if (verbose) dump(`searchTerm: onLess removing at ${richlistIdx}\n`);
 +
-+  let innerGroupLevel = -1;
-+  let beginTermIdx;
-+  if (
-+    gSearchTermList.getItemAtIndex(richlistIdx).firstChild.localName ==
-+    "radiogroup"
-+  ) {
++  let itemChild = gSearchTermList.getItemAtIndex(richlistIdx).firstChild;
++  let entireGroup = false;
++  if (itemChild.localName == "radiogroup") {
 +    // We need to delete the entire group.
++    entireGroup = true;
++    let groupLevel = itemChild.getAttribute("level");
++    groupLevel = parseInt(groupLevel);
 +    if (verbose) {
-+      dump(`searchTerm: onLess: removing entire group at ${richlistIdx}\n`);
++      dump(
++        `searchTerm: onLess: removing entire group at ${richlistIdx} with level ${groupLevel}\n`
++      );
 +    }
++
 +    let currentIdx = richlistIdx + 1;
-+    let numEndsGroupingToFind = 1;
-+    let currentTermIdx = -1;
-+    do {
-+      try {
-+        currentTermIdx = termIdxFromRichlistIdx(currentIdx);
-+        if (currentTermIdx == -1) {
-+          // Found another nested group.
-+          numEndsGroupingToFind++;
-+        } else if (gSearchTerms[currentTermIdx].obj.endsGrouping) {
-+          if (verbose) {
-+            dump(`searchTerm: onLess: found group end at ${currentTermIdx}\n`);
-+          }
-+          innerGroupLevel = gSearchTerms[currentTermIdx].level;
-+          numEndsGroupingToFind--;
-+        }
-+        if (gSearchTerms[currentTermIdx].obj.beginsGrouping) {
-+          if (verbose) {
-+            dump(
-+              `searchTerm: onLess: found group begin at ${currentTermIdx}\n`
-+            );
-+          }
-+          beginTermIdx = currentTermIdx;
-+        }
-+      } catch (ex) {
++    let deleteToIdx = richlistIdx;
++    while (currentIdx < gSearchTermList.children.length) {
++      // Delete all following children with a higher level.
++      itemChild = gSearchTermList.getItemAtIndex(currentIdx).firstChild;
++      let level;
++      if (itemChild.localName == "radiogroup") {
++        level = itemChild.getAttribute("level");
++        level = parseInt(level);
++      } else {
++        let termIdx = termIdxFromRichlistIdx(currentIdx);
++        level = gSearchTerms[termIdx].level;
++      }
++      if (verbose) {
++        dump(`searchTerm: onLess: ${currentIdx} has level ${level}\n`);
++      }
++      if (level <= groupLevel) {
 +        break;
 +      }
++      deleteToIdx = currentIdx;
 +      currentIdx++;
-+    } while (numEndsGroupingToFind > 0);
++    }
 +
 +    // Nuke everythiung between that index downto where we started.
-+    if (currentTermIdx >= 0) {
-+      let currentRichlistIdx = richlistIdxFromTermIdx(currentTermIdx);
-+      for (let i = currentRichlistIdx; i > richlistIdx; i--) {
-+        // eslint-disable-next-line curly
-+        if (verbose) dump(`searchTerm: onLess: removing group member ${i}\n`);
-+        removeSearchRow(i);
-+      }
++    for (let i = deleteToIdx; i > richlistIdx; i--) {
++      // eslint-disable-next-line curly
++      if (verbose) dump(`searchTerm: onLess: removing group member ${i}\n`);
++      removeSearchRow(i);
 +    }
 +  } else {
 +    // We're not removing the entire group. Move the begin/end marker when removing from a group.
@@ -620,29 +588,14 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  if (verbose) dump(`searchTerm: onLess: removing ${richlistIdx}\n`);
 +  removeSearchRow(richlistIdx);
 +
-+  // There's the special case wheren appening a group removed the end marker
-+  // of the preceding group, so repair this here.
-+  if (innerGroupLevel > 0) {
-+    let foundBegin = false;
-+    let foundEnd = false;
-+    let termIdx = beginTermIdx - 1;
-+    while (termIdx >= 0 && gSearchTerms[termIdx].level == innerGroupLevel - 1) {
-+      if (gSearchTerms[termIdx].obj.beginsGrouping) {
-+        foundBegin = true;
-+        break;
-+      }
-+      if (gSearchTerms[termIdx].obj.endsGrouping) {
-+        foundEnd = true;
-+        break;
-+      }
-+      termIdx--;
-+    }
-+    if (foundBegin && !foundEnd) {
++  if (entireGroup) {
++    // There's the special case where appending a group removed the end marker
++    // of the preceding group, so repair this here.
++    let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
++    if (prevTermIdx >= 0 && !gSearchTerms[prevTermIdx].obj.endsGrouping) {
 +      // eslint-disable-next-line curly
-+      if (verbose) {
-+        dump(`searchTerm: onLess: adding end at ${beginTermIdx - 1}\n`);
-+      }
-+      gSearchTerms[beginTermIdx - 1].obj.endsGrouping = true;
++      if (verbose) dump(`searchTerm: onLess: adding end to ${prevTermIdx}\n`);
++      gSearchTerms[prevTermIdx].obj.endsGrouping = true;
 +    }
 +  }
 +
@@ -650,6 +603,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +}
 +
 +function onGroup(event) {
++  dumpSearchTerms("onGroup - entry");
++
 +  // if we have an event, extract the list row index and use that as the row number
 +  // for our insertion point. If there is no event, append to the end....
 +  var richlistIdx;
@@ -674,8 +629,12 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  // This needs to be undone when the group is removed.
 +  let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
 +  if (prevTermIdx >= 0 && gSearchTerms[prevTermIdx].obj.endsGrouping) {
++    if (verbose) {
++      dump(`searchTerm: onGroup: removing end from ${prevTermIdx}\n`);
++    }
 +    gSearchTerms[prevTermIdx].obj.endsGrouping = false;
 +  }
++  dumpSearchTerms("onGroup - exit");
  }
  
  // set scope on all visible searchattribute tags
@@ -684,7 +643,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    for (var i = 0; i < gSearchTerms.length; i++) {
      // don't set element attributes if XBL hasn't loaded
      if (!(gSearchTerms[i].obj.searchattribute.searchScope === undefined)) {
-@@ -296,16 +586,17 @@ function setSearchScope(scope) {
+@@ -296,16 +549,17 @@ function setSearchScope(scope) {
  
  function updateSearchAttributes() {
    for (var i = 0; i < gSearchTerms.length; i++) {
@@ -702,7 +661,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
      setSearchScope(GetScopeForDirectoryURI(selectedAB));
    }
    for (var i = 0; i < gSearchTerms.length; i++) {
-@@ -315,17 +606,17 @@ function booleanChanged(event) {
+@@ -315,17 +569,17 @@ function booleanChanged(event) {
        searchTerm = gSearchTerms[i].searchTerm;
      }
  
@@ -721,7 +680,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
  }
  
  /**
-@@ -338,84 +629,178 @@ function booleanChanged(event) {
+@@ -338,84 +592,180 @@ function booleanChanged(event) {
   *                    (e.g. via the '+' button)
   */
  function createSearchRow(index, scope, searchTerm, aUserAdded) {
@@ -792,7 +751,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
  
 -  var editFilter = window.gFilter || null;
 -  var editMailView = window.gMailView || null;
--
++  searchrow.style = `padding-left: ${level * 20}px;`;
+ 
 -  if (
 -    (!editFilter && !editMailView) ||
 -    (editFilter && index == gTotalSearchTerms) ||
@@ -800,12 +760,12 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 -  ) {
 -    gLoading = false;
 -  }
-+  searchrow.style = `padding-left: ${level * 20}px;`;
- 
-   // index is index of new row
+-
+-  // index is index of new row
 -  // gTotalSearchTerms has not been updated yet
 -  if (gLoading || index == gTotalSearchTerms) {
-+  if (index == gSearchTermList.children.length - 1) {
++  // `index` is index of new row.
++  if (index == gSearchTermList.children.length) {
      gSearchTermList.appendChild(searchrow);
    } else {
      var currentItem = gSearchTermList.getItemAtIndex(index);
@@ -881,10 +841,12 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  andOrRow.appendChild(groupButton);
 +  andOrRow.appendChild(lessButton);
 +
-+  andOrRow.style = `padding-left: ${getLevel(index) * 20}px;`;
++  let level = getLevel(index);
++  radioGroup.setAttribute("level", level);
++  andOrRow.style = `padding-left: ${level * 20}px;`;
 +
-+  // index is index of new row
-+  if (index == gSearchTermList.children.length - 1) {
++  // `index` is index of new row.
++  if (index == gSearchTermList.children.length) {
 +    gSearchTermList.appendChild(andOrRow);
 +  } else {
 +    var currentItem = gSearchTermList.getItemAtIndex(index);
@@ -917,7 +879,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
  
    searchTermObj.searchScope = gSearchTerms[index].scope;
    // the search term will initialize the searchTerm element, including
-@@ -444,17 +829,17 @@ function initializeTermFromIndex(index) 
+@@ -444,17 +794,17 @@ function initializeTermFromIndex(index) 
   * Creates a <richlistitem> using the array children as the children
   * of each listcell.
   * @param aChildren  An array of XUL elements to put into the listitem.
@@ -936,7 +898,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        listcell.setAttribute("flex", cols[i].getAttribute("flex"));
      }
      let child = aChildren[i];
-@@ -468,69 +853,49 @@ function constructRow(aChildren) {
+@@ -468,69 +818,49 @@ function constructRow(aChildren) {
        listcell.appendChild(child);
      }
      listitem.appendChild(listcell);
@@ -1017,7 +979,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
          gSearchTerms[i].obj.save();
        } else if (!gSearchTerms[i].initialized) {
          // the term might be an offscreen one we haven't initialized yet
-@@ -547,20 +912,13 @@ function saveSearchTerms(searchTerms, te
+@@ -547,20 +877,14 @@ function saveSearchTerms(searchTerms, te
      } catch (ex) {
        dump("** Error saving element " + i + ": " + ex + "\n");
      }
@@ -1037,7 +999,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 -  if (allItems) {
 -    allItems.hidden = true;
 +  let length;
-+  while ((length = gSearchTermList.children.length) > 0) {
++  // We need to leave the topmost and/or group alone.
++  while ((length = gSearchTermList.children.length) > 1) {
 +    removeSearchRow(length - 1);
    }
  }
