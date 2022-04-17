@@ -1,0 +1,1039 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1650188967 -7200
+# Parent  d762143accab5adb9f59e309b36edb32052e054f
+Bug 297852 - Allow grouping in search term UI.
+
+This also does a general overhaul of searchTerm.js:
+ - Removal of hideMatchAllItem() and updateRemoveRowButton()
+ - Removal of over-engineered global gTotalSearchTerms, badly tracking the length of the search term array
+ - Removal of gLoading, as a consequence of the gTotalSearchTerms removal
+ - Removal of gSearchRemovedTerms, we saw no use in tracking removed searchterms
+ - Fixed clumsiness in removeSearchRow(): Just remove the row at the given index instead of searching for in the DOM
+ - Adding an empty search term for new rules, user might want to start off with a group instead
+ - Mitigation of https://bugzilla.mozilla.org/show_bug.cgi?id=1765077 (missing highlight, focus).
+
+diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
+--- a/mail/base/content/SearchDialog.js
++++ b/mail/base/content/SearchDialog.js
+@@ -293,17 +293,16 @@ function searchOnUnload() {
+ 
+   // release this early because msgWindow holds a weak reference
+   msgWindow.rootDocShell = null;
+ }
+ 
+ function initializeSearchWindowWidgets() {
+   gFolderPicker = document.getElementById("searchableFolders");
+   gSearchStopButton = document.getElementById("search-button");
+-  hideMatchAllItem();
+ 
+   // eslint-disable-next-line no-global-assign
+   msgWindow = Cc["@mozilla.org/messenger/msgwindow;1"].createInstance(
+     Ci.nsIMsgWindow
+   );
+   msgWindow.domWindow = window;
+   msgWindow.rootDocShell.appType = Ci.nsIDocShell.APP_TYPE_MAIL;
+ 
+diff --git a/mail/components/addrbook/content/abSearchDialog.js b/mail/components/addrbook/content/abSearchDialog.js
+--- a/mail/components/addrbook/content/abSearchDialog.js
++++ b/mail/components/addrbook/content/abSearchDialog.js
+@@ -110,18 +110,16 @@ function disableCommands() {
+ 
+ function initializeSearchWindowWidgets() {
+   gSearchStopButton = document.getElementById("search-button");
+   gPropertiesCmd = document.getElementById("cmd_properties");
+   gComposeCmd = document.getElementById("cmd_compose");
+   gDeleteCmd = document.getElementById("cmd_deleteCard");
+   gStatusText = document.getElementById("statusText");
+   disableCommands();
+-  // matchAll doesn't make sense for address book search
+-  hideMatchAllItem();
+ }
+ 
+ function onSearchStop() {}
+ 
+ function onAbSearchReset(event) {
+   disableCommands();
+   CloseAbView();
+ 
+diff --git a/mail/extensions/mailviews/content/mailViewSetup.js b/mail/extensions/mailviews/content/mailViewSetup.js
+--- a/mail/extensions/mailviews/content/mailViewSetup.js
++++ b/mail/extensions/mailviews/content/mailViewSetup.js
+@@ -80,18 +80,16 @@ function onOK() {
+ }
+ 
+ function initializeMailViewOverrides() {
+   // replace some text with something we want. Need to add some ids to searchOverlay.js
+   // var orButton = document.getElementById('or');
+   // orButton.setAttribute('label', 'Any of the following');
+   // var andButton = document.getElementById('and');
+   // andButton.setAttribute('label', 'All of the following');
+-  // matchAll doesn't make sense for views, since views are a single folder
+-  hideMatchAllItem();
+ }
+ 
+ function UpdateAfterCustomHeaderChange() {
+   updateSearchAttributes();
+ }
+ 
+ function doEnabling() {
+   if (dialog.nameField.value) {
+diff --git a/mail/locales/en-US/chrome/messenger/search.properties b/mail/locales/en-US/chrome/messenger/search.properties
+--- a/mail/locales/en-US/chrome/messenger/search.properties
++++ b/mail/locales/en-US/chrome/messenger/search.properties
+@@ -19,9 +19,10 @@ searchingMessage=Searching…
+ matchesFound=#1 match found;#1 matches found
+ noMatchesFound=No matches found
+ labelForStopButton=Stop
+ labelForSearchButton=Search
+ labelForStopButton.accesskey=S
+ labelForSearchButton.accesskey=S
+ 
+ moreButtonTooltipText=Add a new rule
++groupButtonTooltipText=Add a new group
+ lessButtonTooltipText=Remove this rule
+diff --git a/mailnews/base/content/virtualFolderProperties.xhtml b/mailnews/base/content/virtualFolderProperties.xhtml
+--- a/mailnews/base/content/virtualFolderProperties.xhtml
++++ b/mailnews/base/content/virtualFolderProperties.xhtml
+@@ -105,15 +105,18 @@
+   </hbox>
+ 
+   <separator class="thin"/>
+ 
+   <vbox flex="2">
+     <label value="&searchTermCaption.label;"/>
+     <hbox flex="1">
+       <vbox id="virtualFolderSearchTermListBox" flex="2">
++        <checkbox id="matchAllItem" label="&matchAllMsgs.label;"
++               accesskey="&matchAllMsgs.accesskey;"
++               oncommand="matchAllChanged(event);"/>
+ #include ../../search/content/searchTerm.inc.xhtml
+     </hbox>
+   </vbox>
+ </dialog>
+ <script src="chrome://messenger/content/virtualFolderProperties.js"></script>
+ </html:body>
+ </html>
+diff --git a/mailnews/search/content/FilterEditor.xhtml b/mailnews/search/content/FilterEditor.xhtml
+--- a/mailnews/search/content/FilterEditor.xhtml
++++ b/mailnews/search/content/FilterEditor.xhtml
+@@ -102,16 +102,19 @@
+                     command="cmd_updateFilterType"/>
+           <label id="periodLength"/>
+         </hbox>
+       </vbox>
+     </html:fieldset>
+   </vbox>
+ 
+     <vbox id="searchTermListBox" flex="1">
++      <checkbox id="matchAllItem" label="&matchAllMsgs.label;"
++             accesskey="&matchAllMsgs.accesskey;"
++             oncommand="matchAllChanged(event);"/>
+ #include searchTerm.inc.xhtml
+ 
+   <splitter id="gray_horizontal_splitter" persist="state" orient="vertical"/>
+ 
+   <vbox flex="1">
+     <label value="&filterActionDesc.label;"
+            accesskey="&filterActionDesc.accesskey;"
+            control="filterActionList"/>
+diff --git a/mailnews/search/content/searchTerm.inc.xhtml b/mailnews/search/content/searchTerm.inc.xhtml
+--- a/mailnews/search/content/searchTerm.inc.xhtml
++++ b/mailnews/search/content/searchTerm.inc.xhtml
+@@ -1,28 +1,30 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+-          <radiogroup id="booleanAndGroup" orient="horizontal" value="and"
+-                      oncommand="booleanChanged(event);">
+-            <radio value="and" label="&matchAll.label;"
+-                   accesskey="&matchAll.accesskey;" flex="1"/>
+-            <radio value="or" label="&matchAny.label;"
+-                   accesskey="&matchAny.accesskey;" flex="1"/>
+-            <radio value="matchAll" id="matchAllItem" label="&matchAllMsgs.label;"
+-                   accesskey="&matchAllMsgs.accesskey;" flex="1"/>
+-          </radiogroup>
+ 
+           <hbox id="searchTermBox" flex="1"
+                 style="min-height:100px; max-height:100vh;">
+-            <hbox id="searchterms" class="themeable-brighttext"/>
+-            <richlistbox flex="1" id="searchTermList">
+-              <treecols hidden="true">
+-                <treecol flex="&searchTermListAttributesFlexValue;"/>
+-                <treecol flex="&searchTermListOperatorsFlexValue;"/>
+-                <treecol flex="&searchTermListValueFlexValue;"/>
+-                <treecol class="filler"/>
+-              </treecols>
+-            </richlistbox>
++            <hbox class="themeable-brighttext"/>
++              <richlistbox flex="1" id="searchTermList">
++                <treecols id="flexcols" hidden="true">
++                  <treecol flex="&searchTermListAttributesFlexValue;"/>
++                  <treecol flex="&searchTermListOperatorsFlexValue;"/>
++                  <treecol flex="&searchTermListValueFlexValue;"/>
++                  <treecol class="filler"/>
++                </treecols>
++                <richlistitem>
++                  <radiogroup id="booleanAndGroup" orient="horizontal" value="and"
++                              oncommand="booleanChanged(event);" flex="1">
++                    <radio id="andRadio" value="and" label="&matchAll.label;"
++                           accesskey="&matchAll.accesskey;" flex="1"/>
++                    <radio id="orRadio" value="or" label="&matchAny.label;"
++                           accesskey="&matchAny.accesskey;" flex="1"/>
++                  </radiogroup>
++                  <button id="moreButton" class="small-button" label="+" oncommand="onMore(event);"/>
++                  <button id="groupButton" class="small-button" label="+( )" oncommand="onGroup(event);"/>
++                </richlistitem>
++              </richlistbox>
+ 
+           </hbox>
+         </vbox>
+diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/searchTerm.js
+--- a/mailnews/search/content/searchTerm.js
++++ b/mailnews/search/content/searchTerm.js
+@@ -1,31 +1,134 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ /* import-globals-from ../../../mail/components/addrbook/content/abSearchDialog.js */
+ 
+-var gTotalSearchTerms = 0;
+-var gSearchTermList;
++var gSearchTermList; // DOM Element of the list of search terms and group headings.
++
++// Array of search terms.
++// Beware: There are more richlist items in `gSearchTermList` than there are search terms
++// since the group headings are also richlistitems.
++// Use `termIdxFromRichlistIdx()` and `richlistIdxFromTermIdx()`.
+ var gSearchTerms = [];
+-var gSearchRemovedTerms = [];
++
+ var gSearchScope;
+ var gSearchBooleanRadiogroup;
++var gMatchAll;
+ 
+ var gUniqueSearchTermCounter = 0; // gets bumped every time we add a search term so we can always
+ // dynamically generate unique IDs for the terms.
+ 
+ // cache these so we don't have to hit the string bundle for them
+ var gMoreButtonTooltipText;
++var gGroupButtonTooltipText;
+ var gLessButtonTooltipText;
+-var gLoading = true;
++
++var verbose = true;
+ 
+ function searchTermContainer() {}
+ 
++function dumpSearchTerms(prefix) {
++  if (!verbose) {
++    return;
++  }
++  for (let i = 0; i < gSearchTerms.length; i++) {
++    dump(
++      `searchTerm: ${prefix} ${i}: ${
++        gSearchTerms[i].obj.beginsGrouping ? "begin" : ""
++      } ${gSearchTerms[i].obj.endsGrouping ? "end" : ""} level ${
++        gSearchTerms[i].level
++      }\n`
++    );
++  }
++}
++
++function termIdxFromRichlistIdx(index) {
++  if (
++    gSearchTermList.getItemAtIndex(index).firstChild.localName == "radiogroup"
++  ) {
++    // The richlist item doesn't correspond to a term.
++    // eslint-disable-next-line curly
++    if (verbose) dump(`searchTerm: termIdxFromRichlistIdx ${index} -> -1\n`);
++    return -1;
++  }
++  let termIdx = index;
++  for (let i = index; i >= 0; i--) {
++    let item = gSearchTermList.getItemAtIndex(i);
++    if (item.firstChild.localName == "radiogroup") {
++      termIdx--;
++    }
++  }
++  if (verbose) {
++    dump(`searchTerm: termIdxFromRichlistIdx ${index} -> ${termIdx}\n`);
++  }
++  return termIdx;
++}
++
++function richlistIdxFromTermIdx(index) {
++  // The first richlist item is the topmost and/or group.
++  let richlistIdx = index + 1;
++  for (let i = 0; i <= index; i++) {
++    let searchTermObj = gSearchTerms[i].obj;
++    if (!searchTermObj) {
++      console.log("Something wrong here, term not there", i);
++      continue;
++    }
++    if (searchTermObj.beginsGrouping) {
++      richlistIdx++;
++    }
++  }
++  if (verbose) {
++    dump(`searchTerm: richlistIdxFromTermIdx ${index} -> ${richlistIdx}\n`);
++  }
++  return richlistIdx;
++}
++
++function getLevel(index) {
++  let level = 0;
++  let richlistIdx = index - 1;
++  for (let i = richlistIdx; i >= 0; i--) {
++    let item = gSearchTermList.getItemAtIndex(i);
++    if (item.firstChild.localName == "radiogroup") {
++      level++;
++    }
++  }
++  if (verbose) {
++    dump(`searchTerm: getLevelInPx ${index} -> ${level} (first count)\n`);
++  }
++
++  // Now subtract any closed groups.
++  let termIdx = -1;
++  // Ignore the richlistitem immediately before, since it still has the end group marker
++  // when appending to a group.
++  richlistIdx--;
++  while (
++    richlistIdx >= 0 &&
++    (termIdx = termIdxFromRichlistIdx(richlistIdx)) == -1
++  ) {
++    richlistIdx--;
++  }
++  if (verbose) {
++    dump(`searchTerm: getLevelInPx looking down from term ${termIdx}\n`);
++  }
++  for (let i = termIdx; i >= 0; i--) {
++    if (gSearchTerms[i].obj.endsGrouping) {
++      if (verbose) {
++        dump(`searchTerm: getLevelInPx found group ending at ${i}\n`);
++      }
++      level--;
++    }
++  }
++  // eslint-disable-next-line curly
++  if (verbose) dump(`searchTerm: getLevelInPx ${index} -> ${level} (final)\n`);
++  return level;
++}
++
+ searchTermContainer.prototype = {
+   internalSearchTerm: "",
+   internalBooleanAnd: "",
+ 
+   // this.searchTerm: the actual nsIMsgSearchTerm object
+   get searchTerm() {
+     return this.internalSearchTerm;
+   },
+@@ -144,24 +247,33 @@ searchTermContainer.prototype = {
+   saveTo(searchTerm) {
+     this.internalSearchTerm = searchTerm;
+     this.save();
+   },
+ };
+ 
+ function initializeSearchWidgets() {
+   gSearchBooleanRadiogroup = document.getElementById("booleanAndGroup");
++  gMatchAll = document.getElementById("matchAllItem");
+   gSearchTermList = document.getElementById("searchTermList");
+ 
+   // initialize some strings
+   var bundle = Services.strings.createBundle(
+     "chrome://messenger/locale/search.properties"
+   );
+   gMoreButtonTooltipText = bundle.GetStringFromName("moreButtonTooltipText");
++  gGroupButtonTooltipText = bundle.GetStringFromName("groupButtonTooltipText");
+   gLessButtonTooltipText = bundle.GetStringFromName("lessButtonTooltipText");
++
++  document
++    .getElementById("moreButton")
++    .setAttribute("tooltiptext", gMoreButtonTooltipText);
++  document
++    .getElementById("groupButton")
++    .setAttribute("tooltiptext", gGroupButtonTooltipText);
+ }
+ 
+ function initializeBooleanWidgets() {
+   var booleanAnd = true;
+   var matchAll = false;
+   // get the boolean value from the first term
+   var firstTerm = gSearchTerms[0].searchTerm;
+   if (firstTerm) {
+@@ -172,36 +284,41 @@ function initializeBooleanWidgets() {
+     booleanAnd =
+       gSearchTerms.length > 1
+         ? gSearchTerms[1].searchTerm.booleanAnd
+         : firstTerm.booleanAnd;
+     matchAll = firstTerm.matchAll;
+   }
+   // target radio items have value="and" or value="or" or "all"
+   if (matchAll) {
+-    gSearchBooleanRadiogroup.value = "matchAll";
++    gMatchAll.checked = true;
+   } else if (booleanAnd) {
+     gSearchBooleanRadiogroup.value = "and";
+   } else {
+     gSearchBooleanRadiogroup.value = "or";
+   }
+   var searchTerms = document.getElementById("searchTermList");
+   if (searchTerms) {
+     updateSearchTermsListbox(matchAll);
+   }
+ }
+ 
+ function initializeSearchRows(scope, searchTerms) {
++  let richlistIdx = 1;
+   for (let i = 0; i < searchTerms.length; i++) {
+     let searchTerm = searchTerms[i];
+-    createSearchRow(i, scope, searchTerm, false);
+-    gTotalSearchTerms++;
++    // XXX Here we have to create an andOr row if the Search Terms is beginsGrouping.
++    createSearchRow(richlistIdx, scope, searchTerm, false);
++    richlistIdx++;
+   }
+   initializeBooleanWidgets();
+-  updateRemoveRowButton();
++}
++
++function matchAllChanged(event) {
++  updateSearchTermsListbox(event.target.checked);
+ }
+ 
+ /**
+  * Enables/disables all the visible elements inside the search terms listbox.
+  *
+  * @param matchAllValue boolean value from the first search term
+  */
+ function updateSearchTermsListbox(matchAllValue) {
+@@ -215,74 +332,247 @@ function updateSearchTermsListbox(matchA
+   for (let i = 0; i < searchAttributeList.length; i++) {
+     searchAttributeList[i].setAttribute("disabled", matchAllValue);
+     searchOperatorList[i].setAttribute("disabled", matchAllValue);
+     searchValueList[i].setAttribute("disabled", matchAllValue);
+     if (!matchAllValue) {
+       searchValueList[i].removeAttribute("disabled");
+     }
+   }
++  var radioList = searchTerms.getElementsByTagName("radio");
++  for (let i = 0; i < radioList.length; i++) {
++    radioList[i].setAttribute("disabled", matchAllValue);
++  }
+   var moreOrLessButtonsList = searchTerms.getElementsByTagName("button");
+   for (let i = 0; i < moreOrLessButtonsList.length; i++) {
+     moreOrLessButtonsList[i].setAttribute("disabled", matchAllValue);
+   }
+-  if (!matchAllValue) {
+-    updateRemoveRowButton();
+-  }
+-}
+-
+-// enables/disables the less button for the first row of search terms.
+-function updateRemoveRowButton() {
+-  var firstListItem = gSearchTermList.getItemAtIndex(0);
+-  if (firstListItem) {
+-    firstListItem.lastElementChild.lastElementChild.setAttribute(
+-      "disabled",
+-      gTotalSearchTerms == 1
+-    );
+-  }
+ }
+ 
+ // Returns the actual list item row index in the list of search rows
+ // that contains the passed in element id.
+ function getSearchRowIndexForElement(aElement) {
+   var listItem = aElement;
+ 
+   while (listItem && listItem.localName != "richlistitem") {
+     listItem = listItem.parentNode;
+   }
+ 
+   return gSearchTermList.getIndexOfItem(listItem);
+ }
+ 
+ function onMore(event) {
++  dumpSearchTerms("onMore - entry");
++
+   // if we have an event, extract the list row index and use that as the row number
+   // for our insertion point. If there is no event, append to the end....
+-  var rowIndex;
++  var richlistIdx;
+ 
+   if (event) {
+-    rowIndex = getSearchRowIndexForElement(event.target) + 1;
++    richlistIdx = getSearchRowIndexForElement(event.target) + 1;
+   } else {
+-    rowIndex = gSearchTermList.getRowCount();
++    richlistIdx = gSearchTermList.getRowCount();
+   }
++  // eslint-disable-next-line curly
++  if (verbose) dump(`searchTerm: onMore inserting at ${richlistIdx}\n`);
+ 
+-  createSearchRow(rowIndex, gSearchScope, null, event != null);
+-  gTotalSearchTerms++;
+-  updateRemoveRowButton();
++  createSearchRow(richlistIdx, gSearchScope, null, event != null);
+ 
+   // the user just added a term, so scroll to it
+-  gSearchTermList.ensureIndexIsVisible(rowIndex);
++  gSearchTermList.ensureIndexIsVisible(richlistIdx);
++
++  // Need to set/move the start/end group marker.
++  let termIdx = termIdxFromRichlistIdx(richlistIdx - 1);
++  if (termIdx == -1) {
++    if (richlistIdx > 1) {
++      termIdx = termIdxFromRichlistIdx(richlistIdx);
++      // First term following a group start which is not the top and/or group.
++      // The new term is at `termIdx + 1`.
++      gSearchTerms[termIdx].obj.beginsGrouping = true;
++      // eslint-disable-next-line curly
++      if (verbose) dump(`searchTerm: onMore begin ${termIdx}\n`);
++    }
++    try {
++      // This will fail if no next term.
++      let nextTermIdx = termIdxFromRichlistIdx(richlistIdx + 1);
++      if (
++        nextTermIdx == termIdx + 1 &&
++        gSearchTerms[nextTermIdx].obj.beginsGrouping
++      ) {
++        gSearchTerms[nextTermIdx].obj.beginsGrouping = false;
++        gSearchTerms[termIdx].obj.beginsGrouping = true;
++        // eslint-disable-next-line curly
++        if (verbose) {
++          dump(`searchTerm: onMore begin moved ${nextTermIdx} to ${termIdx}\n`);
++        }
++      } else if (nextTermIdx == -1) {
++        // A group follows, so set end on our only entry.
++        if (verbose) {
++          dump(`searchTerm: onMore end (before next group) ${termIdx}\n`);
++        }
++        gSearchTerms[termIdx].obj.endsGrouping = true;
++      } else if (
++        gSearchTerms[termIdx].level > gSearchTerms[nextTermIdx].level
++      ) {
++        if (verbose) {
++          dump(`searchTerm: onMore end (before lower level) ${termIdx}\n`);
++        }
++        gSearchTerms[termIdx].obj.endsGrouping = true;
++      }
++    } catch (ex) {
++      if (verbose) {
++        dump(`searchTerm: onMore end (at end) ${termIdx}\n`);
++      }
++      gSearchTerms[termIdx].obj.endsGrouping = true;
++    }
++  } else if (gSearchTerms[termIdx].obj.endsGrouping) {
++    gSearchTerms[termIdx].obj.endsGrouping = false;
++    gSearchTerms[termIdx + 1].obj.endsGrouping = true;
++    if (verbose) {
++      dump(`searchTerm: onMore end moved ${termIdx} to ${termIdx + 1}\n`);
++    }
++  }
++  dumpSearchTerms("onMore - exit");
+ }
+ 
+ function onLess(event) {
+-  if (event && gTotalSearchTerms > 1) {
+-    removeSearchRow(getSearchRowIndexForElement(event.target));
+-    --gTotalSearchTerms;
++  if (!event) {
++    return;
++  }
++  dumpSearchTerms("onLess - entry");
++
++  let richlistIdx = getSearchRowIndexForElement(event.target);
++
++  // eslint-disable-next-line curly
++  if (verbose) dump(`searchTerm: onLess removing at ${richlistIdx}\n`);
++
++  let innerGroupLevel = -1;
++  let beginTermIdx;
++  if (
++    gSearchTermList.getItemAtIndex(richlistIdx).firstChild.localName ==
++    "radiogroup"
++  ) {
++    // We need to delete the entire group.
++    if (verbose) {
++      dump(`searchTerm: onLess: removing entire group at ${richlistIdx}\n`);
++    }
++    let currentIdx = richlistIdx + 1;
++    let numEndsGroupingToFind = 1;
++    let currentTermIdx = null;
++    do {
++      try {
++        currentTermIdx = termIdxFromRichlistIdx(currentIdx);
++        if (currentTermIdx == -1) {
++          // Found another nested group.
++          numEndsGroupingToFind++;
++        } else if (gSearchTerms[currentTermIdx].obj.endsGrouping) {
++          if (verbose) {
++            dump(`searchTerm: onLess: found group end at ${currentTermIdx}\n`);
++          }
++          innerGroupLevel = gSearchTerms[currentTermIdx].level;
++          numEndsGroupingToFind--;
++        }
++        if (gSearchTerms[currentTermIdx].obj.beginsGrouping) {
++          if (verbose) {
++            dump(
++              `searchTerm: onLess: found group begin at ${currentTermIdx}\n`
++            );
++          }
++          beginTermIdx = currentTermIdx;
++        }
++      } catch (ex) {
++        break;
++      }
++      currentIdx++;
++    } while (numEndsGroupingToFind > 0);
++
++    // Nuke everythiung between that index downto where we started.
++    if (currentTermIdx) {
++      let currentRichlistIdx = richlistIdxFromTermIdx(currentTermIdx);
++      for (let i = currentRichlistIdx; i > richlistIdx; i--) {
++        // eslint-disable-next-line curly
++        if (verbose) dump(`searchTerm: onLess: removing group member ${i}\n`);
++        removeSearchRow(i);
++      }
++    }
++  } else {
++    // We're not removing the entire group. Move the begin/end marker when removing from a group.
++    let termIdx = termIdxFromRichlistIdx(richlistIdx);
++    if (
++      gSearchTerms[termIdx].obj.beginsGrouping &&
++      gSearchTerms[termIdx].obj.endsGrouping
++    ) {
++      // Nothing to do, group has single entry.
++    } else if (gSearchTerms[termIdx].obj.endsGrouping) {
++      gSearchTerms[termIdx - 1].obj.endsGrouping = true;
++    } else if (gSearchTerms[termIdx].obj.beginsGrouping) {
++      gSearchTerms[termIdx + 1].obj.beginsGrouping = true;
++    }
+   }
+ 
+-  updateRemoveRowButton();
++  // eslint-disable-next-line curly
++  if (verbose) dump(`searchTerm: onLess: removing ${richlistIdx}\n`);
++  removeSearchRow(richlistIdx);
++
++  // There's the special case wheren appening a group removed the end marker
++  // of the preceding group, so repair this here.
++  if (innerGroupLevel > 0) {
++    let foundBegin = false;
++    let foundEnd = false;
++    let termIdx = beginTermIdx - 1;
++    while (termIdx >= 0 && gSearchTerms[termIdx].level == innerGroupLevel - 1) {
++      if (gSearchTerms[termIdx].obj.beginsGrouping) {
++        foundBegin = true;
++        break;
++      }
++      if (gSearchTerms[termIdx].obj.endsGrouping) {
++        foundEnd = true;
++        break;
++      }
++      termIdx--;
++    }
++    if (foundBegin && !foundEnd) {
++      // eslint-disable-next-line curly
++      if (verbose) {
++        dump(`searchTerm: onLess: adding end at ${beginTermIdx - 1}\n`);
++      }
++      gSearchTerms[beginTermIdx - 1].obj.endsGrouping = true;
++    }
++  }
++
++  dumpSearchTerms("onLess - exit");
++}
++
++function onGroup(event) {
++  // if we have an event, extract the list row index and use that as the row number
++  // for our insertion point. If there is no event, append to the end....
++  var richlistIdx;
++
++  if (event) {
++    richlistIdx = getSearchRowIndexForElement(event.target) + 1;
++  } else {
++    richlistIdx = gSearchTermList.getRowCount();
++  }
++
++  createAndRow(richlistIdx, gSearchScope, null, event != null);
++
++  // the user just added a term, so scroll to it
++  gSearchTermList.ensureIndexIsVisible(richlistIdx);
++
++  // Remove the end group marker.
++  // Special case: We go from:
++  // v == 4 && (x == 5 || y == 6) to
++  // v == 4 && (x == 5 || y == 6 || (z == 7 && t == 8)),
++  // hence, the (x == 5 || y == 6) group now ends at the )) and the previous
++  // marker at the "y == 6" term needs to be removed.
++  // This needs to be undone when the group is removed.
++  let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
++  if (prevTermIdx >= 0 && gSearchTerms[prevTermIdx].obj.endsGrouping) {
++    gSearchTerms[prevTermIdx].obj.endsGrouping = false;
++  }
+ }
+ 
+ // set scope on all visible searchattribute tags
+ function setSearchScope(scope) {
+   gSearchScope = scope;
+   for (var i = 0; i < gSearchTerms.length; i++) {
+     // don't set element attributes if XBL hasn't loaded
+     if (!(gSearchTerms[i].obj.searchattribute.searchScope === undefined)) {
+@@ -296,16 +586,17 @@ function setSearchScope(scope) {
+ 
+ function updateSearchAttributes() {
+   for (var i = 0; i < gSearchTerms.length; i++) {
+     gSearchTerms[i].obj.searchattribute.refreshList();
+   }
+ }
+ 
+ function booleanChanged(event) {
++  // XXX Totally wrong now.
+   // when boolean changes, we have to update all the attributes on the search terms
+   var newBoolValue = event.target.getAttribute("value") == "and";
+   var matchAllValue = event.target.getAttribute("value") == "matchAll";
+   if (document.getElementById("abPopup")) {
+     var selectedAB = document.getElementById("abPopup").selectedItem.value;
+     setSearchScope(GetScopeForDirectoryURI(selectedAB));
+   }
+   for (var i = 0; i < gSearchTerms.length; i++) {
+@@ -315,17 +606,17 @@ function booleanChanged(event) {
+       searchTerm = gSearchTerms[i].searchTerm;
+     }
+ 
+     searchTerm.booleanAnd = newBoolValue;
+     searchTerm.matchAll = matchAllValue;
+   }
+   var searchTerms = document.getElementById("searchTermList");
+   if (searchTerms) {
+-    if (!matchAllValue && searchTerms.hidden && !gTotalSearchTerms) {
++    if (!matchAllValue && searchTerms.hidden && !gSearchTerms.length) {
+       // Fake to get empty row.
+       onMore(null);
+     }
+     updateSearchTermsListbox(matchAllValue);
+   }
+ }
+ 
+ /**
+@@ -338,84 +629,174 @@ function booleanChanged(event) {
+  *                    (e.g. via the '+' button)
+  */
+ function createSearchRow(index, scope, searchTerm, aUserAdded) {
+   var searchAttr = document.createXULElement("search-attribute");
+   var searchOp = document.createXULElement("search-operator");
+   var searchVal = document.createXULElement("search-value");
+ 
+   var moreButton = document.createXULElement("button");
++  var groupButton = document.createXULElement("button");
+   var lessButton = document.createXULElement("button");
+   moreButton.setAttribute("class", "small-button");
+   moreButton.setAttribute("oncommand", "onMore(event);");
+   moreButton.setAttribute("label", "+");
+   moreButton.setAttribute("tooltiptext", gMoreButtonTooltipText);
++  groupButton.setAttribute("class", "small-button");
++  groupButton.setAttribute("oncommand", "onGroup(event);");
++  groupButton.setAttribute("label", "+( )");
++  groupButton.setAttribute("tooltiptext", gGroupButtonTooltipText);
+   lessButton.setAttribute("class", "small-button");
+   lessButton.setAttribute("oncommand", "onLess(event);");
+   lessButton.setAttribute("label", "\u2212");
+   lessButton.setAttribute("tooltiptext", gLessButtonTooltipText);
+ 
+   // now set up ids:
+   searchAttr.id = "searchAttr" + gUniqueSearchTermCounter;
+   searchOp.id = "searchOp" + gUniqueSearchTermCounter;
+   searchVal.id = "searchVal" + gUniqueSearchTermCounter;
+ 
+   searchAttr.setAttribute("for", searchOp.id + "," + searchVal.id);
+   searchOp.setAttribute("opfor", searchVal.id);
+ 
+-  var rowdata = [searchAttr, searchOp, searchVal, [moreButton, lessButton]];
++  var rowdata = [
++    searchAttr,
++    searchOp,
++    searchVal,
++    [moreButton, groupButton, lessButton],
++  ];
+   var searchrow = constructRow(rowdata);
+   searchrow.id = "searchRow" + gUniqueSearchTermCounter;
+ 
+   var searchTermObj = new searchTermContainer();
+   searchTermObj.searchattribute = searchAttr;
+   searchTermObj.searchoperator = searchOp;
+   searchTermObj.searchvalue = searchVal;
++  searchTermObj.beginsGrouping = false;
++  searchTermObj.endsGrouping = false;
+ 
+   // now insert the new search term into our list of terms
+-  gSearchTerms.splice(index, 0, {
++  let termIdx = -1;
++  let richlistIdx = index - 1;
++  while (
++    richlistIdx >= 0 &&
++    (termIdx = termIdxFromRichlistIdx(richlistIdx)) == -1
++  ) {
++    richlistIdx--;
++  }
++  termIdx++;
++  let level = getLevel(index);
++  gSearchTerms.splice(termIdx, 0, {
+     obj: searchTermObj,
+     scope,
+     searchTerm,
+     initialized: false,
++    level,
+   });
+ 
+-  var editFilter = window.gFilter || null;
+-  var editMailView = window.gMailView || null;
+-
+-  if (
+-    (!editFilter && !editMailView) ||
+-    (editFilter && index == gTotalSearchTerms) ||
+-    (editMailView && index == gTotalSearchTerms)
+-  ) {
+-    gLoading = false;
+-  }
++  searchrow.style = `padding-left: ${level * 20}px;`;
+ 
+   // index is index of new row
+-  // gTotalSearchTerms has not been updated yet
+-  if (gLoading || index == gTotalSearchTerms) {
++  if (index == gSearchTermList.children.length - 1) {
+     gSearchTermList.appendChild(searchrow);
+   } else {
+     var currentItem = gSearchTermList.getItemAtIndex(index);
+     gSearchTermList.insertBefore(searchrow, currentItem);
+   }
+ 
+   // If this row was added by user action, focus the value field.
+   if (aUserAdded) {
+-    document.commandDispatcher.advanceFocusIntoSubtree(searchVal);
+-    searchrow.setAttribute("highlight", "true");
++    // This broke, perhaps during de-XBL, working in TB 68 but not 78. No one noticed :-(
++    // https://bugzilla.mozilla.org/show_bug.cgi?id=1765077
++    // document.commandDispatcher.advanceFocusIntoSubtree(searchVal);
++    // searchrow.setAttribute("highlight", "true");
++    gSearchTermList.getItemAtIndex(index - 1).selected = false;
++    searchrow.selected = true;
+   }
+ 
+   // bump our unique search term counter
+   gUniqueSearchTermCounter++;
+ }
+ 
++function createAndRow(index, scope, searchTerm, aUserAdded) {
++  var moreButton = document.createXULElement("button");
++  var groupButton = document.createXULElement("button");
++  var lessButton = document.createXULElement("button");
++  moreButton.setAttribute("class", "small-button");
++  moreButton.setAttribute("oncommand", "onMore(event);");
++  moreButton.setAttribute("label", "+");
++  moreButton.setAttribute("tooltiptext", gMoreButtonTooltipText);
++  groupButton.setAttribute("class", "small-button");
++  groupButton.setAttribute("oncommand", "onGroup(event);");
++  groupButton.setAttribute("label", "+( )");
++  groupButton.setAttribute("tooltiptext", gGroupButtonTooltipText);
++  lessButton.setAttribute("class", "small-button");
++  lessButton.setAttribute("oncommand", "onLess(event);");
++  lessButton.setAttribute("label", "\u2212");
++  lessButton.setAttribute("tooltiptext", gLessButtonTooltipText);
++
++  var radioGroup = document.createXULElement("radiogroup");
++  radioGroup.setAttribute(
++    "orient",
++    gSearchBooleanRadiogroup.getAttribute("orient")
++  );
++  radioGroup.setAttribute(
++    "flex",
++    gSearchBooleanRadiogroup.getAttribute("flex")
++  );
++  radioGroup.value = "and";
++
++  var andRadio = document.getElementById("andRadio");
++  var orRadio = document.getElementById("orRadio");
++  var radio;
++  radio = document.createXULElement("radio");
++  radio.value = andRadio.value;
++  radio.label = andRadio.label;
++  radio.flex = andRadio.flex;
++  radio.accesskey = andRadio.accesskey;
++  radioGroup.appendChild(radio);
++
++  radio = document.createXULElement("radio");
++  radio.value = orRadio.value;
++  radio.label = orRadio.label;
++  radio.flex = orRadio.flex;
++  radio.accesskey = orRadio.accesskey;
++  radioGroup.appendChild(radio);
++
++  var andOrRow = document.createXULElement("richlistitem");
++  andOrRow.appendChild(radioGroup);
++  andOrRow.appendChild(moreButton);
++  andOrRow.appendChild(groupButton);
++  andOrRow.appendChild(lessButton);
++
++  andOrRow.style = `padding-left: ${getLevel(index) * 20}px;`;
++
++  // index is index of new row
++  if (index == gSearchTermList.children.length - 1) {
++    gSearchTermList.appendChild(andOrRow);
++  } else {
++    var currentItem = gSearchTermList.getItemAtIndex(index);
++    gSearchTermList.insertBefore(andOrRow, currentItem);
++  }
++
++  // If this row was added by user action, focus the value field.
++  if (aUserAdded) {
++    // This broke, perhaps during de-XBL, working in TB 68 but not 78. No one noticed :-(
++    // https://bugzilla.mozilla.org/show_bug.cgi?id=1765077
++    // andOrRow.setAttribute("highlight", "true");
++    gSearchTermList.getItemAtIndex(index - 1).selected = false;
++    andOrRow.selected = true;
++  }
++}
++
+ function initializeTermFromId(id) {
+   initializeTermFromIndex(
+-    getSearchRowIndexForElement(document.getElementById(id))
++    termIdxFromRichlistIdx(
++      getSearchRowIndexForElement(document.getElementById(id))
++    )
+   );
+ }
+ 
+ function initializeTermFromIndex(index) {
+   var searchTermObj = gSearchTerms[index].obj;
+ 
+   searchTermObj.searchScope = gSearchTerms[index].scope;
+   // the search term will initialize the searchTerm element, including
+@@ -444,17 +825,17 @@ function initializeTermFromIndex(index) 
+  * Creates a <richlistitem> using the array children as the children
+  * of each listcell.
+  * @param aChildren  An array of XUL elements to put into the listitem.
+  *                   Each array member is put into a separate listcell.
+  *                   If the member itself is an array of elements,
+  *                   all of them are put into the same listcell.
+  */
+ function constructRow(aChildren) {
+-  let cols = gSearchTermList.firstElementChild.children; // treecol elements
++  let cols = document.getElementById("flexcols").children; // treecol elements
+   let listitem = document.createXULElement("richlistitem");
+   listitem.setAttribute("allowevents", "true");
+   for (let i = 0; i < aChildren.length; i++) {
+     let listcell = document.createXULElement("hbox");
+     if (cols[i].hasAttribute("flex")) {
+       listcell.setAttribute("flex", cols[i].getAttribute("flex"));
+     }
+     let child = aChildren[i];
+@@ -468,69 +849,49 @@ function constructRow(aChildren) {
+       listcell.appendChild(child);
+     }
+     listitem.appendChild(listcell);
+   }
+   return listitem;
+ }
+ 
+ function removeSearchRow(index) {
+-  var searchTermObj = gSearchTerms[index].obj;
++  let termIdx = termIdxFromRichlistIdx(index);
++  gSearchTermList.getItemAtIndex(index).remove();
++  if (termIdx == -1) {
++    return;
++  }
++
++  var searchTermObj = gSearchTerms[termIdx].obj;
+   if (!searchTermObj) {
+     return;
+   }
+ 
+   // if it is an existing (but offscreen) term,
+   // make sure it is initialized before we remove it.
+-  if (!gSearchTerms[index].searchTerm && !gSearchTerms[index].initialized) {
+-    initializeTermFromIndex(index);
+-  }
+-
+-  // need to remove row from list, so walk upwards from the
+-  // searchattribute to find the first <listitem>
+-  var listitem = searchTermObj.searchattribute;
+-
+-  while (listitem) {
+-    if (listitem.localName == "richlistitem") {
+-      break;
+-    }
+-    listitem = listitem.parentNode;
++  if (!gSearchTerms[termIdx].searchTerm && !gSearchTerms[termIdx].initialized) {
++    initializeTermFromIndex(termIdx);
+   }
+ 
+-  if (!listitem) {
+-    dump("Error: couldn't find parent listitem!\n");
+-    return;
+-  }
+-
+-  if (searchTermObj.searchTerm) {
+-    gSearchRemovedTerms.push(searchTermObj.searchTerm);
+-  } else {
+-    // dump("That wasn't real. ignoring \n");
+-  }
+-
+-  listitem.remove();
+-
+   // now remove the item from our list of terms
+-  gSearchTerms.splice(index, 1);
++  gSearchTerms.splice(termIdx, 1);
+ }
+ 
+ /**
+  * Save the search terms from the UI back to the actual search terms.
+  * @param {nsIMsgSearchTerm[]} searchTerms - Array of terms
+  * @param {Object} termOwner - Object which can contain and create the terms
+  *   e.g. a nsIMsgSearchSession (will be unnecessary if we just make terms
+  *   creatable via XPCOM).
+  * @returns {nsIMsgSearchTerm[]} The filtered searchTerms.
+  */
+ function saveSearchTerms(searchTerms, termOwner) {
+-  var matchAll = gSearchBooleanRadiogroup.value == "matchAll";
++  var matchAll = gMatchAll && gMatchAll.checked;
+   var i;
+ 
+-  searchTerms = searchTerms.filter(t => !gSearchRemovedTerms.includes(t));
+-
+   for (i = 0; i < gSearchTerms.length; i++) {
+     try {
+       gSearchTerms[i].obj.matchAll = matchAll;
+       var searchTerm = gSearchTerms[i].obj.searchTerm;
+       if (searchTerm) {
+         gSearchTerms[i].obj.save();
+       } else if (!gSearchTerms[i].initialized) {
+         // the term might be an offscreen one we haven't initialized yet
+@@ -547,20 +908,13 @@ function saveSearchTerms(searchTerms, te
+     } catch (ex) {
+       dump("** Error saving element " + i + ": " + ex + "\n");
+     }
+   }
+   return searchTerms;
+ }
+ 
+ function onReset(event) {
+-  while (gTotalSearchTerms > 0) {
+-    removeSearchRow(--gTotalSearchTerms);
+-  }
+-  onMore(null);
+-}
+-
+-function hideMatchAllItem() {
+-  var allItems = document.getElementById("matchAllItem");
+-  if (allItems) {
+-    allItems.hidden = true;
++  let length;
++  while ((length = gSearchTermList.children.length) > 0) {
++    removeSearchRow(length - 1);
+   }
+ }
