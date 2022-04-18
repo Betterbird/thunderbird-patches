@@ -60,3 +60,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 
 :: And more strings from bug 1724090.
 %lecho% "calendar-print-back-button = Zurück" >> localization\de\calendar\calendar-print.ftl
+
+:: Fix mess from bug 1764806, hard-coded brand-names
+sed -i -e 's/ Thunderbird / Betterbird /' localization\de\messenger\openpgp\keyWizard.ftl
+sed -i -e 's/ Thunderbird / Betterbird /' localization\de\messenger\openpgp\openpgp.ftl

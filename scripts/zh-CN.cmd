@@ -51,3 +51,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"在所有文件夹启用多行视图\">" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.dtd
+
+:: Fix mess from bug 1764806, hard-coded brand-names
+sed -i -e 's/ Thunderbird / Betterbird /' localization\zh-CN\messenger\openpgp\keyWizard.ftl
+sed -i -e 's/ Thunderbird / Betterbird /' localization\zh-CN\messenger\openpgp\openpgp.ftl

@@ -51,3 +51,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"Affichage multiligne sur tous les dossiers\">" >> chrome\fr\locale\fr\messenger\messenger.dtd
+
+:: Fix mess from bug 1764806, hard-coded brand-names
+sed -i -e 's/ Thunderbird / Betterbird /' localization\fr\messenger\openpgp\keyWizard.ftl
+sed -i -e 's/ Thunderbird / Betterbird /' localization\fr\messenger\openpgp\openpgp.ftl
