@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1650235744 -7200
+# Date 1650309001 -7200
 # Parent  d762143accab5adb9f59e309b36edb32052e054f
 Bug 297852 - Allow grouping in search term UI.
 
@@ -385,7 +385,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
   * @param matchAllValue boolean value from the first search term
   */
  function updateSearchTermsListbox(matchAllValue) {
-@@ -215,74 +310,232 @@ function updateSearchTermsListbox(matchA
+@@ -215,74 +310,312 @@ function updateSearchTermsListbox(matchA
    for (let i = 0; i < searchAttributeList.length; i++) {
      searchAttributeList[i].setAttribute("disabled", matchAllValue);
      searchOperatorList[i].setAttribute("disabled", matchAllValue);
@@ -441,32 +441,104 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    if (event) {
 -    rowIndex = getSearchRowIndexForElement(event.target) + 1;
 +    richlistIdx = getSearchRowIndexForElement(event.target) + 1;
-   } else {
--    rowIndex = gSearchTermList.getRowCount();
++  } else {
 +    richlistIdx = gSearchTermList.getRowCount();
-   }
++  }
 +  // eslint-disable-next-line curly
 +  if (verbose) dump(`searchTerm: onMore inserting at ${richlistIdx}\n`);
- 
--  createSearchRow(rowIndex, gSearchScope, null, event != null);
--  gTotalSearchTerms++;
--  updateRemoveRowButton();
++
 +  createSearchRow(richlistIdx, gSearchScope, null, event != null);
- 
-   // the user just added a term, so scroll to it
--  gSearchTermList.ensureIndexIsVisible(rowIndex);
++
++  // the user just added a term, so scroll to it
 +  gSearchTermList.ensureIndexIsVisible(richlistIdx);
 +
-+  // Need to set/move the start/end group marker.
-+  let termIdx = termIdxFromRichlistIdx(richlistIdx - 1);
-+  if (termIdx == -1) {
++  // Need to set/move the start/end group marker and booleanAnd.
++  let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
++  let termIdx;
++  if (prevTermIdx >= 0) {
++    // The previous item is a term.
++    termIdx = prevTermIdx + 1;
++    if (gSearchTerms[prevTermIdx].obj.endsGrouping) {
++      gSearchTerms[prevTermIdx].obj.endsGrouping = false;
++      gSearchTerms[termIdx].obj.endsGrouping = true;
++      if (verbose) {
++        dump(`searchTerm: onMore end moved ${prevTermIdx} to ${termIdx}\n`);
++      }
++    }
++    // We'll initialize the .booleanAnd from the existing setting in the UI.
++    // This is tricky: The logical operator in the first term is determined
++    // by the grandparent, for all subsequent terms its the parent group.
++    // The first entry in the first group doesn't have a grandparent. So:
++    //
++    // (A || B) && (C || D) becomes:
++    // dummy,A,begin
++    // or,B,end
++    // and,C,begin
++    // or,D,end.
++    //
++    // Here we're not the first term in the group, so find the controlling radio group.
++    // We can't take it from the previous term since that might have the grandparent's value.
++    let loopIdx = richlistIdx - 2;
++    while (loopIdx >= 0) {
++      let itemChild = gSearchTermList.getItemAtIndex(loopIdx).firstChild;
++      if (itemChild.localName == "radiogroup") {
++        gSearchTerms[termIdx].obj.booleanAnd = itemChild.value == "and";
++        if (verbose) {
++          dump(
++            `searchTerm: onMore ${termIdx} set to ${
++              gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
++            }\n`
++          );
++        }
++        break;
++      }
++      loopIdx--;
++    }
+   } else {
+-    rowIndex = gSearchTermList.getRowCount();
++    // The previous item is a group. Get its level and booleanAnd.
++    let itemChild = gSearchTermList.getItemAtIndex(richlistIdx - 1).firstChild;
++    let groupLevel = itemChild.getAttribute("level");
++    groupLevel = parseInt(groupLevel);
++    let groupAndOr = itemChild.value == "and";
++
++    termIdx = termIdxFromRichlistIdx(richlistIdx);
 +    if (richlistIdx > 1) {
-+      termIdx = termIdxFromRichlistIdx(richlistIdx);
 +      // First term following a group start which is not the top and/or group.
-+      // The new term is at `termIdx + 1`.
 +      gSearchTerms[termIdx].obj.beginsGrouping = true;
 +      // eslint-disable-next-line curly
 +      if (verbose) dump(`searchTerm: onMore begin ${termIdx}\n`);
++    }
++
++    // To get the booleanAnd value, we need to visit the grandparent
++    // which may not exists. For this case, we intialise with false.
++    gSearchTerms[termIdx].obj.booleanAnd = false;
++    if (verbose) {
++      dump(
++        `searchTerm: onMore ${termIdx} preset to ${
++          gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
++        }\n`
++      );
++    }
++    let loopIdx = richlistIdx - 2;
++    while (loopIdx >= 0) {
++      itemChild = gSearchTermList.getItemAtIndex(loopIdx).firstChild;
++      if (itemChild.localName == "radiogroup") {
++        let level = itemChild.getAttribute("level");
++        level = parseInt(level);
++        if (level == groupLevel - 1) {
++          gSearchTerms[termIdx].obj.booleanAnd = itemChild.value == "and";
++          if (verbose) {
++            dump(
++              `searchTerm: onMore ${termIdx} (this) set to ${
++                gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
++              }\n`
++            );
++          }
++          break;
++        }
++      }
++      loopIdx--;
 +    }
 +    try {
 +      // This will fail if no next term.
@@ -479,6 +551,15 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        gSearchTerms[termIdx].obj.beginsGrouping = true;
 +        if (verbose) {
 +          dump(`searchTerm: onMore begin moved ${nextTermIdx} to ${termIdx}\n`);
++        }
++        // Apply correct and/Or to the next term.
++        gSearchTerms[nextTermIdx].obj.booleanAnd = groupAndOr;
++        if (verbose) {
++          dump(
++            `searchTerm: onMore ${termIdx} (next) set to ${
++              gSearchTerms[nextTermIdx].obj.booleanAnd ? "and" : "or"
++            }\n`
++          );
 +        }
 +      } else if (nextTermIdx == -1) {
 +        // A group follows, so set end on our only entry.
@@ -502,13 +583,14 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        gSearchTerms[termIdx].obj.endsGrouping = true;
 +      }
 +    }
-+  } else if (gSearchTerms[termIdx].obj.endsGrouping) {
-+    gSearchTerms[termIdx].obj.endsGrouping = false;
-+    gSearchTerms[termIdx + 1].obj.endsGrouping = true;
-+    if (verbose) {
-+      dump(`searchTerm: onMore end moved ${termIdx} to ${termIdx + 1}\n`);
-+    }
-+  }
+   }
+ 
+-  createSearchRow(rowIndex, gSearchScope, null, event != null);
+-  gTotalSearchTerms++;
+-  updateRemoveRowButton();
+-
+-  // the user just added a term, so scroll to it
+-  gSearchTermList.ensureIndexIsVisible(rowIndex);
 +  dumpSearchTerms("onMore - exit");
  }
  
@@ -643,7 +725,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    for (var i = 0; i < gSearchTerms.length; i++) {
      // don't set element attributes if XBL hasn't loaded
      if (!(gSearchTerms[i].obj.searchattribute.searchScope === undefined)) {
-@@ -296,41 +549,82 @@ function setSearchScope(scope) {
+@@ -296,41 +629,110 @@ function setSearchScope(scope) {
  
  function updateSearchAttributes() {
    for (var i = 0; i < gSearchTerms.length; i++) {
@@ -684,12 +766,9 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      `searchTerm: booleanChanged: group at ${richlistIdx} with level ${groupLevel}\n`
 +    );
 +  }
- 
--    searchTerm.booleanAnd = newBoolValue;
--    searchTerm.matchAll = matchAllValue;
++
 +  let currentIdx = richlistIdx + 1;
 +  while (currentIdx < gSearchTermList.children.length) {
-+    // Set all following children with a level one higher than the group level.
 +    itemChild = gSearchTermList.getItemAtIndex(currentIdx).firstChild;
 +    let level;
 +    if (itemChild.localName == "radiogroup") {
@@ -708,20 +787,51 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      let termIdx = termIdxFromRichlistIdx(currentIdx);
 +      level = gSearchTerms[termIdx].level;
 +      if (verbose) {
-+        dump(`searchTerm: booleanChanged: ${currentIdx} has level ${level}\n`);
++        dump(`searchTerm: booleanChanged: ${termIdx} has level ${level}\n`);
 +      }
+ 
+-    searchTerm.booleanAnd = newBoolValue;
+-    searchTerm.matchAll = matchAllValue;
++      // Set all following children with a level one higher than the group level.
 +      if (level == groupLevel + 1) {
 +        let searchTerm = gSearchTerms[termIdx].obj;
 +        // If term is not yet initialized in the UI, change the original object.
 +        if (!searchTerm || !gSearchTerms[termIdx].initialized) {
 +          searchTerm = gSearchTerms[termIdx].searchTerm;
 +        }
-+        if (verbose) {
-+          dump(
-+            `searchTerm: booleanChanged: setting ${currentIdx} to ${newBoolValue}\n`
-+          );
++        // The logical operator in the first group member determines how the entire
++        // group is joined to the terms to the left, the operator in all other
++        // group members determine how the group members are joined, see:
++        // https://searchfox.org/comm-central/rev/391d7cce6c4d581892af7d2a3f5c30a107d4a572/mailnews/search/src/nsMsgLocalSearch.cpp#343-345
++        // Quote (note the grammar mistake):
++        // the first search term in the grouping is the one that holds the
++        // operator for how this search term should be joined with the expressions
++        // to it's left.
++        if (!searchTerm.beginsGrouping) {
++          if (verbose) {
++            dump(
++              `searchTerm: booleanChanged: setting ${termIdx} to ${newBoolValue}\n`
++            );
++          }
++          searchTerm.booleanAnd = newBoolValue;
 +        }
-+        searchTerm.booleanAnd = newBoolValue;
++      }
++
++      // Set all following children with a level two higher than the group level.
++      if (level == groupLevel + 2) {
++        let searchTerm = gSearchTerms[termIdx].obj;
++        // If term is not yet initialized in the UI, change the original object.
++        if (!searchTerm || !gSearchTerms[termIdx].initialized) {
++          searchTerm = gSearchTerms[termIdx].searchTerm;
++        }
++        if (searchTerm.beginsGrouping) {
++          if (verbose) {
++            dump(
++              `searchTerm: booleanChanged: setting ${termIdx} to ${newBoolValue}\n`
++            );
++          }
++          searchTerm.booleanAnd = newBoolValue;
++        }
 +      }
 +    }
 +    currentIdx++;
@@ -744,7 +854,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
   * @param index       index of the position in the menulist where to add the row
   * @param scope       a nsMsgSearchScope constant indicating scope of this search rule
   * @param searchTerm  nsIMsgSearchTerm object to hold the search term
-@@ -338,123 +632,226 @@ function booleanChanged(event) {
+@@ -338,123 +740,216 @@ function booleanChanged(event) {
   *                    (e.g. via the '+' button)
   */
  function createSearchRow(index, scope, searchTerm, aUserAdded) {
@@ -938,6 +1048,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
  
 -function initializeTermFromIndex(index) {
 -  var searchTermObj = gSearchTerms[index].obj;
++// This is called from `connectedCallback()` in the CE MozSearchAttribute (searchWidgets.js).
 +function initializeTermFromId(id) {
 +  let richlistIdx = getSearchRowIndexForElement(document.getElementById(id));
 +  let termIdx = termIdxFromRichlistIdx(richlistIdx);
@@ -950,26 +1061,15 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 -  if (gSearchTerms[index].searchTerm) {
 -    searchTermObj.searchTerm = gSearchTerms[index].searchTerm;
 -    // here, we don't have a searchTerm, so it's probably a new element -
+-    // we'll initialize the .booleanAnd from the existing setting in
+-    // the UI
 +  if (gSearchTerms[termIdx].searchTerm) {
 +    searchTermObj.searchTerm = gSearchTerms[termIdx].searchTerm;
-+  } else {
-+    // Here, we don't have a searchTerm, so it's probably a new element -
-     // we'll initialize the .booleanAnd from the existing setting in
--    // the UI
--  } else {
+   } else {
 -    searchTermObj.booleanAnd = gSearchBooleanRadiogroup.value == "and";
 -    if (index) {
-+    // the UI.
-+    // Find the controlling radio group.
-+    richlistIdx--;
-+    while (richlistIdx >= 0) {
-+      let itemChild = gSearchTermList.getItemAtIndex(richlistIdx).firstChild;
-+      if (itemChild.localName == "radiogroup") {
-+        searchTermObj.booleanAnd = itemChild.value == "and";
-+        break;
-+      }
-+      richlistIdx--;
-+    }
++    // Here we don't have a searchTerm, so it's probably a new element.
++    // eslint-disable-next-line no-lonely-if
 +    if (termIdx > 0) {
        // If we weren't pre-initialized with a searchTerm then steal the
        // search attribute and operator from the previous row.
@@ -1005,7 +1105,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        listcell.setAttribute("flex", cols[i].getAttribute("flex"));
      }
      let child = aChildren[i];
-@@ -468,69 +865,38 @@ function constructRow(aChildren) {
+@@ -468,69 +963,38 @@ function constructRow(aChildren) {
        listcell.appendChild(child);
      }
      listitem.appendChild(listcell);
@@ -1081,7 +1181,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
          gSearchTerms[i].obj.save();
        } else if (!gSearchTerms[i].initialized) {
          // the term might be an offscreen one we haven't initialized yet
-@@ -547,20 +913,14 @@ function saveSearchTerms(searchTerms, te
+@@ -547,20 +1011,14 @@ function saveSearchTerms(searchTerms, te
      } catch (ex) {
        dump("** Error saving element " + i + ": " + ex + "\n");
      }
