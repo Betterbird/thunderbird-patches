@@ -6,12 +6,13 @@ These instruction assume that you know how to build Thunderbird. The following i
 
 1. Pull `mozilla-esr91` and `comm-esr91`.  
 (The `comm-esr91` repo goes into the `mozilla-esr91/comm/` subdirectory.)
+1. Update to the versions noted in `releases.yml`: `hg up -r <rev>`. The patches apply to exactly those revisions.
 1. Put `91/series-M-C` into `mozilla-esr91/.hg/patches`; rename `series-M-C` to `series`.
 1. Put `91/series` into `mozilla-esr91/comm/.hg/patches`.
 1. Put all patches from `91/branding`, `91/bugs`, `91/features`, `91/misc` into `mozilla-esr91/comm/.hg/patches`,
 then move the ones ending in `*-m-c.patch` into `mozilla-esr91/.hg/patches`.
 1. Copy `.mozconfig` into the `mozilla-esr91` directory.
-1. Apply the patches using `hg qpush -a`.
+1. Apply the patches using `hg qpush -a`. This will fail if you omitted step 2.
 1. Build normally using `mach build`.
 1. Build an installer using `mach package`.
  
