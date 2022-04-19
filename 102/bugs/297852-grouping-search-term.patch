@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1650365154 -7200
+# Date 1650393825 -7200
 # Parent  d762143accab5adb9f59e309b36edb32052e054f
 Bug 297852 - Allow grouping in search term UI.
 
@@ -13,6 +13,7 @@ This also does a general overhaul of searchTerm.js:
  - Fixed clumsiness in removeSearchRow(): Just remove the row at the given index instead of searching for in the DOM
  - Adding an empty search term for new rules, user might want to start off with a group instead
  - Mitigation of https://bugzilla.mozilla.org/show_bug.cgi?id=1765077 (missing highlight, focus).
+Further clean-up: Removed nsIMsgFilter.AddTerm() and renamed nsIMsgFilter.GetTerm().
 
 diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
 --- a/mail/base/content/SearchDialog.js
@@ -115,6 +116,73 @@ diff --git a/mailnews/base/content/virtualFolderProperties.xhtml b/mailnews/base
  <script src="chrome://messenger/content/virtualFolderProperties.js"></script>
  </html:body>
  </html>
+diff --git a/mailnews/base/src/VirtualFolderWrapper.jsm b/mailnews/base/src/VirtualFolderWrapper.jsm
+--- a/mailnews/base/src/VirtualFolderWrapper.jsm
++++ b/mailnews/base/src/VirtualFolderWrapper.jsm
+@@ -185,18 +185,19 @@ VirtualFolderWrapper.prototype = {
+     for (let term of aTerms) {
+       if (condition) {
+         condition += " ";
+       }
+       if (term.matchAll) {
+         condition = "ALL";
+         break;
+       }
+-      condition += term.booleanAnd ? "AND (" : "OR (";
+-      condition += term.termAsString + ")";
++      condition += term.booleanAnd ? "AND " : "OR ";
++      condition += term.beginsGrouping ? "[" : "(";
++      condition += term.termAsString + term.endsGrouping ? "]" : ")";
+     }
+     this.searchString = condition;
+   },
+ 
+   /**
+    * @return the set of search terms that define this virtual folder as a
+    *     string.  You may prefer to use |searchTerms| which converts them
+    *     into a list of nsIMsgSearchTerms instead.
+diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
+--- a/mailnews/base/src/nsMsgUtils.cpp
++++ b/mailnews/base/src/nsMsgUtils.cpp
+@@ -1598,31 +1598,35 @@ MsgTermListToString(nsTArray<RefPtr<nsIM
+   nsresult rv = NS_OK;
+   for (nsIMsgSearchTerm* term : aTermList) {
+     nsAutoCString stream;
+ 
+     if (aOutString.Length() > 1) aOutString += ' ';
+ 
+     bool booleanAnd;
+     bool matchAll;
++    bool beginsGrouping;
++    bool endsGrouping;
+     term->GetBooleanAnd(&booleanAnd);
+     term->GetMatchAll(&matchAll);
++    term->GetBeginsGrouping(&beginsGrouping);
++    term->GetEndsGrouping(&endsGrouping);
+     if (matchAll) {
+       aOutString += "ALL";
+       continue;
+     } else if (booleanAnd)
+-      aOutString += "AND (";
++      aOutString += beginsGrouping ? "AND [" : "AND (";
+     else
+-      aOutString += "OR (";
++      aOutString += beginsGrouping ? "OR [" : "OR (";
+ 
+     rv = term->GetTermAsString(stream);
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     aOutString += stream;
+-    aOutString += ')';
++    aOutString += endsGrouping ? ']' : ')';
+   }
+   return rv;
+ }
+ 
+ NS_MSG_BASE uint64_t ParseUint64Str(const char* str) {
+ #ifdef XP_WIN
+   {
+     char* endPtr;
 diff --git a/mailnews/search/content/FilterEditor.js b/mailnews/search/content/FilterEditor.js
 --- a/mailnews/search/content/FilterEditor.js
 +++ b/mailnews/search/content/FilterEditor.js
@@ -1351,3 +1419,258 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    removeSearchRow(length - 1);
    }
  }
+diff --git a/mailnews/search/public/nsIMsgFilter.idl b/mailnews/search/public/nsIMsgFilter.idl
+--- a/mailnews/search/public/nsIMsgFilter.idl
++++ b/mailnews/search/public/nsIMsgFilter.idl
+@@ -54,28 +54,19 @@ interface nsIMsgFilter : nsISupports {
+     attribute boolean enabled;
+     attribute AString filterName;
+     attribute ACString filterDesc;
+     attribute ACString unparsedBuffer; //holds the entire filter if we don't know how to handle it
+     attribute boolean unparseable;  //whether we could parse the filter or not
+ 
+     attribute nsIMsgFilterList filterList; // owning filter list
+ 
+-    void AddTerm(in nsMsgSearchAttribValue attrib,
+-                 in nsMsgSearchOpValue op,
+-                 in nsIMsgSearchValue value,
+-                 in boolean BooleanAND,
+-                 in ACString arbitraryHeader);
+-
+-    void GetTerm(in long termIndex,
+-                 out nsMsgSearchAttribValue attrib,
+-                 out nsMsgSearchOpValue op,
+-                 out nsIMsgSearchValue value, // bad! using shared structure
+-                 out boolean BooleanAND,
+-                 out ACString arbitraryHeader);
++    void GetIncompleteTerm(in long termIndex,
++                           out nsMsgSearchAttribValue attrib,
++                           out ACString arbitraryHeader);
+ 
+     void appendTerm(in nsIMsgSearchTerm term);
+ 
+     nsIMsgSearchTerm createTerm();
+ 
+     attribute Array<nsIMsgSearchTerm> searchTerms;
+ 
+     attribute nsIMsgSearchScopeTerm scope;
+diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/nsMsgSearchTerm.h
+--- a/mailnews/search/public/nsMsgSearchTerm.h
++++ b/mailnews/search/public/nsMsgSearchTerm.h
+@@ -45,16 +45,18 @@ class nsMsgSearchTerm : public nsIMsgSea
+ 
+   nsMsgSearchAttribValue m_attribute;
+   nsMsgSearchOpValue m_operator;
+   nsMsgSearchValue m_value;
+ 
+   // boolean operator to be applied to this search term and the search term
+   // which precedes it.
+   nsMsgSearchBooleanOperator m_booleanOp;
++  bool mBeginsGrouping;
++  bool mEndsGrouping;
+ 
+   // user specified string for the name of the arbitrary header to be used in
+   // the search only has a value when m_attribute = OtherHeader!!!!
+   nsCString m_arbitraryHeader;
+ 
+   // db hdr property name to use - used when m_attribute = HdrProperty.
+   nsCString m_hdrProperty;
+   bool m_matchAll;       // does this term match all headers?
+@@ -76,14 +78,11 @@ class nsMsgSearchTerm : public nsIMsgSea
+    *
+    * @param aValue  the string to switch
+    */
+   void ToLowerCaseExceptSpecials(nsACString& aValue);
+   nsresult InitializeAddressBook();
+   nsresult MatchInAddressBook(const nsAString& aAddress, bool* pResult);
+   // fields used by search in address book
+   nsCOMPtr<nsIAbDirectory> mDirectory;
+-
+-  bool mBeginsGrouping;
+-  bool mEndsGrouping;
+ };
+ 
+ #endif
+diff --git a/mailnews/search/src/nsMsgFilter.cpp b/mailnews/search/src/nsMsgFilter.cpp
+--- a/mailnews/search/src/nsMsgFilter.cpp
++++ b/mailnews/search/src/nsMsgFilter.cpp
+@@ -197,28 +197,16 @@ NS_IMETHODIMP nsMsgFilter::GetUnparsedBu
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgFilter::SetUnparsedBuffer(const nsACString& unparsedBuffer) {
+   m_unparsedBuffer.Assign(unparsedBuffer);
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgFilter::AddTerm(
+-    nsMsgSearchAttribValue attrib,     /* attribute for this term          */
+-    nsMsgSearchOpValue op,             /* operator e.g. opContains           */
+-    nsIMsgSearchValue* value,          /* value e.g. "Dogbert"               */
+-    bool BooleanAND,                   /* true if AND is the boolean operator.
+-                                          false if OR is the boolean operators */
+-    const nsACString& arbitraryHeader) /* arbitrary header specified by user.
+-  ignored unless attrib = attribOtherHeader */
+-{
+-  return NS_OK;
+-}
+-
+ NS_IMETHODIMP nsMsgFilter::AppendTerm(nsIMsgSearchTerm* aTerm) {
+   NS_ENSURE_TRUE(aTerm, NS_ERROR_NULL_POINTER);
+   // invalidate expression tree if we're changing the terms
+   delete m_expressionTree;
+   m_expressionTree = nullptr;
+   m_termList.AppendElement(aTerm);
+   return NS_OK;
+ }
+@@ -348,34 +336,27 @@ nsMsgFilter::GetActionCount(uint32_t* aC
+ }
+ 
+ NS_IMETHODIMP  // for editing a filter
+ nsMsgFilter::ClearActionList() {
+   m_actionList.Clear();
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgFilter::GetTerm(
++NS_IMETHODIMP nsMsgFilter::GetIncompleteTerm(
+     int32_t termIndex,
+     nsMsgSearchAttribValue* attrib, /* attribute for this term          */
+-    nsMsgSearchOpValue* op,         /* operator e.g. opContains           */
+-    nsIMsgSearchValue** value,      /* value e.g. "Dogbert"               */
+-    bool* booleanAnd, /* true if AND is the boolean operator. false if OR is the
+-                         boolean operator */
+     nsACString& arbitraryHeader) /* arbitrary header specified by user.ignore
+                                     unless attrib = attribOtherHeader */
+ {
+   if (termIndex >= (int32_t)m_termList.Length()) {
+     return NS_ERROR_INVALID_ARG;
+   }
+   nsIMsgSearchTerm* term = m_termList[termIndex];
+   if (attrib) term->GetAttrib(attrib);
+-  if (op) term->GetOp(op);
+-  if (value) term->GetValue(value);
+-  if (booleanAnd) term->GetBooleanAnd(booleanAnd);
+   if (attrib && *attrib > nsMsgSearchAttrib::OtherHeader &&
+       *attrib < nsMsgSearchAttrib::kNumMsgSearchAttributes) {
+     term->GetArbitraryHeader(arbitraryHeader);
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgFilter::GetSearchTerms(
+diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsgFilterList.cpp
+--- a/mailnews/search/src/nsMsgFilterList.cpp
++++ b/mailnews/search/src/nsMsgFilterList.cpp
+@@ -743,32 +743,47 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
+     newTerm->m_matchAll = true;
+     aFilter->AppendTerm(newTerm);
+     return NS_OK;
+   }
+ 
+   while (!done) {
+     // insert code to save the boolean operator if there is one for this search
+     // term....
++    bool beginsGrouping = false;
++    bool endsGrouping = false;
+     const char* openParen = PL_strchr(curPtr, '(');
++    const char* openParen2 = PL_strchr(curPtr, '[');
++    if (openParen2 && openParen) {
++      // Found both, take the earlier one.
++      if (openParen2 < openParen) {
++        openParen = openParen2;
++        beginsGrouping = true;
++      }
++    } else if (openParen2) {
++      // Only found [, take it.
++      openParen = openParen2;
++      beginsGrouping = true;
++    }
+     const char* orTermPos = PL_strchr(
+         curPtr, 'O');  // determine if an "OR" appears b4 the openParen...
+     bool ANDTerm = true;
+     if (orTermPos &&
+         orTermPos < openParen)  // make sure OR term falls before the '('
+       ANDTerm = false;
+ 
+     char* termDup = nullptr;
+     if (openParen) {
+       bool foundEndTerm = false;
+       bool inQuote = false;
+       for (curPtr = openParen + 1; *curPtr; curPtr++) {
+         if (*curPtr == '\\' && *(curPtr + 1) == '"')
+           curPtr++;
+-        else if (*curPtr == ')' && !inQuote) {
++        else if ((*curPtr == ')' || *curPtr == ']') && !inQuote) {
++          endsGrouping = *curPtr == ']';
+           foundEndTerm = true;
+           break;
+         } else if (*curPtr == '"')
+           inQuote = !inQuote;
+       }
+       if (foundEndTerm) {
+         int termLen = curPtr - openParen - 1;
+         termDup = (char*)PR_Malloc(termLen + 1);
+@@ -786,16 +801,18 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
+       RefPtr<nsMsgSearchTerm> newTerm = new nsMsgSearchTerm;
+       // Invert nsMsgSearchTerm::EscapeQuotesInStr()
+       for (char *to = termDup, *from = termDup;;) {
+         if (*from == '\\' && from[1] == '"') from++;
+         if (!(*to++ = *from++)) break;
+       }
+       newTerm->m_booleanOp = (ANDTerm) ? nsMsgSearchBooleanOp::BooleanAND
+                                        : nsMsgSearchBooleanOp::BooleanOR;
++      newTerm->mBeginsGrouping = beginsGrouping;
++      newTerm->mEndsGrouping = endsGrouping;
+ 
+       err = newTerm->DeStreamNew(termDup, PL_strlen(termDup));
+       NS_ENSURE_SUCCESS(err, err);
+       aFilter->AppendTerm(newTerm);
+       PR_FREEIF(termDup);
+     } else
+       break;
+   }
+@@ -1093,17 +1110,17 @@ nsresult nsMsgFilterList::ComputeArbitra
+   nsCString arbitraryHeader;
+   for (uint32_t index = 0; index < numFilters; index++) {
+     rv = GetFilterAt(index, getter_AddRefs(filter));
+     if (!(NS_SUCCEEDED(rv) && filter)) continue;
+ 
+     nsTArray<RefPtr<nsIMsgSearchTerm>> searchTerms;
+     filter->GetSearchTerms(searchTerms);
+     for (uint32_t i = 0; i < searchTerms.Length(); i++) {
+-      filter->GetTerm(i, &attrib, nullptr, nullptr, nullptr, arbitraryHeader);
++      filter->GetIncompleteTerm(i, &attrib, arbitraryHeader);
+       if (!arbitraryHeader.IsEmpty()) {
+         if (m_arbitraryHeaders.IsEmpty())
+           m_arbitraryHeaders.Assign(arbitraryHeader);
+         else if (m_arbitraryHeaders.Find(arbitraryHeader,
+                                          /* ignoreCase = */ true) == -1) {
+           m_arbitraryHeaders.Append(' ');
+           m_arbitraryHeaders.Append(arbitraryHeader);
+         }
+diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
+--- a/mailnews/search/src/nsMsgSearchTerm.cpp
++++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -382,19 +382,20 @@ NS_IMPL_ISUPPORTS(nsMsgSearchTerm, nsIMs
+     *destPtr = '\0';
+   }
+   return escapedStr;
+ }
+ 
+ nsresult nsMsgSearchTerm::OutputValue(nsCString& outputStr) {
+   if (IS_STRING_ATTRIBUTE(m_attribute) && !m_value.utf8String.IsEmpty()) {
+     bool quoteVal = false;
+-    // need to quote strings with ')' and strings starting with '"' or ' '
++    // need to quote strings with ')' or ']' and strings starting with '"' or ' '
+     // filter code will escape quotes
+     if (m_value.utf8String.FindChar(')') != kNotFound ||
++        m_value.utf8String.FindChar(']') != kNotFound ||
+         (m_value.utf8String.First() == ' ') ||
+         (m_value.utf8String.First() == '"')) {
+       quoteVal = true;
+       outputStr += "\"";
+     }
+     if (m_value.utf8String.FindChar('"') != kNotFound) {
+       char* escapedString =
+           nsMsgSearchTerm::EscapeQuotesInStr(m_value.utf8String.get());
