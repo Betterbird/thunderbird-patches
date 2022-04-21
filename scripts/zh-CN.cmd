@@ -22,6 +22,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "decryptToFolder.desc=这会将消息解密到非本地文件夹，你确定要继续吗？" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=不再询问我" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 
+:: Original strings:
+:: groupButtonTooltipText=Add a new group
+%lecho% "groupButtonTooltipText=增加一个新的组" >> chrome\zh-CN\locale\zh-CN\messenger\search.properties
+
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
 %lecho% "<!ENTITY folderContextStartupFolder.label \"初始启动文件夹\">" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.dtd

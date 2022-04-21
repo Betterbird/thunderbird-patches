@@ -22,6 +22,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "decryptToFolder.desc=Déchiffrer les messages dans un dossier qui n’est pas local. Voulez-vous vraiment continuer ?" >> chrome\fr\locale\fr\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=Ne plus demander à l’avenir." >> chrome\fr\locale\fr\messenger\messenger.properties
 
+:: Original strings:
+:: groupButtonTooltipText=Add a new group
+%lecho% "groupButtonTooltipText=Ajouter un nouveau groupe" >> chrome\fr\locale\fr\messenger\search.properties
+
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
 %lecho% "<!ENTITY folderContextStartupFolder.label \"Dossier de démarrage\">" >> chrome\fr\locale\fr\messenger\messenger.dtd

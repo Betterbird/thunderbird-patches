@@ -22,6 +22,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "decryptToFolder.desc=Esto descifrará los mensajes en una carpeta que no es local. Está seguro de que quiere continuar?" >> chrome\es-AR\locale\es-AR\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=No volver a preguntarme." >> chrome\es-AR\locale\es-AR\messenger\messenger.properties
 
+:: Original strings:
+:: groupButtonTooltipText=Add a new group
+%lecho% "groupButtonTooltipText=Agregar un nuevo grupo" >> chrome\es-AR\locale\es-AR\messenger\search.properties
+
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
 %lecho% "<!ENTITY folderContextStartupFolder.label \"Carpeta de arranque\">" >> chrome\es-AR\locale\es-AR\messenger\messenger.dtd
