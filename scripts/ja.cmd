@@ -22,6 +22,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "decryptToFolder.desc=これはローカルではないフォルダーにメッセージを復号化するものです。本当にこれを実行してもよいですか？" >> chrome\ja\locale\ja\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=以後尋ねない" >> chrome\ja\locale\ja\messenger\messenger.properties
 
+:: Original strings:
+:: groupButtonTooltipText=Add a new group
+%lecho% "groupButtonTooltipText=新しいグループを追加します" >> chrome\ja\locale\ja\messenger\search.properties
+
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
 %lecho% "<!ENTITY folderContextStartupFolder.label \"スタートアップフォルダ\">" >> chrome\ja\locale\ja\messenger\messenger.dtd

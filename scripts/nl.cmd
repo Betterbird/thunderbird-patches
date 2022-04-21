@@ -22,6 +22,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "decryptToFolder.desc=Dit zal het bericht ontsleutelen naar een niet-lokale map. Weet u zeker dat u door wilt gaan?" >> chrome\nl\locale\nl\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=Niet opnieuw vragen." >> chrome\nl\locale\nl\messenger\messenger.properties
 
+:: Original strings:
+:: groupButtonTooltipText=Add a new group
+%lecho% "groupButtonTooltipText=Nieuwe groep toevoegen" >> chrome\nl\locale\nl\messenger\search.properties
+
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
 %lecho% "<!ENTITY folderContextStartupFolder.label \"Start map\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
