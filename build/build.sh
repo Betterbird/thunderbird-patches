@@ -5,9 +5,13 @@ if [ "$#" -ne 1 ] ; then
   exit 1
 fi
 
+if ! [ -d thunderbird-patches ]; then
+  git clone https://github.com/Betterbird/thunderbird-patches.git
+fi
+
 if ! [ -d thunderbird-patches/"$1" ]; then
   echo "No such version" >&2
- exit 1
+  exit 1
 fi
 
 VERSION="$1"
@@ -22,7 +26,28 @@ echo "  at $mozilla_rev"
 
 MOZILLA_DIR="$(basename $mozilla_repo)"
 
-cd $MOZILLA_DIR
+if [ -d $MOZILLA_DIR ]; then
+  cd $MOZILLA_DIR
+else
+  echo "Mozilla directory $MOZILLA_DIR not found"
+  echo "Do you want to clone the Mozilla repo."
+  echo "This will take 30 minutes or more and will pull 2 GB of data."
+  read -p "Proceed? (Y/N) " ANSWER
+  if [ "$ANSWER" != "Y" ]; then
+    echo "Y not received, exiting"
+    exit 1
+  fi
+  echo
+  echo "======================================================="
+  echo "Cloning $mozilla_repo"
+  hg clone $mozilla_repo
+  echo
+  echo "======================================================="
+  echo "Cloning $comm_repo"
+  cd $MOZILLA_DIR
+  hg clone $comm_repo comm
+fi
+
 echo
 echo "======================================================="
 echo "Removing old patches from $MOZILLA_DIR and updating"
