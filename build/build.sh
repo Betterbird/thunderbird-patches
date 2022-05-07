@@ -103,8 +103,8 @@ cd ..
 echo
 echo "======================================================="
 echo "Copying patches and series file from thunderbird-patches"
-cp ../thunderbird-patches/$VERSION/series-M-C      .hg/patches/series
-cp ../thunderbird-patches/$VERSION/series     comm/.hg/patches/series
+cp ../thunderbird-patches/$VERSION/series-M-C            .hg/patches/series
+cp ../thunderbird-patches/$VERSION/series           comm/.hg/patches/series
 cp ../thunderbird-patches/$VERSION/branding/*.patch comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/bugs/*.patch     comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/features/*.patch comm/.hg/patches/
