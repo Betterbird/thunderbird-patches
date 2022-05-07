@@ -5,10 +5,6 @@ if [ "$#" -ne 1 ] ; then
   exit 1
 fi
 
-if ! [ -d thunderbird-patches ]; then
-  git clone https://github.com/Betterbird/thunderbird-patches.git
-fi
-
 if ! [ -d thunderbird-patches/"$1" ]; then
   echo "No such version" >&2
   exit 1
@@ -46,6 +42,18 @@ else
   echo "Cloning $comm_repo"
   cd $MOZILLA_DIR
   hg clone $comm_repo comm
+fi
+
+if [ `uname` = "Linux" ]; then
+  echo
+  echo "======================================================="
+  echo "Copying mozconfig-Linux"
+  cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
+elif [ `uname` = "Darwin" ]; then
+  echo
+  echo "======================================================="
+  echo "Copying mozconfig-Mac"
+  cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
 fi
 
 echo
