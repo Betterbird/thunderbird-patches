@@ -42,11 +42,6 @@ echo "  at $mozilla_rev"
 
 MOZILLA_DIR="$(basename $mozilla_repo)"
 
-if ! [ -d mercurial.ini ]; then
-  echo "[extensions]" > mercurial.ini
-  echo "mq =" >> mercurial.ini
-fi
-
 if [ -d $MOZILLA_DIR ]; then
   cd $MOZILLA_DIR
 else
@@ -149,6 +144,17 @@ cd ..
 echo
 echo "======================================================="
 echo "Pushing all patches"
+MQ=$(grep "mq =" .hg/hgrc)
+if [ "|$MQ|" = "||" ]; then
+  echo "[extensions]" >> .hg/hgrc
+  echo "mq =" >> .hg/hgrc
+fi
+MQ=$(grep "mq =" comm/.hg/hgrc)
+if [ "|$MQ|" = "||" ]; then
+  echo "[extensions]" >> comm/.hg/hgrc
+  echo "mq =" >> comm/.hg/hgrc
+fi
+
 hg qpush -all
 hg qseries
 cd comm
