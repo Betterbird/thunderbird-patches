@@ -76,6 +76,17 @@ elif [ `uname` = "Darwin" ]; then
   cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
 fi
 
+MQ=$(grep "mq =" .hg/hgrc)
+if [ "|$MQ|" = "||" ]; then
+  echo "[extensions]" >> .hg/hgrc
+  echo "mq =" >> .hg/hgrc
+fi
+MQ=$(grep "mq =" comm/.hg/hgrc)
+if [ "|$MQ|" = "||" ]; then
+  echo "[extensions]" >> comm/.hg/hgrc
+  echo "mq =" >> comm/.hg/hgrc
+fi
+
 echo
 echo "======================================================="
 echo "Removing old patches from $MOZILLA_DIR and updating"
@@ -144,17 +155,6 @@ cd ..
 echo
 echo "======================================================="
 echo "Pushing all patches"
-MQ=$(grep "mq =" .hg/hgrc)
-if [ "|$MQ|" = "||" ]; then
-  echo "[extensions]" >> .hg/hgrc
-  echo "mq =" >> .hg/hgrc
-fi
-MQ=$(grep "mq =" comm/.hg/hgrc)
-if [ "|$MQ|" = "||" ]; then
-  echo "[extensions]" >> comm/.hg/hgrc
-  echo "mq =" >> comm/.hg/hgrc
-fi
-
 hg qpush -all
 hg qseries
 cd comm
