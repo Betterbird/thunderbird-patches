@@ -31,7 +31,14 @@ Windows users please note that packaging will fail without an appropriate code s
 
 Linux users follow these instructions:
 To build successfully on Linux, you need at least 16 GB of memory or swap space.
-1. (Install necessary dependencies - Details to follow soon)
+We executed the steps successfully on a Ubuntu cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk).
+This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html).
+1. Prepare to install necessary dependencies: `sudo apt update`
+1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
+1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.bashrc` and `python3 -m pip install --user mercurial`
+1. In a new shell: `hg version`
+1. Install Rust: `curl https://sh.rustup.rs -sSf | sh` and select option 1
+1. `$HOME/.cargo/bin/rustup override set 1.53.0`, this is needed for Mozilla ESR 91 code
 1. Prepare a directory for all the action, let's say: `mkdir build && cd build`
 1. Copy the goodness from this repository: `git clone https://github.com/Betterbird/thunderbird-patches.git`
 1. Copy the build script to your build directory: `cp thunderbird-patches/build/build.sh .`
@@ -47,7 +54,7 @@ Then follow the first part of the [Firefox build instructions](https://firefox-s
 1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
 1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`
 1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.zshenv` and `python3 -m pip install --user mercurial`
-1. In a new shell, then: `hg version`
+1. In a new shell: `hg version`
 1. Install Rust: `brew install rustup`
 1. In a new shell: `rustup-init` and `rustup override set 1.53.0`, the latter is needed for Mozilla ESR 91 code
 1. Install wget: `brew install wget`

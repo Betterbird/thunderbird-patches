@@ -87,6 +87,18 @@ if [ "|$MQ|" = "||" ]; then
   echo "mq =" >> comm/.hg/hgrc
 fi
 
+if [ `uname` = "Linux" ]; then
+  echo
+  echo "======================================================="
+  echo "Running ./mach bootstrap"
+  echo "Note that this may require a restart of the shell"
+  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+elif [ `uname` = "Darwin" ]; then
+  echo
+  echo "======================================================="
+  echo "NOT running ./mach bootstrap, will there be problems later?"
+fi
+
 echo
 echo "======================================================="
 echo "Removing old patches from $MOZILLA_DIR and updating"
