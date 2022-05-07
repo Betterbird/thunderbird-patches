@@ -5,6 +5,26 @@ if [ "$#" -ne 1 ] ; then
   exit 1
 fi
 
+if ! [ -d thunderbird-patches ]; then
+  echo "No clone of https://github.com/Betterbird/thunderbird-patches.git" >&2
+  echo "How did you get this build script in the first place?" >&2
+  exit 1
+fi
+
+echo
+echo "======================================================="
+echo "Updating Betterbird patches"
+cd thunderbird-patches
+git pull
+cd ..
+
+DIFF=$(diff -q build.sh thunderbird-patches/build/build.sh)
+if [ "|$DIFF|" != "||" ]; then
+  echo "Newer version of build script available."
+  echo "Please |cp thunderbird-patches/build/build.sh .| and restart"
+  exit 1
+fi
+
 if ! [ -d thunderbird-patches/"$1" ]; then
   echo "No such version" >&2
   exit 1

@@ -33,18 +33,18 @@ Mac users follow these instructions (WIP!):
 You need to have at least macOS 12 (Monterey) and you need to install Xcode from the Apple App Store (which requires an Apple ID).
 Then follow the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html), the Thunderbird documentation is incomplete.
 1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
-1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`.
-1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.zshenv` and `python3 -m pip install --user mercurial`.
-1. In a new shell, then: `hg version`.
-1. Install Rust: `brew install rustup`.
-1. In a new shell: `rustup-init` and `rustup override set 1.53.0`, the latter is needed for Mozilla ESR 91 code.
-1. In a new shell install ansible: `python3 -m pip install --upgrade pip` and `python3 -m pip install --user ansible`.
-1. `git clone https://github.com/4ch1m/ansible-betterbird`
-1. `cd ansible-betterbird`
-1. Remove `name: install necessary packages` section from betterbird.yml, those packages are already installed.
-1. `./betterbird.sh`
-1. The Ansible build fails during the bootstrap stage, but it does pull the repositories and applies the patches.
-1. Copy `.mozconfig-Mac` as `.mozconfig` to the source directory and finish the build with `./mach build` and `./mach package`.
+1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`
+1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.zshenv` and `python3 -m pip install --user mercurial`
+1. In a new shell, then: `hg version`
+1. Install Rust: `brew install rustup`
+1. In a new shell: `rustup-init` and `rustup override set 1.53.0`, the latter is needed for Mozilla ESR 91 code
+1. Install wget: `brew install wget`
+1. Prepare a directory for all the action, let's say: `mkdir build && cd build`
+1. Copy the goodness from this repository: `git clone https://github.com/Betterbird/thunderbird-patches.git`
+1. Copy the build script to your build directory: `cp thunderbird-patches/build/build.sh .`
+1. Issue this command: `./build.sh 91`
+
+Voilà. :heavy_check_mark:
 
 ## Bug Reporting / Support
 
