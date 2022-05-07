@@ -134,7 +134,7 @@ echo "Retrieving external patches for Mozilla repo"
 echo "#!/bin/sh" > external.sh
 grep " # " .hg/patches/series >> external.sh
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget \2 -O .hg\/patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
@@ -146,7 +146,7 @@ cd comm
 echo "#!/bin/sh" > external.sh
 grep " # " .hg/patches/series >> external.sh
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget \2 -O .hg\/patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
