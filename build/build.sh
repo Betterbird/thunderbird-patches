@@ -42,6 +42,11 @@ echo "  at $mozilla_rev"
 
 MOZILLA_DIR="$(basename $mozilla_repo)"
 
+if ! [ -d mercurial.ini ]; then
+  echo "[extensions]" > mercurial.ini
+  echo "mq =" >> mercurial.ini
+fi
+
 if [ -d $MOZILLA_DIR ]; then
   cd $MOZILLA_DIR
 else
@@ -103,6 +108,12 @@ cd ..
 echo
 echo "======================================================="
 echo "Copying patches and series file from thunderbird-patches"
+if ! [ -d .hg/patches ]; then
+  mkdir .hg/patches
+fi
+if ! [ -d comm/.hg/patches ]; then
+  mkdir comm/.hg/patches
+fi
 cp ../thunderbird-patches/$VERSION/series-M-C            .hg/patches/series
 cp ../thunderbird-patches/$VERSION/series           comm/.hg/patches/series
 cp ../thunderbird-patches/$VERSION/branding/*.patch comm/.hg/patches/
