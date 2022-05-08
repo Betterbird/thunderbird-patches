@@ -67,12 +67,6 @@ else
 fi
 
 if [ "$UNAME" = "Linux" ]; then
-  echo
-  echo "======================================================="
-  echo "Copying mozconfig-Linux"
-  cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-
-if [ "$UNAME" = "Linux" ]; then
    if [ "$UNAME_ARCH" = "x86_64" ]; then
       echo
       echo "======================================================="
@@ -202,10 +196,17 @@ echo "Packaging"
 
 cd ..
 if [ "$UNAME" = "Linux" ]; then
-  echo
-  echo "======================================================="
-  echo "Find your archive here"
-  ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
+   if [ "$UNAME_ARCH" = "x86_64" ]; then
+      echo
+      echo "======================================================="
+      echo "Find your archive here"
+      ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
+   elif [ "$UNAME_ARCH" = "aarch64" ]; then
+      echo
+      echo "======================================================="
+      echo "Find your archive here"
+      ls  $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
+   fi
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
