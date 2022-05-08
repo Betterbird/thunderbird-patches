@@ -32,6 +32,7 @@ Windows users please note that packaging will fail without an appropriate code s
 Linux users follow these instructions:
 To build successfully on Linux, you need at least 16 GB of memory or swap space.
 We executed the steps successfully on a Ubuntu cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk).
+Building for aarch64 (aka arm64) is also supported. You need to run the build on a aarch64 machine (which you can hire at Amazon EC2).
 This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html).
 1. Prepare to install necessary dependencies: `sudo apt update`
 1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
