@@ -31,6 +31,7 @@ if ! [ -d thunderbird-patches/"$1" ]; then
 fi
 
 VERSION="$1"
+UNAME=$(uname)
 
 . ./thunderbird-patches/$VERSION/$VERSION.sh
 
@@ -64,12 +65,12 @@ else
   hg clone $comm_repo comm
 fi
 
-if [ `uname` = "Linux" ]; then
+if [ "$UNAME" = "Linux" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig-Linux"
   cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-elif [ `uname` = "Darwin" ]; then
+elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig-Mac"
@@ -87,13 +88,13 @@ if [ "|$MQ|" = "||" ]; then
   echo "mq =" >> comm/.hg/hgrc
 fi
 
-if [ `uname` = "Linux" ]; then
+if [ "$UNAME" = "Linux" ]; then
   echo
   echo "======================================================="
   echo "Running ./mach bootstrap"
   echo "Note that this may require a restart of the shell"
   ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
-elif [ `uname` = "Darwin" ]; then
+elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "NOT running ./mach bootstrap, will there be problems later?"
@@ -184,3 +185,16 @@ echo
 echo "======================================================="
 echo "Packaging"
 ./mach package
+
+cd ..
+if [ "$UNAME" = "Linux" ]; then
+  echo
+  echo "======================================================="
+  echo "Find your archive here"
+  ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
+elif [ "$UNAME" = "Darwin" ]; then
+  echo
+  echo "======================================================="
+  echo "Find you disk image here"
+  ls  $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
+fi

@@ -44,7 +44,7 @@ This follows the first part of the [Firefox build instructions](https://firefox-
 1. Copy the build script to your build directory: `cp thunderbird-patches/build/build.sh .`
 1. Issue this command: `./build.sh 91`
 
-Voilà. :heavy_check_mark:
+Voilà. :heavy_check_mark: For subsequent builds you only need to repeat the last step `./build.sh 91`.
 
 Please note that the [Ansible-betterbird](https://github.com/4ch1m/ansible-betterbird) build has been replaced and is no longer supported.
 
@@ -63,7 +63,7 @@ Then follow the first part of the [Firefox build instructions](https://firefox-s
 1. Copy the build script to your build directory: `cp thunderbird-patches/build/build.sh .`
 1. Issue this command: `./build.sh 91`
 
-Voilà. :heavy_check_mark:
+Voilà. :heavy_check_mark: For subsequent builds you only need to repeat the last step `./build.sh 91`.
 
 ## Bug Reporting / Support
 
