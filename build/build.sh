@@ -72,7 +72,7 @@ if [ "$UNAME" = "Linux" ]; then
       echo "======================================================="
       echo "Copying mozconfig-Linux"
       cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-   elif [ "UNAME_ARCH" = "aarch64" ]; then
+   elif [ "$UNAME_ARCH" = "aarch64" ]; then
       echo
       echo "======================================================="
       echo "Copying mozconfig-Linux-aarch64"
