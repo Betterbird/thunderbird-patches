@@ -32,6 +32,7 @@ fi
 
 VERSION="$1"
 UNAME=$(uname)
+UNAME_ARCH=$(uname -i)
 
 . ./thunderbird-patches/$VERSION/$VERSION.sh
 
@@ -70,6 +71,19 @@ if [ "$UNAME" = "Linux" ]; then
   echo "======================================================="
   echo "Copying mozconfig-Linux"
   cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
+
+if [ "$UNAME" = "Linux" ]; then
+   if [ "$UNAME_ARCH" = "x86_64" ]; then
+      echo
+      echo "======================================================="
+      echo "Copying mozconfig-Linux"
+      cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
+   elif [ "UNAME_ARCH" = "aarch64" ]; then
+      echo
+      echo "======================================================="
+      echo "Copying mozconfig-Linux-aarch64"
+      cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
+   fi
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
