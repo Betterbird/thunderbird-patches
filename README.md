@@ -31,13 +31,15 @@ Windows users please note that packaging will fail without an appropriate code s
 
 Linux users follow these instructions:
 To build successfully on Linux, you need at least 16 GB of memory or swap space.
-We executed the steps successfully on a Ubuntu cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk).
+We executed the steps successfully on a Ubuntu 20.04 cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk).
 Building for aarch64 (aka arm64) is also supported. You need to run the build on a aarch64 machine (which you can hire at Amazon EC2).
+Sadly `mach bootstrap` doesn't work on Linux/aarch64, the build script will tell you what to do.
 This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html).
 1. Prepare to install necessary dependencies: `sudo apt update`
 1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
 1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.bashrc` and `python3 -m pip install --user mercurial`
 1. In a new shell: `hg version`
+1. Note that the two steps above can be replaced by `sudo apt-get install mercurial` if the Mercurial in your distribution is new enough (as it should be for Ubuntu 20.04). 
 1. Install Rust: `curl https://sh.rustup.rs -sSf | sh` and select option 1
 1. `$HOME/.cargo/bin/rustup override set 1.53.0`, this is needed for Mozilla ESR 91 code
 1. Prepare a directory for all the action, let's say: `mkdir build && cd build`
