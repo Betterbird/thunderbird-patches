@@ -96,18 +96,23 @@ if [ "|$MQ|" = "||" ]; then
   echo "mq =" >> comm/.hg/hgrc
 fi
 
-if [ "$UNAME" = "Linux" ]; then
-  if [ "$UNAME_ARCH" = "x86_64" ]; then
+if [ -f ../mach_bootstrap_was_run_$VERSION ]; then
+  echo
+  echo "======================================================="
+  echo "NOT running ./mach bootstrap since ./mach_bootstrap_was_run_$VERSION is present."
+else
+  echo
+  echo "======================================================="
+  echo "Running ./mach bootstrap ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
+  echo "Note that this may require a restart of the shell."
+  touch ../mach_bootstrap_was_run_$VERSION
+  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  if [ "$UNAME" = "Linux" && "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
-    echo "Running ./mach bootstrap"
-    echo "Note that this may require a restart of the shell"
-    ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
-  elif [ "$UNAME_ARCH" = "aarch64" ]; then
-    echo
-    echo "======================================================="
-    echo "NOT running ./mach bootstrap on Linux/aarch64 since it doesn't work."
-    echo "Consider this on an Ubuntu 20.04 aarch64 machine:"
+    echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
+    echo "Please try the following before restarting the script:"
+    echo "(This is known to work on a Ubuntu 20.04 aarch64 machine.)"
     echo "sudo apt install nano watchman \ "
     echo "  python3-setuptools python3-wheel default-jre default-jdk \ "
     echo "  gcc g++ binutils libc6 libc6-dev libgcc-9-dev libstdc++-9-dev \ "
@@ -121,11 +126,12 @@ if [ "$UNAME" = "Linux" ]; then
     echo "Issue command: cargo install cbindgen"
     echo "Install node and npm using the nvm script (instructions and script are from: https://github.com/nvm-sh/nvm)."
     echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
+    exit 1
+  elif [ "$UNAME" = "Darwin" ]; then
+    echo
+    echo "======================================================="
+    echo "./mach bootstrap can fail on Mac. It should be safe to ignore the errors."
   fi
-elif [ "$UNAME" = "Darwin" ]; then
-  echo
-  echo "======================================================="
-  echo "NOT running ./mach bootstrap, will there be problems later?"
 fi
 
 echo
