@@ -107,7 +107,7 @@ else
   echo "Note that this may require a restart of the shell."
   touch ../mach_bootstrap_was_run_$VERSION
   ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
-  if [ "$UNAME" = "Linux" && "$UNAME_ARCH" = "aarch64" ]; then
+  if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
