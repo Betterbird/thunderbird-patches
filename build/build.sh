@@ -67,17 +67,17 @@ else
 fi
 
 if [ "$UNAME" = "Linux" ]; then
-   if [ "$UNAME_ARCH" = "x86_64" ]; then
-      echo
-      echo "======================================================="
-      echo "Copying mozconfig-Linux"
-      cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-   elif [ "$UNAME_ARCH" = "aarch64" ]; then
-      echo
-      echo "======================================================="
-      echo "Copying mozconfig-Linux-aarch64"
-      cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
-   fi
+  if [ "$UNAME_ARCH" = "x86_64" ]; then
+    echo
+    echo "======================================================="
+    echo "Copying mozconfig-Linux"
+    cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
+  elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    echo
+    echo "======================================================="
+    echo "Copying mozconfig-Linux-aarch64"
+    cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
+  fi
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
@@ -97,11 +97,31 @@ if [ "|$MQ|" = "||" ]; then
 fi
 
 if [ "$UNAME" = "Linux" ]; then
-  echo
-  echo "======================================================="
-  echo "Running ./mach bootstrap"
-  echo "Note that this may require a restart of the shell"
-  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  if [ "$UNAME_ARCH" = "x86_64" ]; then
+    echo
+    echo "======================================================="
+    echo "Running ./mach bootstrap"
+    echo "Note that this may require a restart of the shell"
+    ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    echo
+    echo "======================================================="
+    echo "NOT running ./mach bootstrap on Linux/aarch64 since it doesn't work."
+    echo "Consider this on an Ubuntu 20.04 aarch64 machine:"
+    echo "sudo apt install git mercurial python3 python3-pip nano watchman \ "
+    echo "  python3 python3-pip python3-setuptools python3-wheel default-jre default-jdk \ "
+    echo "  gcc g++ binutils libc6 libc6-dev libgcc-9-dev libstdc++-9-dev \ "
+    echo "  libstdc++6 linux-libc-dev libstdc++6 libstdc++-9-dev \ "
+    echo "  libx11-dev libxext-dev libxt-dev libxcb1-dev libxcb-shm0-dev libx11-xcb-dev \ "
+    echo "  clang clang-tools clang-format clangd clang-tidy-10 \ "
+    echo "  libclang-10-dev libclang-common-10-dev libclang-cpp10 libclang1-10 libclang-dev libclang-cpp10-dev \ "
+    echo "  llvm llvm-runtime libllvm11 llvm-dev \ "
+    echo "  libc++1-11 libc++abi1-11 libc++-11-dev libgtk-3-dev libdbus-glib-1-dev"
+    echo "Rust should already be installed if you followed the instructions, otherwise turn to https://rust-lang.github.io/rustup/installation/other.html."
+    echo "Issue command: cargo install cbindgen"
+    echo "Install node and npm using the nvm script (instructions and script are from: https://github.com/nvm-sh/nvm)."
+    echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
+  fi
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
@@ -196,17 +216,17 @@ echo "Packaging"
 
 cd ..
 if [ "$UNAME" = "Linux" ]; then
-   if [ "$UNAME_ARCH" = "x86_64" ]; then
-      echo
-      echo "======================================================="
-      echo "Find your archive here"
-      ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
-   elif [ "$UNAME_ARCH" = "aarch64" ]; then
-      echo
-      echo "======================================================="
-      echo "Find your archive here"
-      ls  $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
-   fi
+  if [ "$UNAME_ARCH" = "x86_64" ]; then
+    echo
+    echo "======================================================="
+    echo "Find your archive here"
+    ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
+  elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    echo
+    echo "======================================================="
+    echo "Find your archive here"
+    ls  $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
+  fi
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
