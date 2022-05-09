@@ -96,44 +96,6 @@ if [ "|$MQ|" = "||" ]; then
   echo "mq =" >> comm/.hg/hgrc
 fi
 
-if [ -f ../mach_bootstrap_was_run_$VERSION ]; then
-  echo
-  echo "======================================================="
-  echo "NOT running ./mach bootstrap since ./mach_bootstrap_was_run_$VERSION is present."
-else
-  echo
-  echo "======================================================="
-  echo "Running ./mach bootstrap ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
-  echo "Note that this may require a restart of the shell."
-  touch ../mach_bootstrap_was_run_$VERSION
-  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
-  if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
-    echo
-    echo "======================================================="
-    echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
-    echo "Please try the following before restarting the script:"
-    echo "(This is known to work on a Ubuntu 20.04 aarch64 machine.)"
-    echo "sudo apt install nano watchman \ "
-    echo "  python3-setuptools python3-wheel default-jre default-jdk \ "
-    echo "  gcc g++ binutils libc6 libc6-dev libgcc-9-dev libstdc++-9-dev \ "
-    echo "  libstdc++6 linux-libc-dev libstdc++6 libstdc++-9-dev \ "
-    echo "  libx11-dev libxext-dev libxt-dev libxcb1-dev libxcb-shm0-dev libx11-xcb-dev \ "
-    echo "  clang clang-tools clang-format clangd clang-tidy-10 \ "
-    echo "  libclang-10-dev libclang-common-10-dev libclang-cpp10 libclang1-10 libclang-dev libclang-cpp10-dev \ "
-    echo "  llvm llvm-runtime libllvm11 llvm-dev \ "
-    echo "  libc++1-11 libc++abi1-11 libc++-11-dev libgtk-3-dev libdbus-glib-1-dev"
-    echo "Rust should already be installed if you followed the instructions, otherwise turn to https://rust-lang.github.io/rustup/installation/other.html."
-    echo "Issue command: cargo install cbindgen"
-    echo "Install node and npm using the nvm script (instructions and script are from: https://github.com/nvm-sh/nvm)."
-    echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
-    exit 1
-  elif [ "$UNAME" = "Darwin" ]; then
-    echo
-    echo "======================================================="
-    echo "./mach bootstrap should not fail on Mac. However, it should be safe to ignore any errors here."
-  fi
-fi
-
 echo
 echo "======================================================="
 echo "Removing old patches from $MOZILLA_DIR and updating"
@@ -208,6 +170,40 @@ cd comm
 hg qpush -all
 hg qseries
 cd ..
+
+if [ -f ../mach_bootstrap_was_run_$VERSION ]; then
+  echo
+  echo "======================================================="
+  echo "NOT running ./mach bootstrap since ./mach_bootstrap_was_run_$VERSION is present."
+else
+  echo
+  echo "======================================================="
+  echo "Running ./mach bootstrap ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
+  echo "Note that this may require a restart of the shell."
+  touch ../mach_bootstrap_was_run_$VERSION
+  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
+    echo
+    echo "======================================================="
+    echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
+    echo "Please try the following before restarting the script:"
+    echo "(This is known to work on a Ubuntu 20.04 aarch64 machine.)"
+    echo "sudo apt install nano watchman \ "
+    echo "  python3-setuptools python3-wheel default-jre default-jdk \ "
+    echo "  gcc g++ binutils libc6 libc6-dev libgcc-9-dev libstdc++-9-dev \ "
+    echo "  libstdc++6 linux-libc-dev libstdc++6 libstdc++-9-dev \ "
+    echo "  libx11-dev libxext-dev libxt-dev libxcb1-dev libxcb-shm0-dev libx11-xcb-dev \ "
+    echo "  clang clang-tools clang-format clangd clang-tidy-10 \ "
+    echo "  libclang-10-dev libclang-common-10-dev libclang-cpp10 libclang1-10 libclang-dev libclang-cpp10-dev \ "
+    echo "  llvm llvm-runtime libllvm11 llvm-dev \ "
+    echo "  libc++1-11 libc++abi1-11 libc++-11-dev libgtk-3-dev libdbus-glib-1-dev"
+    echo "Rust should already be installed if you followed the instructions, otherwise turn to https://rust-lang.github.io/rustup/installation/other.html."
+    echo "Issue command: cargo install cbindgen"
+    echo "Install node and npm using the nvm script (instructions and script are from: https://github.com/nvm-sh/nvm)."
+    echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
+    exit 1
+  fi
+fi
 
 echo
 echo "======================================================="
