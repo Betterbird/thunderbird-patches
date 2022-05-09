@@ -130,7 +130,7 @@ else
   elif [ "$UNAME" = "Darwin" ]; then
     echo
     echo "======================================================="
-    echo "./mach bootstrap can fail on Mac. It should be safe to ignore the errors."
+    echo "./mach bootstrap should not fail on Mac. However, it should be safe to ignore any errors here."
   fi
 fi
 
