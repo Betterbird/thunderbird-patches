@@ -83,17 +83,31 @@ elif [ "$UNAME" = "Darwin" ]; then
   echo "======================================================="
   echo "Copying mozconfig-Mac"
   cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
+elif [ "$UNAME" = "MINGW32_NT-6.2" ]; then
+  echo
+  echo "======================================================="
+  echo "Copying mozconfig for Windows"
+  cp ../thunderbird-patches/$VERSION/mozconfig mozconfig
 fi
 
-MQ=$(grep "mq =" .hg/hgrc)
-if [ "|$MQ|" = "||" ]; then
-  echo "[extensions]" >> .hg/hgrc
-  echo "mq =" >> .hg/hgrc
-fi
-MQ=$(grep "mq =" comm/.hg/hgrc)
-if [ "|$MQ|" = "||" ]; then
-  echo "[extensions]" >> comm/.hg/hgrc
-  echo "mq =" >> comm/.hg/hgrc
+if [ "$UNAME" = "Linux" ] || [ "$UNAME" = "Darwin" ]; then
+  MQ=$(grep "mq =" .hg/hgrc)
+  if [ "|$MQ|" = "||" ]; then
+    echo "[extensions]" >> .hg/hgrc
+    echo "mq =" >> .hg/hgrc
+  fi
+  MQ=$(grep "mq =" comm/.hg/hgrc)
+  if [ "|$MQ|" = "||" ]; then
+    echo "[extensions]" >> comm/.hg/hgrc
+    echo "mq =" >> comm/.hg/hgrc
+  fi
+else
+  # On Windows we assume mercurial.ini in the build directory.
+  MQ=$(grep "mq =" mercurial.ini)
+  if [ "|$MQ|" = "||" ]; then
+    echo "[extensions]" >> .hg/hgrc
+    echo "mq =" >> .hg/hgrc
+  fi
 fi
 
 echo
@@ -234,4 +248,9 @@ elif [ "$UNAME" = "Darwin" ]; then
   echo "======================================================="
   echo "Find you disk image here"
   ls  $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
+elif [ "$UNAME" = "MINGW32_NT-6.2" ]; then
+  echo
+  echo "======================================================="
+  echo "Find you disk image here"
+  ls  $MOZILLA_DIR/obj-x86_64-pc-mingw32/dist/install/sea/*.installer.exe
 fi

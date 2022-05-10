@@ -24,6 +24,7 @@ We don't store those patches here. Those patches will have a comment in the seri
 patch to the series file where it is already present.
 
 The process described above is automated for Linux and Mac, see below for details.
+The build script (thunderbird-patches/build/build.sh) which automates all the steps above also works for Windows.
 
 Linux users please note that [08-branding-m-c.patch](91/branding/08-branding-m-c.patch) patches a Windows installer script making use of Windows PowerShell.
 However, that part of the build system should not be triggered for Linux builds.
