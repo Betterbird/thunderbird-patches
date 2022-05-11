@@ -1,5 +1,5 @@
 #!/bin/sh
 mozilla_repo=https://hg.mozilla.org/mozilla-central/
-mozilla_rev=fe0b18ac5fe152cad89a780b5e48c2b325fea839
+mozilla_rev=05f61ce1fd54d7abed9e22b0bd5f4b540ff790b9
 comm_repo=https://hg.mozilla.org/comm-central/
-comm_rev=1a9b35ab2d54efc3ce65c59a2617c9752bf81481
+comm_rev=97918d20311ca21acc36bb4327b8ff4ed652f91c
