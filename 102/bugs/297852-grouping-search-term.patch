@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1652274545 -7200
+# Date 1652295680 -7200
 # Parent  a7cd07327c3b89881c7a0b3b113be4cbb588d5f9
 Bug 297852 - Allow grouping in search term UI.
 
@@ -842,7 +842,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
   * @param matchAllValue boolean value from the first search term
   */
  function updateSearchTermsListbox(matchAllValue) {
-@@ -215,74 +363,327 @@ function updateSearchTermsListbox(matchA
+@@ -215,74 +363,359 @@ function updateSearchTermsListbox(matchA
    for (let i = 0; i < searchAttributeList.length; i++) {
      searchAttributeList[i].setAttribute("disabled", matchAllValue);
      searchOperatorList[i].setAttribute("disabled", matchAllValue);
@@ -965,6 +965,25 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      gSearchTerms[termIdx].obj.beginsGrouping = true;
 +      // eslint-disable-next-line curly
 +      if (verbose) dump(`searchTerm: onMore begin ${termIdx}\n`);
++
++      // (***) Special case: Remove preceding end group marker.
++      // We go from:
++      // v == 4 && (x == 5 || y == 6) to
++      // v == 4 && (x == 5 || y == 6 || (z == 7 && t == 8)),
++      // hence, the (x == 5 || y == 6) group now ends at the )) and the previous
++      // marker at the "y == 6" term needs to be removed.
++      // This needs to be undone when the group is removed.
++      let prevTermIdx = termIdx - 1;
++      if (
++        prevTermIdx >= 0 &&
++        gSearchTerms[prevTermIdx].obj.endsGrouping &&
++        gSearchTerms[termIdx].level > gSearchTerms[prevTermIdx].level
++      ) {
++        if (verbose) {
++          dump(`searchTerm: onGroup: removing end from ${prevTermIdx}\n`);
++        }
++        gSearchTerms[prevTermIdx].obj.endsGrouping = false;
++      }
 +    }
 +
 +    // To get the booleanAnd value, we need to visit the grandparent
@@ -1117,7 +1136,11 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      gSearchTerms[termIdx].obj.beginsGrouping &&
 +      gSearchTerms[termIdx].obj.endsGrouping
 +    ) {
-+      // Nothing to do, group has single entry.
++      // Nothing to move, group has single entry.
++      entireGroup = true;
++      // eslint-disable-next-line curly
++      if (verbose)
++        dump(`searchTerm: onLess: removing last group member ${termIdx}\n`);
 +    } else if (gSearchTerms[termIdx].obj.endsGrouping) {
 +      if (termIdx - 1 >= 0) {
 +        gSearchTerms[termIdx - 1].obj.endsGrouping = true;
@@ -1139,13 +1162,36 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  removeSearchRow(richlistIdx);
 +
 +  if (entireGroup) {
-+    // There's the special case [look for "(***) Special case" below]
++    // There's the special case [look for "(***) Special case" above]
 +    // where appending a group removed the end marker
 +    // of the preceding group, so repair this here.
 +    // Level 1 is not counted as group.
-+    let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
-+    if (prevTermIdx >= 0 && !gSearchTerms[prevTermIdx].obj.endsGrouping &&
-+        gSearchTerms[prevTermIdx].level > 1) {
++    // There is also nothing to repair if the group was in the middle of
++    // another group.
++    // Find the term before.
++    let loopIdx = richlistIdx - 1;
++    let prevTermIdx = -1;
++    while (loopIdx >= 0) {
++      let itemChild = gSearchTermList.getItemAtIndex(loopIdx).firstChild;
++      if (itemChild.localName != "radiogroup") {
++        prevTermIdx = termIdxFromRichlistIdx(loopIdx);
++        break;
++      }
++      loopIdx--;
++    }
++
++    // Let's see what follows.
++    let nextTermIdx = -1;
++    if (prevTermIdx >= 0 && prevTermIdx + 1 < gSearchTerms.length) {
++      nextTermIdx = prevTermIdx + 1;
++    }
++    if (
++      prevTermIdx >= 0 &&
++      !gSearchTerms[prevTermIdx].obj.endsGrouping &&
++      gSearchTerms[prevTermIdx].level > 1 &&
++      (nextTermIdx == -1 ||
++        gSearchTerms[prevTermIdx].level > gSearchTerms[nextTermIdx].level)
++    ) {
 +      // eslint-disable-next-line curly
 +      if (verbose) dump(`searchTerm: onLess: adding end to ${prevTermIdx}\n`);
 +      gSearchTerms[prevTermIdx].obj.endsGrouping = true;
@@ -1174,20 +1220,6 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  // the user just added a term, so scroll to it
 +  gSearchTermList.ensureIndexIsVisible(richlistIdx);
 +
-+  // Remove the end group marker.
-+  // (***) Special case: We go from:
-+  // v == 4 && (x == 5 || y == 6) to
-+  // v == 4 && (x == 5 || y == 6 || (z == 7 && t == 8)),
-+  // hence, the (x == 5 || y == 6) group now ends at the )) and the previous
-+  // marker at the "y == 6" term needs to be removed.
-+  // This needs to be undone when the group is removed.
-+  let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
-+  if (prevTermIdx >= 0 && gSearchTerms[prevTermIdx].obj.endsGrouping) {
-+    if (verbose) {
-+      dump(`searchTerm: onGroup: removing end from ${prevTermIdx}\n`);
-+    }
-+    gSearchTerms[prevTermIdx].obj.endsGrouping = false;
-+  }
 +  dumpSearchTerms("onGroup - exit");
  }
  
@@ -1197,7 +1229,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    for (var i = 0; i < gSearchTerms.length; i++) {
      // don't set element attributes if XBL hasn't loaded
      if (!(gSearchTerms[i].obj.searchattribute.searchScope === undefined)) {
-@@ -296,165 +697,333 @@ function setSearchScope(scope) {
+@@ -296,165 +729,333 @@ function setSearchScope(scope) {
  
  function updateSearchAttributes() {
    for (var i = 0; i < gSearchTerms.length; i++) {
@@ -1584,7 +1616,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        listcell.setAttribute("flex", cols[i].getAttribute("flex"));
      }
      let child = aChildren[i];
-@@ -468,76 +1037,68 @@ function constructRow(aChildren) {
+@@ -468,76 +1069,68 @@ function constructRow(aChildren) {
        listcell.appendChild(child);
      }
      listitem.appendChild(listcell);
@@ -1693,7 +1725,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
          gSearchTerms[i].obj.saveTo(searchTerm);
          // this might not be the right place for the term,
          // but we need to make the array longer anyway
-@@ -547,20 +1108,15 @@ function saveSearchTerms(searchTerms, te
+@@ -547,20 +1140,15 @@ function saveSearchTerms(searchTerms, te
      } catch (ex) {
        dump("** Error saving element " + i + ": " + ex + "\n");
      }

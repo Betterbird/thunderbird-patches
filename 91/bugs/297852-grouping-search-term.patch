@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1651306569 -7200
-# Parent  5c1fdcfec9588bfada46c1bdced50d3583ba63e2
+# Date 1652295674 -7200
+# Parent  639aff9468cb9f133da0342e32a9b819e8d5cf0d
 Bug 297852 - Allow grouping in search term UI.
 
 This also does a general overhaul of searchTerm.js:
@@ -567,7 +567,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        return this.searchattribute.searchScope;
      }
      return undefined;
-@@ -278,74 +362,324 @@ function updateSearchTermsListbox(matchA
+@@ -278,74 +362,359 @@ function updateSearchTermsListbox(matchA
    for (let i = 0; i < searchAttributeList.length; i++) {
      searchAttributeList[i].setAttribute("disabled", matchAllValue);
      searchOperatorList[i].setAttribute("disabled", matchAllValue);
@@ -690,6 +690,25 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      gSearchTerms[termIdx].obj.beginsGrouping = true;
 +      // eslint-disable-next-line curly
 +      if (verbose) dump(`searchTerm: onMore begin ${termIdx}\n`);
++
++      // (***) Special case: Remove preceding end group marker.
++      // We go from:
++      // v == 4 && (x == 5 || y == 6) to
++      // v == 4 && (x == 5 || y == 6 || (z == 7 && t == 8)),
++      // hence, the (x == 5 || y == 6) group now ends at the )) and the previous
++      // marker at the "y == 6" term needs to be removed.
++      // This needs to be undone when the group is removed.
++      let prevTermIdx = termIdx - 1;
++      if (
++        prevTermIdx >= 0 &&
++        gSearchTerms[prevTermIdx].obj.endsGrouping &&
++        gSearchTerms[termIdx].level > gSearchTerms[prevTermIdx].level
++      ) {
++        if (verbose) {
++          dump(`searchTerm: onGroup: removing end from ${prevTermIdx}\n`);
++        }
++        gSearchTerms[prevTermIdx].obj.endsGrouping = false;
++      }
 +    }
 +
 +    // To get the booleanAnd value, we need to visit the grandparent
@@ -842,7 +861,11 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      gSearchTerms[termIdx].obj.beginsGrouping &&
 +      gSearchTerms[termIdx].obj.endsGrouping
 +    ) {
-+      // Nothing to do, group has single entry.
++      // Nothing to move, group has single entry.
++      entireGroup = true;
++      // eslint-disable-next-line curly
++      if (verbose)
++        dump(`searchTerm: onLess: removing last group member ${termIdx}\n`);
 +    } else if (gSearchTerms[termIdx].obj.endsGrouping) {
 +      if (termIdx - 1 >= 0) {
 +        gSearchTerms[termIdx - 1].obj.endsGrouping = true;
@@ -864,10 +887,36 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  removeSearchRow(richlistIdx);
 +
 +  if (entireGroup) {
-+    // There's the special case where appending a group removed the end marker
++    // There's the special case [look for "(***) Special case" above]
++    // where appending a group removed the end marker
 +    // of the preceding group, so repair this here.
-+    let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
-+    if (prevTermIdx >= 0 && !gSearchTerms[prevTermIdx].obj.endsGrouping) {
++    // Level 1 is not counted as group.
++    // There is also nothing to repair if the group was in the middle of
++    // another group.
++    // Find the term before.
++    let loopIdx = richlistIdx - 1;
++    let prevTermIdx = -1;
++    while (loopIdx >= 0) {
++      let itemChild = gSearchTermList.getItemAtIndex(loopIdx).firstChild;
++      if (itemChild.localName != "radiogroup") {
++        prevTermIdx = termIdxFromRichlistIdx(loopIdx);
++        break;
++      }
++      loopIdx--;
++    }
++
++    // Let's see what follows.
++    let nextTermIdx = -1;
++    if (prevTermIdx >= 0 && prevTermIdx + 1 < gSearchTerms.length) {
++      nextTermIdx = prevTermIdx + 1;
++    }
++    if (
++      prevTermIdx >= 0 &&
++      !gSearchTerms[prevTermIdx].obj.endsGrouping &&
++      gSearchTerms[prevTermIdx].level > 1 &&
++      (nextTermIdx == -1 ||
++        gSearchTerms[prevTermIdx].level > gSearchTerms[nextTermIdx].level)
++    ) {
 +      // eslint-disable-next-line curly
 +      if (verbose) dump(`searchTerm: onLess: adding end to ${prevTermIdx}\n`);
 +      gSearchTerms[prevTermIdx].obj.endsGrouping = true;
@@ -896,20 +945,6 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  // the user just added a term, so scroll to it
 +  gSearchTermList.ensureIndexIsVisible(richlistIdx);
 +
-+  // Remove the end group marker.
-+  // Special case: We go from:
-+  // v == 4 && (x == 5 || y == 6) to
-+  // v == 4 && (x == 5 || y == 6 || (z == 7 && t == 8)),
-+  // hence, the (x == 5 || y == 6) group now ends at the )) and the previous
-+  // marker at the "y == 6" term needs to be removed.
-+  // This needs to be undone when the group is removed.
-+  let prevTermIdx = termIdxFromRichlistIdx(richlistIdx - 1);
-+  if (prevTermIdx >= 0 && gSearchTerms[prevTermIdx].obj.endsGrouping) {
-+    if (verbose) {
-+      dump(`searchTerm: onGroup: removing end from ${prevTermIdx}\n`);
-+    }
-+    gSearchTerms[prevTermIdx].obj.endsGrouping = false;
-+  }
 +  dumpSearchTerms("onGroup - exit");
  }
  
@@ -919,7 +954,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    for (var i = 0; i < gSearchTerms.length; i++) {
      // don't set element attributes if XBL hasn't loaded
      if (!(gSearchTerms[i].obj.searchattribute.searchScope === undefined)) {
-@@ -359,165 +693,333 @@ function setSearchScope(scope) {
+@@ -359,165 +728,333 @@ function setSearchScope(scope) {
  
  function updateSearchAttributes() {
    for (var i = 0; i < gSearchTerms.length; i++) {
@@ -1306,7 +1341,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        listcell.setAttribute("flex", cols[i].getAttribute("flex"));
      }
      let child = aChildren[i];
-@@ -531,76 +1033,68 @@ function constructRow(aChildren) {
+@@ -531,76 +1068,68 @@ function constructRow(aChildren) {
        listcell.appendChild(child);
      }
      listitem.appendChild(listcell);
@@ -1415,7 +1450,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
          gSearchTerms[i].obj.saveTo(searchTerm);
          // this might not be the right place for the term,
          // but we need to make the array longer anyway
-@@ -610,20 +1104,15 @@ function saveSearchTerms(searchTerms, te
+@@ -610,20 +1139,15 @@ function saveSearchTerms(searchTerms, te
      } catch (ex) {
        dump("** Error saving element " + i + ": " + ex + "\n");
      }
@@ -1586,7 +1621,7 @@ diff --git a/mailnews/search/src/nsMsgFilter.cpp b/mailnews/search/src/nsMsgFilt
 diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsgFilterList.cpp
 --- a/mailnews/search/src/nsMsgFilterList.cpp
 +++ b/mailnews/search/src/nsMsgFilterList.cpp
-@@ -725,16 +726,27 @@ nsresult nsMsgFilterList::LoadTextFilter
+@@ -725,16 +725,27 @@ nsresult nsMsgFilterList::LoadTextFilter
  }
  
  // parse condition like "(subject, contains, fred) AND (body, isn't, "foo)")"
@@ -1614,7 +1649,7 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
    nsresult err = NS_OK;
    const char* curPtr = aCondition;
    if (!strcmp(aCondition, "ALL")) {
-@@ -742,32 +754,48 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
+@@ -742,32 +753,48 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
      newTerm->m_matchAll = true;
      aFilter->AppendTerm(newTerm);
      return NS_OK;
@@ -1664,7 +1699,7 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
        if (foundEndTerm) {
          int termLen = curPtr - openParen - 1;
          termDup = (char*)PR_Malloc(termLen + 1);
-@@ -785,16 +813,18 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
+@@ -785,16 +812,18 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
        RefPtr<nsMsgSearchTerm> newTerm = new nsMsgSearchTerm;
        // Invert nsMsgSearchTerm::EscapeQuotesInStr()
        for (char *to = termDup, *from = termDup;;) {
@@ -1683,7 +1718,7 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
      } else
        break;
    }
-@@ -1092,17 +1122,17 @@ nsresult nsMsgFilterList::ComputeArbitra
+@@ -1092,17 +1121,17 @@ nsresult nsMsgFilterList::ComputeArbitra
    nsCString arbitraryHeader;
    for (uint32_t index = 0; index < numFilters; index++) {
      rv = GetFilterAt(index, getter_AddRefs(filter));
