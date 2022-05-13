@@ -1,0 +1,142 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1652425183 -7200
+# Parent  ea8912be820bc7a3f42792f932a241fe4b301d4c
+Feature: Multi-line tree, don't switch threading when restoring folder view.
+
+diff --git a/mail/base/content/folderDisplay.js b/mail/base/content/folderDisplay.js
+--- a/mail/base/content/folderDisplay.js
++++ b/mail/base/content/folderDisplay.js
+@@ -854,16 +854,17 @@ FolderDisplayWidget.prototype = {
+     }
+     if (this._active) {
+       this.makeActive();
+     }
+ 
+     if (this._tabInfo) {
+       document.getElementById("tabmail").setTabTitle(this._tabInfo);
+     }
++    this.view.dbView.setOpenComplete();
+   },
+ 
+   /**
+    * Clone an existing view wrapper as the basis for our display.
+    */
+   cloneView(aViewWrapper) {
+     this.view = aViewWrapper.clone(this);
+     // generate a view created notification; this will cause us to do the right
+diff --git a/mailnews/base/public/nsIMsgDBView.idl b/mailnews/base/public/nsIMsgDBView.idl
+--- a/mailnews/base/public/nsIMsgDBView.idl
++++ b/mailnews/base/public/nsIMsgDBView.idl
+@@ -198,16 +198,17 @@ interface nsMsgNavigationType : nsISuppo
+ [scriptable, uuid(fe8a2326-4dd0-11e5-8b8a-206a8aa7a25c)]
+ interface nsIMsgDBView : nsISupports
+ {
+   void open(in nsIMsgFolder folder, in nsMsgViewSortTypeValue sortType, in nsMsgViewSortOrderValue sortOrder, in nsMsgViewFlagsTypeValue viewFlags, out long count);
+   void openWithHdrs(in nsIMsgEnumerator aHeaders, in nsMsgViewSortTypeValue aSortType,
+                       in nsMsgViewSortOrderValue aSortOrder,
+                       in nsMsgViewFlagsTypeValue aViewFlags, out long aCount);
+   void close();
++  void setOpenComplete();
+ 
+   void init(in nsIMessenger aMessengerInstance, in nsIMsgWindow aMsgWindow, in nsIMsgDBViewCommandUpdater aCommandUpdater);
+ 
+   void sort(in nsMsgViewSortTypeValue sortType, in nsMsgViewSortOrderValue sortOrder);
+ 
+   void doCommand(in nsMsgViewCommandTypeValue command);
+   void doCommandWithFolder(in nsMsgViewCommandTypeValue command, in nsIMsgFolder destFolder);
+   void getCommandStatus(in nsMsgViewCommandTypeValue command, out boolean selectable_p,
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -2195,16 +2195,22 @@ nsMsgDBView::GetColspanTextProperties(in
+ 
+       break;
+     }
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++nsMsgDBView::SetOpenComplete() {
++  mOpenComplete = true;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
+ nsMsgDBView::IsMultiline(bool* isMulti) {
+   nsTreeColumn* col;
+   RefPtr<mozilla::dom::Element> el;
+   mozilla::IgnoredErrorResult rv1;
+   RefPtr<nsTreeColumns> cols;
+   if (mTree) cols = mTree->GetColumns();
+ 
+   *isMulti =
+@@ -2303,19 +2309,25 @@ nsMsgDBView::IsMultiline(bool* isMulti) 
+             if (colID.EqualsLiteral("customSortCol")) set = true;
+             break;
+           default:
+             break;
+         }
+         if (set) el->SetAttribute(u"primary"_ns, u"true"_ns, rv1);
+       }
+     }
+-    if (!(m_viewFlags & nsMsgViewFlagsType::kGroupBySort)) {
+-      // Switch off pure threading.
+-      m_viewFlags &= ~nsMsgViewFlagsType::kThreadedDisplay;
++    if (mOpenComplete) {
++      // nsMsgDBView::IsMultiline() is called many times when switching to a
++      // different folder, sadly mostly when the columns aren't ready yet,
++      // hence giving the wrong answer. There is no need to do the following
++      // until the view is "completely" opened.
++      if (!(m_viewFlags & nsMsgViewFlagsType::kGroupBySort)) {
++        // Switch off pure threading.
++        m_viewFlags &= ~nsMsgViewFlagsType::kThreadedDisplay;
++      }
+     }
+   } else if (m_viewFlags & nsMsgViewFlagsType::kGroupBySort) {
+     // Put the primary attribute back onto the subject column
+     // and remove it elsewhere.
+     for (col = cols->GetFirstColumn(); col; col = col->GetNext()) {
+       const nsAString& colID = col->GetId();
+       el = col->Element();
+       if (colID.EqualsLiteral("subjectCol")) {
+@@ -2358,16 +2370,17 @@ nsMsgDBView::IsColspanCol(nsTreeColumn* 
+ 
+ NS_IMETHODIMP
+ nsMsgDBView::Open(nsIMsgFolder* folder, nsMsgViewSortTypeValue sortType,
+                   nsMsgViewSortOrderValue sortOrder,
+                   nsMsgViewFlagsTypeValue viewFlags, int32_t* pCount) {
+   m_viewFlags = viewFlags;
+   m_sortOrder = sortOrder;
+   m_sortType = sortType;
++  mOpenComplete = false;
+ 
+   nsresult rv;
+   nsCOMPtr<nsIMsgAccountManager> accountManager =
+       do_GetService(NS_MSGACCOUNTMANAGER_CONTRACTID, &rv);
+ 
+   NS_ENSURE_SUCCESS(rv, rv);
+   bool userNeedsToAuthenticate = false;
+   // If we're PasswordProtectLocalCache, then we need to find out if the
+diff --git a/mailnews/base/src/nsMsgDBView.h b/mailnews/base/src/nsMsgDBView.h
+--- a/mailnews/base/src/nsMsgDBView.h
++++ b/mailnews/base/src/nsMsgDBView.h
+@@ -133,16 +133,17 @@ class nsMsgDBView : public nsIMsgDBView,
+   static char16_t* kRedirectedString;
+   static char16_t* kNewString;
+ 
+   RefPtr<mozilla::dom::XULTreeElement> mTree;
+   nsCOMPtr<nsITreeSelection> mTreeSelection;
+   // We cache this to determine when to push command status notifications.
+   uint32_t mNumSelectedRows;
+   bool mIsMultiline;
++  bool mOpenComplete;
+   // Set when the message pane is collapsed.
+   bool mSuppressMsgDisplay;
+   bool mSuppressCommandUpdating;
+   // Set when we're telling the outline a row is being removed. Used to
+   // suppress msg loading during delete/move operations.
+   bool mRemovingRow;
+   bool mCommandsNeedDisablingBecauseOfSelection;
+   bool mSuppressChangeNotification;
