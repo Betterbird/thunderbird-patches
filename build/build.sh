@@ -39,10 +39,10 @@ UNAME_ARCH=$(uname -i)
 echo
 echo "======================================================="
 echo "Preparing Mozilla repo"
-echo "  for $mozilla_repo"
-echo "  at $mozilla_rev"
+echo "  for $MOZILLA_REPO"
+echo "  at $MOZILLA_REV"
 
-MOZILLA_DIR="$(basename $mozilla_repo)"
+MOZILLA_DIR="$(basename $MOZILLA_REPO)"
 
 if [ -d $MOZILLA_DIR ]; then
   cd $MOZILLA_DIR
@@ -57,13 +57,13 @@ else
   fi
   echo
   echo "======================================================="
-  echo "Cloning $mozilla_repo"
-  hg clone $mozilla_repo
+  echo "Cloning $MOZILLA_REPO"
+  hg clone $MOZILLA_REPO
   echo
   echo "======================================================="
-  echo "Cloning $comm_repo"
+  echo "Cloning $COMM_REPO"
   cd $MOZILLA_DIR
-  hg clone $comm_repo comm
+  hg clone $COMM_REPO comm
 fi
 
 if [ "$UNAME" = "Linux" ]; then
@@ -116,13 +116,13 @@ echo "Removing old patches from $MOZILLA_DIR and updating"
 hg revert --all
 hg qpop --all
 hg pull
-hg update -r $mozilla_rev
+hg update -r $MOZILLA_REV
 
 echo
 echo "======================================================="
 echo "Preparing comm repo"
-echo "  for $comm_repo"
-echo "  at $comm_rev"
+echo "  for $COMM_REPO"
+echo "  at $COMM_REV"
 
 cd comm
 echo
@@ -131,7 +131,7 @@ echo "Removing old patches from $MOZILLA_DIR/comm and updating"
 hg revert --all
 hg qpop --all
 hg pull
-hg update -r $comm_rev
+hg update -r $COMM_REV
 cd ..
 
 echo
@@ -195,6 +195,7 @@ else
   echo "Running ./mach bootstrap ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
   echo "Note that this may require a restart of the shell."
   touch ../mach_bootstrap_was_run_$VERSION
+  rustup override set $RUST_VER
   ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
   if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
