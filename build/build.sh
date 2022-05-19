@@ -103,10 +103,12 @@ if [ "$UNAME" = "Linux" ] || [ "$UNAME" = "Darwin" ]; then
   fi
 else
   # On Windows we assume mercurial.ini in the build directory.
-  MQ=$(grep "mq =" mercurial.ini)
-  if [ "|$MQ|" = "||" ]; then
-    echo "[extensions]" >> .hg/hgrc
-    echo "mq =" >> .hg/hgrc
+  if [ -f ../mercurial.ini ]; then
+    MQ=$(grep "mq =" ../mercurial.ini)
+    if [ "|$MQ|" = "||" ]; then
+      echo "[extensions]" >> ../mercurial.ini
+      echo "mq =" >> ../mercurial.ini
+    fi
   fi
 fi
 
