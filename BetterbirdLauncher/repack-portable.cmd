@@ -5,9 +5,9 @@
 rm setup.exe
 
 :: Create a ZIP file (larger).
-:: 7z a -tzip BetterbirdPortable-%~2.%~1.win64.zip core BetterbirdLauncher.exe
+7z a -tzip BetterbirdPortable-%~2.%~1.win64.zip core BetterbirdLauncher.exe
 
 :: Create a self-extracting 7z executable.
-7z a -sfx BetterbirdPortable-%~2.%~1.win64.exe core BetterbirdLauncher.exe
+:: 7z a -sfx BetterbirdPortable-%~2.%~1.win64.exe core BetterbirdLauncher.exe
 
 rmdir /s /q core
