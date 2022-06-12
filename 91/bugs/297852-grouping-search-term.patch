@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1654089408 -7200
-# Parent  cecc4051ecc2c29f5282713b6833944266b2414b
+# Date 1655031492 -7200
+# Parent  f7fbb2e180ef135dbd0d63d2176d60eccd688f4f
 Bug 297852 - Allow grouping in search term UI.
 
 This also does a general overhaul of searchTerm.js:
@@ -14,6 +14,10 @@ This also does a general overhaul of searchTerm.js:
  - Adding an empty search term for new rules, user might want to start off with a group instead
  - Mitigation of https://bugzilla.mozilla.org/show_bug.cgi?id=1765077 (missing highlight, focus).
 Further clean-up: Removed nsIMsgFilter.AddTerm() and renamed nsIMsgFilter.GetTerm().
+* * *
+Bug 297852 - Allow grouping in search term UI: Switch to console.log() and fix GitHub issue 60.
+* * *
+Bug 297852 - Make begins/endsGrouping into intergers to cater for multi-level groups to fix GitHub issue 62.
 
 diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
 --- a/mail/base/content/SearchDialog.js
@@ -189,6 +193,152 @@ diff --git a/mail/locales/en-US/chrome/messenger/search.properties b/mail/locale
  moreButtonTooltipText=Add a new rule
 +groupButtonTooltipText=Add a new group
  lessButtonTooltipText=Remove this rule
+diff --git a/mail/modules/QuickFilterManager.jsm b/mail/modules/QuickFilterManager.jsm
+--- a/mail/modules/QuickFilterManager.jsm
++++ b/mail/modules/QuickFilterManager.jsm
+@@ -631,23 +631,23 @@ QuickFilterManager.defineFilter({
+         term.value = value;
+         term.op = aFilterValue
+           ? Ci.nsMsgSearchOp.IsInAB
+           : Ci.nsMsgSearchOp.IsntInAB;
+         // It's an AND if we're the first book (so the boolean affects the
+         //  group as a whole.)
+         // It's the negation of whether we're filtering otherwise; demorgans.
+         term.booleanAnd = firstBook || !aFilterValue;
+-        term.beginsGrouping = firstBook;
++        term.beginsGrouping = firstBook ? 1 : 0;
+         aTerms.push(term);
+         firstBook = false;
+       }
+     }
+     if (term) {
+-      term.endsGrouping = true;
++      term.endsGrouping = 1;
+     }
+   },
+ });
+ 
+ /**
+  * It's a tag filter that sorta facets! Stealing gloda's thunder! Woo!
+  *
+  * Filter on message tags?  Meanings:
+@@ -770,32 +770,32 @@ var TagFacetingFilter = {
+             if (showUntagged) {
+               // We need to OR with the previous condition.
+               term.booleanAnd = false;
+             } else {
+               // AND for the group. Inside the group we also want AND if the
+               // mode is set to "All of".
+               term.booleanAnd = firstIncludeClause || mode === "AND";
+             }
+-            term.beginsGrouping = firstIncludeClause;
++            term.beginsGrouping = firstIncludeClause ? 1 : 0;
+             aTerms.push(term);
+             firstIncludeClause = false;
+             lastIncludeTerm = term;
+           } else {
+             term.op = Ci.nsMsgSearchOp.DoesntContain;
+             // you need to not include all of the tags marked excluded.
+             term.booleanAnd = true;
+-            term.beginsGrouping = firstExcludeClause;
++            term.beginsGrouping = firstExcludeClause ? 1 : 0;
+             excludeTerms.push(term);
+             firstExcludeClause = false;
+           }
+         }
+       }
+       if (lastIncludeTerm) {
+-        lastIncludeTerm.endsGrouping = true;
++        lastIncludeTerm.endsGrouping = 1;
+       }
+ 
+       // if we have any exclude terms:
+       // - we might need to add a "has a tag" clause if there were no explicit
+       //   inclusions.
+       // - extend the exclusions list in.
+       if (excludeTerms.length) {
+         // (we need to add has a tag)
+@@ -806,17 +806,17 @@ var TagFacetingFilter = {
+           value.str = "";
+           term.value = value;
+           term.op = Ci.nsMsgSearchOp.IsntEmpty;
+           term.booleanAnd = !showUntagged;
+           aTerms.push(term);
+         }
+ 
+         // (extend in the exclusions)
+-        excludeTerms[excludeTerms.length - 1].endsGrouping = true;
++        excludeTerms[excludeTerms.length - 1].endsGrouping = 1;
+         aTerms.push.apply(aTerms, excludeTerms);
+       }
+     }
+     return null;
+   },
+ 
+   onSearchStart(aCurState) {
+     // this becomes aKeywordMap; we want to start with an empty one
+@@ -1163,23 +1163,23 @@ var MessageTextFilter = {
+             term.attrib = tfDef.attrib;
+             value = term.value;
+             value.attrib = tfDef.attrib;
+             value.str = phrase;
+             term.value = value;
+             term.op = Ci.nsMsgSearchOp.Contains;
+             // AND for the group, but OR inside the group
+             term.booleanAnd = firstClause;
+-            term.beginsGrouping = firstClause;
++            term.beginsGrouping = firstClause ? 1 : 0;
+             aTerms.push(term);
+             firstClause = false;
+           }
+         }
+         if (term) {
+-          term.endsGrouping = true;
++          term.endsGrouping = 1;
+         }
+       }
+     }
+   },
+   getDefaults() {
+     let states = {};
+     for (let name in this._defaultStates) {
+       states[name] = this._defaultStates[name];
+diff --git a/mail/modules/SearchSpec.jsm b/mail/modules/SearchSpec.jsm
+--- a/mail/modules/SearchSpec.jsm
++++ b/mail/modules/SearchSpec.jsm
+@@ -165,27 +165,27 @@ SearchSpec.prototype = {
+         cloneTerm.customId = term.customId;
+         cloneTerm.op = term.op;
+         cloneTerm.booleanAnd = term.booleanAnd;
+         cloneTerm.matchAll = term.matchAll;
+         term = cloneTerm;
+         outTerms.push(term);
+       }
+       if (iTerm == 0) {
+-        term.beginsGrouping = true;
+-        term.endsGrouping = false;
++        term.beginsGrouping = 1;
++        term.endsGrouping = 0;
+         term.booleanAnd = true;
+       } else {
+-        term.beginsGrouping = false;
+-        term.endsGrouping = false;
++        term.beginsGrouping = 0;
++        term.endsGrouping = 0;
+       }
+       iTerm++;
+     }
+     if (term) {
+-      term.endsGrouping = true;
++      term.endsGrouping = 1;
+     }
+ 
+     return outTerms;
+   },
+ 
+   /**
+    * Normalize the provided list of terms so that all of the 'groups' in it are
+    *  ANDed together.  If any OR clauses are detected outside of a group, we
 diff --git a/mail/themes/linux/mail/filterDialog.css b/mail/themes/linux/mail/filterDialog.css
 --- a/mail/themes/linux/mail/filterDialog.css
 +++ b/mail/themes/linux/mail/filterDialog.css
@@ -303,7 +453,7 @@ diff --git a/mailnews/base/content/virtualFolderProperties.js b/mailnews/base/co
 diff --git a/mailnews/base/src/VirtualFolderWrapper.jsm b/mailnews/base/src/VirtualFolderWrapper.jsm
 --- a/mailnews/base/src/VirtualFolderWrapper.jsm
 +++ b/mailnews/base/src/VirtualFolderWrapper.jsm
-@@ -181,18 +181,19 @@ VirtualFolderWrapper.prototype = {
+@@ -181,18 +181,32 @@ VirtualFolderWrapper.prototype = {
      for (let term of aTerms) {
        if (condition) {
          condition += " ";
@@ -315,8 +465,21 @@ diff --git a/mailnews/base/src/VirtualFolderWrapper.jsm b/mailnews/base/src/Virt
 -      condition += term.booleanAnd ? "AND (" : "OR (";
 -      condition += term.termAsString + ")";
 +      condition += term.booleanAnd ? "AND " : "OR ";
-+      condition += term.beginsGrouping ? "[" : "(";
-+      condition += term.termAsString + (term.endsGrouping ? "]" : ")");
++      if (term.beginsGrouping == 0) {
++        condition += "(";
++      } else {
++        for (let i = 0; i < term.beginsGrouping; i++) {
++          condition += "[";
++        }
++      }
++      condition += term.termAsString;
++      if (term.endsGrouping == 0) {
++        condition += ")";
++      } else {
++        for (let i = 0; i < term.endsGrouping; i++) {
++          condition += "]";
++        }
++      }
      }
      this.searchString = condition;
    },
@@ -325,10 +488,34 @@ diff --git a/mailnews/base/src/VirtualFolderWrapper.jsm b/mailnews/base/src/Virt
     * @return the set of search terms that define this virtual folder as a
     *     string.  You may prefer to use |searchTerms| which converts them
     *     into a list of nsIMsgSearchTerms instead.
+diff --git a/mailnews/base/src/nsMsgIncomingServer.cpp b/mailnews/base/src/nsMsgIncomingServer.cpp
+--- a/mailnews/base/src/nsMsgIncomingServer.cpp
++++ b/mailnews/base/src/nsMsgIncomingServer.cpp
+@@ -1752,18 +1752,18 @@ nsresult nsMsgIncomingServer::ConfigureT
+     // get the list of search terms from the filter
+     nsTArray<RefPtr<nsIMsgSearchTerm>> searchTerms;
+     rv = newFilter->GetSearchTerms(searchTerms);
+     NS_ENSURE_SUCCESS(rv, rv);
+     uint32_t count = searchTerms.Length();
+     if (count > 1)  // don't need to group a single term
+     {
+       // beginGrouping the first term, and endGrouping the last term
+-      searchTerms[0]->SetBeginsGrouping(true);
+-      searchTerms[count - 1]->SetEndsGrouping(true);
++      searchTerms[0]->SetBeginsGrouping(1);
++      searchTerms[count - 1]->SetEndsGrouping(1);
+     }
+ 
+     // Create a new term, checking if the user set junk status. The term will
+     // search for junkscoreorigin != "user"
+     nsCOMPtr<nsIMsgSearchTerm> searchTerm;
+     rv = newFilter->CreateTerm(getter_AddRefs(searchTerm));
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
 diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
 --- a/mailnews/base/src/nsMsgUtils.cpp
 +++ b/mailnews/base/src/nsMsgUtils.cpp
-@@ -1603,31 +1603,35 @@ MsgTermListToString(nsTArray<RefPtr<nsIM
+@@ -1603,31 +1603,56 @@ MsgTermListToString(nsTArray<RefPtr<nsIM
    nsresult rv = NS_OK;
    for (nsIMsgSearchTerm* term : aTermList) {
      nsAutoCString stream;
@@ -337,8 +524,8 @@ diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
  
      bool booleanAnd;
      bool matchAll;
-+    bool beginsGrouping;
-+    bool endsGrouping;
++    uint32_t beginsGrouping;
++    uint32_t endsGrouping;
      term->GetBooleanAnd(&booleanAnd);
      term->GetMatchAll(&matchAll);
 +    term->GetBeginsGrouping(&beginsGrouping);
@@ -346,19 +533,42 @@ diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
      if (matchAll) {
        aOutString += "ALL";
        continue;
-     } else if (booleanAnd)
+-    } else if (booleanAnd)
 -      aOutString += "AND (";
-+      aOutString += beginsGrouping ? "AND [" : "AND (";
-     else
+-    else
 -      aOutString += "OR (";
-+      aOutString += beginsGrouping ? "OR [" : "OR (";
++    } else if (booleanAnd) {
++      if (beginsGrouping == 0) {
++        aOutString += "AND (";
++      } else {
++        aOutString += "AND " ;
++        for (uint32_t i = 0; i < beginsGrouping; i++) {
++          aOutString += "[" ;
++        }
++      }
++    } else {
++      if (beginsGrouping == 0) {
++        aOutString += "OR (";
++      } else {
++        aOutString += "OR " ;
++        for (uint32_t i = 0; i < beginsGrouping; i++) {
++          aOutString += "[" ;
++        }
++      }
++    }
  
      rv = term->GetTermAsString(stream);
      NS_ENSURE_SUCCESS(rv, rv);
  
      aOutString += stream;
 -    aOutString += ')';
-+    aOutString += endsGrouping ? ']' : ')';
++    if (endsGrouping == 0) {
++      aOutString += ")";
++    } else {
++      for (uint32_t i = 0; i < endsGrouping; i++) {
++        aOutString += "]" ;
++      }
++    }
    }
    return rv;
  }
@@ -367,6 +577,124 @@ diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
  #ifdef XP_WIN
    {
      char* endPtr;
+diff --git a/mailnews/db/gloda/modules/IndexMsg.jsm b/mailnews/db/gloda/modules/IndexMsg.jsm
+--- a/mailnews/db/gloda/modules/IndexMsg.jsm
++++ b/mailnews/db/gloda/modules/IndexMsg.jsm
+@@ -755,17 +755,17 @@ var GlodaMsgIndexer = {
+         this._indexingFolder
+       );
+       let nsMsgSearchAttrib = Ci.nsMsgSearchAttrib;
+       let nsMsgSearchOp = Ci.nsMsgSearchOp;
+ 
+       // first term: (GLODA_MESSAGE_ID_PROPERTY Is 0
+       let searchTerm = searchSession.createTerm();
+       searchTerm.booleanAnd = false; // actually don't care here
+-      searchTerm.beginsGrouping = true;
++      searchTerm.beginsGrouping = 1;
+       searchTerm.attrib = nsMsgSearchAttrib.Uint32HdrProperty;
+       searchTerm.op = nsMsgSearchOp.Is;
+       let value = searchTerm.value;
+       value.attrib = searchTerm.attrib;
+       value.status = 0;
+       searchTerm.value = value;
+       searchTerm.hdrProperty = GLODA_MESSAGE_ID_PROPERTY;
+       searchTerms.push(searchTerm);
+@@ -780,17 +780,17 @@ var GlodaMsgIndexer = {
+       value.status = GLODA_OLD_BAD_MESSAGE_ID;
+       searchTerm.value = value;
+       searchTerm.hdrProperty = GLODA_MESSAGE_ID_PROPERTY;
+       searchTerms.push(searchTerm);
+ 
+       //  third term: || GLODA_DIRTY_PROPERTY Isnt 0 )
+       searchTerm = searchSession.createTerm();
+       searchTerm.booleanAnd = false;
+-      searchTerm.endsGrouping = true;
++      searchTerm.endsGrouping = 1;
+       searchTerm.attrib = nsMsgSearchAttrib.Uint32HdrProperty;
+       searchTerm.op = nsMsgSearchOp.Isnt;
+       value = searchTerm.value;
+       value.attrib = searchTerm.attrib;
+       value.status = 0;
+       searchTerm.value = value;
+       searchTerm.hdrProperty = GLODA_DIRTY_PROPERTY;
+       searchTerms.push(searchTerm);
+@@ -860,33 +860,33 @@ var GlodaMsgIndexer = {
+         this._indexingFolder
+       );
+       let nsMsgSearchAttrib = Ci.nsMsgSearchAttrib;
+       let nsMsgSearchOp = Ci.nsMsgSearchOp;
+ 
+       // first term: (GLODA_MESSAGE_ID_PROPERTY > GLODA_FIRST_VALID_MESSAGE_ID-1
+       let searchTerm = searchSession.createTerm();
+       searchTerm.booleanAnd = false; // actually don't care here
+-      searchTerm.beginsGrouping = true;
++      searchTerm.beginsGrouping = 1;
+       searchTerm.attrib = nsMsgSearchAttrib.Uint32HdrProperty;
+       // use != 0 if we're allow pre-bad ids.
+       searchTerm.op = aAllowPreBadIds
+         ? nsMsgSearchOp.Isnt
+         : nsMsgSearchOp.IsGreaterThan;
+       let value = searchTerm.value;
+       value.attrib = searchTerm.attrib;
+       value.status = aAllowPreBadIds ? 0 : GLODA_FIRST_VALID_MESSAGE_ID - 1;
+       searchTerm.value = value;
+       searchTerm.hdrProperty = GLODA_MESSAGE_ID_PROPERTY;
+       searchTerms.push(searchTerm);
+ 
+       //  second term: && GLODA_DIRTY_PROPERTY Isnt kMessageFilthy)
+       searchTerm = searchSession.createTerm();
+       searchTerm.booleanAnd = true;
+-      searchTerm.endsGrouping = true;
++      searchTerm.endsGrouping = 1;
+       searchTerm.attrib = nsMsgSearchAttrib.Uint32HdrProperty;
+       searchTerm.op = nsMsgSearchOp.Isnt;
+       value = searchTerm.value;
+       value.attrib = searchTerm.attrib;
+       value.status = this.kMessageFilthy;
+       searchTerm.value = value;
+       searchTerm.hdrProperty = GLODA_DIRTY_PROPERTY;
+       searchTerms.push(searchTerm);
+diff --git a/mailnews/db/msgdb/test/unit/test_filter_enumerator.js b/mailnews/db/msgdb/test/unit/test_filter_enumerator.js
+--- a/mailnews/db/msgdb/test/unit/test_filter_enumerator.js
++++ b/mailnews/db/msgdb/test/unit/test_filter_enumerator.js
+@@ -45,17 +45,17 @@ function run_test() {
+     localAccountUtils.inboxFolder
+   );
+   let searchTerm = searchSession.createTerm();
+ 
+   // Create the following search term:
+   // (folderFlag & Mail && folderFlag != ImapBox) &&
+   //    msg property.gloda-id isEmpty
+ 
+-  searchTerm.beginsGrouping = true;
++  searchTerm.beginsGrouping = 1;
+   searchTerm.booleanAnd = true;
+   searchTerm.attrib = Ci.nsMsgSearchAttrib.FolderFlag;
+   searchTerm.op = Ci.nsMsgSearchOp.Is;
+   let value = searchTerm.value;
+   value.status = Ci.nsMsgFolderFlags.Mail;
+   value.attrib = Ci.nsMsgSearchAttrib.FolderFlag;
+   searchTerm.value = value;
+   searchTerms.push(searchTerm);
+@@ -63,17 +63,17 @@ function run_test() {
+   searchTerm = searchSession.createTerm();
+   searchTerm.booleanAnd = true;
+   searchTerm.attrib = Ci.nsMsgSearchAttrib.FolderFlag;
+   searchTerm.op = Ci.nsMsgSearchOp.Isnt;
+   value = searchTerm.value;
+   value.status = Ci.nsMsgFolderFlags.ImapBox;
+   value.attrib = Ci.nsMsgSearchAttrib.FolderFlag;
+   searchTerm.value = value;
+-  searchTerm.endsGrouping = true;
++  searchTerm.endsGrouping = 1;
+   searchTerms.push(searchTerm);
+ 
+   searchTerm = searchSession.createTerm();
+   searchTerm.booleanAnd = true;
+   searchTerm.attrib = Ci.nsMsgSearchAttrib.HdrProperty;
+   searchTerm.hdrProperty = "gloda-id";
+   searchTerm.op = Ci.nsMsgSearchOp.IsEmpty;
+   value = searchTerm.value;
 diff --git a/mailnews/search/content/FilterEditor.js b/mailnews/search/content/FilterEditor.js
 --- a/mailnews/search/content/FilterEditor.js
 +++ b/mailnews/search/content/FilterEditor.js
@@ -429,7 +757,7 @@ diff --git a/mailnews/search/content/FilterEditor.xhtml b/mailnews/search/conten
 diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/searchTerm.js
 --- a/mailnews/search/content/searchTerm.js
 +++ b/mailnews/search/content/searchTerm.js
-@@ -1,32 +1,114 @@
+@@ -1,32 +1,101 @@
  /* -*- Mode: Java; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -445,7 +773,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +// Array of search terms.
 +// Beware: There are more richlist items in `gSearchTermList` than there are search terms
 +// since the group headings are also richlistitems.
-+// Use `termIdxFromRichlistIdx()` and `richlistIdxFromTermIdx()`.
++// Use `termIdxFromRichlistIdx()` to get from the richlist to the term.
  var gSearchTerms = [];
 -var gSearchRemovedTerms = [];
 +
@@ -462,7 +790,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
  var gLessButtonTooltipText;
 -var gLoading = true;
 +
-+var verbose = false;
++var verbose = true;
  
  function searchTermContainer() {}
  
@@ -471,12 +799,17 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    return;
 +  }
 +  for (let i = 0; i < gSearchTerms.length; i++) {
-+    dump(
++    let beginsGrouping = gSearchTerms[i].obj.beginsGrouping
++      ? `begin(${gSearchTerms[i].obj.beginsGrouping})`
++      : "";
++    let endsGrouping = gSearchTerms[i].obj.endsGrouping
++      ? `end(${gSearchTerms[i].obj.endsGrouping})`
++      : "";
++      
++    console.log(
 +      `searchTerm: ${prefix} ${i}: ${
 +        gSearchTerms[i].obj.booleanAnd ? "and" : "or"
-+      } ${gSearchTerms[i].obj.beginsGrouping ? "begin" : ""} ${
-+        gSearchTerms[i].obj.endsGrouping ? "end" : ""
-+      } level ${gSearchTerms[i].level}\n`
++      } ${beginsGrouping} ${endsGrouping} level ${gSearchTerms[i].level}`
 +    );
 +  }
 +}
@@ -486,8 +819,9 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    gSearchTermList.getItemAtIndex(index).firstChild.localName == "radiogroup"
 +  ) {
 +    // The richlist item doesn't correspond to a term.
-+    // eslint-disable-next-line curly
-+    if (verbose) dump(`searchTerm: termIdxFromRichlistIdx ${index} -> -1\n`);
++    if (verbose) {
++      console.log(`searchTerm: termIdxFromRichlistIdx ${index} -> -1`);
++    }
 +    return -1;
 +  }
 +  let termIdx = index;
@@ -498,28 +832,9 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    }
 +  }
 +  if (verbose) {
-+    dump(`searchTerm: termIdxFromRichlistIdx ${index} -> ${termIdx}\n`);
++    console.log(`searchTerm: termIdxFromRichlistIdx ${index} -> ${termIdx}`);
 +  }
 +  return termIdx;
-+}
-+
-+function richlistIdxFromTermIdx(index) {
-+  // The first richlist item is the topmost and/or group.
-+  let richlistIdx = index + 1;
-+  for (let i = 0; i <= index; i++) {
-+    let searchTermObj = gSearchTerms[i].obj;
-+    if (!searchTermObj) {
-+      console.log("Something wrong here, term not there", i);
-+      continue;
-+    }
-+    if (searchTermObj.beginsGrouping) {
-+      richlistIdx++;
-+    }
-+  }
-+  if (verbose) {
-+    dump(`searchTerm: richlistIdxFromTermIdx ${index} -> ${richlistIdx}\n`);
-+  }
-+  return richlistIdx;
 +}
 +
 +function getLevel(index) {
@@ -536,7 +851,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  }
 +
 +  // eslint-disable-next-line curly
-+  if (verbose) dump(`searchTerm: getLevel ${index} -> ${level}\n`);
++  if (verbose) console.log(`searchTerm: getLevel ${index} -> ${level}`);
 +  return level;
 +}
 +
@@ -548,7 +863,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    get searchTerm() {
      return this.internalSearchTerm;
    },
-@@ -52,16 +134,18 @@ searchTermContainer.prototype = {
+@@ -52,16 +121,18 @@ searchTermContainer.prototype = {
        searchOperator.value = val.op;
      }
      if (searchValue) {
@@ -567,7 +882,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        return this.searchattribute.searchScope;
      }
      return undefined;
-@@ -283,74 +367,359 @@ function updateSearchTermsListbox(matchA
+@@ -286,74 +357,403 @@ function updateSearchTermsListbox(matchA
    for (let i = 0; i < searchAttributeList.length; i++) {
      searchAttributeList[i].setAttribute("disabled", matchAllValue);
      searchOperatorList[i].setAttribute("disabled", matchAllValue);
@@ -627,7 +942,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    richlistIdx = gSearchTermList.getRowCount();
 +  }
 +  // eslint-disable-next-line curly
-+  if (verbose) dump(`searchTerm: onMore inserting at ${richlistIdx}\n`);
++  if (verbose) console.log(`searchTerm: onMore inserting at ${richlistIdx}`);
 +
 +  createSearchRow(richlistIdx, gSearchScope, null, null, event != null);
 +
@@ -641,10 +956,12 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    // The previous item is a term.
 +    termIdx = prevTermIdx + 1;
 +    if (gSearchTerms[prevTermIdx].obj.endsGrouping) {
-+      gSearchTerms[prevTermIdx].obj.endsGrouping = false;
-+      gSearchTerms[termIdx].obj.endsGrouping = true;
++      gSearchTerms[termIdx].obj.endsGrouping += gSearchTerms[prevTermIdx].obj.endsGrouping;
++      gSearchTerms[prevTermIdx].obj.endsGrouping = 0;
 +      if (verbose) {
-+        dump(`searchTerm: onMore end moved ${prevTermIdx} to ${termIdx}\n`);
++        console.log(
++          `searchTerm: onMore end moved ${prevTermIdx} to ${termIdx}`
++        );
 +      }
 +    }
 +    // We'll initialize the .booleanAnd from the existing setting in the UI.
@@ -664,15 +981,19 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    while (loopIdx >= 0) {
 +      let itemChild = gSearchTermList.getItemAtIndex(loopIdx).firstChild;
 +      if (itemChild.localName == "radiogroup") {
-+        gSearchTerms[termIdx].obj.booleanAnd = itemChild.value == "and";
-+        if (verbose) {
-+          dump(
-+            `searchTerm: onMore ${termIdx} set to ${
-+              gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
-+            }\n`
-+          );
++        let groupLevel = itemChild.getAttribute("level");
++        groupLevel = parseInt(groupLevel);
++        if (groupLevel == gSearchTerms[termIdx].level - 1) {
++          gSearchTerms[termIdx].obj.booleanAnd = itemChild.value == "and";
++          if (verbose) {
++            console.log(
++              `searchTerm: onMore ${termIdx} set to ${
++                gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
++              }`
++            );
++          }
++          break;
 +        }
-+        break;
 +      }
 +      loopIdx--;
 +    }
@@ -687,16 +1008,16 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    termIdx = termIdxFromRichlistIdx(richlistIdx);
 +    if (richlistIdx > 1) {
 +      // First term following a group start which is not the top and/or group.
-+      gSearchTerms[termIdx].obj.beginsGrouping = true;
++      gSearchTerms[termIdx].obj.beginsGrouping = 1;
 +      // eslint-disable-next-line curly
-+      if (verbose) dump(`searchTerm: onMore begin ${termIdx}\n`);
++      if (verbose) console.log(`searchTerm: onMore begin ${termIdx}`);
 +
 +      // (***) Special case: Remove preceding end group marker.
 +      // We go from:
 +      // v == 4 && (x == 5 || y == 6) to
 +      // v == 4 && (x == 5 || y == 6 || (z == 7 && t == 8)),
 +      // hence, the (x == 5 || y == 6) group now ends at the )) and the previous
-+      // marker at the "y == 6" term needs to be removed.
++      // marker at the "y == 6" term needs to be transferred to the new term.
 +      // This needs to be undone when the group is removed.
 +      let prevTermIdx = termIdx - 1;
 +      if (
@@ -705,9 +1026,12 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        gSearchTerms[termIdx].level > gSearchTerms[prevTermIdx].level
 +      ) {
 +        if (verbose) {
-+          dump(`searchTerm: onGroup: removing end from ${prevTermIdx}\n`);
++          console.log(
++            `searchTerm: onGroup: transferring end from ${prevTermIdx} to ${termIdx}`
++          );
 +        }
-+        gSearchTerms[prevTermIdx].obj.endsGrouping = false;
++        gSearchTerms[termIdx].obj.endsGrouping += gSearchTerms[prevTermIdx].obj.endsGrouping;
++        gSearchTerms[prevTermIdx].obj.endsGrouping = 0;
 +      }
 +    }
 +
@@ -715,10 +1039,10 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    // which may not exists. For this case, we intialise with true.
 +    gSearchTerms[termIdx].obj.booleanAnd = true;
 +    if (verbose) {
-+      dump(
++      console.log(
 +        `searchTerm: onMore ${termIdx} preset to ${
 +          gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
-+        }\n`
++        }`
 +      );
 +    }
 +    let loopIdx = richlistIdx - 2;
@@ -730,10 +1054,10 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        if (level == groupLevel - 1) {
 +          gSearchTerms[termIdx].obj.booleanAnd = itemChild.value == "and";
 +          if (verbose) {
-+            dump(
++            console.log(
 +              `searchTerm: onMore ${termIdx} (this) set to ${
 +                gSearchTerms[termIdx].obj.booleanAnd ? "and" : "or"
-+              }\n`
++              }`
 +            );
 +          }
 +          break;
@@ -748,42 +1072,52 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        nextTermIdx == termIdx + 1 &&
 +        gSearchTerms[nextTermIdx].obj.beginsGrouping
 +      ) {
-+        gSearchTerms[nextTermIdx].obj.beginsGrouping = false;
-+        gSearchTerms[termIdx].obj.beginsGrouping = true;
++        if (gSearchTerms[nextTermIdx].level < gSearchTerms[termIdx].level) {
++          gSearchTerms[termIdx].obj.beginsGrouping += gSearchTerms[nextTermIdx].obj.beginsGrouping;
++        }
++        gSearchTerms[nextTermIdx].obj.beginsGrouping = 0;
 +        if (verbose) {
-+          dump(`searchTerm: onMore begin moved ${nextTermIdx} to ${termIdx}\n`);
++          console.log(
++            `searchTerm: onMore begin moved ${nextTermIdx} to ${termIdx}`
++          );
 +        }
 +        // Apply correct and/Or to the next term.
 +        gSearchTerms[nextTermIdx].obj.booleanAnd = groupAndOr;
 +        if (verbose) {
-+          dump(
++          console.log(
 +            `searchTerm: onMore ${termIdx} (next) set to ${
 +              gSearchTerms[nextTermIdx].obj.booleanAnd ? "and" : "or"
-+            }\n`
++            }`
 +          );
 +        }
-+      } else if (nextTermIdx == -1) {
++      }
++      if (nextTermIdx == -1) {
 +        // A group follows, so set end on our only entry.
++        // We need to increase to cater for the transfer from above.
 +        if (richlistIdx > 1) {
 +          if (verbose) {
-+            dump(`searchTerm: onMore end (before next group) ${termIdx}\n`);
++            console.log(
++              `searchTerm: onMore end (before next group) ${termIdx}`
++            );
 +          }
-+          gSearchTerms[termIdx].obj.endsGrouping = true;
++          gSearchTerms[termIdx].obj.endsGrouping++;
 +        }
 +      } else if (
 +        gSearchTerms[termIdx].level > gSearchTerms[nextTermIdx].level
 +      ) {
 +        if (verbose) {
-+          dump(`searchTerm: onMore end (before lower level) ${termIdx}\n`);
++          console.log(
++            `searchTerm: onMore end (before lower level) ${termIdx}`
++          );
 +        }
-+        gSearchTerms[termIdx].obj.endsGrouping = true;
++        gSearchTerms[termIdx].obj.endsGrouping++;
 +      }
 +    } catch (ex) {
 +      if (richlistIdx > 1) {
 +        if (verbose) {
-+          dump(`searchTerm: onMore end (at end) ${termIdx}\n`);
++          console.log(`searchTerm: onMore end (at end) ${termIdx}`);
 +        }
-+        gSearchTerms[termIdx].obj.endsGrouping = true;
++        gSearchTerms[termIdx].obj.endsGrouping++;
 +      }
 +    }
    }
@@ -810,18 +1144,19 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  let richlistIdx = getSearchRowIndexForElement(event.target);
 +
 +  // eslint-disable-next-line curly
-+  if (verbose) dump(`searchTerm: onLess removing at ${richlistIdx}\n`);
++  if (verbose) console.log(`searchTerm: onLess removing at ${richlistIdx}`);
 +
 +  let itemChild = gSearchTermList.getItemAtIndex(richlistIdx).firstChild;
 +  let entireGroup = false;
++  let endsGroupingToTransfer = 0;
 +  if (itemChild.localName == "radiogroup") {
 +    // We need to delete the entire group.
 +    entireGroup = true;
 +    let groupLevel = itemChild.getAttribute("level");
 +    groupLevel = parseInt(groupLevel);
 +    if (verbose) {
-+      dump(
-+        `searchTerm: onLess: removing entire group at ${richlistIdx} with level ${groupLevel}\n`
++      console.log(
++        `searchTerm: onLess: removing entire group at ${richlistIdx} with level ${groupLevel}`
 +      );
 +    }
 +
@@ -837,9 +1172,13 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      } else {
 +        let termIdx = termIdxFromRichlistIdx(currentIdx);
 +        level = gSearchTerms[termIdx].level;
++        if (level > groupLevel) {
++          endsGroupingToTransfer -= gSearchTerms[termIdx].obj.beginsGrouping;
++          endsGroupingToTransfer += gSearchTerms[termIdx].obj.endsGrouping;
++        }
 +      }
 +      if (verbose) {
-+        dump(`searchTerm: onLess: ${currentIdx} has level ${level}\n`);
++        console.log(`searchTerm: onLess: ${currentIdx} has level ${level}`);
 +      }
 +      if (level <= groupLevel) {
 +        break;
@@ -847,11 +1186,17 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      deleteToIdx = currentIdx;
 +      currentIdx++;
 +    }
++    if (verbose) {
++      console.log(
++        `searchTerm: onLess: Need to transfer ${endsGroupingToTransfer}`
++      );
++    }
 +
 +    // Nuke everythiung between that index downto where we started.
 +    for (let i = deleteToIdx; i > richlistIdx; i--) {
-+      // eslint-disable-next-line curly
-+      if (verbose) dump(`searchTerm: onLess: removing group member ${i}\n`);
++      if (verbose) {
++        console.log(`searchTerm: onLess: removing group member ${i}`);
++      }
 +      removeSearchRow(i);
 +    }
 +  } else {
@@ -863,32 +1208,45 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    ) {
 +      // Nothing to move, group has single entry.
 +      entireGroup = true;
-+      // eslint-disable-next-line curly
-+      if (verbose)
-+        dump(`searchTerm: onLess: removing last group member ${termIdx}\n`);
++      endsGroupingToTransfer = gSearchTerms[termIdx].obj.endsGrouping - 1;
++      if (verbose) {
++        console.log(
++          `searchTerm: onLess: removing last group member ${termIdx} transferring ${endsGroupingToTransfer}`
++        );
++      }
 +    } else if (gSearchTerms[termIdx].obj.endsGrouping) {
 +      if (termIdx - 1 >= 0) {
-+        gSearchTerms[termIdx - 1].obj.endsGrouping = true;
++        gSearchTerms[termIdx - 1].obj.endsGrouping += gSearchTerms[termIdx].obj.endsGrouping;
++        console.log(
++          `searchTerm: onLess: end(${gSearchTerms[termIdx - 1].obj.endsGrouping}) at ${termIdx - 1}`
++        );
 +      } else if (verbose) {
-+        dump("searchTerm: onLess: Logic error, trying to acces before front\n");
++        console.log(
++          "searchTerm: onLess: Logic error, trying to acces before front"
++        );
 +      }
 +    } else if (gSearchTerms[termIdx].obj.beginsGrouping) {
 +      if (termIdx + 1 < gSearchTerms.length) {
-+        gSearchTerms[termIdx + 1].obj.beginsGrouping = true;
++        gSearchTerms[termIdx + 1].obj.beginsGrouping += gSearchTerms[termIdx].obj.beginsGrouping;
++        console.log(
++          `searchTerm: onLess: begin(${gSearchTerms[termIdx + 1].obj.endsGrouping}) at ${termIdx + 1}`
++        );
 +      } else if (verbose) {
-+        dump("searchTerm: onLess: Logic error, trying to acces beyond end\n");
++        console.log(
++          "searchTerm: onLess: Logic error, trying to acces beyond end"
++        );
 +      }
 +    }
    }
  
 -  updateRemoveRowButton();
 +  // eslint-disable-next-line curly
-+  if (verbose) dump(`searchTerm: onLess: removing ${richlistIdx}\n`);
++  if (verbose) console.log(`searchTerm: onLess: removing ${richlistIdx}`);
 +  removeSearchRow(richlistIdx);
 +
 +  if (entireGroup) {
 +    // There's the special case [look for "(***) Special case" above]
-+    // where appending a group removed the end marker
++    // where appending a group transferred the end marker
 +    // of the preceding group, so repair this here.
 +    // Level 1 is not counted as group.
 +    // There is also nothing to repair if the group was in the middle of
@@ -917,9 +1275,10 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      (nextTermIdx == -1 ||
 +        gSearchTerms[prevTermIdx].level > gSearchTerms[nextTermIdx].level)
 +    ) {
-+      // eslint-disable-next-line curly
-+      if (verbose) dump(`searchTerm: onLess: adding end to ${prevTermIdx}\n`);
-+      gSearchTerms[prevTermIdx].obj.endsGrouping = true;
++      if (verbose) {
++        console.log(`searchTerm: onLess: adding end to ${prevTermIdx}`);
++      }
++      gSearchTerms[prevTermIdx].obj.endsGrouping += endsGroupingToTransfer;
 +    }
 +  }
 +
@@ -954,7 +1313,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    for (var i = 0; i < gSearchTerms.length; i++) {
      // don't set element attributes if XBL hasn't loaded
      if (!(gSearchTerms[i].obj.searchattribute.searchScope === undefined)) {
-@@ -364,165 +733,334 @@ function setSearchScope(scope) {
+@@ -367,165 +767,336 @@ function setSearchScope(scope) {
  
  function updateSearchAttributes() {
    for (var i = 0; i < gSearchTerms.length; i++) {
@@ -969,7 +1328,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  let richlistIdx = getSearchRowIndexForElement(event.target);
 +
 +  // eslint-disable-next-line curly
-+  if (verbose) dump(`searchTerm: booleanChanged at ${richlistIdx}\n`);
++  if (verbose) console.log(`searchTerm: booleanChanged at ${richlistIdx}`);
 +
 +  // When boolean changes, we have to update all the attributes on the search terms.
    var newBoolValue = event.target.getAttribute("value") == "and";
@@ -991,8 +1350,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +  let groupLevel = itemChild.getAttribute("level");
 +  groupLevel = parseInt(groupLevel);
 +  if (verbose) {
-+    dump(
-+      `searchTerm: booleanChanged: group at ${richlistIdx} with level ${groupLevel}\n`
++    console.log(
++      `searchTerm: booleanChanged: group at ${richlistIdx} with level ${groupLevel}`
 +    );
 +  }
 +
@@ -1006,8 +1365,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      if (level == groupLevel) {
 +        // Found the next group with the same level.
 +        if (verbose) {
-+          dump(
-+            `searchTerm: booleanChanged: group at ${currentIdx} has same level ${level}\n`
++          console.log(
++            `searchTerm: booleanChanged: group at ${currentIdx} has same level ${level}`
 +          );
 +        }
 +        break;
@@ -1016,7 +1375,9 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +      let termIdx = termIdxFromRichlistIdx(currentIdx);
 +      level = gSearchTerms[termIdx].level;
 +      if (verbose) {
-+        dump(`searchTerm: booleanChanged: ${termIdx} has level ${level}\n`);
++        console.log(
++          `searchTerm: booleanChanged: ${termIdx} has level ${level}`
++        );
 +      }
  
 -    searchTerm.booleanAnd = newBoolValue;
@@ -1038,8 +1399,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        // to it's left.
 +        if (!searchTerm.beginsGrouping) {
 +          if (verbose) {
-+            dump(
-+              `searchTerm: booleanChanged: setting ${termIdx} to ${newBoolValue}\n`
++            console.log(
++              `searchTerm: booleanChanged: setting ${termIdx} to ${newBoolValue}`
 +            );
 +          }
 +          searchTerm.booleanAnd = newBoolValue;
@@ -1055,8 +1416,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +        }
 +        if (searchTerm.beginsGrouping) {
 +          if (verbose) {
-+            dump(
-+              `searchTerm: booleanChanged: setting ${termIdx} to ${newBoolValue}\n`
++            console.log(
++              `searchTerm: booleanChanged: setting ${termIdx} to ${newBoolValue}`
 +            );
 +          }
 +          searchTerm.booleanAnd = newBoolValue;
@@ -1130,8 +1491,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
    searchTermObj.searchattribute = searchAttr;
    searchTermObj.searchoperator = searchOp;
    searchTermObj.searchvalue = searchVal;
-+  searchTermObj.beginsGrouping = false;
-+  searchTermObj.endsGrouping = false;
++  searchTermObj.beginsGrouping = 0;
++  searchTermObj.endsGrouping = 0;
 +  searchTermObj.booleanAnd = false;
  
    // now insert the new search term into our list of terms
@@ -1342,7 +1703,7 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        listcell.setAttribute("flex", cols[i].getAttribute("flex"));
      }
      let child = aChildren[i];
-@@ -536,68 +1074,61 @@ function constructRow(aChildren) {
+@@ -539,68 +1110,61 @@ function constructRow(aChildren) {
        listcell.appendChild(child);
      }
      listitem.appendChild(listcell);
@@ -1415,8 +1776,8 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
 +    gSearchTerms[0].initialized = true;
 +    gSearchTerms[0].obj.matchAll = true;
 +    gSearchTerms[0].obj.booleanAnd = false;
-+    gSearchTerms[0].obj.beginsGrouping = false;
-+    gSearchTerms[0].obj.endsGrouping = false;
++    gSearchTerms[0].obj.beginsGrouping = 0;
++    gSearchTerms[0].obj.endsGrouping = 0;
 +    // `gSearchTerms[0].obj.searchTerm` is set here, we should try to reset
 +    // the value which turns out to be quite tricky.
 +  }
@@ -1440,9 +1801,17 @@ diff --git a/mailnews/search/content/searchTerm.js b/mailnews/search/content/sea
        if (searchTerm) {
          gSearchTerms[i].obj.save();
        } else if (!gSearchTerms[i].initialized) {
-@@ -615,20 +1146,15 @@ function saveSearchTerms(searchTerms, te
+@@ -611,27 +1175,22 @@ function saveSearchTerms(searchTerms, te
+         searchTerm = termOwner.createTerm();
+         gSearchTerms[i].obj.saveTo(searchTerm);
+         // this might not be the right place for the term,
+         // but we need to make the array longer anyway
+         termOwner.appendTerm(searchTerm);
+       }
+       searchTerms[i] = searchTerm;
      } catch (ex) {
-       dump("** Error saving element " + i + ": " + ex + "\n");
+-      dump("** Error saving element " + i + ": " + ex + "\n");
++      console.log("** Error saving element " + i + ": " + ex + "");
      }
    }
    return searchTerms;
@@ -1501,6 +1870,31 @@ diff --git a/mailnews/search/public/nsIMsgFilter.idl b/mailnews/search/public/ns
      attribute Array<nsIMsgSearchTerm> searchTerms;
  
      attribute nsIMsgSearchScopeTerm scope;
+diff --git a/mailnews/search/public/nsIMsgSearchTerm.idl b/mailnews/search/public/nsIMsgSearchTerm.idl
+--- a/mailnews/search/public/nsIMsgSearchTerm.idl
++++ b/mailnews/search/public/nsIMsgSearchTerm.idl
+@@ -25,18 +25,19 @@ interface nsIMsgSearchTerm : nsISupports
+      * nothing to do the message headers, e.g., gloda-id.
+      * value.str will be compared with nsIMsgHdr::GetProperty(hdrProperty).
+      */
+     attribute ACString hdrProperty;
+ 
+     /// identifier for a custom id used for this term, if any.
+     attribute ACString customId;
+ 
+-    attribute boolean beginsGrouping;
+-    attribute boolean endsGrouping;
++    /// Number of groups begining/ending at this term.
++    attribute unsigned long beginsGrouping;
++    attribute unsigned long endsGrouping;
+ 
+     /**
+      * Match the value against one of the emails found in the incoming
+      * 2047-encoded string.
+      */
+     boolean matchRfc822String(in ACString aString, in string charset);
+     /**
+      * Match the current header value against the incoming 2047-encoded string.
 diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/nsMsgSearchTerm.h
 --- a/mailnews/search/public/nsMsgSearchTerm.h
 +++ b/mailnews/search/public/nsMsgSearchTerm.h
@@ -1513,8 +1907,8 @@ diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/n
    // boolean operator to be applied to this search term and the search term
    // which precedes it.
    nsMsgSearchBooleanOperator m_booleanOp;
-+  bool mBeginsGrouping;
-+  bool mEndsGrouping;
++  uint32_t mBeginsGrouping;
++  uint32_t mEndsGrouping;
  
    // user specified string for the name of the arbitrary header to be used in
    // the search only has a value when m_attribute = OtherHeader!!!!
@@ -1611,7 +2005,7 @@ diff --git a/mailnews/search/src/nsMsgFilter.cpp b/mailnews/search/src/nsMsgFilt
 diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsgFilterList.cpp
 --- a/mailnews/search/src/nsMsgFilterList.cpp
 +++ b/mailnews/search/src/nsMsgFilterList.cpp
-@@ -725,16 +725,27 @@ nsresult nsMsgFilterList::LoadTextFilter
+@@ -725,16 +725,30 @@ nsresult nsMsgFilterList::LoadTextFilter
  }
  
  // parse condition like "(subject, contains, fred) AND (body, isn't, "foo)")"
@@ -1621,14 +2015,17 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
  // which will get written out as (\"foo\\")\") and read in as ("foo\")"
  // ALL means match all messages.
 +static bool isModernBrace(const char* q) {
-+  size_t len = strlen(q);
 +  // ] at the end is a modern endsGrouping brace.
-+  if (len == 0) return true;
++  if (*q == 0) return true;
 +  // A "modern" brace ends a term so
 +  // " AND (" or " OR (" or " ALL (" must follow.
-+  if (strncmp(q, " AND ", 5) == 0) return q[5] == '(' || q[5] == '[';
-+  if (strncmp(q, " OR ", 4) == 0) return q[4] == '(' || q[4] == '[';
-+  if (strncmp(q, " ALL ", 5) == 0) return q[5] == '(' || q[5] == '[';
++  // First skip multiple closing groups.
++  const char* p = q;
++  while (*p == ']') p++;
++  if (*p == 0) return true;
++  if (strncmp(p, " AND ", 5) == 0) return p[5] == '(' || p[5] == '[';
++  if (strncmp(p, " OR ", 4) == 0) return p[4] == '(' || p[4] == '[';
++  if (strncmp(p, " ALL ", 5) == 0) return p[5] == '(' || p[5] == '[';
 +  return false;
 +}
  NS_IMETHODIMP nsMsgFilterList::ParseCondition(nsIMsgFilter* aFilter,
@@ -1639,7 +2036,7 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
    nsresult err = NS_OK;
    const char* curPtr = aCondition;
    if (!strcmp(aCondition, "ALL")) {
-@@ -742,32 +753,48 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
+@@ -742,39 +756,74 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
      newTerm->m_matchAll = true;
      aFilter->AppendTerm(newTerm);
      return NS_OK;
@@ -1648,20 +2045,29 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
    while (!done) {
      // insert code to save the boolean operator if there is one for this search
      // term....
-+    bool beginsGrouping = false;
-+    bool endsGrouping = false;
++    uint32_t beginsGrouping = false;
++    uint32_t endsGrouping = false;
      const char* openParen = PL_strchr(curPtr, '(');
 +    const char* openParen2 = PL_strchr(curPtr, '[');
 +    if (openParen2 && openParen) {
 +      // Found both, take the earlier one.
 +      if (openParen2 < openParen) {
 +        openParen = openParen2;
-+        beginsGrouping = true;
++        beginsGrouping = 1;
 +      }
 +    } else if (openParen2) {
 +      // Only found [, take it.
 +      openParen = openParen2;
-+      beginsGrouping = true;
++      beginsGrouping = 1;
++    }
++    if (beginsGrouping) {
++      const char* p = openParen + 1;
++      // Skip any more groups starting here.
++      while (*p == '[') {
++        beginsGrouping++;
++        openParen++;
++        p++;
++      }
 +    }
      const char* orTermPos = PL_strchr(
          curPtr, 'O');  // determine if an "OR" appears b4 the openParen...
@@ -1680,7 +2086,16 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
 -        else if (*curPtr == ')' && !inQuote) {
 +        else if (!inQuote && (*curPtr == ')' ||
 +                              (*curPtr == ']' && isModernBrace(curPtr + 1)))) {
-+          endsGrouping = *curPtr == ']';
++          if (*curPtr == ']') {
++            endsGrouping = 1;
++            const char* p = curPtr + 1;
++            // Skip any more groups ending here.
++            while (*p == ']') {
++              endsGrouping++;
++              curPtr++;
++              p++;
++            }
++          }
            foundEndTerm = true;
            break;
          } else if (*curPtr == '"')
@@ -1688,8 +2103,16 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
        }
        if (foundEndTerm) {
          int termLen = curPtr - openParen - 1;
++        if (endsGrouping > 1) termLen = termLen - (endsGrouping - 1);
          termDup = (char*)PR_Malloc(termLen + 1);
-@@ -785,16 +812,18 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
+         if (termDup) {
+           PL_strncpy(termDup, openParen + 1, termLen + 1);
+           termDup[termLen] = '\0';
+         } else {
+           err = NS_ERROR_OUT_OF_MEMORY;
+           break;
+         }
+@@ -785,16 +834,18 @@ NS_IMETHODIMP nsMsgFilterList::ParseCond
        RefPtr<nsMsgSearchTerm> newTerm = new nsMsgSearchTerm;
        // Invert nsMsgSearchTerm::EscapeQuotesInStr()
        for (char *to = termDup, *from = termDup;;) {
@@ -1708,7 +2131,7 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
      } else
        break;
    }
-@@ -1092,17 +1121,17 @@ nsresult nsMsgFilterList::ComputeArbitra
+@@ -1092,17 +1143,17 @@ nsresult nsMsgFilterList::ComputeArbitra
    nsCString arbitraryHeader;
    for (uint32_t index = 0; index < numFilters; index++) {
      rv = GetFilterAt(index, getter_AddRefs(filter));
@@ -1727,9 +2150,80 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
            m_arbitraryHeaders.Append(' ');
            m_arbitraryHeaders.Append(arbitraryHeader);
          }
+diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
+--- a/mailnews/search/src/nsMsgLocalSearch.cpp
++++ b/mailnews/search/src/nsMsgLocalSearch.cpp
+@@ -326,24 +326,24 @@ nsresult nsMsgSearchOfflineMail::Constru
+   nsMsgSearchBoolExpression* finalExpression = *aExpressionTree;
+ 
+   if (!finalExpression) finalExpression = new nsMsgSearchBoolExpression();
+ 
+   while (aStartPosInList < termCount) {
+     nsIMsgSearchTerm* pTerm = termList[aStartPosInList];
+     NS_ASSERTION(pTerm, "couldn't get term to match");
+ 
+-    bool beginsGrouping;
+-    bool endsGrouping;
++    uint32_t beginsGrouping;
++    uint32_t endsGrouping;
+     pTerm->GetBeginsGrouping(&beginsGrouping);
+     pTerm->GetEndsGrouping(&endsGrouping);
+ 
+     if (beginsGrouping) {
+       // temporarily turn off the grouping for our recursive call
+-      pTerm->SetBeginsGrouping(false);
++      pTerm->SetBeginsGrouping(0);
+       nsMsgSearchBoolExpression* innerExpression =
+           new nsMsgSearchBoolExpression();
+ 
+       // the first search term in the grouping is the one that holds the
+       // operator for how this search term should be joined with the expressions
+       // to it's left.
+       bool booleanAnd;
+       pTerm->GetBooleanAnd(&booleanAnd);
+@@ -352,17 +352,17 @@ nsresult nsMsgSearchOfflineMail::Constru
+       finalExpression = nsMsgSearchBoolExpression::AddExpressionTree(
+           finalExpression, innerExpression, booleanAnd);
+ 
+       // recursively process this inner expression
+       ConstructExpressionTree(termList, termCount, aStartPosInList,
+                               &finalExpression->m_rightChild);
+ 
+       // undo our damage
+-      pTerm->SetBeginsGrouping(true);
++      pTerm->SetBeginsGrouping(beginsGrouping);
+ 
+     } else {
+       finalExpression = nsMsgSearchBoolExpression::AddSearchTerm(
+           finalExpression, pTerm,
+           nullptr);  // add the term to the expression tree
+ 
+       if (endsGrouping) break;
+     }
 diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
 --- a/mailnews/search/src/nsMsgSearchTerm.cpp
 +++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -326,18 +326,18 @@ int32_t NS_MsgGetStatusValueFromName(cha
+ 
+ // Needed for DeStream method.
+ nsMsgSearchTerm::nsMsgSearchTerm() {
+   // initialize this to zero
+   m_value.attribute = 0;
+   m_value.u.priority = 0;
+   m_attribute = nsMsgSearchAttrib::Default;
+   m_operator = nsMsgSearchOp::Contains;
+-  mBeginsGrouping = false;
+-  mEndsGrouping = false;
++  mBeginsGrouping = 0;
++  mEndsGrouping = 0;
+   m_matchAll = false;
+ 
+   // valgrind warning during GC/java data check suggests
+   // m_booleanp needs to be initialized too.
+   m_booleanOp = nsMsgSearchBooleanOp::BooleanAND;
+ }
+ 
+ nsMsgSearchTerm::nsMsgSearchTerm(nsMsgSearchAttribValue attrib,
 @@ -380,19 +380,20 @@ NS_IMPL_ISUPPORTS(nsMsgSearchTerm, nsIMs
      *destPtr = '\0';
    }
@@ -1753,3 +2247,52 @@ diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsg
      if (m_value.utf8String.FindChar('"') != kNotFound) {
        char* escapedString =
            nsMsgSearchTerm::EscapeQuotesInStr(m_value.utf8String.get());
+@@ -1603,18 +1604,18 @@ nsMsgSearchTerm::GetHdrProperty(nsACStri
+ 
+ NS_IMETHODIMP
+ nsMsgSearchTerm::SetHdrProperty(const nsACString& aValue) {
+   m_hdrProperty = aValue;
+   ToLowerCaseExceptSpecials(m_hdrProperty);
+   return NS_OK;
+ }
+ 
+-NS_IMPL_GETSET(nsMsgSearchTerm, BeginsGrouping, bool, mBeginsGrouping)
+-NS_IMPL_GETSET(nsMsgSearchTerm, EndsGrouping, bool, mEndsGrouping)
++NS_IMPL_GETSET(nsMsgSearchTerm, BeginsGrouping, uint32_t, mBeginsGrouping)
++NS_IMPL_GETSET(nsMsgSearchTerm, EndsGrouping, uint32_t, mEndsGrouping)
+ 
+ //
+ // Certain possible standard values of a message database row also sometimes
+ // appear as header values. To prevent a naming collision, we use all
+ // lower case for the standard headers, and first capital when those
+ // same strings are requested as arbitrary headers. This routine is used
+ // when setting arbitrary headers.
+ //
+diff --git a/mailnews/search/test/unit/test_searchBoolean.js b/mailnews/search/test/unit/test_searchBoolean.js
+--- a/mailnews/search/test/unit/test_searchBoolean.js
++++ b/mailnews/search/test/unit/test_searchBoolean.js
+@@ -176,20 +176,20 @@ function run_test() {
+   }
+ 
+   gSearchSession.addScopeTerm(
+     Ci.nsMsgSearchScope.offlineMail,
+     localAccountUtils.inboxFolder
+   );
+   gSearchSession.registerListener(searchListener);
+   // I tried using capital "A" but something makes it lower case internally, so it failed
+-  addSearchTerm("a", true, false, true); // "(A"
+-  addSearchTerm("b", false, true, false); // " || B)"
+-  addSearchTerm("c", true, false, true); // " && (C"
+-  addSearchTerm("d", false, true, false); // " || D)"
++  addSearchTerm("a", 1, 0, true); // "(A"
++  addSearchTerm("b", 0, 1, false); // " || B)"
++  addSearchTerm("c", 1, 0, true); // " && (C"
++  addSearchTerm("d", 0, 1, false); // " || D)"
+ 
+   var copyListener = {
+     OnStartCopy() {},
+     OnProgress(aProgress, aProgressMax) {},
+     SetMessageKey(aKey) {
+       gHdr = localAccountUtils.inboxFolder.GetMessageHeader(aKey);
+     },
+     SetMessageId(aMessageId) {},
