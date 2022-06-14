@@ -225,6 +225,16 @@ fi
 echo
 echo "======================================================="
 echo "Starting the build"
+if [ "$UNAME" = "MINGW32_NT-6.2" ] && [ -d obj-x86_64-pc-mingw32 ]; then
+  echo
+  echo "======================================================="
+  echo "Deleting .rc and .res files"
+  cd obj-x86_64-pc-mingw32
+  # del /s is much faster than find.
+  /C/Windows/system32/cmd.exe /C"del/s *.rc"
+  /C/Windows/system32/cmd.exe /C"del/s *.res"
+  cd ..
+fi
 ./mach clobber
 ./mach build
 
