@@ -1,8 +1,21 @@
 #!/bin/sh
 
-if [ "$#" -ne 1 ] ; then
-  echo "Usage: $0 VERSION" >&2
+if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
+  echo "Usage: $0 VERSION [apply|noclobber]" >&2
   exit 1
+fi
+
+APPLY=""
+NOCLOBBER=""
+if [ "$#" -eq 2 ]; then
+  if [ "$2" = "apply" ]; then
+    APPLY="apply"
+  elif [ "$2" = "noclobber" ]; then
+    NOCLOBBER="noclobber"
+  else
+    echo "Usage: $0 VERSION [apply|noclobber]" >&2
+    exit 1
+  fi
 fi
 
 if ! [ -d thunderbird-patches ]; then
@@ -187,6 +200,13 @@ hg qpush -all
 hg qseries
 cd ..
 
+if [ "$APPLY" = "apply" ]; then
+  echo
+  echo "======================================================="
+  echo "Patches applied, exiting."
+  exit 0
+fi
+
 if [ -f ../mach_bootstrap_was_run_$VERSION ]; then
   echo
   echo "======================================================="
@@ -235,7 +255,17 @@ if [ "$UNAME" = "MINGW32_NT-6.2" ] && [ -d obj-x86_64-pc-mingw32 ]; then
   /C/Windows/system32/cmd.exe /C"del/s *.res"
   cd ..
 fi
-./mach clobber
+if [ "$NOCLOBBER" = "noclobber" ]; then
+  echo
+  echo "======================================================="
+  echo "NOT running clobber."
+else
+  echo
+  echo "======================================================="
+  echo "Running clobber."
+  ./mach clobber
+fi
+
 ./mach build
 
 echo
