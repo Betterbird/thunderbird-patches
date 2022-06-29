@@ -1,0 +1,239 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1656441150 -7200
+# Parent  4fb25472f3ef9a30e3b4470717a742e44640e210
+Feature: Multi-line tree follow-up: Allow threading again.
+
+diff --git a/layout/xul/tree/nsTreeBodyFrame.cpp b/layout/xul/tree/nsTreeBodyFrame.cpp
+--- a/layout/xul/tree/nsTreeBodyFrame.cpp
++++ b/layout/xul/tree/nsTreeBodyFrame.cpp
+@@ -2842,16 +2842,41 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+     result &= PaintBackgroundLayer(rowContext, aPresContext, aRenderingContext,
+                                    rowRect, aDirtyRect);
+   }
+ 
+   // Adjust the rect for its border and padding.
+   nsRect originalRowRect = rowRect;
+   AdjustForBorderPadding(rowContext, rowRect);
+ 
++  bool displayColspan = false;
++  bool indentColspan = false;
++  if (mIsMultiline) {
++    displayColspan = true;
++    PrefillPropertyArray(aRowIndex, nullptr);
++    nsAutoString properties;
++    mView->GetRowProperties(aRowIndex, properties);
++    nsTreeUtils::TokenizeProperties(properties, mScratchArray);
++    ComputedStyle* colspanContext =
++        GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeColspan());
++    if (colspanContext) {
++      const nsStyleDisplay* display = colspanContext->StyleDisplay();
++      if (display->mDisplay == StyleDisplay::None) {
++        displayColspan = false;
++      }
++    }
++    if (displayColspan) {
++      nsTreeColumn* primaryCol = mColumns->GetPrimaryColumn();
++      if (primaryCol) {
++        nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
++        multilineView->IsColspanCol(primaryCol, &indentColspan);
++      }
++    }
++  }
++
+   bool isSeparator = false;
+   mView->IsSeparator(aRowIndex, &isSeparator);
+   if (isSeparator) {
+     // The row is a separator.
+ 
+     nscoord primaryX = rowRect.x;
+     nsTreeColumn* primaryCol = mColumns->GetPrimaryColumn();
+     if (primaryCol) {
+@@ -2928,25 +2953,35 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+         if (isColspanCol) colspanCol = currCol;
+       }
+       nsRect cellRect;
+       rv = currCol->GetRect(this, rowRect.y, rowRect.height, &cellRect);
+       // Don't paint cells in hidden columns.
+       if (NS_FAILED(rv) || cellRect.width == 0) continue;
+ 
+       // Find cell to align with.
++      bool alignWith = false;
+       if (multilineView && xColspanIndent == -1) {
+-        bool alignWith = false;
+         multilineView->AlignWith(aRowIndex, currCol, &alignWith);
+         if (alignWith) xColspanIndent = cellRect.x;
+       }
+ 
+       if (OffsetForHorzScroll(cellRect, false)) {
+         cellRect.x += aPt.x;
+ 
++        if (displayColspan && alignWith && indentColspan) {
++          int32_t level;
++          mView->GetLevel(aRowIndex, &level);
++          nscoord alignColIndent = mIndentation * level;
++          // If it's intented, indent more by the width of the icon below.
++          alignColIndent += level ? nsPresContext::CSSPixelsToAppUnits(16) : 0;
++          cellRect.x += alignColIndent;
++          cellRect.width -= alignColIndent;
++        }
++
+         // for primary columns, use the row's vertical size so that the
+         // lines get drawn properly
+         nsRect checkRect = cellRect;
+         if (currCol->IsPrimary())
+           checkRect = nsRect(cellRect.x, originalRowRect.y, cellRect.width,
+                              originalRowRect.height);
+ 
+         nsRect dirtyRect;
+@@ -2957,46 +2992,24 @@ ImgDrawResult nsTreeBodyFrame::PaintRow(
+                         aRenderingContext, aDirtyRect, dummy, aPt, aBuilder);
+       }
+     }
+ 
+     // Did we find anything to align with? If not, draw at the front, how ugly
+     // :-(
+     if (xColspanIndent == -1) xColspanIndent = 0;
+ 
+-    if (mIsMultiline) {
+-      bool displayColspan = true;
+-      PrefillPropertyArray(aRowIndex, nullptr);
+-      nsAutoString properties;
+-      mView->GetRowProperties(aRowIndex, properties);
+-      nsTreeUtils::TokenizeProperties(properties, mScratchArray);
+-      ComputedStyle* colspanContext =
+-          GetPseudoComputedStyle(nsCSSAnonBoxes::mozTreeColspan());
+-      if (colspanContext) {
+-        const nsStyleDisplay* display = colspanContext->StyleDisplay();
+-        if (display->mDisplay == StyleDisplay::None) {
+-          displayColspan = false;
+-        }
+-      }
+-
+-      if (displayColspan) {
+-        nsTreeColumn* primaryCol = mColumns->GetPrimaryColumn();
+-        bool indentColspan = false;
+-        if (primaryCol) {
+-          nsCOMPtr<nsIMultilineTreeView> multilineView = do_QueryInterface(mView);
+-          multilineView->IsColspanCol(primaryCol, &indentColspan);
+-        }
+-        nsRect colspanRect(originalRowRect.x + xColspanIndent, originalRowRect.y,
+-                           originalRowRect.width - xColspanIndent, originalRowRect.height);
+-        nsRect dirtyRect;
+-        if (dirtyRect.IntersectRect(aDirtyRect, colspanRect)) {
+-          result &=
+-              PaintColspan(aRowIndex, colspanCol, indentColspan, colspanRect, aPresContext,
+-                           aRenderingContext, aDirtyRect, aPt, aBuilder);
+-        }
++    if (displayColspan) {
++      nsRect colspanRect(originalRowRect.x + xColspanIndent, originalRowRect.y,
++                         originalRowRect.width - xColspanIndent, originalRowRect.height);
++      nsRect dirtyRect;
++      if (dirtyRect.IntersectRect(aDirtyRect, colspanRect)) {
++        result &=
++            PaintColspan(aRowIndex, colspanCol, indentColspan, colspanRect, aPresContext,
++                         aRenderingContext, aDirtyRect, aPt, aBuilder);
+       }
+     }
+   }
+ 
+   return result;
+ }
+ 
+ ImgDrawResult nsTreeBodyFrame::PaintSeparator(int32_t aRowIndex,
+@@ -3387,19 +3400,19 @@ ImgDrawResult nsTreeBodyFrame::PaintCols
+     result &= PaintImage(aRowIndex, aColspanColumn, iconRect, aPresContext,
+                          aRenderingContext, aDirtyRect, remainingWidth, currX,
+                          aBuilder);
+   }
+ 
+   if (dirtyRect.IntersectRect(aDirtyRect, colspanRect)) {
+     colspanRect.x = currX;
+     colspanRect.width = remainingWidth;
+-    nscoord currX = 0;
++    nscoord dummy = 0;
+     result &= PaintText(aRowIndex, aColspanColumn, colspanRect, aPresContext,
+-                        aRenderingContext, aDirtyRect, currX);
++                        aRenderingContext, aDirtyRect, dummy);
+   }
+ 
+   return result;
+ }
+ 
+ ImgDrawResult nsTreeBodyFrame::PaintTwisty(
+     int32_t aRowIndex, nsTreeColumn* aColumn, const nsRect& aTwistyRect,
+     nsPresContext* aPresContext, gfxContext& aRenderingContext,
+diff --git a/toolkit/content/widgets/tree.js b/toolkit/content/widgets/tree.js
+--- a/toolkit/content/widgets/tree.js
++++ b/toolkit/content/widgets/tree.js
+@@ -230,28 +230,16 @@
+             this.style.MozBoxOrdinalGroup = "";
+             tree._ensureColumnOrder(tree.NATURAL_ORDER);
+           } else {
+             var colindex = event.originalTarget.getAttribute("colindex");
+             var column = tree.columns[colindex];
+             if (column) {
+               var element = column.element;
+               element.hidden = !element.hidden;
+-              // More hackery to switch off the thread column.
+-              if (tree.view instanceof Ci.nsIMultilineTreeView &&
+-                  tree.view.QueryInterface(Ci.nsIMultilineTreeView).isColspanCol(column)) {
+-                let threadCol = event.originalTarget.parentNode.querySelector('[colID="threadCol"]');
+-                if (element.hidden) {
+-                  // Switch off the threadCol as well.
+-                  threadCol.setAttribute("disabled", "true");
+-                  threadCol.removeAttribute("checked");
+-                } else {
+-                  threadCol.removeAttribute("disabled");
+-                }
+-              }
+             }
+           }
+         }
+       });
+     }
+ 
+     connectedCallback() {
+       if (this.delayConnectedCallback()) {
+@@ -283,39 +271,29 @@
+         if (!currElement.hasAttribute("ignoreincolumnpicker")) {
+           var popupChild = document.createXULElement("menuitem");
+           popupChild.setAttribute("type", "checkbox");
+           var columnName =
+             currElement.getAttribute("display") ||
+             currElement.getAttribute("label");
+           popupChild.setAttribute("label", columnName);
+           popupChild.setAttribute("colindex", currCol.index);
+-          popupChild.setAttribute("colID", currCol.id);
+           if (currElement.getAttribute("hidden") != "true") {
+             popupChild.setAttribute("checked", "true");
+           }
+-          if (tree.view instanceof Ci.nsIMultilineTreeView &&
+-              tree.view.QueryInterface(Ci.nsIMultilineTreeView).isMultiline()) {
+-            // Hack: After adding isThreadCol() to the IDL, the following should be replaced ...
+-            // if (tree.view.QueryInterface(Ci.nsIMultilineTreeView).isThreadCol(currCol)).
+-            if (currCol.id == "threadCol") {
+-              popupChild.setAttribute("disabled", "true");
+-            } else {
+-              popupChild.removeAttribute("disabled");
+-            }
+-          }
+-          // More hacks, this should go into the API.
++          // Multi-line hack, this should go into the API.
+           if (currCol.id == "subjectCol") {
+             let isMultiline = Services.prefs.getBoolPref("mail.pane_config.multiline_all", false);
+             if (isMultiline) {
+               popupChild.setAttribute("disabled", "true");
+             } else {
+               popupChild.removeAttribute("disabled");
+             }
+           }
++          // The subject can always be disabled to trigger multi-line view.
+           if (currCol.primary && currCol.id != "subjectCol") {
+             popupChild.setAttribute("disabled", "true");
+           }
+           if (currElement.hasAttribute("closemenu")) {
+             popupChild.setAttribute(
+               "closemenu",
+               currElement.getAttribute("closemenu")
+             );
