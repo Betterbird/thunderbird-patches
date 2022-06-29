@@ -43,7 +43,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option =" >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "    .label = Reintext oder HTML"     >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = O"                  >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "compose-send-plain-or-html-description = Falls keine Stilformatierungen verwendet werden, erfolgt die Verwendung von Reintext. Ansonsten wird nur HTML eingesetzt." >> localization\de\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\de\messenger\messengercompose\messengercompose.ftl
