@@ -53,3 +53,13 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "language-popup-label =" >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "    .value = Sprache:"  >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"     >> localization\de\messenger\preferences\preferences.ftl
+
+%lecho% "details-notification-incompatible-link = Mehr Information" >> localization\de\toolkit\about\aboutAddons.ftl
+
+:: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
+sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\de\messenger\messenger.ftl
+sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\de\messenger\messenger.ftl
+sed -i -e 's/spaces-pinned-button-menuitem-calendar/spaces-pinned-button-menuitem-calendar2/' localization\de\messenger\messenger.ftl
+sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-tasks2/' localization\de\messenger\messenger.ftl
+sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\de\messenger\messenger.ftl
+sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\de\messenger\messenger.ftl
