@@ -48,9 +48,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
 %lecho% "menuitem-recent-files ="          >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近のファイル…"         >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近のファイル..."         >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "context-menuitem-recent-files ="  >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近のファイルを添付する…" >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近のファイルを添付する..." >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
