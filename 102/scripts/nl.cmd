@@ -53,19 +53,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "language-popup-label =" >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .value = Taal:"     >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = T"     >> localization\nl\messenger\preferences\preferences.ftl
-
-%lecho% "details-notification-incompatible-link = Meer informatie" >> localization\nl\toolkit\about\aboutAddons.ftl
-
-:: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
-sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-calendar/spaces-pinned-button-menuitem-calendar2/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-tasks2/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\nl\messenger\messenger.ftl
-
-sed -i -e 's/spaces-toolbar-button-mail.title/spaces-toolbar-button-mail2.title/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-address-book.title/spaces-toolbar-button-address-book2.title/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-calendar.title/spaces-toolbar-button-calendar2.title/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-tasks.title/spaces-toolbar-button-tasks2.title/' localization\nl\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-chat.title/spaces-toolbar-button-chat2.title/' localization\nl\messenger\messenger.ftl
