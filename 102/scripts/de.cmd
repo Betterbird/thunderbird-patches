@@ -54,8 +54,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .value = Sprache:"  >> localization\de\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"     >> localization\de\messenger\preferences\preferences.ftl
 
-%lecho% "details-notification-incompatible-link = Mehr Information" >> localization\de\toolkit\about\aboutAddons.ftl
-
 :: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
 sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\de\messenger\messenger.ftl
 sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\de\messenger\messenger.ftl
