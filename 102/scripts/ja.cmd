@@ -8,7 +8,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
-%lecho% "<!ENTITY folderContextStartupFolder.label \"スタートアップフォルダ\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
+%lecho% "<!ENTITY folderContextStartupFolder.label \"起動フォルダー\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
 
 :: Original strings:
 :: <!ENTITY quickFilterBar.untagged.tooltip "Show messages with no tags">
@@ -28,13 +28,13 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
 %lecho% "menuitem-recent-files ="            >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近のファイル..."         >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近使用したファイル..."         >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "context-menuitem-recent-files ="    >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近のファイルを添付する..." >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近使用したファイルを添付..." >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
-%lecho% "<!ENTITY multilineAllFolders.label \"すべてのフォルダーでマルチラインビュー\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
+%lecho% "<!ENTITY multilineAllFolders.label \"すべてのフォルダーで複数行表示\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
 
 :: Original strings:
 :: compose-send-plain-or-html-option =

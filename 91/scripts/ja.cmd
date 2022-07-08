@@ -6,19 +6,19 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: <!ENTITY hdrOpenConversationButton1.label "Conversation">
 :: <!ENTITY hdrOpenConversationButton1.tooltip "Show conversation of this message">
 :: <!ENTITY hdrMenuForwardButton.label "Forward As">
-%lecho% "<!ENTITY hdrOpenConversationButton1.label \"会話\">" >> chrome\ja\locale\ja\messenger\msgHdrViewOverlay.dtd
+%lecho% "<!ENTITY hdrOpenConversationButton1.label \"スレッド\">" >> chrome\ja\locale\ja\messenger\msgHdrViewOverlay.dtd
 %lecho% "<!ENTITY hdrOpenConversationButton1.tooltip \"選択したメッセージのスレッドを表示します\">" >> chrome\ja\locale\ja\messenger\msgHdrViewOverlay.dtd
 %lecho% "<!ENTITY hdrMenuForwardButton.label \"転送\">" >> chrome\ja\locale\ja\messenger\msgHdrViewOverlay.dtd
 
 :: Original strings:
 :: <!ENTITY contextDecryptToFolder.label "Decrypt to Folder">
 :: <!ENTITY contextDecryptToFolder.accesskey "Y">
-%lecho% "<!ENTITY contextDecryptToFolder.label \"フォルダーの複合化\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
+%lecho% "<!ENTITY contextDecryptToFolder.label \"フォルダーの復号化\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
 %lecho% "<!ENTITY contextDecryptToFolder.accesskey \"Y\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
 :: decryptToFolder.title=Confirm Decrypt
 :: decryptToFolder.desc=This will decrypt messages to a folder which is not local. Are you sure you want to continue?
 :: decryptToFolder.dontAsk.label=Don't ask me again.
-%lecho% "decryptToFolder.title=複合化の確認" >> chrome\ja\locale\ja\messenger\messenger.properties
+%lecho% "decryptToFolder.title=復号化の確認" >> chrome\ja\locale\ja\messenger\messenger.properties
 %lecho% "decryptToFolder.desc=これはローカルではないフォルダーにメッセージを復号化するものです。本当にこれを実行してもよいですか？" >> chrome\ja\locale\ja\messenger\messenger.properties
 %lecho% "decryptToFolder.dontAsk.label=以後尋ねない" >> chrome\ja\locale\ja\messenger\messenger.properties
 
@@ -28,7 +28,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
-%lecho% "<!ENTITY folderContextStartupFolder.label \"スタートアップフォルダ\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
+%lecho% "<!ENTITY folderContextStartupFolder.label \"起動フォルダー\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
 
 :: Original strings:
 :: <!ENTITY quickFilterBar.untagged.tooltip "Show messages with no tags">
@@ -48,10 +48,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
 %lecho% "menuitem-recent-files ="          >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近のファイル..."         >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近使用したファイル..."         >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "context-menuitem-recent-files ="  >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近のファイルを添付する..." >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近使用したファイルを添付..." >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
-%lecho% "<!ENTITY multilineAllFolders.label \"すべてのフォルダーでマルチラインビュー\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
+%lecho% "<!ENTITY multilineAllFolders.label \"すべてのフォルダーで複数行表示\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
