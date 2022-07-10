@@ -14,6 +14,7 @@ wget http://ftp.mozilla.org/pub/thunderbird/candidates/91.8.0-candidates/build1/
 rm -f %~1.xpi
 
 :: Fix the manifest.
+sed -i -e 's/langpack-de@thunderbird.mozilla.org/langpack-de@betterbird.eu/' manifest.json
 sed -i -e 's/Language pack for Thunderbird/Language pack for Betterbird/' manifest.json
 
 :: Copy US branding
