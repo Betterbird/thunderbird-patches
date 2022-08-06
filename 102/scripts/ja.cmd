@@ -49,12 +49,5 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = プレーンテキスト形式または HTML 形式" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
-%lecho% "details-notification-incompatible-link = 詳細情報" >> localization\ja\toolkit\about\aboutAddons.ftl
-
-:: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
-sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\ja\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\ja\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-calendar/spaces-pinned-button-menuitem-calendar2/' localization\ja\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-tasks2/' localization\ja\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\ja\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\ja\messenger\messenger.ftl
+%lecho% "vcard-custom-header = Custom Properties" >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-custom-add = Add custom properties" >> localization\ja\messenger\addressbook\vcard.ftl

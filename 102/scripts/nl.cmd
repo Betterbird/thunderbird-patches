@@ -53,3 +53,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "language-popup-label =" >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .value = Taal:"     >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = T"     >> localization\nl\messenger\preferences\preferences.ftl
+
+%lecho% "vcard-custom-header = Custom Properties" >> localization\nl\messenger\addressbook\vcard.ftl
+%lecho% "vcard-custom-add = Add custom properties" >> localization\nl\messenger\addressbook\vcard.ftl
