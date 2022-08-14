@@ -49,5 +49,5 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = プレーンテキスト形式または HTML 形式" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
-%lecho% "vcard-custom-header = Custom Properties" >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-custom-add = Add custom properties" >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-custom-header = カスタムプロパティ" >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-custom-add = カスタムプロパティを追加" >> localization\ja\messenger\addressbook\vcard.ftl
