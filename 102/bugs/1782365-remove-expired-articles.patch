@@ -1,0 +1,332 @@
+
+# HG changeset patch
+# User Ping Chen <remotenonsense@gmail.com>
+# Date 1660739111 -7200
+# Node ID d592397ca1fdc8e87e2b24257001d50cc4077309
+# Parent  00f6f96b9f5259febd15df2e7faf4a271c63c259
+Bug 1782365 - Support removing all expired NNTP articles. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D153543
+
+diff --git a/mailnews/db/msgdb/public/nsIMsgDatabase.idl b/mailnews/db/msgdb/public/nsIMsgDatabase.idl
+--- a/mailnews/db/msgdb/public/nsIMsgDatabase.idl
++++ b/mailnews/db/msgdb/public/nsIMsgDatabase.idl
+@@ -81,17 +81,16 @@ typedef long nsMsgDBCommit;
+ [scriptable, uuid(15431853-e448-45dc-8978-9958bf74d9b7)]
+ interface nsMsgDBCommitType : nsISupports
+ {
+   const long kLargeCommit = 1;
+   const long kSessionCommit = 2;
+   const long kCompressCommit = 3;
+ };
+ 
+-[ref] native nsMsgKeyArrayRef(nsTArray<nsMsgKey>);
+ [ptr] native nsMsgKeyArrayPtr(nsTArray<nsMsgKey>);
+ 
+ /**
+  * A service to open mail databases and manipulate listeners automatically.
+  *
+  * The contract ID for this component is
+  * <tt>\@mozilla.org/msgDatabase/msgDBService;1</tt>.
+  */
+diff --git a/mailnews/news/public/nsIMsgNewsFolder.idl b/mailnews/news/public/nsIMsgNewsFolder.idl
+--- a/mailnews/news/public/nsIMsgNewsFolder.idl
++++ b/mailnews/news/public/nsIMsgNewsFolder.idl
+@@ -8,18 +8,16 @@
+ 
+ %{C++
+ #include "nsTArray.h"
+ %}
+ 
+ interface nsIMsgWindow;
+ interface nsINntpIncomingServer;
+ 
+-[ref] native nsMsgKeyArrayRef(nsTArray<nsMsgKey>);
+-
+ [scriptable, uuid(9a12c3a5-9de5-4c57-ace3-d51802b525a9)]
+ interface nsIMsgNewsFolder : nsISupports {
+   readonly attribute AString unicodeName;
+   /**|rawName| is an 8-bit string to represent the name of a newsgroup used by
+    * a news server. It's offered for the convenience of callers so that they
+    * don't have to convert |unicodeName| to the server-side name when
+    * communicating with a news server.  It's US-ASCII except for some
+    * 'stand-alone' Chinese news servers that use GB2312 for newsgroup names
+@@ -100,17 +98,17 @@ interface nsIMsgNewsFolder : nsISupports
+   readonly attribute ACString charset;
+ 
+   readonly attribute AUTF8String newsrcLine;
+   readonly attribute ACString optionLines;
+   readonly attribute ACString unsubscribedNewsgroupLines;
+   void SetNewsrcHasChanged(in boolean newsrcHasChanged);
+   void updateSummaryFromNNTPInfo(in long oldest, in long youngest, in long total);
+   void removeMessage(in nsMsgKey key);
+-  [noscript] void removeMessages(in nsMsgKeyArrayRef aMsgKeys);
++  void removeMessages(in Array<nsMsgKey> keys);
+   void cancelComplete();
+   void cancelFailed();
+ 
+   ACString getMessageIdForKey(in nsMsgKey key);
+ 
+   void getNextNMessages(in nsIMsgWindow aMsgWindow);
+   void notifyDownloadedLine(in string line, in nsMsgKey key);
+   void notifyFinishedDownloadinghdrs();
+diff --git a/mailnews/news/src/NntpChannel.jsm b/mailnews/news/src/NntpChannel.jsm
+--- a/mailnews/news/src/NntpChannel.jsm
++++ b/mailnews/news/src/NntpChannel.jsm
+@@ -13,16 +13,17 @@ XPCOMUtils.defineLazyModuleGetters(this,
+   MailServices: "resource:///modules/MailServices.jsm",
+   NntpUtils: "resource:///modules/NntpUtils.jsm",
+ });
+ 
+ /**
+  * A channel to interact with NNTP server.
+  * @implements {nsIChannel}
+  * @implements {nsIRequest}
++ * @implements {nsICacheEntryOpenCallback}
+  */
+ class NntpChannel {
+   QueryInterface = ChromeUtils.generateQI([
+     "nsIChannel",
+     "nsIRequest",
+     "nsICacheEntryOpenCallback",
+   ]);
+ 
+@@ -130,16 +131,25 @@ class NntpChannel {
+   open() {
+     throw Components.Exception(
+       "open not implemented",
+       Cr.NS_ERROR_NOT_IMPLEMENTED
+     );
+   }
+ 
+   asyncOpen(listener) {
++    this._logger.debug("asyncOpen", this.URI.spec);
++    this._listener = listener;
++    if (this.URI.spec.endsWith("?list-ids")) {
++      // Triggered by newsError.js.
++      let url = new URL(this.URI.spec);
++      this._removeExpired(decodeURIComponent(url.pathname.slice(1)));
++      return;
++    }
++
+     if (this._groupName && !this._server.containsNewsgroup(this._groupName)) {
+       let bundle = Services.strings.createBundle(
+         "chrome://messenger/locale/news.properties"
+       );
+       let result = Services.prompt.confirm(
+         null,
+         null,
+         bundle.formatStringFromName("autoSubscribeText", [this._groupName])
+@@ -153,17 +163,16 @@ class NntpChannel {
+ 
+     if (this._groupName && !this._articleNumber && !this._messageId) {
+       MailServices.mailSession.topmostMsgWindow.windowCommands.selectFolder(
+         this._server.findGroup(this._groupName).URI
+       );
+       return;
+     }
+ 
+-    this._listener = listener;
+     this._cacheEntry = null;
+     if (this.URI.spec.includes("?part=") || this.URI.spec.includes("&part=")) {
+       let converter = Cc["@mozilla.org/streamConverters;1"].getService(
+         Ci.nsIStreamConverterService
+       );
+       this._listener = converter.asyncConvertData(
+         "message/rfc822",
+         "*/*",
+@@ -302,9 +311,35 @@ class NntpChannel {
+         }
+         this._listener.onStopRequest(this, status);
+         this._newsFolder?.msgDatabase.Commit(
+           Ci.nsMsgDBCommitType.kSessionCommit
+         );
+       };
+     });
+   }
++
++  /**
++   * Fetch all the article keys on the server, then remove expired keys from the
++   * local folder.
++   * @param {string} groupName - The group to check.
++   */
++  _removeExpired(groupName) {
++    this._logger.debug("_removeExpired", groupName);
++    let newsFolder = this._server.findGroup(groupName);
++    let allKeys = new Set(newsFolder.msgDatabase.listAllKeys());
++    this._server.wrappedJSObject.withClient(client => {
++      this._listener.onStartRequest(this);
++      client.onOpen = () => {
++        client.listgroup(groupName);
++      };
++
++      client.onData = data => {
++        allKeys.delete(+data);
++      };
++
++      client.onDone = status => {
++        newsFolder.removeMessages([...allKeys]);
++        this._listener.onStopRequest(this, status);
++      };
++    });
++  }
+ }
+diff --git a/mailnews/news/src/NntpClient.jsm b/mailnews/news/src/NntpClient.jsm
+--- a/mailnews/news/src/NntpClient.jsm
++++ b/mailnews/news/src/NntpClient.jsm
+@@ -164,21 +164,29 @@ class NntpClient {
+               let msgId = this._newsFolder?.getMessageIdForKey(
+                 this._articleNumber
+               );
+               if (msgId) {
+                 uri += `&m=${encodeURIComponent(msgId)}`;
+               }
+               uri += `&k=${this._articleNumber}`;
+             }
+-            this._msgWindow.displayURIInMessagePane(
+-              uri,
+-              true,
+-              Services.scriptSecurityManager.getSystemPrincipal()
+-            );
++            if (this._newsFolder) {
++              uri += `&f=${this._newsFolder.URI}`;
++            }
++            try {
++              this._msgWindow.displayURIInMessagePane(
++                uri,
++                true,
++                Services.scriptSecurityManager.getSystemPrincipal()
++              );
++            } catch (e) {
++              // Can happen when copying an expired message to another folder.
++              this._logger.error(e);
++            }
+           }
+           this._actionDone(Cr.NS_ERROR_FAILURE);
+           return;
+         }
+     }
+ 
+     this._nextAction?.(res);
+   };
+@@ -218,20 +226,22 @@ class NntpClient {
+   }
+ 
+   /**
+    * Send a command to the socket.
+    * @param {string} str - The command string to send.
+    * @param {boolean} [suppressLogging=false] - Whether to suppress logging the str.
+    */
+   _sendCommand(str, suppressLogging) {
+-    if (this._socket.readyState !== "open") {
+-      this._logger.warn(
+-        `Failed to send "${str}" because socket state is ${this._socket.readyState}`
+-      );
++    if (this._socket.readyState != "open") {
++      if (str != "QUIT") {
++        this._logger.warn(
++          `Failed to send "${str}" because socket state is ${this._socket.readyState}`
++        );
++      }
+       return;
+     }
+     if (suppressLogging && AppConstants.MOZ_UPDATE_CHANNEL != "default") {
+       this._logger.debug(
+         "C: Logging suppressed (it probably contained auth information)"
+       );
+     } else {
+       // Do not suppress for non-release builds, so that debugging auth problems
+@@ -376,16 +386,27 @@ class NntpClient {
+       streamListener.onDataAvailable(null, inputStream, 0, data.length);
+     };
+     this.onDone = () => {
+       streamListener.onStopRequest(null, Cr.NS_OK);
+     };
+   }
+ 
+   /**
++   * Send LISTGROUP request to the server.
++   * @param {string} groupName - The group to request.
++   */
++  listgroup(groupName) {
++    this._actionModeReader(() => {
++      this._nextAction = this._actionListgroupResponse;
++      this._sendCommand(`LISTGROUP ${groupName}`);
++    });
++  }
++
++  /**
+    * Send `POST` request to the server.
+    * @param {nsIMsgWindow} msgWindow - The associated msg window.
+    */
+   post(msgWindow) {
+     this._msgWindow = msgWindow;
+     this._sendCommand("POST");
+     this._nextAction = this._actionHandlePost;
+   }
+@@ -479,16 +500,42 @@ class NntpClient {
+     if (res.status == 411) {
+       this._server.groupNotFound(null, this._currentGroupName, true);
+       return;
+     }
+     this._firstGroupCommand(res);
+   };
+ 
+   /**
++   * Consume the status line of LISTGROUP response.
++   */
++  _actionListgroupResponse = res => {
++    this._nextAction = this._actionListgroupDataResponse;
++    if (res.data) {
++      this._actionListgroupDataResponse(res);
++    }
++  };
++
++  /**
++   * Consume the multi-line data of LISTGROUP response.
++   * @param {NntpResponse} res - The server response.
++   */
++  _actionListgroupDataResponse = ({ data }) => {
++    this._lineReader.read(
++      data,
++      line => {
++        this.onData(line);
++      },
++      () => {
++        this._actionDone();
++      }
++    );
++  };
++
++  /**
+    * Send `XOVER` request to the server.
+    */
+   _actionXOver = res => {
+     let [count, low, high] = res.statusText.split(" ");
+     this._newsFolder.updateSummaryFromNNTPInfo(low, high, count);
+     let [start, end] = this._newsGroup.getArticlesRangeToFetch(
+       this._msgWindow,
+       Number(low),
+diff --git a/mailnews/news/src/nsNewsFolder.cpp b/mailnews/news/src/nsNewsFolder.cpp
+--- a/mailnews/news/src/nsNewsFolder.cpp
++++ b/mailnews/news/src/nsNewsFolder.cpp
+@@ -1347,17 +1347,18 @@ NS_IMETHODIMP nsMsgNewsFolder::RemoveMes
+     nsCOMPtr<nsIMsgDBHdr> msgHdr;
+     rv = mDatabase->GetMsgHdrForKey(key, getter_AddRefs(msgHdr));
+     NS_ENSURE_SUCCESS(rv, rv);
+     notifier->NotifyMsgsDeleted({msgHdr.get()});
+   }
+   return mDatabase->DeleteMessage(key, nullptr, false);
+ }
+ 
+-NS_IMETHODIMP nsMsgNewsFolder::RemoveMessages(nsTArray<nsMsgKey>& aMsgKeys) {
++NS_IMETHODIMP nsMsgNewsFolder::RemoveMessages(
++    const nsTArray<nsMsgKey>& aMsgKeys) {
+   nsresult rv = GetDatabase();
+   NS_ENSURE_SUCCESS(rv,
+                     rv);  // if GetDatabase succeeds, mDatabase will be non-null
+ 
+   // Notify listeners of a multiple message delete
+   nsCOMPtr<nsIMsgFolderNotificationService> notifier(
+       do_GetService(NS_MSGNOTIFICATIONSERVICE_CONTRACTID));
+ 
