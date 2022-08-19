@@ -48,6 +48,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = プレーンテキスト形式または HTML 形式" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\ja\messenger\messengercompose\messengercompose.ftl
-
-%lecho% "vcard-custom-header = カスタムプロパティ" >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-custom-add = カスタムプロパティを追加" >> localization\ja\messenger\addressbook\vcard.ftl

@@ -54,5 +54,8 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .value = Langue :"  >> localization\fr\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = L"     >> localization\fr\messenger\preferences\preferences.ftl
 
-%lecho% "vcard-custom-header = Propriétés personnalisées" >> localization\fr\messenger\addressbook\vcard.ftl
-%lecho% "vcard-custom-add = Ajouter des propriétés personnalisées" >> localization\fr\messenger\addressbook\vcard.ftl
+REM %lecho% "apply-current-view-to-menu ="        >> localization\fr\messenger\mailWidgets.ftl
+REM %lecho% "    .label = Appliquer la vue actuelle à…" >> localization\fr\messenger\mailWidgets.ftl
+REM %lecho% "threadpane-apply-changes-prompt-title = Appliquer les modifications ?" >> localization\fr\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-no-children-text = Appliquer la vue actuelle à dossier { $name } ?" >> localization\fr\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-with-children-text = Appliquer la vue actuelle à dossier { $name } et sous-dossiers ?" >> localization\fr\messenger\mailWidgets.ftl

@@ -57,6 +57,12 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "vcard-custom-header = Custom Properties" >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "vcard-custom-add = Add custom properties" >> localization\de\messenger\addressbook\vcard.ftl
 
+%lecho% "apply-current-view-to-menu ="                >> localization\de\messenger\mailWidgets.ftl
+%lecho% "    .label = Aktuelle Ansicht anwenden auf…" >> localization\de\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-title = Änderungen anwenden?" >> localization\de\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-no-children-text = Aktuelle Ansicht anwenden auf Ordner { $name }?" >> localization\de\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-with-children-text = Aktuelle Ansicht anwenden auf Ordner { $name } und alle Unterordner?" >> localization\de\messenger\mailWidgets.ftl
+
 :: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
 sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\de\messenger\messenger.ftl
 sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\de\messenger\messenger.ftl
