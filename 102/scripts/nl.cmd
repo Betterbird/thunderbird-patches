@@ -54,5 +54,8 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .value = Taal:"     >> localization\nl\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = T"     >> localization\nl\messenger\preferences\preferences.ftl
 
-%lecho% "vcard-custom-header = Custom Properties" >> localization\nl\messenger\addressbook\vcard.ftl
-%lecho% "vcard-custom-add = Add custom properties" >> localization\nl\messenger\addressbook\vcard.ftl
+%lecho% "apply-current-view-to-menu ="                >> localization\nl\messenger\mailWidgets.ftl
+%lecho% "    .label = Huidige weergave toepassen op…" >> localization\nl\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-title = Wijzigingen toepassen?" >> localization\nl\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-no-children-text = De weergave van de huidige map toepassen op { $name }?" >> localization\nl\messenger\mailWidgets.ftl
+%lecho% "threadpane-apply-changes-prompt-with-children-text = De weergave van de huidige map toepassen op { $name } en de submappen?" >> localization\nl\messenger\mailWidgets.ftl
