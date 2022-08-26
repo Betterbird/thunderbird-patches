@@ -46,6 +46,10 @@ fi
 VERSION="$1"
 UNAME=$(uname)
 UNAME_ARCH=$(uname -i)
+# Hack for Debian 11 Bullseye on Amazon EC2 image.
+if [[ "$UNAME" == *"$aarch64"* ]] && [ "$UNAME_ARCH" = "unknown" ]; then
+  UNAME_ARCH="aarch64"
+fi
 
 . ./thunderbird-patches/$VERSION/$VERSION.sh
 
