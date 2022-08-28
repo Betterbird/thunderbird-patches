@@ -12,7 +12,7 @@ Linux users follow these instructions:
 To build successfully on Linux, you need at least 16 GB of memory or swap space.
 We executed the steps successfully on a Ubuntu 20.04 cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk).
 Building for aarch64 (aka arm64) is also supported. You need to run the build on a aarch64 machine (which you can hire at Amazon EC2).
-Sadly `mach bootstrap` doesn't work on Linux/aarch64, the build script will tell you what to do.
+Sadly `./mach bootstrap` doesn't work on Linux/aarch64, the build script will tell you what to do.
 This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html).
 1. Prepare to install necessary dependencies: `sudo apt update`
 1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
@@ -61,7 +61,6 @@ Voilà. :heavy_check_mark: For subsequent builds you only need to repeat the las
 
 1. Pull `mozilla-esrNN` and `comm-esrNN`.
 (The `comm-esrNN` repo goes into the `mozilla-esrNN/comm/` subdirectory.)
-1. Copy `.mozconfig` into the `mozilla-esrNN` directory.
 1. Update to the versions noted in `NN/NN.sh`: `hg up -r <rev>`. The patches apply to exactly those revisions.
 1. Put `NN/series-M-C` into `mozilla-esrNN/.hg/patches`; rename `series-M-C` to `series`.
 1. Put `NN/series` into `mozilla-esrNN/comm/.hg/patches`.
@@ -69,8 +68,9 @@ Voilà. :heavy_check_mark: For subsequent builds you only need to repeat the las
 then move the ones ending in `*-m-c.patch` into `mozilla-esrNN/.hg/patches`.
 1. Fetch "quick-track" patches (see below).
 1. Apply the patches using `hg qpush -a`. This would fail if step 3 or 7 were omitted.
-1. Build normally using `mach build`.
-1. Build an installer using `mach package`.
+1. Copy `mozconfig` into the `mozilla-esrNN` directory.
+1. Build normally using `./mach build`.
+1. Build an installer using `./mach package`.
 
 Voilà. :heavy_check_mark:
 

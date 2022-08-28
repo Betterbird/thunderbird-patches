@@ -47,8 +47,11 @@ VERSION="$1"
 UNAME=$(uname)
 UNAME_ARCH=$(uname -i)
 # Hack for Debian 11 Bullseye on Amazon EC2 image.
-if [[ "$UNAME" == *"$aarch64"* ]] && [ "$UNAME_ARCH" = "unknown" ]; then
+if [[ "$UNAME" == *"aarch64"* ]] && [ "$UNAME_ARCH" = "unknown" ]; then
   UNAME_ARCH="aarch64"
+fi
+if [[ "$UNAME" == *"MSYS_NT"* ]]; then
+  UNAME="Windows"
 fi
 
 . ./thunderbird-patches/$VERSION/$VERSION.sh
@@ -81,30 +84,6 @@ else
   echo "Cloning $COMM_REPO"
   cd $MOZILLA_DIR
   hg clone $COMM_REPO comm
-fi
-
-if [ "$UNAME" = "Linux" ]; then
-  if [ "$UNAME_ARCH" = "x86_64" ]; then
-    echo
-    echo "======================================================="
-    echo "Copying mozconfig-Linux"
-    cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-  elif [ "$UNAME_ARCH" = "aarch64" ]; then
-    echo
-    echo "======================================================="
-    echo "Copying mozconfig-Linux-aarch64"
-    cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
-  fi
-elif [ "$UNAME" = "Darwin" ]; then
-  echo
-  echo "======================================================="
-  echo "Copying mozconfig-Mac"
-  cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
-elif [ "$UNAME" = "MINGW32_NT-6.2" ]; then
-  echo
-  echo "======================================================="
-  echo "Copying mozconfig for Windows"
-  cp ../thunderbird-patches/$VERSION/mozconfig mozconfig
 fi
 
 if [ "$UNAME" = "Linux" ] || [ "$UNAME" = "Darwin" ]; then
@@ -246,10 +225,34 @@ else
   fi
 fi
 
+if [ "$UNAME" = "Linux" ]; then
+  if [ "$UNAME_ARCH" = "x86_64" ]; then
+    echo
+    echo "======================================================="
+    echo "Copying mozconfig-Linux"
+    cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
+  elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    echo
+    echo "======================================================="
+    echo "Copying mozconfig-Linux-aarch64"
+    cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
+  fi
+elif [ "$UNAME" = "Darwin" ]; then
+  echo
+  echo "======================================================="
+  echo "Copying mozconfig-Mac"
+  cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
+elif [ "$UNAME" = "Windows" ]; then
+  echo
+  echo "======================================================="
+  echo "Copying mozconfig for Windows"
+  cp ../thunderbird-patches/$VERSION/mozconfig mozconfig
+fi
+
 echo
 echo "======================================================="
 echo "Starting the build"
-if [ "$UNAME" = "MINGW32_NT-6.2" ] && [ -d obj-x86_64-pc-mingw32 ]; then
+if [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-mingw32 ]; then
   echo
   echo "======================================================="
   echo "Deleting .rc and .res files"
@@ -295,7 +298,7 @@ elif [ "$UNAME" = "Darwin" ]; then
   echo "======================================================="
   echo "Find you disk image here"
   ls  $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
-elif [ "$UNAME" = "MINGW32_NT-6.2" ]; then
+elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"
