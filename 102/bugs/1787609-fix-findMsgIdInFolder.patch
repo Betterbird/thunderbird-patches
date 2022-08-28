@@ -1,0 +1,141 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1661730721 -7200
+# Parent  2ece93ee33b51bcba43ae0e3f267e914523a2a47
+Bug 1787609 - Fix findMsgIdInFolder(): Tolerate missing MSF and close database after use. Related backend changes.
+
+diff --git a/mail/modules/MailUtils.jsm b/mail/modules/MailUtils.jsm
+--- a/mail/modules/MailUtils.jsm
++++ b/mail/modules/MailUtils.jsm
+@@ -616,19 +616,24 @@ var MailUtils = {
+    * @param {nsIMsgFolder} folder - The folder to check.
+    * @returns {nsIMsgDBHdr}
+    */
+   findMsgIdInFolder(msgId, folder) {
+     let msgHdr;
+ 
+     // Search in folder.
+     if (!folder.isServer) {
+-      msgHdr = folder.msgDatabase.getMsgHdrForMessageID(msgId);
+-      if (msgHdr) {
+-        return msgHdr;
++      try {
++        msgHdr = folder.msgDatabase.getMsgHdrForMessageID(msgId);
++        folder.closeDBIfFolderNotOpen();
++        if (msgHdr) {
++          return msgHdr;
++        }
++      } catch (ex) {
++        Cu.reportError(`Database for ${folder.name} not accessible`);
+       }
+     }
+ 
+     // Search subfolders recursively.
+     for (let currentFolder of folder.subFolders) {
+       msgHdr = this.findMsgIdInFolder(msgId, currentFolder);
+       if (msgHdr) {
+         return msgHdr;
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -549,16 +549,19 @@ interface nsIMsgFolder : nsISupports {
+    * @exception NS_MSG_ERROR_FOLDER_SUMMARY_MISSING If the database does not
+    *                         exist.
+    * @exception NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE If the database contains
+    *                         out of date information.
+    * @see nsIMsgFolder::getDBFolderInfoAndDB.
+    */
+   attribute nsIMsgDatabase msgDatabase;
+ 
++  /// Close the database if not open in folder.
++  void closeDBIfFolderNotOpen();
++
+   /// Does the folder have a local reference to the msgDatabase?
+   readonly attribute boolean databaseOpen;
+ 
+   /**
+    * Get the backup message database, used in reparsing. This database must
+    * be created first using closeAndBackupFolderDB()
+    *
+    * @return   backup message database
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -4871,26 +4871,28 @@ nsresult nsMsgDBFolder::SetWarnFilterCha
+   return prefBranch->SetBoolPref(PREF_MAIL_WARN_FILTER_CHANGED, aVal);
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::NotifyCompactCompleted() {
+   NS_ASSERTION(false, "should be overridden by child class");
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
+-nsresult nsMsgDBFolder::CloseDBIfFolderNotOpen() {
++NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFolderNotOpen() {
+   nsresult rv;
+   nsCOMPtr<nsIMsgMailSession> session =
+       do_GetService(NS_MSGMAILSESSION_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+   bool folderOpen;
+   session->IsFolderOpenInWindow(this, &folderOpen);
+   if (!folderOpen &&
+-      !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox)))
++      !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox))) {
++    if (mDatabase) mDatabase->ForceClosed();
+     SetMsgDatabase(nullptr);
++  }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetSortOrder(int32_t order) {
+   NS_ASSERTION(false, "not implemented");
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -184,17 +184,16 @@ class nsMsgDBFolder : public nsSupportsW
+   nsresult GetPromptPurgeThreshold(bool* aPrompt);
+   nsresult GetPurgeThreshold(int32_t* aThreshold);
+   nsresult ApplyRetentionSettings(bool deleteViaFolder);
+   MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult AddMarkAllReadUndoAction(
+       nsIMsgWindow* msgWindow, nsMsgKey* thoseMarked, uint32_t numMarked);
+ 
+   nsresult PerformBiffNotifications(
+       void);  // if there are new, non spam messages, do biff
+-  nsresult CloseDBIfFolderNotOpen();
+ 
+   // Helper function for Move code to call to update the MRU and MRM time.
+   void UpdateTimestamps(bool allowUndo);
+   void SetMRUTime();
+   void SetMRMTime();
+   /**
+    * Clear all processing flags, presumably because message keys are no longer
+    * valid.
+diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+--- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
++++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+@@ -1200,18 +1200,21 @@ nsresult nsMsgDatabase::CheckForErrors(n
+         NS_WARNING("Forcing a reparse presumably because key limit reached");
+         err = NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE;
+       }
+     }
+     if (NS_FAILED(err) && !m_leaveInvalidDB) deleteInvalidDB = true;
+   } else if (err != NS_MSG_ERROR_FOLDER_SUMMARY_MISSING) {
+     // No point declaring it out-of-date and trying to delete it
+     // if it's missing.
++    // We get here with NS_ERROR_FAILURE when Mork can't open the
++    // file due to too many open files. In this case there is no
++    // point to blow away the MSF file.
+     err = NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE;
+-    deleteInvalidDB = true;
++    if (!m_leaveInvalidDB) deleteInvalidDB = true;
+   }
+ 
+   if (deleteInvalidDB) {
+     // this will make the db folder info release its ref to the mail db...
+     m_dbFolderInfo = nullptr;
+     ForceClosed();
+     if (err == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE)
+       summaryFile->Remove(false);
