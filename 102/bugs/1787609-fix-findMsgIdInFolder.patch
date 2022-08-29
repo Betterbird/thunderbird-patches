@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1661730721 -7200
-# Parent  2ece93ee33b51bcba43ae0e3f267e914523a2a47
+# Date 1661767718 -7200
+# Parent  dae64d5d61f842878d3bb16c6bd4eb3db1ef744c
 Bug 1787609 - Fix findMsgIdInFolder(): Tolerate missing MSF and close database after use. Related backend changes.
 
 diff --git a/mail/modules/MailUtils.jsm b/mail/modules/MailUtils.jsm
 --- a/mail/modules/MailUtils.jsm
 +++ b/mail/modules/MailUtils.jsm
-@@ -616,19 +616,24 @@ var MailUtils = {
+@@ -614,19 +614,24 @@ var MailUtils = {
     * @param {nsIMsgFolder} folder - The folder to check.
     * @returns {nsIMsgDBHdr}
     */
@@ -21,7 +21,7 @@ diff --git a/mail/modules/MailUtils.jsm b/mail/modules/MailUtils.jsm
 -        return msgHdr;
 +      try {
 +        msgHdr = folder.msgDatabase.getMsgHdrForMessageID(msgId);
-+        folder.closeDBIfFolderNotOpen();
++        folder.closeDBIfFolderNotOpen(true);
 +        if (msgHdr) {
 +          return msgHdr;
 +        }
@@ -48,7 +48,7 @@ diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsg
    attribute nsIMsgDatabase msgDatabase;
  
 +  /// Close the database if not open in folder.
-+  void closeDBIfFolderNotOpen();
++  void closeDBIfFolderNotOpen(in boolean forceClosed);
 +
    /// Does the folder have a local reference to the msgDatabase?
    readonly attribute boolean databaseOpen;
@@ -61,6 +61,44 @@ diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsg
 diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
 --- a/mailnews/base/src/nsMsgDBFolder.cpp
 +++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -2025,17 +2025,17 @@ nsMsgDBFolder::GetStringProperty(const c
+       nsCOMPtr<nsIMsgDatabase> db;
+       bool exists;
+       rv = dbPath->Exists(&exists);
+       if (NS_FAILED(rv) || !exists) return NS_MSG_ERROR_FOLDER_MISSING;
+       bool weOpenedDB = !mDatabase;
+       rv = GetDBFolderInfoAndDB(getter_AddRefs(folderInfo), getter_AddRefs(db));
+       if (NS_SUCCEEDED(rv))
+         rv = folderInfo->GetCharProperty(propertyName, propertyValue);
+-      if (weOpenedDB) CloseDBIfFolderNotOpen();
++      if (weOpenedDB) CloseDBIfFolderNotOpen(false);
+     }
+   }
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBFolder::SetStringProperty(const char* propertyName,
+                                  const nsACString& propertyValue) {
+@@ -4406,17 +4406,17 @@ nsresult nsMsgDBFolder::ApplyRetentionSe
+       if (mDatabase)
+         rv = mDatabase->ApplyRetentionSettings(retentionSettings,
+                                                deleteViaFolder);
+     }
+   }
+   // we don't want applying retention settings to keep the db open, because
+   // if we try to purge a bunch of folders, that will leave the dbs all open.
+   // So if we opened the db, close it.
+-  if (weOpenedDB) CloseDBIfFolderNotOpen();
++  if (weOpenedDB) CloseDBIfFolderNotOpen(false);
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBFolder::DeleteMessages(nsTArray<RefPtr<nsIMsgDBHdr>> const& messages,
+                               nsIMsgWindow* msgWindow, bool deleteStorage,
+                               bool isMove, nsIMsgCopyServiceListener* listener,
+                               bool allowUndo) {
 @@ -4871,26 +4871,28 @@ nsresult nsMsgDBFolder::SetWarnFilterCha
    return prefBranch->SetBoolPref(PREF_MAIL_WARN_FILTER_CHANGED, aVal);
  }
@@ -71,7 +109,7 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
  }
  
 -nsresult nsMsgDBFolder::CloseDBIfFolderNotOpen() {
-+NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFolderNotOpen() {
++NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFolderNotOpen(bool aForceClosed) {
    nsresult rv;
    nsCOMPtr<nsIMsgMailSession> session =
        do_GetService(NS_MSGMAILSESSION_CONTRACTID, &rv);
@@ -81,7 +119,7 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
    if (!folderOpen &&
 -      !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox)))
 +      !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox))) {
-+    if (mDatabase) mDatabase->ForceClosed();
++    if (aForceClosed && mDatabase) mDatabase->ForceClosed();
      SetMsgDatabase(nullptr);
 +  }
    return NS_OK;
@@ -139,3 +177,44 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
      ForceClosed();
      if (err == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE)
        summaryFile->Remove(false);
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -1230,17 +1230,17 @@ nsMsgLocalMailFolder::OnCopyCompleted(ns
+ 
+   if (mCopyState && !mCopyState->m_newMsgKeywords.IsEmpty() &&
+       mCopyState->m_newHdr) {
+     AddKeywordsToMessages({&*mCopyState->m_newHdr},
+                           mCopyState->m_newMsgKeywords);
+   }
+   if (moveCopySucceeded && mDatabase) {
+     mDatabase->SetSummaryValid(true);
+-    (void)CloseDBIfFolderNotOpen();
++    (void)CloseDBIfFolderNotOpen(false);
+   }
+ 
+   delete mCopyState;
+   mCopyState = nullptr;
+   nsCOMPtr<nsIMsgCopyService> copyService =
+       do_GetService(NS_MSGCOPYSERVICE_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+   return copyService->NotifyCompletion(
+@@ -3065,17 +3065,17 @@ nsMsgLocalMailFolder::SetCheckForNewMess
+ 
+ NS_IMETHODIMP
+ nsMsgLocalMailFolder::NotifyCompactCompleted() {
+   mExpungedBytes = 0;
+   m_newMsgs.Clear();  // if compacted, m_newMsgs probably aren't valid.
+   // if compacted, processing flags probably also aren't valid.
+   ClearProcessingFlags();
+   (void)RefreshSizeOnDisk();
+-  (void)CloseDBIfFolderNotOpen();
++  (void)CloseDBIfFolderNotOpen(false);
+   NotifyFolderEvent(kCompactCompleted);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgLocalMailFolder::Shutdown(bool shutdownChildren) {
+   mInitialized = false;
+   return nsMsgDBFolder::Shutdown(shutdownChildren);
+ }
