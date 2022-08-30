@@ -6,7 +6,7 @@ Used on an aarch64 Amazon EC2 instance with Debian 11 (20220816-1109):
 Choose: en_US.UTF-8 UTF-8<br>
 Then: en_US.UTF-8<br>
 `sudo dpkg-reconfigure tzdata`<br>
-Set to Berlin<br>
+Set to Berlin or Madrid (to match other Betterbird builds)<br>
 `sudo apt upgrade`
 
 INSTALL APT PACKAGES:
