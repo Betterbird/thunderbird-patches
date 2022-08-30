@@ -1,14 +1,12 @@
-Most recent build instructions for building aarch64 on an aarch64 Debian Bullseye instance are as follows. Used on an aarch64 Amazon EC2 instance:
-debian-11-arm64-20220816-1109-34ede06f-9465-483a-a16a-a2e2c4bf37bb
-ami-06a42efd7beb3d694
-Debian 11 (20220816-1109)
+Most recent build instructions for building aarch64 on an aarch64 Debian 11 "Bullseye" instance are as follows.
+Used on an aarch64 Amazon EC2 instance with Debian 11 (20220816-1109):
 
-`sudo apt update`
-`sudo dpkg-reconfigure locales`
-Choose: en_US.UTF-8 UTF-8
-Then: en_US.UTF-8
-`sudo dpkg-reconfigure tzdata`
-Set to Berlin
+`sudo apt update`<br>
+`sudo dpkg-reconfigure locales`<br>
+Choose: en_US.UTF-8 UTF-8<br>
+Then: en_US.UTF-8<br>
+`sudo dpkg-reconfigure tzdata`<br>
+Set to Berlin<br>
 `sudo apt upgrade`
 
 INSTALL APT PACKAGES:
@@ -28,8 +26,8 @@ git config --global user.email "XXXXXXXXXXX"
 git config --global pull.rebase false
 ```
 
-SETUP HG:
-`hg config --edit`
+SETUP HG:<br>
+`hg config --edit`<br>
 So it reads:
 ```
 [ui]
@@ -95,7 +93,7 @@ INSTALL LLVM-14 PACKAGES:
 `python3-clang-14=1:14.0.6~++20220622053050+f28c006a5895-1~exp1~20220622173135.152 \`
 `python3-lldb-14=1:14.0.6~++20220622053050+f28c006a5895-1~exp1~20220622173135.152 `
 
-ADD TO .bashrc:
+ADD TO .bashrc:<br>
 `export PATH="/usr/lib/llvm-14/bin:$PATH"`
 
 INSTALL RUSTUP, RUSTC, CARGO:
@@ -119,7 +117,7 @@ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash
 . ~/.bashrc
 
 ```
-INSTALL NODE:
+INSTALL NODE:<br>
 Current version is 16.17.0
 ```
 nvm install 16.17.0
@@ -127,7 +125,7 @@ nvm use 16.17.0
 nvm alias default 16.17.0
 ```
 
-INSTALL NPM:
+INSTALL NPM:<br>
 `npm install --location=global npm@latest`
 
 CLONE THE THUNDERBIRD-PATCHES GITHUB REPO:
@@ -138,5 +136,5 @@ cd ~/build-102
 git clone --recursive https://github.com/Betterbird/thunderbird-patches.git
 cp -p thunderbird-patches/build/build.sh .
 ```
-BUILD Betterbird-102:
+BUILD Betterbird-102:<br>
 `./build.sh 102`
