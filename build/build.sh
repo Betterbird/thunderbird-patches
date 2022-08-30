@@ -208,20 +208,8 @@ else
     echo
     echo "======================================================="
     echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
-    echo "Please try the following before restarting the script:"
-    echo "(This is known to work on a Ubuntu 20.04 aarch64 machine.)"
-    echo "sudo apt install nano watchman \ "
-    echo "  python3-setuptools python3-wheel default-jre default-jdk \ "
-    echo "  gcc g++ binutils libc6 libc6-dev libgcc-9-dev libstdc++-9-dev \ "
-    echo "  libstdc++6 linux-libc-dev libstdc++6 libstdc++-9-dev \ "
-    echo "  libx11-dev libxext-dev libxt-dev libxcb1-dev libxcb-shm0-dev libx11-xcb-dev \ "
-    echo "  clang clang-tools clang-format clangd clang-tidy-10 \ "
-    echo "  libclang-10-dev libclang-common-10-dev libclang-cpp10 libclang1-10 libclang-dev libclang-cpp10-dev \ "
-    echo "  llvm llvm-runtime libllvm11 llvm-dev \ "
-    echo "  libc++1-11 libc++abi1-11 libc++-11-dev libgtk-3-dev libdbus-glib-1-dev"
-    echo "Rust should already be installed if you followed the instructions, otherwise turn to https://rust-lang.github.io/rustup/installation/other.html."
-    echo "Issue command: cargo install cbindgen"
-    echo "Install node and npm using the nvm script (instructions and script are from: https://github.com/nvm-sh/nvm)."
+    echo "Please follow the instructions here:"
+    echo "https://github.com/Betterbird/thunderbird-patches/blob/main/build/build-env-aarch64.MD"
     echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
     exit 1
   fi
