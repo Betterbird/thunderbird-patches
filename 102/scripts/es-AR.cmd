@@ -48,8 +48,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = HTML o Texto sin formato"  >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\es-AR\messenger\messengercompose\messengercompose.ftl
-
-:: Already translated, not yet in the language pack.
-%lecho% "language-popup-label =" >> localization\es-AR\messenger\preferences\preferences.ftl
-%lecho% "    .value = Idioma:"   >> localization\es-AR\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = L"     >> localization\es-AR\messenger\preferences\preferences.ftl

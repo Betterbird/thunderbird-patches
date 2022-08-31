@@ -49,11 +49,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = HTML ou texte brut"        >> localization\fr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\fr\messenger\messengercompose\messengercompose.ftl
 
-:: Already translated, not yet in the language pack.
-%lecho% "language-popup-label =" >> localization\fr\messenger\preferences\preferences.ftl
-%lecho% "    .value = Langue :"  >> localization\fr\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = L"     >> localization\fr\messenger\preferences\preferences.ftl
-
 REM %lecho% "apply-current-view-to-menu ="        >> localization\fr\messenger\mailWidgets.ftl
 REM %lecho% "    .label = Appliquer la vue actuelle à…" >> localization\fr\messenger\mailWidgets.ftl
 REM %lecho% "threadpane-apply-changes-prompt-title = Appliquer les modifications ?" >> localization\fr\messenger\mailWidgets.ftl

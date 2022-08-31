@@ -48,14 +48,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\nl\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = Platte tekst of HTML"      >> localization\nl\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\nl\messenger\messengercompose\messengercompose.ftl
-
-:: Already translated, not yet in the language pack.
-%lecho% "language-popup-label =" >> localization\nl\messenger\preferences\preferences.ftl
-%lecho% "    .value = Taal:"     >> localization\nl\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = T"     >> localization\nl\messenger\preferences\preferences.ftl
-
-%lecho% "apply-current-view-to-menu ="                >> localization\nl\messenger\mailWidgets.ftl
-%lecho% "    .label = Huidige weergave toepassen op…" >> localization\nl\messenger\mailWidgets.ftl
-%lecho% "threadpane-apply-changes-prompt-title = Wijzigingen toepassen?" >> localization\nl\messenger\mailWidgets.ftl
-%lecho% "threadpane-apply-changes-prompt-no-children-text = De weergave van de huidige map toepassen op { $name }?" >> localization\nl\messenger\mailWidgets.ftl
-%lecho% "threadpane-apply-changes-prompt-with-children-text = De weergave van de huidige map toepassen op { $name } en de submappen?" >> localization\nl\messenger\mailWidgets.ftl

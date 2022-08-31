@@ -49,11 +49,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = Reintext oder HTML"        >> localization\de\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\de\messenger\messengercompose\messengercompose.ftl
 
-:: Already translated, not yet in the language pack.
-%lecho% "language-popup-label =" >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "    .value = Sprache:"  >> localization\de\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = p"     >> localization\de\messenger\preferences\preferences.ftl
-
 %lecho% "vcard-custom-header = Custom Properties" >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "vcard-custom-add = Add custom properties" >> localization\de\messenger\addressbook\vcard.ftl
 
