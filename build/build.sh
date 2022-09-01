@@ -45,11 +45,15 @@ fi
 
 VERSION="$1"
 UNAME=$(uname)
-UNAME_FULL=$(uname -a)
-UNAME_ARCH=$(uname -i)
-# Hack for Debian 11 Bullseye on Amazon EC2 image.
-if [[ "$UNAME_FULL" == *"aarch64"* ]] && [ "$UNAME_ARCH" = "unknown" ]; then
-  UNAME_ARCH="aarch64"
+# uname -i doesn't work on Mac.
+UNAME_ARCH="unknown"
+if [ "$UNAME" = "Linux" ]; then
+  UNAME_FULL=$(uname -a)
+  UNAME_ARCH=$(uname -i)
+  # Hack for Debian 11 Bullseye on Amazon EC2 image.
+  if [[ "$UNAME_FULL" == *"aarch64"* ]] && [ "$UNAME_ARCH" = "unknown" ]; then
+    UNAME_ARCH="aarch64"
+  fi
 fi
 # Windows: Cater for newer and older MozillaBuild: MINGW32_NT-6.2 or MSYS_NT-10
 if [[ "$UNAME" == *"_NT-"* ]]; then
