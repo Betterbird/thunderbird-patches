@@ -27,10 +27,10 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 ::     .label = Recent File(s)…
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
-%lecho% "menuitem-recent-files ="           >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Arquivo(s) recentes…" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
-%lecho% "context-menuitem-recent-files ="   >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Anexar arquivo(s) recentes…" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
+%lecho% "menuitem-recent-files ="             >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Arquivo(s) recente(s)…" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
+%lecho% "context-menuitem-recent-files ="     >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Anexar arquivo(s) recente(s)…" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
@@ -41,9 +41,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 ::     .label = Plain Text or HTML
 ::     .accesskey = O
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
-%lecho% "compose-send-plain-or-html-option =" >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-option ="       >> localization\pt-BR\messenger\preferences\preferences.ftl
 %lecho% "    .label = HTML ou Texto sem formatação" >> localization\pt-BR\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = Si no se utiliza ningún estilo en el mensaje, enviar texto sin formato. De lo contrario, enviar sólo con formato HTML." >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-description = Se nenhum estilo for usado na mensagem, envie texto sem formatação. Caso contrário, envie somente HTML." >> localization\pt-BR\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = HTML ou texto sem formato" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
