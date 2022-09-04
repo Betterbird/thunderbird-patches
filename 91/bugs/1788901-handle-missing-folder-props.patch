@@ -1,0 +1,64 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1662318105 -7200
+# Parent  81de3c70eface861183087097a1cc42dc15479a6
+Bug 1788901 - handle missing folder properties better. r=benc
+
+Restore code from bug 1726319 and bug 1776280 removed in bug 1778888:
+
+https://hg.mozilla.org/comm-central/rev/aba71e533211
+https://hg.mozilla.org/comm-central/rev/a96377dc5770
+https://hg.mozilla.org/comm-central/rev/2f49d0b8575f
+
+See reasoning in code comments.
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -1969,28 +1969,45 @@ nsMsgDBFolder::GetStringProperty(const c
+   NS_ENSURE_ARG_POINTER(propertyName);
+   nsCOMPtr<nsIFile> dbPath;
+   nsresult rv = GetFolderCacheKey(getter_AddRefs(dbPath));
+   if (dbPath) {
+     nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
+     rv = GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement));
+     if (cacheElement)  // try to get from cache
+       rv = cacheElement->GetStringProperty(propertyName, propertyValue);
+-    if (NS_FAILED(rv))  // if failed, then try to get from db
++    if (NS_FAILED(rv))  // if failed, then try to get from db, usually.
+     {
++      if (strcmp(propertyName, MRU_TIME_PROPERTY) == 0 ||
++          strcmp(propertyName, MRM_TIME_PROPERTY) == 0 ||
++          strcmp(propertyName, "LastPurgeTime") == 0) {
++        // Don't open DB for missing time properties.
++        // Missing time properties can happen if the folder was never
++        // accessed, for exaple after an import. They happen if
++        // folderCache.json is removed or becomes invalid after moving
++        // a profile (see bug 1726660).
++        propertyValue.Truncate();
++        return NS_OK;
++      }
+       nsCOMPtr<nsIDBFolderInfo> folderInfo;
+       nsCOMPtr<nsIMsgDatabase> db;
+       bool exists;
+       rv = dbPath->Exists(&exists);
+       if (NS_FAILED(rv) || !exists) return NS_MSG_ERROR_FOLDER_MISSING;
+       bool weOpenedDB = !mDatabase;
+       rv = GetDBFolderInfoAndDB(getter_AddRefs(folderInfo), getter_AddRefs(db));
+       if (NS_SUCCEEDED(rv))
+         rv = folderInfo->GetCharProperty(propertyName, propertyValue);
+       if (weOpenedDB) CloseDBIfFolderNotOpen();
++      if (NS_SUCCEEDED(rv)) {
++        // Now that we have the value, store it in our cache.
++        if (cacheElement) {
++          cacheElement->SetStringProperty(propertyName, propertyValue);
++        }
++      }
+     }
+   }
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBFolder::SetStringProperty(const char* propertyName,
+                                  const nsACString& propertyValue) {
