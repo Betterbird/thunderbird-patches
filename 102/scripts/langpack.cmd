@@ -15,6 +15,7 @@ rm -f %~1.xpi
 :: Fix the manifest.
 sed -i -e 's/langpack-%~1@thunderbird.mozilla.org/langpack-%~1@betterbird.eu/' manifest.json
 sed -i -e 's/Language pack for Thunderbird/Language pack for Betterbird/' manifest.json
+sed -i -e 's/"gecko": {/"gecko": { "update_url": "https:\/\/www.betterbird.eu\/downloads\/LanguagePacks\/updates.json",/' manifest.json
 
 :: Copy US branding
 7z x ..\betterbird-%~2.en-US.win64.installer.exe core\omni.ja
@@ -29,7 +30,7 @@ rmdir /s /q localization\en-US
 call ..\%~1.cmd
 
 :: Pack the whole thing again
-7z a -r -tzip %~1.xpi manifest.json chrome localization
+7z a -r -tzip %~1-%~2.xpi manifest.json chrome localization
 
 rmdir /s /q chrome
 rmdir /s /q localization
