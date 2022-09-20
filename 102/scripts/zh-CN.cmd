@@ -42,25 +42,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 ::     .accesskey = O
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option =" >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .label = FIXME: Plain Text or HTML" >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = 若訊息內容未使用樣式，可用純文字格式寄出。FIXME: 否则，仅发送 HTML - Otherwise, send HTML only。" >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = HTML 或纯文本" >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only." >> localization\zh-CN\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = FIXME: Plain Text or HTML" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .accesskey = FIXME O"               >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
-
-%lecho% "details-notification-incompatible-link = 更多信息" >> localization\zh-CN\toolkit\about\aboutAddons.ftl
-
-:: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
-sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-calendar/spaces-pinned-button-menuitem-calendar2/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-tasks2/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\zh-CN\messenger\messenger.ftl
-
-sed -i -e 's/spaces-toolbar-button-mail.title/spaces-toolbar-button-mail2.title/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-address-book.title/spaces-toolbar-button-address-book2.title/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-calendar.title/spaces-toolbar-button-calendar2.title/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-tasks.title/spaces-toolbar-button-tasks2.title/' localization\zh-CN\messenger\messenger.ftl
-sed -i -e 's/spaces-toolbar-button-chat.title/spaces-toolbar-button-chat2.title/' localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .label = HTML 或纯文本"             >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .accesskey = O"                     >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
