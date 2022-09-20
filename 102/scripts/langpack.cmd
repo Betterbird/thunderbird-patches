@@ -23,7 +23,7 @@ sed -i -e 's/"gecko": {/"gecko": { "update_url": "https:\/\/www.betterbird.eu\/d
 7z x core\omni.ja localization\en-US\branding
 mv chrome\en-US\locale\en-US\branding\ chrome\%~1\locale\%~1\branding\
 mv localization\en-US\branding localization\%~1\branding\
-rmdir /s /q chrome\en-US\locale\en-US
+rmdir /s /q chrome\en-US
 rmdir /s /q localization\en-US
 
 :: Call script that provides extra strings
