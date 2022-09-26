@@ -37,6 +37,20 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "<!ENTITY multilineAllFolders.label \"すべてのフォルダーで複数行表示\">" >> chrome\ja\locale\ja\messenger\messenger.dtd
 
 :: Original strings:
+:: mail-multiline-all-folders =
+::     .label = Multi-line View On All Folders
+:: mail-multiline-individual-folders =
+::     .label = Multi-line View Via Subject Column
+:: mail-multiline-no-folders =
+::     .label = No Multi-line View
+%lecho% "mail-multiline-all-folders ="        >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = すべてのフォルダーで複数行表示" >> localization\ja\messenger\menubar.ftl
+%lecho% "mail-multiline-individual-folders =" >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = Multi-line View Via Subject Column" >> localization\ja\messenger\menubar.ftl
+%lecho% "mail-multiline-no-folders ="         >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = No Multi-line View"     >> localization\ja\messenger\menubar.ftl
+
+:: Original strings:
 :: compose-send-plain-or-html-option =
 ::     .label = Plain Text or HTML
 ::     .accesskey = O

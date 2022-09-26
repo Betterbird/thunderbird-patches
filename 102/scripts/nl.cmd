@@ -37,6 +37,20 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "<!ENTITY multilineAllFolders.label \"Weergave met meerdere regels voor alle mappen\">" >> chrome\nl\locale\nl\messenger\messenger.dtd
 
 :: Original strings:
+:: mail-multiline-all-folders =
+::     .label = Multi-line View On All Folders
+:: mail-multiline-individual-folders =
+::     .label = Multi-line View Via Subject Column
+:: mail-multiline-no-folders =
+::     .label = No Multi-line View
+%lecho% "mail-multiline-all-folders ="        >> localization\nl\messenger\menubar.ftl
+%lecho% "    .label = Weergave met meerdere regels voor alle mappen" >> localization\nl\messenger\menubar.ftl
+%lecho% "mail-multiline-individual-folders =" >> localization\nl\messenger\menubar.ftl
+%lecho% "    .label = Weergave met meerdere regels middels de onderwerpkolom" >> localization\nl\messenger\menubar.ftl
+%lecho% "mail-multiline-no-folders ="         >> localization\nl\messenger\menubar.ftl
+%lecho% "    .label = Geen weergave met meerdere regels" >> localization\nl\messenger\menubar.ftl
+
+:: Original strings:
 :: compose-send-plain-or-html-option =
 ::     .label = Plain Text or HTML
 ::     .accesskey = O

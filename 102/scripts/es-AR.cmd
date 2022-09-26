@@ -37,6 +37,20 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "<!ENTITY multilineAllFolders.label \"Vista multilínea en todas las carpetas\">" >> chrome\es-AR\locale\es-AR\messenger\messenger.dtd
 
 :: Original strings:
+:: mail-multiline-all-folders =
+::     .label = Multi-line View On All Folders
+:: mail-multiline-individual-folders =
+::     .label = Multi-line View Via Subject Column
+:: mail-multiline-no-folders =
+::     .label = No Multi-line View
+%lecho% "mail-multiline-all-folders ="        >> localization\es-AR\messenger\menubar.ftl
+%lecho% "    .label = Vista multilínea en todas las carpetas" >> localization\es-AR\messenger\menubar.ftl
+%lecho% "mail-multiline-individual-folders =" >> localization\es-AR\messenger\menubar.ftl
+%lecho% "    .label = Vista multilínea mediante la columna de Asunto" >> localization\es-AR\messenger\menubar.ftl
+%lecho% "mail-multiline-no-folders ="         >> localization\es-AR\messenger\menubar.ftl
+%lecho% "    .label = Sin vista multilínea"   >> localization\es-AR\messenger\menubar.ftl
+
+:: Original strings:
 :: compose-send-plain-or-html-option =
 ::     .label = Plain Text or HTML
 ::     .accesskey = O

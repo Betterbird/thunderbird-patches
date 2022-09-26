@@ -37,6 +37,20 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "<!ENTITY multilineAllFolders.label \"在所有文件夹启用多行视图\">" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.dtd
 
 :: Original strings:
+:: mail-multiline-all-folders =
+::     .label = Multi-line View On All Folders
+:: mail-multiline-individual-folders =
+::     .label = Multi-line View Via Subject Column
+:: mail-multiline-no-folders =
+::     .label = No Multi-line View
+%lecho% "mail-multiline-all-folders ="        >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = 在所有文件夹启用多行视图" >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "mail-multiline-individual-folders =" >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = Multi-line View Via Subject Column" >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "mail-multiline-no-folders ="         >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = 没启用多行视"            >> localization\zh-CN\messenger\menubar.ftl
+
+:: Original strings:
 :: compose-send-plain-or-html-option =
 ::     .label = Plain Text or HTML
 ::     .accesskey = O

@@ -27,14 +27,28 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 ::     .label = Recent File(s)…
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
-%lecho% "menuitem-recent-files ="               >> localization\it\messenger\messengercompose\messengercompose.ftl
+%lecho% "menuitem-recent-files ="             >> localization\it\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = File recenti…"          >> localization\it\messenger\messengercompose\messengercompose.ftl
-%lecho% "context-menuitem-recent-files ="       >> localization\it\messenger\messengercompose\messengercompose.ftl
+%lecho% "context-menuitem-recent-files ="     >> localization\it\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = Allegare file recenti…" >> localization\it\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
 :: <!ENTITY multilineAllFolders.label "Multi-line View On All Folders">
 %lecho% "<!ENTITY multilineAllFolders.label \"Visualizzazione multilinea per tutte le cartelle\">" >> chrome\it\locale\it\messenger\messenger.dtd
+
+:: Original strings:
+:: mail-multiline-all-folders =
+::     .label = Multi-line View On All Folders
+:: mail-multiline-individual-folders =
+::     .label = Multi-line View Via Subject Column
+:: mail-multiline-no-folders =
+::     .label = No Multi-line View
+%lecho% "mail-multiline-all-folders ="        >> localization\it\messenger\menubar.ftl
+%lecho% "    .label = Visualizzazione multilinea per tutte le cartelle" >> localization\it\messenger\menubar.ftl
+%lecho% "mail-multiline-individual-folders =" >> localization\it\messenger\menubar.ftl
+%lecho% "    .label = Visualizzazione multilinea mediante la colonna Oggetto" >> localization\it\messenger\menubar.ftl
+%lecho% "mail-multiline-no-folders ="         >> localization\it\messenger\menubar.ftl
+%lecho% "    .label = Senza visualizzazione multilinea" >> localization\it\messenger\menubar.ftl
 
 :: Original strings:
 :: compose-send-plain-or-html-option =
