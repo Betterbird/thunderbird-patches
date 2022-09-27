@@ -28,7 +28,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
 %lecho% "menuitem-recent-files ="            >> localization\ja\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近使用したファイル..."         >> localization\ja\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近使用したファイル..."   >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "context-menuitem-recent-files ="    >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = 最近使用したファイルを添付..." >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
@@ -43,12 +43,12 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 ::     .label = Multi-line View Via Subject Column
 :: mail-multiline-no-folders =
 ::     .label = No Multi-line View
-%lecho% "mail-multiline-all-folders ="        >> localization\ja\messenger\menubar.ftl
+%lecho% "mail-multiline-all-folders ="          >> localization\ja\messenger\menubar.ftl
 %lecho% "    .label = すべてのフォルダーで複数行表示" >> localization\ja\messenger\menubar.ftl
-%lecho% "mail-multiline-individual-folders =" >> localization\ja\messenger\menubar.ftl
-%lecho% "    .label = Multi-line View Via Subject Column" >> localization\ja\messenger\menubar.ftl
-%lecho% "mail-multiline-no-folders ="         >> localization\ja\messenger\menubar.ftl
-%lecho% "    .label = No Multi-line View"     >> localization\ja\messenger\menubar.ftl
+%lecho% "mail-multiline-individual-folders ="   >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = 件名欄による複数行表示"      >> localization\ja\messenger\menubar.ftl
+%lecho% "mail-multiline-no-folders ="           >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = 複数行表示なし"             >> localization\ja\messenger\menubar.ftl
 
 :: Original strings:
 :: compose-send-plain-or-html-option =

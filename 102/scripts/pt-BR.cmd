@@ -46,7 +46,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "mail-multiline-all-folders ="        >> localization\pt-BR\messenger\menubar.ftl
 %lecho% "    .label = Visão multilinha em todas as pastas" >> localization\pt-BR\messenger\menubar.ftl
 %lecho% "mail-multiline-individual-folders =" >> localization\pt-BR\messenger\menubar.ftl
-%lecho% "    .label = Visão multilinha mediante a coluna de Assunto" >> localization\pt-BR\messenger\menubar.ftl
+%lecho% "    .label = Visão multilinha via coluna Assunto" >> localization\pt-BR\messenger\menubar.ftl
 %lecho% "mail-multiline-no-folders ="         >> localization\pt-BR\messenger\menubar.ftl
 %lecho% "    .label = Sem visão multilinha"   >> localization\pt-BR\messenger\menubar.ftl
 
