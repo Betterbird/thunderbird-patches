@@ -62,7 +62,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = プレーンテキスト形式または HTML 形式" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\ja\messenger\messengercompose\messengercompose.ftl
-
-:: Missing access key the language pack, hence the entire string is rejected.
-%lecho% "language-popup-label ="   >> localization\ja\messenger\preferences\preferences.ftl
-%lecho% "    .value = 辞書の言語:"  >> localization\ja\messenger\preferences\preferences.ftl

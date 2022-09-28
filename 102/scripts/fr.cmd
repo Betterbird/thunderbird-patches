@@ -62,9 +62,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\fr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = HTML ou texte brut"        >> localization\fr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\fr\messenger\messengercompose\messengercompose.ftl
-
-REM %lecho% "apply-current-view-to-menu ="        >> localization\fr\messenger\mailWidgets.ftl
-REM %lecho% "    .label = Appliquer la vue actuelle à…" >> localization\fr\messenger\mailWidgets.ftl
-REM %lecho% "threadpane-apply-changes-prompt-title = Appliquer les modifications ?" >> localization\fr\messenger\mailWidgets.ftl
-%lecho% "threadpane-apply-changes-prompt-no-children-text = Appliquer la vue actuelle à dossier { $name } ?" >> localization\fr\messenger\mailWidgets.ftl
-%lecho% "threadpane-apply-changes-prompt-with-children-text = Appliquer la vue actuelle à dossier { $name } et sous-dossiers ?" >> localization\fr\messenger\mailWidgets.ftl
