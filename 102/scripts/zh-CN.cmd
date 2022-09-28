@@ -46,9 +46,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "mail-multiline-all-folders ="        >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "    .label = 在所有文件夹启用多行视图" >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "mail-multiline-individual-folders =" >> localization\zh-CN\messenger\menubar.ftl
-%lecho% "    .label = Multi-line View Via Subject Column" >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = 显示基于主题列的多行视图" >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "mail-multiline-no-folders ="         >> localization\zh-CN\messenger\menubar.ftl
-%lecho% "    .label = 没启用多行视"            >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = 停用多行视图"            >> localization\zh-CN\messenger\menubar.ftl
 
 :: Original strings:
 :: compose-send-plain-or-html-option =
@@ -57,7 +57,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option =" >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .label = HTML 或纯文本" >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only." >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-description = 如果邮件中有样式则转为 HTML 发送，否则以纯文本发送。" >> localization\zh-CN\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = HTML 或纯文本"             >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
