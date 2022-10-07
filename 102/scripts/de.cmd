@@ -79,3 +79,11 @@ sed -i -e 's/spaces-pinned-button-menuitem-calendar/spaces-pinned-button-menuite
 sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-tasks2/' localization\de\messenger\messenger.ftl
 sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\de\messenger\messenger.ftl
 sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\de\messenger\messenger.ftl
+
+:: Fix more mess from 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
+%lecho% "about-addressbook-details-impp-header = Instant Messaging" >> localization\de\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-impp2-header = Instant Messaging"                    >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-select = Protocol"                              >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-option-other = Other"                           >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-input-label = URI"                              >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-input-title = URI for instant messaging"        >> localization\de\messenger\addressbook\vcard.ftl

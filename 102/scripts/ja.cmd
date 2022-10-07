@@ -62,3 +62,11 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = プレーンテキスト形式または HTML 形式" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\ja\messenger\messengercompose\messengercompose.ftl
+
+:: Fix more mess from 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
+%lecho% "about-addressbook-details-impp-header = Instant Messaging" >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-impp2-header = Instant Messaging"                    >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-select = Protocol"                              >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-option-other = Other"                           >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-input-label = URI"                              >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-impp-input-title = URI for instant messaging"        >> localization\ja\messenger\addressbook\vcard.ftl
