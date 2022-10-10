@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1665409556 -7200
+# Date 1665422132 -7200
 # Parent  815c7aa26fa1c69a44cb5e130b8a1b8bc715690a
 Feature: Compose in tab (see https://bugzilla.mozilla.org/show_bug.cgi?id=449299)
 
@@ -269,6 +269,32 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
      // Prefer 860x800.
      let defaultHeight = Math.min(screen.availHeight, 800);
      let defaultWidth = Math.min(screen.availWidth, 860);
+@@ -7423,17 +7429,24 @@ function SetContentAndBodyAsUnmodified()
+   gMsgCompose.bodyModified = false;
+   gContentChanged = false;
+ }
+ 
+ function MsgComposeCloseWindow() {
+   if (gMsgCompose) {
+     gMsgCompose.CloseWindow();
+   } else {
+-    window.close();
++    let tm = Cc["@mozilla.org/mail/tabmail;1"].getService(
++      Ci.nsITabmail
++    );
++    if (tm.isTab(window.location.href)) {
++      tm.removeCurrentTab();
++    } else {
++      window.close();
++    }
+   }
+ }
+ 
+ function GetLastAttachDirectory() {
+   var lastDirectory;
+ 
+   try {
+     lastDirectory = Services.prefs.getComplexValue(
 diff --git a/mail/components/compose/content/editor.js b/mail/components/compose/content/editor.js
 --- a/mail/components/compose/content/editor.js
 +++ b/mail/components/compose/content/editor.js
@@ -511,6 +537,26 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
  
  #attachmentSplitter {
    grid-area: attachment-splitter;
+@@ -1338,16 +1342,19 @@ button:is(
+   margin-block: -0.2em 0.2em;
+   margin-inline: 0.2em -0.2em;
+ }
+ 
+ .statusbar {
+   display: flex;
+   align-items: center;
+   min-width: 0;
++  background-color: var(--toolbar-non-lwt-bgcolor);
++  color: var(--toolbar-non-lwt-textcolor);
++  border-top: 1px solid ThreeDLightShadow;
+ }
+ 
+ .statusbar > :not(#statusText) {
+   flex: 0 0 auto;
+ }
+ 
+ .statusbar > #statusText {
+   flex: 1 1 auto;
 diff --git a/mailnews/base/public/moz.build b/mailnews/base/public/moz.build
 --- a/mailnews/base/public/moz.build
 +++ b/mailnews/base/public/moz.build
@@ -677,27 +723,99 @@ diff --git a/mailnews/base/src/moz.build b/mailnews/base/src/moz.build
  USE_LIBS += [
      "jsoncpp",
  ]
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -66,25 +66,27 @@
+ #include "mozilla/mailnews/MimeHeaderParser.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/ErrorResult.h"
+ #include "mozilla/Telemetry.h"
+ #include "mozilla/dom/HTMLAnchorElement.h"
+ #include "mozilla/dom/HTMLImageElement.h"
+ #include "mozilla/dom/Selection.h"
+ #include "mozilla/dom/PromiseNativeHandler.h"
++#include "mozilla/dom/Location.h"
+ #include "mozilla/Utf8.h"
+ #include "nsStreamConverter.h"
+ #include "nsIObserverService.h"
+ #include "nsIProtocolHandler.h"
+ #include "nsContentUtils.h"
+ #include "nsIFileURL.h"
+ #include "nsTextNode.h"  // from dom/base
+ #include "nsIParserUtils.h"
+ #include "nsIStringBundle.h"
++#include "nsITabmail.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::mailnews;
+ 
+ LazyLogModule Compose("Compose");
+ 
+ static nsresult GetReplyHeaderInfo(int32_t* reply_header_type,
+@@ -1324,25 +1326,39 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+   rv = composeService->UnregisterComposeDocShell(mDocShell);
+   NS_ENSURE_SUCCESS(rv, rv);
+   mDocShell = nullptr;
+ 
+   // ensure that the destructor of nsMsgSend is invoked to remove
+   // temporary files.
+   mMsgSend = nullptr;
+ 
++  nsCOMPtr<nsPIDOMWindowOuter> window = nsPIDOMWindowOuter::From(m_window);
++  Location* location = window->GetLocation();
++  nsAutoString href;
++  location->GetHref(href);
++  nsCOMPtr<nsITabmail> tabmail(do_GetService(NSITABMAIL_CONTRACTID, &rv));
++  NS_ENSURE_SUCCESS(rv, rv);
++  bool isTab;
++  rv = tabmail->IsTab(NS_ConvertUTF16toUTF8(href), &isTab);
++  NS_ENSURE_SUCCESS(rv, rv);
++
+   // We are going away for real, we need to do some clean up first
+   if (m_baseWindow) {
+     if (m_editor) {
+       // The editor will be destroyed during the close window.
+       // Set it to null to be sure we won't use it anymore.
+       m_editor = nullptr;
+     }
+     nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
+-    rv = window->Destroy();
++    if (isTab) {
++      rv = tabmail->RemoveCurrentTab();
++    } else {
++      rv = window->Destroy();
++    }
+   }
+ 
+   m_window = nullptr;
+   return rv;
+ }
+ 
+ nsresult nsMsgCompose::Abort() {
+   if (mMsgSend) mMsgSend->Abort();
 diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
 --- a/mailnews/compose/src/nsMsgComposeService.cpp
 +++ b/mailnews/compose/src/nsMsgComposeService.cpp
-@@ -8,16 +8,17 @@
- #include "nsIMsgSend.h"
- #include "nsIServiceManager.h"
- #include "nsIObserverService.h"
- #include "nsIMsgIdentity.h"
- #include "nsISmtpUrl.h"
- #include "nsIURI.h"
- #include "nsMsgI18N.h"
- #include "nsIMsgComposeParams.h"
+@@ -60,16 +60,17 @@
+ #  include "nsMsgUtils.h"
+ #endif
+ 
+ #include "nsICommandLine.h"
+ #include "nsIAppStartup.h"
+ #include "nsMsgUtils.h"
+ #include "nsIPrincipal.h"
+ #include "nsIMutableArray.h"
 +#include "nsITabmail.h"
- #include "nsXPCOM.h"
- #include "nsISupportsPrimitives.h"
- #include "nsIWindowWatcher.h"
- #include "mozIDOMWindow.h"
- #include "nsIContentViewer.h"
- #include "nsIMsgWindow.h"
- #include "nsIDocShell.h"
- #include "nsPIDOMWindow.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ 
+ #ifdef XP_WIN
+ #  include <windows.h>
+ #  include <shellapi.h>
+ #  include "nsIWidget.h"
 @@ -175,26 +176,33 @@ nsMsgComposeService::OpenComposeWindowWi
  
    nsCOMPtr<nsISupportsInterfacePointer> msgParamsWrapper =
