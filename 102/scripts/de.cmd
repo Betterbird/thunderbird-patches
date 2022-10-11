@@ -80,10 +80,25 @@ sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-t
 sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\de\messenger\messenger.ftl
 sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\de\messenger\messenger.ftl
 
-:: Fix more mess from 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
+:: Fix new strings from bug 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
 %lecho% "about-addressbook-details-impp-header = Instant Messaging" >> localization\de\messenger\addressbook\aboutAddressBook.ftl
 %lecho% "vcard-impp2-header = Instant Messaging"                    >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "vcard-impp-select = Protocol"                              >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "vcard-impp-option-other = Other"                           >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "vcard-impp-input-label = URI"                              >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "vcard-impp-input-title = URI for instant messaging"        >> localization\de\messenger\addressbook\vcard.ftl
+
+:: More new strings from bug 1777780, https://hg.mozilla.org/releases/comm-esr102/rev/3dfd43ae97e1#l6.12
+%lecho% "vcard-org-title-input ="                                   >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .title = Position or job"                              >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .placeholder = Job title"                              >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-org-role-input ="                                    >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .title = Function or part played in a particular situation" >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .placeholder = Role in a project"                      >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-org-org-input ="                                     >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .title = Organizational name"                          >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .placeholder = Company name"                           >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-org-org-unit = Department"                           >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "vcard-org-org-unit-input ="                                >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .title = Organizational unit name"                     >> localization\de\messenger\addressbook\vcard.ftl
+%lecho% "    .placeholder = Department"                             >> localization\de\messenger\addressbook\vcard.ftl
