@@ -73,12 +73,19 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "threadpane-apply-changes-prompt-with-children-text = Aktuelle Ansicht anwenden auf Ordner { $name } und alle Unterordner?" >> localization\de\messenger\mailWidgets.ftl
 
 :: Fix the horrible mess TB made in https://bugzilla.mozilla.org/show_bug.cgi?id=1775273
-sed -i -e 's/spaces-pinned-button-menuitem-mail/spaces-pinned-button-menuitem-mail2/' localization\de\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-address-book/spaces-pinned-button-menuitem-address-book2/' localization\de\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-calendar/spaces-pinned-button-menuitem-calendar2/' localization\de\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-tasks/spaces-pinned-button-menuitem-tasks2/' localization\de\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-chat/spaces-pinned-button-menuitem-chat2/' localization\de\messenger\messenger.ftl
-sed -i -e 's/spaces-pinned-button-menuitem-settings/spaces-pinned-button-menuitem-settings2/' localization\de\messenger\messenger.ftl
+:: Now aggravated by https://hg.mozilla.org/l10n-central/de/diff/f583e525fabb238644dc921aaf6e90a348d8edf6/mail/messenger/messenger.ftl#l1.79
+%lecho% "spaces-pinned-button-menuitem-mail2 ="                      >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = { spaces-toolbar-button-mail2.title }"         >> localization\de\messenger\messenger.ftl
+%lecho% "spaces-pinned-button-menuitem-address-book2 ="              >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = { spaces-toolbar-button-address-book2.title }" >> localization\de\messenger\messenger.ftl
+%lecho% "spaces-pinned-button-menuitem-calendar2 ="                  >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = { spaces-toolbar-button-calendar2.title }"     >> localization\de\messenger\messenger.ftl
+%lecho% "spaces-pinned-button-menuitem-tasks2 ="                     >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = { spaces-toolbar-button-tasks2.title }"        >> localization\de\messenger\messenger.ftl
+%lecho% "spaces-pinned-button-menuitem-chat2 ="                      >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = { spaces-toolbar-button-chat2.title }"         >> localization\de\messenger\messenger.ftl
+%lecho% "spaces-pinned-button-menuitem-settings2 ="                  >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = { spaces-toolbar-button-settings2.title }"     >> localization\de\messenger\messenger.ftl
 
 :: Fix new strings from bug 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
 %lecho% "about-addressbook-details-impp-header = Instant Messaging" >> localization\de\messenger\addressbook\aboutAddressBook.ftl
