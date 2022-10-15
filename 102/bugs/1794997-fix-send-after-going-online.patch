@@ -1,0 +1,217 @@
+# HG changeset patch
+# Date 1665856747 -7200
+# Parent  35aa1544b87ced33031e10b591a9201082649972
+# User Ping Chen <remotenonsense@gmail.com>
+# Parent  f82ea8ba9d5f95c9951b8f36b5af1415fa848949
+Bug 1794997 - Fix sending after going online.
+
+diff --git a/mail/components/activity/modules/sendLater.jsm b/mail/components/activity/modules/sendLater.jsm
+--- a/mail/components/activity/modules/sendLater.jsm
++++ b/mail/components/activity/modules/sendLater.jsm
+@@ -261,17 +261,17 @@ var sendLaterModule = {
+       this._sendProcess = null;
+ 
+       if (
+         this._copyProcess &&
+         this._copyProcess.state != Ci.nsIActivityProcess.STATE_COMPLETED
+       ) {
+         this._copyProcess.state = Ci.nsIActivityProcess.STATE_COMPLETED;
+         this.activityMgr.removeActivity(this._copyProcess.id);
+-        this._copyProcess = null;
++        // BB modification this._copyProcess = null;
+       }
+     }
+   },
+ 
+   onMsgStatus(aStatusText) {
+     this._sendProcess.setProgress(
+       aStatusText,
+       this._sendProcess.workUnitComplete,
+diff --git a/mailnews/compose/src/MessageSend.jsm b/mailnews/compose/src/MessageSend.jsm
+--- a/mailnews/compose/src/MessageSend.jsm
++++ b/mailnews/compose/src/MessageSend.jsm
+@@ -46,17 +46,17 @@ MessageSend.prototype = {
+     parentWindow,
+     progress,
+     listener,
+     smtpPassword,
+     originalMsgURI,
+     compType
+   ) {
+     this._userIdentity = userIdentity;
+-    this._accountKey = accountKey;
++    this._accountKey = this._getAccountKey(accountKey, userIdentity);
+     this._compFields = compFields;
+     this._dontDeliver = dontDeliver;
+     this._deliverMode = deliverMode;
+     this._msgToReplace = msgToReplace;
+     this._sendProgress = progress;
+     this._smtpPassword = smtpPassword;
+     this._sendListener = listener;
+     this._parentWindow = parentWindow;
+@@ -155,17 +155,17 @@ MessageSend.prototype = {
+     digest,
+     deliverMode,
+     msgToReplace,
+     listener,
+     statusFeedback,
+     smtpPassword
+   ) {
+     this._userIdentity = userIdentity;
+-    this._accountKey = accountKey;
++    this._accountKey = this._getAccountKey(accountKey, userIdentity);
+     this._compFields = compFields;
+     this._deliverMode = deliverMode;
+     this._msgToReplace = msgToReplace;
+     this._smtpPassword = smtpPassword;
+     this._sendListener = listener;
+     this._statusFeedback = statusFeedback;
+     this._shouldRemoveMessageFile = deleteSendFileOnCompletion;
+ 
+@@ -1078,19 +1078,22 @@ MessageSend.prototype = {
+ 
+   /**
+    * Send this._deliveryFile to nntp service.
+    */
+   _deliverAsNews() {
+     this.sendReport.currentProcess = Ci.nsIMsgSendReport.process_NNTP;
+     MsgUtils.sendLogger.debug("Delivering news message");
+     let deliveryListener = new MsgDeliveryListener(this, true);
+-    let msgWindow =
+-      this._sendProgress?.msgWindow ||
+-      MailServices.mailSession.topmostMsgWindow;
++    let msgWindow;
++    try {
++      msgWindow =
++        this._sendProgress?.msgWindow ||
++        MailServices.mailSession.topmostMsgWindow;
++    } catch (e) {}
+     MailServices.nntp.postMessage(
+       this._deliveryFile,
+       this._compFields.newsgroups,
+       this._accountKey,
+       deliveryListener,
+       msgWindow,
+       null
+     );
+@@ -1281,16 +1284,33 @@ MessageSend.prototype = {
+       if (Services.prefs.getBoolPref("mail.send_struct", false)) {
+         csFlags |= Ci.mozITXTToHTMLConv.kStructPhrase;
+       }
+       bodyText = cs.scanHTML(bodyText, csFlags);
+     }
+ 
+     return bodyText;
+   },
++
++  /**
++   * If accountKey is empty, get the corresponding account key from identity.
++   * @param {string} accountKey - The account key, can be empty.
++   * @param {nsIMsgIdentity} identity - The identity.
++   * @returns {string}
++   */
++  _getAccountKey(accountKey, identity) {
++    if (!accountKey) {
++      let servers = MailServices.accounts.getServersForIdentity(identity);
++      if (servers.length) {
++        accountKey = MailServices.accounts.FindAccountForServer(servers[0])
++          ?.key;
++      }
++    }
++    return accountKey;
++  },
+ };
+ 
+ /**
+  * A listener to be passed to the SMTP service.
+  *
+  * @implements {nsIUrlListener}
+  */
+ function MsgDeliveryListener(msgSend, isNewsDelivery) {
+diff --git a/mailnews/news/src/NntpClient.jsm b/mailnews/news/src/NntpClient.jsm
+--- a/mailnews/news/src/NntpClient.jsm
++++ b/mailnews/news/src/NntpClient.jsm
+@@ -89,16 +89,17 @@ class NntpClient {
+    */
+   connect() {
+     this._done = false;
+     if (this._socket?.readyState == "open") {
+       // Reuse the connection.
+       this.onOpen();
+     } else {
+       // Start a new connection.
++      this._authenticated = false;
+       let hostname = this._server.hostName.toLowerCase();
+       let useSecureTransport = this._server.isSecure;
+       this._logger.debug(
+         `Connecting to ${useSecureTransport ? "snews" : "news"}://${hostname}:${
+           this._server.port
+         }`
+       );
+       this._socket = new TCPSocket(hostname, this._server.port, {
+@@ -406,18 +407,26 @@ class NntpClient {
+       this._sendCommand(`LISTGROUP ${groupName}`);
+     });
+   }
+ 
+   /**
+    * Send `POST` request to the server.
+    */
+   post() {
+-    this._sendCommand("POST");
+-    this._nextAction = this._actionHandlePost;
++    let action = () => {
++      this._nextAction = this._actionHandlePost;
++      this._sendCommand("POST");
++    };
++    if (this._server.pushAuth && !this._authenticated) {
++      this._currentAction = action;
++      this._actionAuthUser();
++    } else {
++      action();
++    }
+   }
+ 
+   /**
+    * Send `QUIT` request to the server.
+    */
+   quit(status = Cr.NS_OK) {
+     this._sendCommand("QUIT");
+     this._nextAction = this.close;
+@@ -457,17 +466,17 @@ class NntpClient {
+    */
+   _actionModeReader(nextAction) {
+     if (this._inReadingMode) {
+       nextAction();
+     } else {
+       this._sendCommand("MODE READER");
+       this._inReadingMode = true;
+       this._nextAction = () => {
+-        if (this._server.pushAuth) {
++        if (this._server.pushAuth && !this._authenticated) {
+           this._currentAction = nextAction;
+           this._actionAuthUser();
+         } else {
+           nextAction();
+         }
+       };
+     }
+   }
+@@ -750,16 +759,17 @@ class NntpClient {
+ 
+   /**
+    * Decide the next step according to the auth response.
+    * @param {NntpResponse} res - Auth response received from the server.
+    */
+   _actionAuthResult({ status }) {
+     switch (status) {
+       case AUTH_ACCEPTED:
++        this._authenticated = true;
+         this._currentAction?.();
+         return;
+       case AUTH_PASSWORD_REQUIRED:
+         this._actionAuthPassword();
+         return;
+       case AUTH_FAILED:
+         let action = this._authenticator.promptAuthFailed();
+         if (action == 1) {
