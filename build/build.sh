@@ -206,8 +206,8 @@ else
   echo "Running ./mach bootstrap ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
   echo "Note that this may require a restart of the shell."
   touch ../mach_bootstrap_was_run_$VERSION
-  rustup override set $RUST_VER
   ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  rustup override set $RUST_VER
   if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
