@@ -202,7 +202,7 @@ else
   echo
   echo "======================================================="
   echo "./mach configure likely failed to complete."
-  echo "You will need to install LLVM, clang, nodejs (nvm, node, npm) and other dependencies manually.
+  echo "You will need to install LLVM, clang, nodejs (nvm, node, npm) and other dependencies manually."
   echo "For aarch64 there are some instructions here:"
   echo "https://github.com/Betterbird/thunderbird-patches/blob/main/build/build-env-aarch64.MD"
   echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
