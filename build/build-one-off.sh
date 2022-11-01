@@ -190,20 +190,23 @@ if [ -f ../mach_bootstrap_was_run_$VERSION ]; then
 else
   echo
   echo "======================================================="
-  echo "Running ./mach bootstrap ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
+  echo "Bootstrapping environment ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
   echo "Note that this may require a restart of the shell."
+  echo "This is very much 'work in progress'."
+  echo "./mach --no-interactive bootstrap does not work since this is neither a hg nor git checkout."
   touch ../mach_bootstrap_was_run_$VERSION
-  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
-  rustup override set $RUST_VER
-  if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
-    echo
-    echo "======================================================="
-    echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
-    echo "Please follow the instructions here:"
-    echo "https://github.com/Betterbird/thunderbird-patches/blob/main/build/build-env-aarch64.MD"
-    echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
-    exit 1
-  fi
+  # ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  # $HOME/.cargo/bin/rustup override set $RUST_VER
+  ./mach create-mach-environment
+  ./mach configure
+  echo
+  echo "======================================================="
+  echo "./mach configure likely failed to complete."
+  echo "You will need to install LLVM, clang, nodejs (nvm, node, npm) and other dependencies manually.
+  echo "For aarch64 there are some instructions here:"
+  echo "https://github.com/Betterbird/thunderbird-patches/blob/main/build/build-env-aarch64.MD"
+  echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
+  exit 1
 fi
 
 if [ "$UNAME" = "Linux" ]; then
