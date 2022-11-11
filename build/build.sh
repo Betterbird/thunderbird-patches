@@ -260,6 +260,17 @@ if [ "$NOCLOBBER" = "noclobber" ]; then
   echo
   echo "======================================================="
   echo "NOT running clobber."
+  if [ "$UNAME" = "Linux" ]; then
+    if [ "$UNAME_ARCH" = "x86_64" ]; then
+      touch $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/CLOBBER
+    elif [ "$UNAME_ARCH" = "aarch64" ]; then
+      touch $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/CLOBBER
+    fi
+  elif [ "$UNAME" = "Darwin" ]; then
+    touch $MOZILLA_DIR/obj-x86_64-apple-darwin/CLOBBER
+  elif [ "$UNAME" = "Windows" ]; then
+    touch $MOZILLA_DIR/obj-x86_64-pc-mingw32/CLOBBER
+  fi
 else
   echo
   echo "======================================================="
@@ -280,21 +291,21 @@ if [ "$UNAME" = "Linux" ]; then
     echo
     echo "======================================================="
     echo "Find your archive here"
-    ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
+    ls $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
   elif [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "Find your archive here"
-    ls  $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
+    ls $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
   fi
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"
-  ls  $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
+  ls $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
 elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"
-  ls  $MOZILLA_DIR/obj-x86_64-pc-mingw32/dist/install/sea/*.installer.exe
+  ls $MOZILLA_DIR/obj-x86_64-pc-mingw32/dist/install/sea/*.installer.exe
 fi
