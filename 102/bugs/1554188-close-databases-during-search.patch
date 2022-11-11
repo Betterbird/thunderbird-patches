@@ -1,0 +1,196 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1668126782 -3600
+# Parent  138f23d65a1e3a932a3710cff6164bf4c1c9c122
+Bug 1554188 - More aggressively close databases during search.
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -4679,21 +4679,24 @@ NS_IMETHODIMP nsMsgDBFolder::EnableNotif
+     return NS_OK;
+   }
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetMessageHeader(nsMsgKey msgKey,
+                                               nsIMsgDBHdr** aMsgHdr) {
+   NS_ENSURE_ARG_POINTER(aMsgHdr);
++  bool weOpenedDB = !mDatabase;
+   nsCOMPtr<nsIMsgDatabase> database;
+   nsresult rv = GetMsgDatabase(getter_AddRefs(database));
+   NS_ENSURE_SUCCESS(rv, rv);
+-  return (database) ? database->GetMsgHdrForKey(msgKey, aMsgHdr)
+-                    : NS_ERROR_FAILURE;
++  if (!database) return NS_ERROR_FAILURE;
++  rv = database->GetMsgHdrForKey(msgKey, aMsgHdr);
++  if (weOpenedDB) CloseDBIfFolderNotOpen(false);
++  return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetDescendants(
+     nsTArray<RefPtr<nsIMsgFolder>>& aDescendants) {
+   aDescendants.Clear();
+   for (nsIMsgFolder* child : mSubFolders) {
+     aDescendants.AppendElement(child);
+     nsTArray<RefPtr<nsIMsgFolder>> grandchildren;
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -334,17 +334,19 @@ nsresult nsMsgSearchDBView::GetMsgHdrFor
+   }
+ 
+   nsIMsgFolder* folder = m_folders[index];
+   if (folder) {
+     nsCOMPtr<nsIMsgDatabase> db;
+     nsresult rv = folder->GetMsgDatabase(getter_AddRefs(db));
+     NS_ENSURE_SUCCESS(rv, rv);
+     if (db) {
+-      return db->GetMsgHdrForKey(m_keys[index], msgHdr);
++      rv = db->GetMsgHdrForKey(m_keys[index], msgHdr);
++      folder->CloseDBIfFolderNotOpen(false);
++      return rv;
+     }
+   }
+ 
+   return NS_ERROR_FAILURE;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgSearchDBView::GetFolderForViewIndex(nsMsgViewIndex index,
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -196,16 +196,17 @@ void nsMsgXFVirtualFolderDBView::UpdateC
+         // ### of course, this isn't quite right, since we should be
+         // using FindHdr, and we shouldn't be expanding the threads.
+         db->GetMsgHdrForKey(badKey, getter_AddRefs(badHdr));
+         // Let nsMsgSearchDBView decide what to do about this header
+         // getting removed.
+         if (badHdr) OnHdrDeleted(badHdr, nsMsgKey_None, 0, this);
+       }
+     }
++    folder->CloseDBIfFolderNotOpen(false);
+   }
+ }
+ 
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForPrevSearchedFolders(
+     nsIMsgFolder* curSearchFolder) {
+   // Handle the most recent folder with hits, if any.
+   if (m_curFolderGettingHits) {
+     uint32_t count = m_hdrHits.Count();
+@@ -250,19 +251,17 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+     m_curFolderGettingHits = aFolder;
+     m_hdrHits.Clear();
+     m_curFolderStartKeyIndex = m_keys.Length();
+   }
+ 
+   bool hdrInCache = false;
+   if (!m_doingQuickSearch) {
+     nsCOMPtr<nsIMsgDatabase> dbToUse;
+-    nsCOMPtr<nsIDBFolderInfo> dummyInfo;
+-    nsresult rv = aFolder->GetDBFolderInfoAndDB(getter_AddRefs(dummyInfo),
+-                                                getter_AddRefs(dbToUse));
++    nsresult rv = aFolder->GetMsgDatabase(getter_AddRefs(dbToUse));
+     if (NS_SUCCEEDED(rv)) {
+       nsCString searchUri;
+       m_viewFolder->GetURI(searchUri);
+       dbToUse->HdrIsInCache(searchUri, aMsgHdr, &hdrInCache);
+     }
+   }
+ 
+   if (!m_doingSearch || !m_curFolderHasCachedHits || !hdrInCache) {
+@@ -271,16 +270,17 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+     else if (m_sortValid)
+       InsertHdrFromFolder(aMsgHdr, aFolder);
+     else
+       AddHdrFromFolder(aMsgHdr, aFolder);
+   }
+ 
+   m_hdrHits.AppendObject(aMsgHdr);
+   m_totalMessagesInView++;
++  aFolder->CloseDBIfFolderNotOpen(false);
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::OnSearchDone(nsresult status) {
+   NS_ENSURE_TRUE(m_viewFolder, NS_ERROR_NOT_INITIALIZED);
+ 
+@@ -440,16 +440,17 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+               } else {
+                 break;
+               }
+ 
+               cachedHits->HasMoreElements(&hasMore);
+             }
+           }
+         }
++        searchFolder->CloseDBIfFolderNotOpen(false);
+       }
+     }
+   }
+ 
+   if (mTree && !m_doingQuickSearch) mTree->EndUpdateBatch();
+ 
+   m_curFolderStartKeyIndex = 0;
+   m_curFolderGettingHits = nullptr;
+diff --git a/mailnews/db/mork/morkRowSpace.cpp b/mailnews/db/mork/morkRowSpace.cpp
+--- a/mailnews/db/mork/morkRowSpace.cpp
++++ b/mailnews/db/mork/morkRowSpace.cpp
+@@ -301,16 +301,17 @@ morkTable* morkRowSpace::NewTable(
+     this->NilSpaceStoreError(ev);
+ 
+   return outTable;
+ }
+ 
+ mork_tid morkRowSpace::MakeNewTableId(morkEnv* ev) {
+   mork_tid outTid = 0;
+   mork_tid id = mRowSpace_NextTableId;
++  if (!id) id++;
+   mork_num count = 9;  // try up to eight times
+ 
+   while (!outTid && --count)  // still trying to find an unused table ID?
+   {
+     if (!mRowSpace_Tables.GetTable(ev, id))
+       outTid = id;
+     else {
+       MORK_ASSERT(morkBool_kFalse);  // alert developer about ID problems
+diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
+--- a/mailnews/search/src/nsMsgSearchSession.cpp
++++ b/mailnews/search/src/nsMsgSearchSession.cpp
+@@ -491,31 +491,20 @@ nsresult nsMsgSearchSession::TimeSlice(b
+   // we only do serial for now.
+   return TimeSliceSerial(aDone);
+ }
+ 
+ void nsMsgSearchSession::ReleaseFolderDBRef() {
+   nsMsgSearchScopeTerm* scope = GetRunningScope();
+   if (!scope) return;
+ 
+-  bool isOpen = false;
+-  uint32_t flags;
+   nsCOMPtr<nsIMsgFolder> folder;
+   scope->GetFolder(getter_AddRefs(folder));
+-  nsCOMPtr<nsIMsgMailSession> mailSession =
+-      do_GetService(NS_MSGMAILSESSION_CONTRACTID);
+-  if (!mailSession || !folder) return;
+-
+-  mailSession->IsFolderOpenInWindow(folder, &isOpen);
+-  folder->GetFlags(&flags);
+-
+-  /*we don't null out the db reference for inbox because inbox is like the
+-    "main" folder and performance outweighs footprint */
+-  if (!isOpen && !(nsMsgFolderFlags::Inbox & flags))
+-    folder->SetMsgDatabase(nullptr);
++  // The call parameter needs to be `true`, tested via trial and error.
++  folder->CloseDBIfFolderNotOpen(true);
+ }
+ nsresult nsMsgSearchSession::TimeSliceSerial(bool* aDone) {
+   // This version of TimeSlice runs each scope term one at a time, and waits
+   // until one scope term is finished before starting another one. When we're
+   // searching the local disk, this is the fastest way to do it.
+ 
+   NS_ENSURE_ARG_POINTER(aDone);
+ 
