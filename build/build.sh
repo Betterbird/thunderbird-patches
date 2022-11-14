@@ -262,14 +262,14 @@ if [ "$NOCLOBBER" = "noclobber" ]; then
   echo "NOT running clobber."
   if [ "$UNAME" = "Linux" ]; then
     if [ "$UNAME_ARCH" = "x86_64" ]; then
-      touch $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/CLOBBER
+      touch obj-x86_64-pc-linux-gnu/CLOBBER
     elif [ "$UNAME_ARCH" = "aarch64" ]; then
-      touch $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/CLOBBER
+      touch obj-aarch64-unknown-linux-gnu/CLOBBER
     fi
   elif [ "$UNAME" = "Darwin" ]; then
-    touch $MOZILLA_DIR/obj-x86_64-apple-darwin/CLOBBER
+    touch obj-x86_64-apple-darwin/CLOBBER
   elif [ "$UNAME" = "Windows" ]; then
-    touch $MOZILLA_DIR/obj-x86_64-pc-mingw32/CLOBBER
+    touch obj-x86_64-pc-mingw32/CLOBBER
   fi
 else
   echo
