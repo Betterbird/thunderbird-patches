@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1668727977 -3600
+# Date 1668810501 -3600
 # Parent  faa1c3fb8a557d44c494d7fdb66fadf12d3e54a5
 Bug 1728778 - Re-establish movemail.
 
@@ -115,27 +115,6 @@ diff --git a/mail/locales/en-US/chrome/messenger/messenger.properties b/mail/loc
  
  # LOCALIZATION NOTE (getMsgButtonTooltip): Do not translate the word "%S" below.
  # Place the word "%S" in your translation where the name of the comma separated accounts should appear.
-diff --git a/mail/locales/en-US/chrome/messenger/msgAccountCentral.dtd b/mail/locales/en-US/chrome/messenger/msgAccountCentral.dtd
---- a/mail/locales/en-US/chrome/messenger/msgAccountCentral.dtd
-+++ b/mail/locales/en-US/chrome/messenger/msgAccountCentral.dtd
-@@ -8,16 +8,17 @@
- 
- <!ENTITY newsSectionHdr.label         "Newsgroups">
- <!ENTITY subscribeNewsLink.label      "Manage newsgroup subscriptions">
- 
- <!ENTITY feedsSectionHdr.label        "Feeds">
- <!ENTITY subscribeFeeds.label         "Manage subscriptions">
- 
- <!ENTITY chat.label                   "Chat">
-+<!ENTITY movemail.label               "Movemail">
- 
- <!ENTITY accountsSectionHdr.label     "Accounts">
- <!ENTITY subscribeImapFolders.label   "Manage folder subscriptions">
- <!ENTITY settingsLink.label           "View settings for this account">
- <!ENTITY setupNewAcct.label           "Set up an account:">
- 
- <!ENTITY advFeaturesSectionHdr.label  "Advanced Features">
- <!ENTITY searchMsgsLink.label         "Search messages">
 diff --git a/mail/locales/en-US/messenger/accountManager.ftl b/mail/locales/en-US/messenger/accountManager.ftl
 --- a/mail/locales/en-US/messenger/accountManager.ftl
 +++ b/mail/locales/en-US/messenger/accountManager.ftl
@@ -329,17 +308,21 @@ diff --git a/mailnews/base/prefs/content/AccountWizard.js b/mailnews/base/prefs/
  
    For new accounts:
    * pageData -> accountData -> createAccount -> finishAccount
-@@ -50,16 +50,18 @@ var gDefaultAccount;
+@@ -48,26 +48,37 @@ var gDefaultAccount;
+ 
+ // the current associative array that
  // will eventually be dumped into the account
  var gCurrentAccountData = null;
  
  // default picker mode for copies and folders
  var gDefaultSpecialFolderPickerMode = "0";
  
++// Type of account to create, "nntp" or "movemail".
++var gType;
++
  // event handlers
  function onAccountWizardLoad() {
-+  let type = window.arguments[0].type;
-+  console.log("=== onAccountWizardLoad", type);
++  gType = window.arguments[0].type;
    document.querySelector("wizard").addEventListener("wizardcancel", onCancel);
    document
      .querySelector("wizard")
@@ -347,7 +330,119 @@ diff --git a/mailnews/base/prefs/content/AccountWizard.js b/mailnews/base/prefs/
    let identityPage = document.getElementById("identitypage");
    identityPage.addEventListener("pageshow", identityPageInit);
    identityPage.addEventListener("pageadvanced", identityPageUnload);
-   identityPage.next = "newsserver";
+-  identityPage.next = "newsserver";
++  
++  if (gType == "nntp") {
++    identityPage.next = "newsserver";
++  } else {
++    // Hacky setup, user needs to set up outgoing server themselves.
++    identityPage.next = "accnamepage";
++  }
++
+   let newsserverPage = document.getElementById("newsserver");
+   newsserverPage.addEventListener("pageshow", incomingPageInit);
+   newsserverPage.addEventListener("pageadvanced", incomingPageUnload);
+   newsserverPage.next = "accnamepage";
+   let accnamePage = document.getElementById("accnamepage");
+   accnamePage.addEventListener("pageshow", acctNamePageInit);
+   accnamePage.addEventListener("pageadvanced", acctNamePageUnload);
+   accnamePage.next = "done";
+@@ -78,26 +89,31 @@ function onAccountWizardLoad() {
+   gMessengerBundle = document.getElementById("bundle_messenger");
+ 
+   checkForInvalidAccounts();
+ 
+   // It is fine if there is no default account, this is expected the first
+   // time you launch mail on a new profile.
+   gDefaultAccount = MailServices.accounts.defaultAccount;
+ 
++  if (gType == "movemail") {
++    // hostname shows as default Account name in the wizzard :-(
++    GetPageData().hostname = "Movemail";
++  }
+   identityPageInit();
+ }
+ 
+ function onCancel() {
+   if ("ActivationOnCancel" in this && this.ActivationOnCancel()) {
+     return false;
+   }
+   var firstInvalidAccount = getInvalidAccounts(
+     MailServices.accounts.accounts
+-  ).find(account => account.incomingServer.type == "nntp");
++  ).find(account => account.incomingServer.type == "nntp" ||
++                    account.incomingServer.type == "movemail");
+   var closeWizard = true;
+ 
+   // if the user cancels the the wizard when it pops up because of
+   // an invalid account (example, a webmail account that activation started)
+   // we just force create it by setting some values and calling the FinishAccount()
+   // see bug #47521 for the full discussion
+   if (firstInvalidAccount) {
+     var pageData = GetPageData();
+@@ -152,16 +168,29 @@ function FinishAccount() {
+     }
+ 
+     // we may need local folders before account is "Finished"
+     // if it's a pop3 account which defers to Local Folders.
+     verifyLocalFoldersAccount();
+ 
+     PageDataToAccountData(pageData, accountData);
+ 
++    if (gType == "movemail") {
++      accountData.incomingServer.hostName = "localhost";
++      if ("@mozilla.org/userinfo;1" in Cc) {
++        accountData.incomingServer.username =
++          Cc["@mozilla.org/userinfo;1"].getService(
++            Ci.nsIUserInfo
++          ).username;
++      } else {
++        accountData.incomingServer.username =
++          getUsernameFromEmail(accountData.identity.email);
++      }
++    }
++
+     // we might be simply finishing another account
+     if (!gCurrentAccount) {
+       gCurrentAccount = createAccount(accountData);
+     }
+ 
+     // transfer all attributes from the accountdata
+     finishAccount(gCurrentAccount, accountData);
+ 
+@@ -250,24 +279,27 @@ function PageDataToAccountData(pageData,
+     server.prettyName = pageData.prettyName;
+   }
+ }
+ 
+ // given an accountData structure, create an account
+ // (but don't fill in any fields, that's for finishAccount()
+ function createAccount(accountData) {
+   let hostName = accountData.incomingServer.hostName;
+-  // If we're here, the server must not be associated with any account, so reuse
+-  // it.
+-  let server = NntpUtils.findServer(hostName);
+-
++  let server;
++  if (gType == "nntp") {
++    // If we're here, the server must not be associated with any account, so reuse
++    // it.
++    let server = NntpUtils.findServer(hostName);
++  }
++    
+   if (!server) {
+     dump(`MailServices.accounts.createIncomingServer(${hostName})\n`);
+     // Create a (actual) server.
+-    server = MailServices.accounts.createIncomingServer(null, hostName, "nntp");
++    server = MailServices.accounts.createIncomingServer(null, hostName, gType);
+   }
+ 
+   dump("MailServices.accounts.createAccount()\n");
+   // Create an account.
+   let account = MailServices.accounts.createAccount();
+ 
+   // only create an identity for this account if we really have one
+   // (use the email address as a check)
 diff --git a/mailnews/base/prefs/content/accountUtils.js b/mailnews/base/prefs/content/accountUtils.js
 --- a/mailnews/base/prefs/content/accountUtils.js
 +++ b/mailnews/base/prefs/content/accountUtils.js
@@ -819,6 +914,40 @@ diff --git a/mailnews/base/prefs/content/am-server.xhtml b/mailnews/base/prefs/c
    </vbox>
  </html:body>
  </html>
+diff --git a/mailnews/base/prefs/content/aw-done.js b/mailnews/base/prefs/content/aw-done.js
+--- a/mailnews/base/prefs/content/aw-done.js
++++ b/mailnews/base/prefs/content/aw-done.js
+@@ -9,19 +9,28 @@ var { MailServices } = ChromeUtils.impor
+   "resource:///modules/MailServices.jsm"
+ );
+ 
+ function donePageInit() {
+   var pageData = parent.GetPageData();
+ 
+   var email = pageData.email;
+   setDivTextFromForm("identity.email", email);
+-  setDivTextFromForm("server.username", getUsernameFromEmail(email));
++  var username;
++  if (gType == "movemail" && "@mozilla.org/userinfo;1" in Cc) {
++    username =
++      Cc["@mozilla.org/userinfo;1"].getService(
++        Ci.nsIUserInfo
++      ).username;
++  } else {
++    username = getUsernameFromEmail(email);
++  }
++  setDivTextFromForm("server.username", username);
+   setDivTextFromForm("account.name", pageData.prettyName);
+-  setDivTextFromForm("newsServer.name", pageData.hostname);
++  setDivTextFromForm("newsServer.name", gType == "nntp" ? pageData.hostname : "");
+ }
+ 
+ function setDivTextFromForm(divid, value) {
+   // collapse the row if the div has no value
+   let label = document.getElementById(`${divid}.label`);
+   let text = document.getElementById(`${divid}.text`);
+ 
+   if (!value) {
 diff --git a/mailnews/base/public/nsIMsgAccountManager.idl b/mailnews/base/public/nsIMsgAccountManager.idl
 --- a/mailnews/base/public/nsIMsgAccountManager.idl
 +++ b/mailnews/base/public/nsIMsgAccountManager.idl
@@ -2224,7 +2353,7 @@ new file mode 100644
 diff --git a/mailnews/local/test/unit/xpcshell-shared.ini b/mailnews/local/test/unit/xpcshell-shared.ini
 --- a/mailnews/local/test/unit/xpcshell-shared.ini
 +++ b/mailnews/local/test/unit/xpcshell-shared.ini
-@@ -1,16 +1,17 @@
+@@ -1,16 +1,18 @@
  [test_bug457168.js]
  [test_duplicateKey.js]
  [test_fileName.js]
@@ -2234,6 +2363,7 @@ diff --git a/mailnews/local/test/unit/xpcshell-shared.ini b/mailnews/local/test/
  [test_mailboxProtocol.js]
  [test_mailboxURL.js]
 +[test_movemailDownload.js]
++skip-if = os == "win"
  [test_msgCopy.js]
  [test_msgIDParsing.js]
  [test_nsIMsgLocalMailFolder.js]
