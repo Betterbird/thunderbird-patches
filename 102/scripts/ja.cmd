@@ -63,6 +63,24 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = プレーンテキスト形式または HTML 形式" >> localization\ja\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\ja\messenger\messengercompose\messengercompose.ftl
 
+:: Movemail
+:: Strings from https://hg.mozilla.org/l10n-central/ja/file/6ae114401a4cb7736a46e7d99b1ccd241fa7909b/mail/chrome/messenger/localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=メールスプールファイル %S を開けませんでした。"    >> chrome\ja\locale\ja\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=ロックファイル %S を作成できませんでした。Movemail が機能するにはメールスプールディレクトリーにロックファイルを作成する必要があります。多くのシステムではスプールディレクトリーのモードを 01777 に設定します。
+" >> chrome\ja\locale\ja\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=ロックファイル %S を削除できませんでした。"          >> chrome\ja\locale\ja\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=スプールファイル %S を整理できませんでした。" >> chrome\ja\locale\ja\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=メールスプールファイルが見つかりませんでした。"     >> chrome\ja\locale\ja\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=スプールファイル %S をパースできませんでした。ファイルが壊れているか正しくない可能性があります。" >> chrome\ja\locale\ja\messenger\localMsgs.properties
+%lecho% "serverType-movemail=Unix Movemail"                               >> chrome\ja\locale\ja\messenger\messenger.properties
+
+%lecho% "account-action-add-movemail-account ="  >> localization\ja\messenger\accountManager.ftl
+%lecho% "    .label = Movemail プアカウントを追加..." >> localization\ja\messenger\accountManager.ftl
+%lecho% "    .accesskey = M"                     >> localization\ja\messenger\accountManager.ftl
+%lecho% "file-new-movemail-account ="            >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = Movemail プアカウント..."      >> localization\ja\messenger\menubar.ftl
+%lecho% "    .accesskey = M"                     >> localization\ja\messenger\menubar.ftl
+
 :: Fix new strings from bug 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
 %lecho% "about-addressbook-details-impp-header = インスタントメッセージ" >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
 %lecho% "vcard-impp2-header = インスタントメッセージ"                    >> localization\ja\messenger\addressbook\vcard.ftl
