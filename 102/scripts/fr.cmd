@@ -62,3 +62,20 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\fr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = HTML ou texte brut"        >> localization\fr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\fr\messenger\messengercompose\messengercompose.ftl
+
+:: Movemail
+:: Strings from https://hg.mozilla.org/l10n-central/fr/file/c44ec9cbb2f169b6456935b250e0a0499ce80927/mail/chrome/messenger/localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Impossible d’ouvrir le fichier de spool du courrier %S."        >> chrome\fr\locale\fr\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Impossible de créer le fichier verrou %S. Pour que movemail fonctionne, il est nécessaire de créer des fichiers verrous dans le répertoire de spool du courrier. Sur de nombreux systèmes, le meilleur moyen d’y parvenir est d’établir les permissions du répertoire de spool à 01777." >> chrome\fr\locale\fr\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Impossible de supprimer le fichier verrou %S."                     >> chrome\fr\locale\fr\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Impossible de tronquer le fichier de spool du courrier %S." >> chrome\fr\locale\fr\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=Impossible de localiser le fichier de spool du courrier."       >> chrome\fr\locale\fr\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Impossible d’analyser le fichier de spool du courrier %S. Le fichier est peut-être corrompu ou non valide." >> chrome\fr\locale\fr\messenger\localMsgs.properties
+%lecho% "serverType-movemail=Unix Movemail"                                                        >> chrome\fr\locale\fr\messenger\messenger.properties
+
+%lecho% "account-action-add-movemail-account ="       >> localization\fr\messenger\accountManager.ftl
+%lecho% "    .label = Ajouter un compte de Movemail…" >> localization\fr\messenger\accountManager.ftl
+%lecho% "    .accesskey = M"                          >> localization\fr\messenger\accountManager.ftl
+%lecho% "file-new-movemail-account ="                 >> localization\fr\messenger\menubar.ftl
+%lecho% "    .label = Compte de Movemail…"            >> localization\fr\messenger\menubar.ftl
+%lecho% "    .accesskey = M"                          >> localization\fr\messenger\menubar.ftl
