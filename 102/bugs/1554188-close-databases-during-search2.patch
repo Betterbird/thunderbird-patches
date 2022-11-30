@@ -1,0 +1,182 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1669847051 -3600
+# Parent  d1e2575c79e318f3c5e8d017c58b9b7f54e72ca7
+Bug 1554188 - Only aggressively close folders if many involved in search.
+
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -23,31 +23,50 @@
+ #include "nsServiceManagerUtils.h"
+ 
+ static bool gReferenceOnlyThreading;
+ 
+ nsMsgSearchDBView::nsMsgSearchDBView() {
+   // Don't try to display messages for the search pane.
+   mSuppressMsgDisplay = true;
+   m_totalMessagesInView = 0;
++  m_numFoldersSearched = 0;
+   m_nextThreadId = 1;
+   mCurIndex = 0;
+   mTotalIndices = 0;
+   mCommand = -1;
+ }
+ 
+ nsMsgSearchDBView::~nsMsgSearchDBView() {}
+ 
+ NS_IMPL_ISUPPORTS_INHERITED(nsMsgSearchDBView, nsMsgDBView, nsIMsgDBView,
+                             nsIMsgCopyServiceListener, nsIMsgSearchNotify)
+ 
+ NS_IMETHODIMP
+ nsMsgSearchDBView::Open(nsIMsgFolder* folder, nsMsgViewSortTypeValue sortType,
+                         nsMsgViewSortOrderValue sortOrder,
+                         nsMsgViewFlagsTypeValue viewFlags, int32_t* pCount) {
++  m_numFoldersSearched = 0;
++  if (folder) {
++    nsCOMPtr<nsIMsgDatabase> db;
++    nsCOMPtr<nsIDBFolderInfo> folderInfo;
++    folder->GetDBFolderInfoAndDB(getter_AddRefs(folderInfo),
++                                 getter_AddRefs(db));
++    if (folderInfo) {
++      nsCString searchUri;
++      folderInfo->GetCharProperty("searchFolderUri", searchUri);
++      if (!searchUri.IsEmpty()) {
++        m_numFoldersSearched = 1;
++        for (const char* c = searchUri.BeginReading(); *c; c++) {
++          if (*c == '|') m_numFoldersSearched++;
++        }
++      }
++    }
++  }
++
+   // DBViewWrapper.jsm likes to create search views with a sort order
+   // of byNone, in order to have the order be the order the search results
+   // are returned. But this doesn't work with threaded view, so make the
+   // sort order be byDate if we're threaded.
+ 
+   if (viewFlags & nsMsgViewFlagsType::kThreadedDisplay &&
+       sortType == nsMsgViewSortType::byNone)
+     sortType = nsMsgViewSortType::byDate;
+@@ -342,17 +361,17 @@ nsresult nsMsgSearchDBView::GetMsgHdrFor
+       rv = db->GetMsgHdrForKey(m_keys[index], msgHdr);
+       // This is still a disaster zone. If a search result spans more than
+       // 500 folders, selecting the entire result will trigger calls of
+       // nsMsgDBView::GetSelectedMsgHdrs() in folderDisplay.js which via
+       // nsMsgDBView::GetHeadersFromSelection() calls this function for all
+       // the result messages attempting to open more that 500 databases.
+       // Even the call below doesn't mitigate that ...
+       // and using `true` as call parameter breaks other things.
+-      folder->CloseDBIfFolderNotOpen(false);
++      if (m_numFoldersSearched > 200) folder->CloseDBIfFolderNotOpen(false);
+       return rv;
+     }
+   }
+ 
+   return NS_ERROR_FAILURE;
+ }
+ 
+ NS_IMETHODIMP
+diff --git a/mailnews/base/src/nsMsgSearchDBView.h b/mailnews/base/src/nsMsgSearchDBView.h
+--- a/mailnews/base/src/nsMsgSearchDBView.h
++++ b/mailnews/base/src/nsMsgSearchDBView.h
+@@ -157,16 +157,17 @@ class nsMsgSearchDBView : public nsMsgGr
+   // the corresponding nsMsgXFViewThread object. If we're
+   // doing subject threading, we would throw subjects
+   // into the same table.
+   nsInterfaceHashtable<nsCStringHashKey, nsIMsgThread> m_threadsTable;
+ 
+   // map message-ids to msg hdrs in the view, used for threading.
+   nsInterfaceHashtable<nsCStringHashKey, nsIMsgDBHdr> m_hdrsTable;
+   uint32_t m_totalMessagesInView;
++  uint32_t m_numFoldersSearched;
+ 
+   virtual nsMsgGroupThread* CreateGroupThread(nsIMsgDatabase* db) override;
+   nsresult GetXFThreadFromMsgHdr(nsIMsgDBHdr* msgHdr, nsIMsgThread** pThread,
+                                  bool* foundByMessageId = nullptr);
+   bool GetThreadFromHash(nsCString& reference, nsIMsgThread** thread);
+   bool GetMsgHdrFromHash(nsCString& reference, nsIMsgDBHdr** hdr);
+   nsresult AddRefToHash(nsCString& reference, nsIMsgThread* thread);
+   nsresult AddMsgToHashTables(nsIMsgDBHdr* msgHdr, nsIMsgThread* thread);
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -196,17 +196,17 @@ void nsMsgXFVirtualFolderDBView::UpdateC
+         // ### of course, this isn't quite right, since we should be
+         // using FindHdr, and we shouldn't be expanding the threads.
+         db->GetMsgHdrForKey(badKey, getter_AddRefs(badHdr));
+         // Let nsMsgSearchDBView decide what to do about this header
+         // getting removed.
+         if (badHdr) OnHdrDeleted(badHdr, nsMsgKey_None, 0, this);
+       }
+     }
+-    folder->CloseDBIfFolderNotOpen(false);
++    if (m_numFoldersSearched > 200) folder->CloseDBIfFolderNotOpen(false);
+   }
+ }
+ 
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForPrevSearchedFolders(
+     nsIMsgFolder* curSearchFolder) {
+   // Handle the most recent folder with hits, if any.
+   if (m_curFolderGettingHits) {
+     uint32_t count = m_hdrHits.Count();
+@@ -270,17 +270,17 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+     else if (m_sortValid)
+       InsertHdrFromFolder(aMsgHdr, aFolder);
+     else
+       AddHdrFromFolder(aMsgHdr, aFolder);
+   }
+ 
+   m_hdrHits.AppendObject(aMsgHdr);
+   m_totalMessagesInView++;
+-  aFolder->CloseDBIfFolderNotOpen(false);
++  if (m_numFoldersSearched > 200) aFolder->CloseDBIfFolderNotOpen(false);
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::OnSearchDone(nsresult status) {
+   NS_ENSURE_TRUE(m_viewFolder, NS_ERROR_NOT_INITIALIZED);
+ 
+@@ -440,17 +440,17 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+               } else {
+                 break;
+               }
+ 
+               cachedHits->HasMoreElements(&hasMore);
+             }
+           }
+         }
+-        searchFolder->CloseDBIfFolderNotOpen(false);
++        if (m_numFoldersSearched > 200) searchFolder->CloseDBIfFolderNotOpen(false);
+       }
+     }
+   }
+ 
+   if (mTree && !m_doingQuickSearch) mTree->EndUpdateBatch();
+ 
+   m_curFolderStartKeyIndex = 0;
+   m_curFolderGettingHits = nullptr;
+diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
+--- a/mailnews/search/src/nsMsgSearchSession.cpp
++++ b/mailnews/search/src/nsMsgSearchSession.cpp
+@@ -495,17 +495,17 @@ nsresult nsMsgSearchSession::TimeSlice(b
+ void nsMsgSearchSession::ReleaseFolderDBRef() {
+   nsMsgSearchScopeTerm* scope = GetRunningScope();
+   if (!scope) return;
+ 
+   nsCOMPtr<nsIMsgFolder> folder;
+   scope->GetFolder(getter_AddRefs(folder));
+   // The call parameter needs to be `true` when dealing with more than one
+   // folder. Tested via trial and error.
+-  folder->CloseDBIfFolderNotOpen(m_scopeList.Length() > 1);
++  folder->CloseDBIfFolderNotOpen(m_scopeList.Length() > 200);
+ }
+ nsresult nsMsgSearchSession::TimeSliceSerial(bool* aDone) {
+   // This version of TimeSlice runs each scope term one at a time, and waits
+   // until one scope term is finished before starting another one. When we're
+   // searching the local disk, this is the fastest way to do it.
+ 
+   NS_ENSURE_ARG_POINTER(aDone);
+ 
