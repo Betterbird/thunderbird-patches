@@ -1,0 +1,488 @@
+# HG changeset patch
+# User Ben Campbell <benc@thunderbird.net>
+# Date 1670515548 -3600
+# Node ID 5d8d431a4a2ffd52d4a1ecbacfe291fe4b9e75bb
+# Parent  728c8ca834b9bf4c7f6550b85742356557d788c0
+Bug 1793313 - Fix bad end-of-message detection when saving news messages offline. r=mkmelin
+
+ESR102 version by Betterbird.
+
+The problem was that NntpClient was handling escaping the "." message
+termination, but that nsNewsFolder::NotifyDownloadedLine() was scanning for
+"." lines to finish messages. So the folder would screw up when a message
+body contained a lone "." line.
+
+The changes in detail:
+- Adds notifyDownloadBegin()/notifyDownloadEnd() calls to nsIMsgNewsFolder.
+- In NntpClient.jsm:
+  - Now calls notifyDownloadBegin()/notifyDownloadEnd() to denote message
+    boundaries.
+  - No longer sends a "." final line to the folder.
+  - Tries to call notifyDownloadEnd() with an error code if an error occurs.
+- adds an status param to nsMsgDBFolder::EndNewOfflineMessage(), and a code
+  path to clean up upon errors. News folder now uses this to handle rolling
+  back if an error occurs, but IMAP still relies on magic (checking the size
+  of the message written so far).
+- nsNewsFolder::NotifyDownloadedLine() no longer looks for a lone "." to
+  denote the end of a message. The relevant code was split out into
+  NotifyDownloadBegin() and NotifyDownloadEnd().
+- Added some comments to try and clarify the offline message writing vars in
+  nsMsgDBFolder.
+
+Differential Revision: https://phabricator.services.mozilla.com/D158486
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -1629,32 +1629,43 @@ nsresult nsMsgDBFolder::StartNewOfflineM
+       m_offlineHeader, getter_AddRefs(m_tempMessageStream));
+   if (NS_SUCCEEDED(rv) && !hasSemaphore)
+     AcquireSemaphore(static_cast<nsIMsgFolder*>(this));
+   if (NS_SUCCEEDED(rv)) WriteStartOfNewLocalMessage();
+   m_numOfflineMsgLines = 0;
+   return rv;
+ }
+ 
+-nsresult nsMsgDBFolder::EndNewOfflineMessage() {
++nsresult nsMsgDBFolder::EndNewOfflineMessage(nsresult status) {
+   int64_t curStorePos;
+   uint64_t messageOffset;
+   uint32_t messageSize;
+ 
+   nsMsgKey messageKey;
+ 
+   nsresult rv = GetDatabase();
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   m_offlineHeader->GetMessageKey(&messageKey);
+ 
+   nsCOMPtr<nsIMsgPluggableStore> msgStore;
+-  GetMsgStore(getter_AddRefs(msgStore));
+-
+-  mDatabase->MarkOffline(messageKey, true, nullptr);
++  rv = GetMsgStore(getter_AddRefs(msgStore));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  // Are we being asked to abort and clean up?
++  if (NS_FAILED(status)) {
++    mDatabase->MarkOffline(messageKey, false, nullptr);
++    if (m_tempMessageStream) {
++      msgStore->DiscardNewMessage(m_tempMessageStream, m_offlineHeader);
++    }
++    m_tempMessageStream = nullptr;
++    m_offlineHeader = nullptr;
++    return NS_OK;
++  }
++
+   if (m_tempMessageStream) {
+     m_tempMessageStream->Flush();
+   }
+ 
+   // Some sanity checking.
+   // This will go away once nsIMsgPluggableStore stops serving up seekable
+   // output streams.
+   // If quarantining (mailnews.downloadToTempFile == true) is on we'll already
+@@ -1679,21 +1690,18 @@ nsresult nsMsgDBFolder::EndNewOfflineMes
+     // We clear the offline flag on the message if the size
+     // looks wrong. Check if we're off by more than one byte per line.
+     if (messageSize > (uint32_t)curStorePos &&
+         (messageSize - (uint32_t)curStorePos) >
+             (uint32_t)m_numOfflineMsgLines) {
+       mDatabase->MarkOffline(messageKey, false, nullptr);
+       // we should truncate the offline store at messageOffset
+       ReleaseSemaphore(static_cast<nsIMsgFolder*>(this));
+-      if (msgStore)
+-        // this closes the stream
+-        msgStore->DiscardNewMessage(m_tempMessageStream, m_offlineHeader);
+-      else
+-        m_tempMessageStream->Close();
++      // this closes the stream
++      msgStore->DiscardNewMessage(m_tempMessageStream, m_offlineHeader);
+       m_tempMessageStream = nullptr;
+ #ifdef _DEBUG
+       nsAutoCString message("Offline message too small: messageSize=");
+       message.AppendInt(messageSize);
+       message.AppendLiteral(" curStorePos=");
+       message.AppendInt(curStorePos);
+       message.AppendLiteral(" numOfflineMsgLines=");
+       message.AppendInt(m_numOfflineMsgLines);
+@@ -1701,29 +1709,27 @@ nsresult nsMsgDBFolder::EndNewOfflineMes
+       message.AppendInt(m_bytesAddedToLocalMsg);
+       NS_ERROR(message.get());
+ #endif
+       m_offlineHeader = nullptr;
+       return NS_ERROR_FAILURE;
+     }
+   }
+ 
+-  // Successful. Finalise the message.
++  // Success! Finalise the message.
++  mDatabase->MarkOffline(messageKey, true, nullptr);
+   m_offlineHeader->SetOfflineMessageSize(m_tempMessageStreamBytesWritten);
+   m_offlineHeader->SetLineCount(m_numOfflineMsgLines);
+ 
+-  if (msgStore)
+-    msgStore->FinishNewMessage(m_tempMessageStream, m_offlineHeader);
+-
++  // (But remember, stream might be buffered and closing/flushing could still
++  // fail!)
++  rv = msgStore->FinishNewMessage(m_tempMessageStream, m_offlineHeader);
++  m_tempMessageStream = nullptr;
+   m_offlineHeader = nullptr;
+-  if (m_tempMessageStream) {
+-    m_tempMessageStream->Close();
+-    m_tempMessageStream = nullptr;
+-  }
+-  return NS_OK;
++  return rv;
+ }
+ 
+ class AutoCompactEvent : public mozilla::Runnable {
+  public:
+   AutoCompactEvent(nsIMsgWindow* aMsgWindow, nsMsgDBFolder* aFolder)
+       : mozilla::Runnable("AutoCompactEvent"),
+         mMsgWindow(aMsgWindow),
+         mFolder(aFolder) {}
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -168,20 +168,22 @@ class nsMsgDBFolder : public nsSupportsW
+   bool ConfirmAutoFolderRename(nsIMsgWindow* aMsgWindow,
+                                const nsString& aOldName,
+                                const nsString& aNewName);
+ 
+   // Returns true if: a) there is no need to prompt or b) the user is already
+   // logged in or c) the user logged in successfully.
+   static bool PromptForMasterPasswordIfNecessary();
+ 
+-  // offline support methods.
++  // Offline support methods. Used by IMAP and News folders, but not local
++  // folders.
+   nsresult StartNewOfflineMessage();
+   nsresult WriteStartOfNewLocalMessage();
+-  nsresult EndNewOfflineMessage();
++  nsresult EndNewOfflineMessage(nsresult status);
++
+   nsresult AutoCompact(nsIMsgWindow* aWindow);
+   // this is a helper routine that ignores whether nsMsgMessageFlags::Offline is
+   // set for the folder
+   nsresult MsgFitsDownloadCriteria(nsMsgKey msgKey, bool* result);
+   nsresult GetPromptPurgeThreshold(bool* aPrompt);
+   nsresult GetPurgeThreshold(int32_t* aThreshold);
+   nsresult ApplyRetentionSettings(bool deleteViaFolder);
+   MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult AddMarkAllReadUndoAction(
+@@ -213,28 +215,40 @@ class nsMsgDBFolder : public nsSupportsW
+ 
+   nsCOMPtr<nsIMsgDatabase> mDatabase;
+   nsCOMPtr<nsIMsgDatabase> mBackupDatabase;
+   bool mAddListener;
+   bool mNewMessages;
+   bool mGettingNewMessages;
+   nsMsgKey mLastMessageLoaded;
+ 
++  /*
++   * Start of offline-message-writing vars.
++   * These track offline message writing for IMAP and News folders.
++   * But *not* for local folders, which do their own thing.
++   * They are set up by StartNewOfflineMessage() and cleaned up
++   * by EndNewOfflineMessage().
++   * IMAP folder also uses these vars when saving messages to disk.
++   */
++
++  // The header of the message currently being written.
+   nsCOMPtr<nsIMsgDBHdr> m_offlineHeader;
+   int32_t m_numOfflineMsgLines;
++  // Number of bytes added due to add X-Mozilla-* headers.
+   int32_t m_bytesAddedToLocalMsg;
+   // This is currently used when we do a save as of an imap or news message..
+   // Also used by IMAP/News offline messsage writing.
+   nsCOMPtr<nsIOutputStream> m_tempMessageStream;
+-  // Tracks the number of bytes written to m_tempMessageStream.
+-  // Intentionally cumbersome name. Needed to fix Bug 1742975, but should
+-  // be removed as soon as nsIMsgPluggableStore implementations track byte
+-  // counts properly themselves.
++  // The number of bytes written to m_tempMessageStream so far.
+   uint32_t m_tempMessageStreamBytesWritten;
+ 
++  /*
++   * End of offline message tracking vars
++   */
++
+   nsCOMPtr<nsIMsgRetentionSettings> m_retentionSettings;
+   nsCOMPtr<nsIMsgDownloadSettings> m_downloadSettings;
+   static nsrefcnt mInstanceCount;
+ 
+   uint32_t mFlags;
+   nsWeakPtr mParent;          // This won't be refcounted for ownership reasons.
+   int32_t mNumUnreadMessages; /* count of unread messages (-1 means unknown; -2
+                                  means unknown but we already tried to find
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -4271,17 +4271,17 @@ nsImapMailFolder::NormalEndMsgWriteStrea
+       // offline header gets committed in EndNewOfflineMessage() called below
+       if (mDatabase && !m_offlineHeader)
+         mDatabase->Commit(nsMsgDBCommitType::kLargeCommit);
+     } else
+       NS_WARNING(
+           "Failed to get message header when trying to update message size");
+   }
+ 
+-  if (m_offlineHeader) EndNewOfflineMessage();
++  if (m_offlineHeader) EndNewOfflineMessage(NS_OK);
+ 
+   m_curMsgUid = uidOfMessage;
+ 
+   // Apply filter now if it needed a body
+   if (m_filterListRequiresBody) {
+     if (m_filterList) {
+       nsCOMPtr<nsIMsgDBHdr> newMsgHdr;
+       GetMessageHeader(uidOfMessage, getter_AddRefs(newMsgHdr));
+diff --git a/mailnews/news/public/nsIMsgNewsFolder.idl b/mailnews/news/public/nsIMsgNewsFolder.idl
+--- a/mailnews/news/public/nsIMsgNewsFolder.idl
++++ b/mailnews/news/public/nsIMsgNewsFolder.idl
+@@ -105,17 +105,43 @@ interface nsIMsgNewsFolder : nsISupports
+   void removeMessage(in nsMsgKey key);
+   void removeMessages(in Array<nsMsgKey> keys);
+   void cancelComplete();
+   void cancelFailed();
+ 
+   ACString getMessageIdForKey(in nsMsgKey key);
+ 
+   void getNextNMessages(in nsIMsgWindow aMsgWindow);
+-  void notifyDownloadedLine(in string line, in nsMsgKey key);
++
++  /**
++   * Begin loading a message into the folder's offline store.
++   * @param key - the key of the message being loaded (the folder must
++   *              already have the message in it's DB)
++   */
++  void notifyDownloadBegin(in nsMsgKey key);
++
++  /**
++   * Feed the next line of a message into the folder, to be invoked multiple
++   * times between notifyDownloadBegin() and notifyDownloadEnd().
++   *
++   * @param line - a single line of data to append to the message, including
++   *               end-of-line terminator.
++   */
++  void notifyDownloadedLine(in ACString line);
++  void notifyDownloadedLine_CPP_MODULE(in string line, in nsMsgKey key);
++
++  /**
++   * Finish loading a message into the folder. If an error occurs, the
++   * folder hears about it via this function, and should abort the message.
++   *
++   * @param status - NS_OK if the operation was completed, an error code
++   *                 otherwise.
++   */
++  void notifyDownloadEnd(in nsresult status);
++
+   void notifyFinishedDownloadinghdrs();
+ 
+   /**
+    * Requests that a message be canceled.
+    *
+    * Note that, before sending the news cancel, this method will check to make
+    * sure that the user has proper permission to cancel the message.
+    *
+diff --git a/mailnews/news/src/NntpClient.jsm b/mailnews/news/src/NntpClient.jsm
+--- a/mailnews/news/src/NntpClient.jsm
++++ b/mailnews/news/src/NntpClient.jsm
+@@ -667,40 +667,39 @@ class NntpClient {
+   }
+ 
+   /**
+    * Send `ARTICLE` request to the server.
+    */
+   _actionArticle = () => {
+     this._sendCommand(`ARTICLE ${this._articleNumber}`);
+     this._nextAction = this._actionArticleResponse;
++    this._newsFolder?.notifyDownloadBegin(this._articleNumber);
++    this._downloadingToFolder = true;
+   };
+ 
+   /**
+    * Handle `ARTICLE` response.
+    * @param {NntpResponse} res - ARTICLE response received from the server.
+    */
+   _actionArticleResponse = ({ data }) => {
+     let lineSeparator = AppConstants.platform == "win" ? "\r\n" : "\n";
+ 
+     this._lineReader.read(
+       data,
+       line => {
+         // NewsFolder will decide whether to save it to the offline storage.
+         this._newsFolder?.notifyDownloadedLine(
+-          line.slice(0, -2) + lineSeparator,
+-          this._articleNumber
++          line.slice(0, -2) + lineSeparator
+         );
+         this.onData(line);
+       },
+       () => {
+-        this._newsFolder?.notifyDownloadedLine(
+-          `.${lineSeparator}`,
+-          this._articleNumber
+-        );
++        this._newsFolder?.notifyDownloadEnd(Cr.NS_OK);
++        this._downloadingToFolder = false;
+         this._actionDone();
+       }
+     );
+   };
+ 
+   /**
+    * Handle multi-line data blocks response, e.g. ARTICLE/LIST response. Emit
+    * each line through onData.
+@@ -840,16 +839,22 @@ class NntpClient {
+ 
+   /**
+    * Close the connection and do necessary cleanup.
+    */
+   _actionDone = (status = Cr.NS_OK) => {
+     if (this._done) {
+       return;
+     }
++    if (this._downloadingToFolder) {
++      // If we're in the middle of sending a message to the folder, make sure
++      // the folder knows we're aborting.
++      this._newsFolder.notifyDownloadEnd(Cr.NS_ERROR_FAILURE);
++      this._downloadingToFolder = false;
++    }
+     this._done = true;
+     this._logger.debug(`Done with status=${status}`);
+     this.onDone(status);
+     this._newsGroup?.cleanUp();
+     this._newsFolder?.OnStopRunningUrl?.(this.runningUri, status);
+     this.urlListener?.OnStopRunningUrl(this.runningUri, status);
+     this.runningUri.SetUrlState(false, Cr.NS_OK);
+     this._reset();
+diff --git a/mailnews/news/src/nsNNTPProtocol.cpp b/mailnews/news/src/nsNNTPProtocol.cpp
+--- a/mailnews/news/src/nsNNTPProtocol.cpp
++++ b/mailnews/news/src/nsNNTPProtocol.cpp
+@@ -1980,17 +1980,17 @@ nsresult nsNNTPProtocol::DisplayArticle(
+       PR_Free(line);
+       return rv;
+     }
+ 
+     if (!line) return NS_OK;
+ 
+     // line only contains a single dot -> message end
+     if (line_length == 1 + MSG_LINEBREAK_LEN && line[0] == '.') {
+-      if (m_newsFolder) m_newsFolder->NotifyDownloadedLine(line, m_key);
++      if (m_newsFolder) m_newsFolder->NotifyDownloadedLine_CPP_MODULE(line, m_key);
+ 
+       m_nextState = NEWS_DONE;
+ 
+       ClearFlag(NNTP_PAUSE_FOR_READ);
+ 
+       uint64_t inlength = 0;
+       mDisplayInputStream->Available(&inlength);
+       if (inlength > 0)  // broadcast our batched up ODA changes
+@@ -2007,17 +2007,17 @@ nsresult nsNNTPProtocol::DisplayArticle(
+       // see: https://tools.ietf.org/html/rfc3977#section-3.1.1
+       const char* unescapedLine = line;
+       if (line_length > 1 && line[0] == '.' && line[1] == '.') {
+         unescapedLine++;
+         line_length--;
+       }
+ 
+       if (m_newsFolder)
+-        m_newsFolder->NotifyDownloadedLine(unescapedLine, m_key);
++        m_newsFolder->NotifyDownloadedLine_CPP_MODULE(unescapedLine, m_key);
+ 
+       mDisplayOutputStream->Write(unescapedLine, line_length, &count);
+     }
+ 
+     PR_Free(line);
+   }
+ 
+   return NS_OK;
+@@ -2043,17 +2043,17 @@ nsresult nsNNTPProtocol::ReadArticle(nsI
+ 
+   char* line = m_lineStreamBuffer->ReadNextLine(inputStream, status,
+                                                 pauseForMoreData, &rv, true);
+   if (m_newsFolder && line) {
+     const char* unescapedLine = line;
+     // lines beginning with '.' are escaped by nntp server
+     // or is it just '.' on a line by itself?
+     if (line[0] == '.' && line[1] == '.') unescapedLine++;
+-    m_newsFolder->NotifyDownloadedLine(unescapedLine, m_key);
++    m_newsFolder->NotifyDownloadedLine_CPP_MODULE(unescapedLine, m_key);
+   }
+ 
+   if (pauseForMoreData) {
+     SetFlag(NNTP_PAUSE_FOR_READ);
+     return NS_OK;
+   }
+   if (status > 1) {
+     mBytesReceived += status;
+diff --git a/mailnews/news/src/nsNewsFolder.cpp b/mailnews/news/src/nsNewsFolder.cpp
+--- a/mailnews/news/src/nsNewsFolder.cpp
++++ b/mailnews/news/src/nsNewsFolder.cpp
+@@ -1468,33 +1468,62 @@ NS_IMETHODIMP nsMsgNewsFolder::GetLocalM
+ 
+   RefPtr<mozilla::SlicedInputStream> slicedStream =
+       new mozilla::SlicedInputStream(rawStream.forget(), offset,
+                                      uint64_t(size));
+   slicedStream.forget(stream);
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgNewsFolder::NotifyDownloadBegin(nsMsgKey key) {
++  if (!m_downloadMessageForOfflineUse) {
++    return NS_OK;
++  }
++  nsresult rv = GetMessageHeader(key, getter_AddRefs(m_offlineHeader));
++  NS_ENSURE_SUCCESS(rv, rv);
++  return StartNewOfflineMessage();  // Sets up m_tempMessageStream et al.
++}
++
++NS_IMETHODIMP nsMsgNewsFolder::NotifyDownloadedLine(nsACString const& line) {
++  nsresult rv = NS_OK;
++  if (m_tempMessageStream) {
++    m_numOfflineMsgLines++;
++    uint32_t count = 0;
++    rv = m_tempMessageStream->Write(line.BeginReading(), line.Length(), &count);
++    NS_ENSURE_SUCCESS(rv, rv);
++    m_tempMessageStreamBytesWritten += count;
++  }
++
++  return rv;
++}
++
++NS_IMETHODIMP nsMsgNewsFolder::NotifyDownloadEnd(nsresult status) {
++  if (m_tempMessageStream) {
++    return EndNewOfflineMessage(status);
++  }
++  return NS_OK;
++}
++
+ // line does not have a line terminator (e.g., CR or CRLF)
+-NS_IMETHODIMP nsMsgNewsFolder::NotifyDownloadedLine(const char* line,
++NS_IMETHODIMP nsMsgNewsFolder::NotifyDownloadedLine_CPP_MODULE(const char* line,
+                                                     nsMsgKey keyOfArticle) {
+   nsresult rv = NS_OK;
+   if (m_downloadMessageForOfflineUse) {
+     if (!m_offlineHeader) {
+       GetMessageHeader(keyOfArticle, getter_AddRefs(m_offlineHeader));
+       rv = StartNewOfflineMessage();
+     }
+     m_numOfflineMsgLines++;
+   }
+ 
+   if (m_tempMessageStream) {
+     // line now contains the linebreak.
+     if (line[0] == '.' && line[MSG_LINEBREAK_LEN + 1] == 0) {
+       // end of article.
+-      if (m_offlineHeader) EndNewOfflineMessage();
++      if (m_offlineHeader) EndNewOfflineMessage(NS_OK);
+ 
+       if (m_tempMessageStream && !m_downloadingMultipleMessages) {
+         m_tempMessageStream->Close();
+         m_tempMessageStream = nullptr;
+       }
+     } else {
+       uint32_t count = 0;
+       rv = m_tempMessageStream->Write(line, strlen(line), &count);
