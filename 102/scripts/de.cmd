@@ -72,6 +72,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "threadpane-apply-changes-prompt-no-children-text = Aktuelle Ansicht anwenden auf Ordner { $name }?" >> localization\de\messenger\mailWidgets.ftl
 %lecho% "threadpane-apply-changes-prompt-with-children-text = Aktuelle Ansicht anwenden auf Ordner { $name } und alle Unterordner?" >> localization\de\messenger\mailWidgets.ftl
 
+:: Fix missing ! in the about box.
+sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\de\locale\de\messenger\aboutDialog.dtd
+
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/de/file/2f346846f995f942b61562fed125b0cc98e82a13/mail/chrome/messenger/localMsgs.properties
 %lecho% "movemailCantOpenSpoolFile=Nachrichten-Warteschlangen-Datei %S kann nicht geöffnet werden."            >> chrome\de\locale\de\messenger\localMsgs.properties

@@ -63,6 +63,9 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = HTML ou texto sem formato" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
 
+:: Fix missing ! in the about box.
+sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\pt-BR\locale\pt-BR\messenger\aboutDialog.dtd
+
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/pt-BR/file/5ad8709a37c8f82389ad95a7fb00b65f641433ad/mail/chrome/messenger/localMsgs.properties
 %lecho% "movemailCantOpenSpoolFile=Não foi possível abrir o arquivo de spool de emails %S."  >> chrome\pt-BR\locale\pt-BR\messenger\localMsgs.properties
