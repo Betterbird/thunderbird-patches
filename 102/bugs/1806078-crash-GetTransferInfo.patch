@@ -1,0 +1,148 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1671212903 -3600
+# Parent  38abd75403ec86c4f0125ab6715f426b44aa02b8
+Bug 1806078 - Fix crash in nsDBFolderInfo::GetTransferInfo() and adjust callers.
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -1995,18 +1995,18 @@ nsMsgDBFolder::MatchOrChangeFilterDestin
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBFolder::GetDBTransferInfo(nsIDBFolderInfo** aTransferInfo) {
+   nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+   nsCOMPtr<nsIMsgDatabase> db;
+   GetDBFolderInfoAndDB(getter_AddRefs(dbFolderInfo), getter_AddRefs(db));
+-  if (dbFolderInfo) dbFolderInfo->GetTransferInfo(aTransferInfo);
+-  return NS_OK;
++  NS_ENSURE_TRUE(dbFolderInfo, NS_ERROR_UNEXPECTED);
++  return dbFolderInfo->GetTransferInfo(aTransferInfo);
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBFolder::SetDBTransferInfo(nsIDBFolderInfo* aTransferInfo) {
+   NS_ENSURE_ARG(aTransferInfo);
+   nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+   nsCOMPtr<nsIMsgDatabase> db;
+   GetMsgDatabase(getter_AddRefs(db));
+diff --git a/mailnews/base/src/nsMsgFolderCompactor.cpp b/mailnews/base/src/nsMsgFolderCompactor.cpp
+--- a/mailnews/base/src/nsMsgFolderCompactor.cpp
++++ b/mailnews/base/src/nsMsgFolderCompactor.cpp
+@@ -615,17 +615,17 @@ nsresult nsFolderCompactState::FinishCom
+     rv = msgDBService->OpenFolderDB(m_folder, true, getter_AddRefs(m_db));
+     NS_ENSURE_TRUE(m_db, NS_FAILED(rv) ? rv : NS_ERROR_FAILURE);
+     // These errors are expected.
+     rv = (rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING ||
+           rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE)
+              ? NS_OK
+              : rv;
+     m_db->SetSummaryValid(true);
+-    m_folder->SetDBTransferInfo(transferInfo);
++    if (transferInfo) m_folder->SetDBTransferInfo(transferInfo);
+ 
+     // since we're transferring info from the old db, we need to reset the
+     // expunged bytes
+     nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+     m_db->GetDBFolderInfo(getter_AddRefs(dbFolderInfo));
+     if (dbFolderInfo) dbFolderInfo->SetExpungedBytes(0);
+   }
+   if (m_db) m_db->Close(true);
+diff --git a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp b/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
+--- a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
++++ b/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
+@@ -693,27 +693,26 @@ class nsTransferDBFolderInfo : public ns
+ 
+ nsTransferDBFolderInfo::nsTransferDBFolderInfo() : nsDBFolderInfo(nullptr) {}
+ 
+ nsTransferDBFolderInfo::~nsTransferDBFolderInfo() {}
+ 
+ /* void GetTransferInfo (out nsIDBFolderInfo transferInfo); */
+ NS_IMETHODIMP nsDBFolderInfo::GetTransferInfo(nsIDBFolderInfo** transferInfo) {
+   NS_ENSURE_ARG_POINTER(transferInfo);
+-
+-  nsTransferDBFolderInfo* newInfo = new nsTransferDBFolderInfo;
+-  NS_ADDREF(*transferInfo = newInfo);
++  NS_ENSURE_TRUE(m_mdbRow, NS_ERROR_NULL_POINTER);
++  
++  RefPtr<nsTransferDBFolderInfo> newInfo = new nsTransferDBFolderInfo;
+ 
+   mdb_count numCells;
+   mdbYarn cellYarn;
+   mdb_column cellColumn;
+   char columnName[100];
+   mdbYarn cellName = {columnName, 0, sizeof(columnName), 0, 0, nullptr};
+ 
+-  NS_ASSERTION(m_mdbRow, "null row in getTransferInfo");
+   m_mdbRow->GetCount(m_mdb->GetEnv(), &numCells);
+   // iterate over the cells in the dbfolderinfo remembering attribute names and
+   // values.
+   for (mdb_count cellIndex = 0; cellIndex < numCells; cellIndex++) {
+     nsresult err = m_mdbRow->SeekCellYarn(m_mdb->GetEnv(), cellIndex,
+                                           &cellColumn, nullptr);
+     if (NS_SUCCEEDED(err)) {
+       err = m_mdbRow->AliasCellYarn(m_mdb->GetEnv(), cellColumn, &cellYarn);
+@@ -725,16 +724,17 @@ NS_IMETHODIMP nsDBFolderInfo::GetTransfe
+                       (const char*)cellYarn.mYarn_Buf + cellYarn.mYarn_Fill));
+         newInfo->m_properties.AppendElement(
+             Substring((const char*)cellName.mYarn_Buf,
+                       (const char*)cellName.mYarn_Buf + cellName.mYarn_Fill));
+       }
+     }
+   }
+ 
++  newInfo.forget(transferInfo);
+   return NS_OK;
+ }
+ 
+ /* void InitFromTransferInfo (in nsIDBFolderInfo transferInfo); */
+ NS_IMETHODIMP nsDBFolderInfo::InitFromTransferInfo(
+     nsIDBFolderInfo* aTransferInfo) {
+   NS_ENSURE_ARG(aTransferInfo);
+ 
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -1453,17 +1453,17 @@ NS_IMETHODIMP nsImapMailFolder::EmptyTra
+ 
+     nsCOMPtr<nsIDBFolderInfo> transferInfo;
+     rv = trashFolder->GetDBTransferInfo(getter_AddRefs(transferInfo));
+     NS_ENSURE_SUCCESS(rv, rv);
+     // Bulk-delete all the messages by deleting the msf file and storage.
+     // This is a little kludgy.
+     rv = trashFolder->DeleteStorage();
+     NS_ENSURE_SUCCESS(rv, rv);
+-    trashFolder->SetDBTransferInfo(transferInfo);
++    if (transferInfo) trashFolder->SetDBTransferInfo(transferInfo);
+     trashFolder->SetSizeOnDisk(0);
+ 
+     // The trash folder has effectively been deleted.
+     nsCOMPtr<nsIMsgFolderNotificationService> notifier(
+         do_GetService(NS_MSGNOTIFICATIONSERVICE_CONTRACTID));
+     if (notifier) notifier->NotifyFolderDeleted(trashFolder);
+ 
+     return NS_OK;
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -573,17 +573,17 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Empt
+       trashFolder->SetParent(nullptr);
+       parentFolder->PropagateDelete(trashFolder, true, msgWindow);
+       parentFolder->CreateSubfolder(u"Trash"_ns, nullptr);
+       nsCOMPtr<nsIMsgFolder> newTrashFolder;
+       rv = GetTrashFolder(getter_AddRefs(newTrashFolder));
+       if (NS_SUCCEEDED(rv) && newTrashFolder) {
+         nsCOMPtr<nsIMsgLocalMailFolder> localTrash =
+             do_QueryInterface(newTrashFolder);
+-        newTrashFolder->SetDBTransferInfo(transferInfo);
++        if (transferInfo) newTrashFolder->SetDBTransferInfo(transferInfo);
+         if (localTrash) localTrash->RefreshSizeOnDisk();
+         // update the summary totals so the front end will
+         // show the right thing for the new trash folder
+         // see bug #161999
+         nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+         nsCOMPtr<nsIMsgDatabase> db;
+         newTrashFolder->GetDBFolderInfoAndDB(getter_AddRefs(dbFolderInfo),
+                                              getter_AddRefs(db));
