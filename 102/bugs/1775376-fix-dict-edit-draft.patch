@@ -1,13 +1,31 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1662405786 -7200
-# Parent  63dd0ac4c02309afbf3f6261aef65a45e82b4a59
-Bug 1775376 - Delay setting of dictionaries when composition is restored from draft.
+# Parent  9c443446ecb5b27060e603a8894a37f1bff5b97c
+Bug 1775376 - Delay setting of dictionaries in InitEditor() until initial spell check is done.
 
 diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
 --- a/mail/components/compose/content/MsgComposeCommands.js
 +++ b/mail/components/compose/content/MsgComposeCommands.js
-@@ -10787,17 +10787,39 @@ function InitEditor() {
+@@ -5395,16 +5395,17 @@ function ComposeUnload() {
+     gMsgEditorCreationObserver,
+     "obs_documentCreated"
+   );
+   UnloadCommandUpdateHandlers();
+ 
+   // In some tests, the window is closed so quickly that the observer
+   // hasn't fired and removed itself yet, so let's remove it here.
+   spellCheckReadyObserver.removeObserver();
++  checkerReadyObserver.removeObserver();
+   // Stop spell checker so personal dictionary is saved.
+   enableInlineSpellCheck(false);
+ 
+   EditorCleanup();
+ 
+   if (gMsgCompose) {
+     gMsgCompose.removeMsgSendListener(gSendListener);
+   }
+@@ -10858,17 +10859,30 @@ function InitEditor() {
      gMsgCompose.compFields.contentLanguage
    ) {
      draftLanguages = gMsgCompose.compFields.contentLanguage
@@ -17,29 +35,20 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
  
    let dictionaries = getValidSpellcheckerDictionaries(draftLanguages);
 -  ComposeChangeLanguage(dictionaries).catch(console.error);
-+  // Setting dictionaries programatically is troublesome, looks
-+  // like the windows needs a breather before it can accept them.
-+  // 0 doesn't work, 100 ms also works, but 200 ms is safer but doesn't
-+  // always work, let's try 300 ms. Replies take especially long.
-+  let delay;
-+  switch (gComposeType) {
-+    case Ci.nsIMsgCompType.Reply:
-+    case Ci.nsIMsgCompType.ReplyAll:
-+    case Ci.nsIMsgCompType.ReplyToSender:
-+    case Ci.nsIMsgCompType.ReplyToGroup:
-+    case Ci.nsIMsgCompType.ReplyToSenderAndGroup:
-+    case Ci.nsIMsgCompType.ReplyWithTemplate:
-+    case Ci.nsIMsgCompType.ReplyToList:
-+      delay = 500;
-+      break;
-+
-+    default:
-+      delay = 300;
++  // We can only set new dictionaries after the initial spell check
++  // triggered by switching on the inline spell checker is finished.
++  if (!gSpellCheckingEnabled) {
++    ComposeChangeLanguage(dictionaries).catch(console.error);
++  } else {
++    (function setDicts() {
++      if (checkerReadyObserver.isReady()) {
++        checkerReadyObserver.removeObserver();
++        ComposeChangeLanguage(dictionaries).catch(console.error);
++      } else {
++        setTimeout(setDicts, 100);
++      }
++    })();
 +  }
-+  setTimeout(
-+    () => ComposeChangeLanguage(dictionaries).catch(console.error),
-+    delay
-+  );
  }
  
  function setFontSize(event) {
@@ -48,3 +57,78 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
    // and fontSize will be null for such function calls.
    let fontSize = event.target.value;
    if (fontSize) {
+@@ -10881,32 +10895,74 @@ function setParagraphState(event) {
+ }
+ 
+ // This is used as event listener to spellcheck-changed event to update
+ // document language.
+ function updateDocumentLanguage(e) {
+   ComposeChangeLanguage(e.detail.dictionaries).catch(console.error);
+ }
+ 
++var checkerReadyObserver = {
++  _topic: "inlineSpellChecker-spellCheck-ended",
++  _isReady: false,
++
++  observe(aSubject, aTopic, aData) {
++    if (aTopic != this._topic) {
++      return;
++    }
++    this._isReady = true;
++  },
++
++  _isAdded: false,
++
++  addObserver() {
++    if (this._isAdded) {
++      return;
++    }
++
++    Services.obs.addObserver(this, this._topic);
++    this._isAdded = true;
++  },
++
++  removeObserver() {
++    if (!this._isAdded) {
++      return;
++    }
++
++    Services.obs.removeObserver(this, this._topic);
++    this._isAdded = false;
++    this._isReady = false;
++  },
++
++  isReady() {
++    return this._isReady;
++  },
++};
++
+ function toggleSpellCheckingEnabled() {
+   enableInlineSpellCheck(!gSpellCheckingEnabled);
++  checkerReadyObserver.removeObserver();
+ }
+ 
+ // This function is called either at startup (see InitEditor above), or when
+ // the user clicks on one of the two menu items that allow them to toggle the
+ // spellcheck feature (either context menu or Options menu).
+ function enableInlineSpellCheck(aEnableInlineSpellCheck) {
+   let checker = GetCurrentEditorSpellChecker();
+   if (!checker) {
+     return;
+   }
+   if (gSpellCheckingEnabled != aEnableInlineSpellCheck) {
+     // If state of spellchecker is about to change, clear any pending observer.
+     spellCheckReadyObserver.removeObserver();
+   }
++  checkerReadyObserver.removeObserver();
++  if (aEnableInlineSpellCheck) {
++    checkerReadyObserver.addObserver();
++  }
+ 
+   gSpellCheckingEnabled = checker.enableRealTimeSpell = aEnableInlineSpellCheck;
+   document
+     .getElementById("msgSubject")
+     .setAttribute("spellcheck", aEnableInlineSpellCheck);
+ }
+ 
+ function getMailToolbox() {
