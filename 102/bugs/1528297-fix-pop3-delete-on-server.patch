@@ -1,0 +1,60 @@
+# HG changeset patch
+# User Ping Chen <remotenonsense@gmail.com>
+# Date 1671551637 -3600
+# Node ID 9184df23182497f78bd0a6279fe9d8f706c44fbc
+# Parent  cdaf03fc3a5e7bc18c4eb103b5b1afabd4247bbb
+Bug 1528297 - Prevent deleting POP3 message on server after detaching attachments. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D164780
+
+diff --git a/mailnews/base/src/nsMessenger.cpp b/mailnews/base/src/nsMessenger.cpp
+--- a/mailnews/base/src/nsMessenger.cpp
++++ b/mailnews/base/src/nsMessenger.cpp
+@@ -2374,16 +2374,17 @@ nsDelAttachListener::OnStartRunningUrl(n
+   return NS_OK;
+ }
+ 
+ nsresult nsDelAttachListener::DeleteOriginalMessage() {
+   nsCOMPtr<nsIMsgCopyServiceListener> listenerCopyService;
+   QueryInterface(NS_GET_IID(nsIMsgCopyServiceListener),
+                  getter_AddRefs(listenerCopyService));
+ 
++  mOriginalMessage->SetUint32Property("attachmentDetached", 1);
+   RefPtr<nsIMsgDBHdr> doomed(mOriginalMessage);
+   mOriginalMessage = nullptr;
+   m_state = eDeletingOldMessage;
+   return mMessageFolder->DeleteMessages({doomed},             // messages
+                                         mMsgWindow,           // msgWindow
+                                         true,                 // deleteStorage
+                                         false,                // isMove
+                                         listenerCopyService,  // listener
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -973,17 +973,25 @@ nsMsgLocalMailFolder::DeleteMessages(
+     nsTArray<RefPtr<nsIMsgDBHdr>> const& msgHeaders, nsIMsgWindow* msgWindow,
+     bool deleteStorage, bool isMove, nsIMsgCopyServiceListener* listener,
+     bool allowUndo) {
+   nsresult rv;
+ 
+   // shift delete case - (delete to trash is handled in EndMove)
+   // this is also the case when applying retention settings.
+   if (deleteStorage && !isMove) {
+-    MarkMsgsOnPop3Server(msgHeaders, POP3_DELETE);
++    nsTArray<RefPtr<nsIMsgDBHdr>> hdrsToDelete;
++    for (auto msgHdr : msgHeaders) {
++      uint32_t attachmentDetached = 0;
++      msgHdr->GetUint32Property("attachmentDetached", &attachmentDetached);
++      if (!attachmentDetached) {
++        hdrsToDelete.AppendElement(msgHdr);
++      }
++    }
++    MarkMsgsOnPop3Server(hdrsToDelete, POP3_DELETE);
+   }
+ 
+   bool isTrashFolder = mFlags & nsMsgFolderFlags::Trash;
+ 
+   // notify on delete from trash and shift-delete
+   if (!isMove && (deleteStorage || isTrashFolder)) {
+     nsCOMPtr<nsIMsgFolderNotificationService> notifier(
+         do_GetService(NS_MSGNOTIFICATIONSERVICE_CONTRACTID));

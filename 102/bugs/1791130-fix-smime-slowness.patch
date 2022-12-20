@@ -1,0 +1,282 @@
+# HG changeset patch
+# User Kai Engert <kaie@kuix.de>
+# Date 1671551914 -3600
+#      Mon Dec 05 13:43:16 2022 +0100
+# Node ID e0505ed4940741f3d11bce8d4d226dc7f1ab21f2
+# Parent  a8c4521fa243b0e32b7bd60e96538f2563922c9e
+Bug 1791130 - Speed up s/mime recipient certificate check. r=mkmelin
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -166,16 +166,18 @@ var gBodyFromArgs;
+ // gSMFields is the nsIMsgComposeSecure instance for S/MIME.
+ // gMsgCompose.compFields.composeSecure is set to this instance most of
+ // the time. Because the S/MIME code has no knowledge of the OpenPGP
+ // implementation, gMsgCompose.compFields.composeSecure is set to an
+ // instance of PgpMimeEncrypt only temporarily. Keeping variable
+ // gSMFields separate allows switching as needed.
+ var gSMFields = null;
+ 
++var gSMCertsMap = new Map();
++
+ var gSelectedTechnologyIsPGP = false;
+ 
+ // The initial flags store the value we used at composer open time.
+ // Some flags might be automatically changed as a consequence of other
+ // changes. When reverting automatic actions, the initial flags help
+ // us know what value we should use for restoring.
+ 
+ var gSendSigned = false;
+@@ -3499,52 +3501,54 @@ async function checkRecipientKeys() {
+     }
+ 
+     if (!emailsWithMissingKeys.length) {
+       haveAllKeys = true;
+     }
+   }
+ 
+   if (remindSMime && (gSendEncrypted || isSmimeEncryptionConfigured())) {
+-    Recipients2CompFields(gMsgCompose.compFields);
++    let compFields = Cc[
++      "@mozilla.org/messengercompose/composefields;1"
++    ].createInstance(Ci.nsIMsgCompFields);
++    Recipients2CompFields(compFields);
+     let helper = Cc[
+       "@mozilla.org/messenger-smime/smimejshelper;1"
+     ].createInstance(Ci.nsISMimeJSHelper);
+ 
+     let outEmailAddresses = {};
+-    let outCertIssuedInfos = {};
+-    let outCertExpiresInfos = {};
+-    let outCerts = {};
+-    let outCanEncrypt = {};
+-
+-    helper.getRecipientCertsInfo(
+-      gMsgCompose.compFields,
+-      outEmailAddresses,
+-      outCertIssuedInfos,
+-      outCertExpiresInfos,
+-      outCerts,
+-      outCanEncrypt
+-    );
+-
+-    let checks = [];
++
++    helper.getRecipients(compFields, outEmailAddresses);
++
+     for (let i = 0; i < outEmailAddresses.value.length; i++) {
+-      if (!outCerts.value[i]) {
+-        emailsWithMissingCerts.push(outEmailAddresses.value[i]);
++      let email = outEmailAddresses.value[i];
++
++      let certFromCache = gSMCertsMap.get(email);
++      if (certFromCache) {
+         continue;
+       }
+ 
+-      checks.push(
+-        verifyCertUsable(outCerts.value[i])
+-          .then(usage => {})
+-          .catch(error => {
+-            emailsWithMissingCerts.push(outEmailAddresses.value[i]);
+-          })
++      let outCertIssuedInfo = {};
++      let outCertExpiresInfo = {};
++      let outCert = {};
++
++      helper.getValidCertInfo(
++        email,
++        outCertIssuedInfo,
++        outCertExpiresInfo,
++        outCert
+       );
+-    }
+-    await Promise.all(checks);
++
++      if (outCert.value) {
++        gSMCertsMap.set(email, outCert.value);
++      } else {
++        emailsWithMissingCerts.push(email);
++        continue;
++      }
++    }
+ 
+     if (!emailsWithMissingCerts.length) {
+       haveAllCerts = true;
+     }
+   }
+ 
+   if (!gSendEncrypted) {
+     if (recipients.length && (haveAllCerts || haveAllKeys)) {
+diff --git a/mail/extensions/am-e2e/prefs/e2e-prefs.js b/mail/extensions/am-e2e/prefs/e2e-prefs.js
+--- a/mail/extensions/am-e2e/prefs/e2e-prefs.js
++++ b/mail/extensions/am-e2e/prefs/e2e-prefs.js
+@@ -44,17 +44,17 @@ pref("mail.openpgp.alias_rules_file", ""
+ pref("mail.openpgp.key_assistant.enable", true);
+ 
+ // If false, disable the reminder in composer, whether email could be
+ // sent with OpenPGP encryption (without further user actions/decisions).
+ pref("mail.openpgp.remind_encryption_possible", true);
+ 
+ // If false, disable the reminder in composer, whether email could be
+ // sent with S/MIME encryption (without further user actions/decisions).
+-pref("mail.smime.remind_encryption_possible", false);
++pref("mail.smime.remind_encryption_possible", true);
+ 
+ // When sending, encrypt to this additional key. Not available in release channel builds.
+ pref("mail.openpgp.debug.extra_encryption_key", "");
+ 
+ // Ignore missing MDC.
+ pref("mail.openpgp.ignore_missing_mdc", false);
+ 
+ // Hide prefs and menu entries from non-advanced users
+diff --git a/mailnews/extensions/smime/nsISMimeJSHelper.idl b/mailnews/extensions/smime/nsISMimeJSHelper.idl
+--- a/mailnews/extensions/smime/nsISMimeJSHelper.idl
++++ b/mailnews/extensions/smime/nsISMimeJSHelper.idl
+@@ -14,31 +14,43 @@ interface nsIMsgCompFields;
+ interface nsIX509Cert;
+ 
+ [scriptable, uuid(a54e3c8f-a000-4901-898f-fafb297b1546)]
+ interface nsISMimeJSHelper : nsISupports
+ {
+   /**
+    * Obtains detailed information about the certificate availability
+    * status of email recipients.
++   * The returned certificates have NOT been checked for validity yet
+    *
+    * @param compFields - Attributes of the composed message.
+    * @param emailAddresses - The list of all recipient email addresses
+    * @param certIssuedInfos - If a recipient cert was found, when has it been issued?
+    * @param certExpiredInfos - If a recipient cert was found, when will it expire?
+    * @param certs - The recipient certificates, which can contain null for not found
+    * @param canEncrypt - whether valid certificates have been found for all recipients
+    */
+   void getRecipientCertsInfo(in nsIMsgCompFields compFields,
+                              out Array<AString> emailAddresses,
+                              out Array<AString> certIssuedInfos,
+                              out Array<AString> certExpiresInfos,
+                              out Array<nsIX509Cert> certs,
+                              out boolean canEncrypt);
+ 
++  void getRecipients(in nsIMsgCompFields compFields,
++                     out Array<AString> emailAddresses);
++
++  /**
++   * Only a VALID certificate will be returned.
++   */
++  void getValidCertInfo(in AString email,
++                        out AString certIssuedInfo,
++                        out AString certExpiresInfo,
++                        out nsIX509Cert cert);
++
+   /**
+    * Obtains a list of email addresses where valid email recipient certificates
+    * are not yet available.
+    *
+    * @param compFields - Attributes of the composed message
+    * @returns The list of email addresses without valid certs
+    */
+   Array<AString> getNoCertAddresses(in nsIMsgCompFields compFields);
+diff --git a/mailnews/extensions/smime/nsSMimeJSHelper.cpp b/mailnews/extensions/smime/nsSMimeJSHelper.cpp
+--- a/mailnews/extensions/smime/nsSMimeJSHelper.cpp
++++ b/mailnews/extensions/smime/nsSMimeJSHelper.cpp
+@@ -35,16 +35,80 @@ static void PRTimeToLocalDateString(PRTi
+   PR_ExplodeTime(time, PR_LocalTimeParameters, &explodedTime);
+   mozilla::intl::DateTimeFormat::StyleBag style;
+   style.date = mozilla::Some(mozilla::intl::DateTimeFormat::Style::Long);
+   style.time = mozilla::Nothing();
+   mozilla::Unused << mozilla::intl::AppDateTimeFormat::Format(
+       style, &explodedTime, result);
+ }
+ 
++NS_IMETHODIMP nsSMimeJSHelper::GetRecipients(
++    nsIMsgCompFields* compFields, nsTArray<nsString>& emailAddresses) {
++  nsTArray<nsCString> mailboxes;
++  nsresult rv = getMailboxList(compFields, mailboxes);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  uint32_t mailbox_count = mailboxes.Length();
++
++  emailAddresses.ClearAndRetainStorage();
++  emailAddresses.SetCapacity(mailbox_count);
++
++  rv = NS_OK;
++
++  for (uint32_t i = 0; i < mailbox_count; ++i) {
++    const nsCString& email = mailboxes[i];
++
++    nsCString email_lowercase;
++    ToLowerCase(email, email_lowercase);
++
++    emailAddresses.AppendElement(NS_ConvertUTF8toUTF16(email));
++  }
++  return NS_OK;
++}
++
++NS_IMETHODIMP nsSMimeJSHelper::GetValidCertInfo(const nsAString& email,
++                                                nsAString& certIssuedInfo,
++                                                nsAString& certExpiresInfo,
++                                                nsIX509Cert** cert) {
++  nsCOMPtr<nsIX509CertDB> certdb = do_GetService(NS_X509CERTDB_CONTRACTID);
++
++  *cert = nullptr;
++  nsresult rv = NS_OK;
++
++  nsCOMPtr<nsIMsgComposeSecure> composeSecure =
++      do_CreateInstance("@mozilla.org/messengercompose/composesecure;1", &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  NS_ConvertUTF16toUTF8 emailC(email);
++
++  nsCString email_lowercase;
++  ToLowerCase(emailC, email_lowercase);
++
++  // Find only valid certificate.
++  if (NS_SUCCEEDED(
++          composeSecure->FindCertByEmailAddress(email_lowercase, true, cert))) {
++    nsCOMPtr<nsIX509CertValidity> validity;
++    rv = (*cert)->GetValidity(getter_AddRefs(validity));
++    if (NS_SUCCEEDED(rv)) {
++      PRTime notBefore;
++      rv = validity->GetNotBefore(&notBefore);
++      if (NS_SUCCEEDED(rv)) {
++        PRTimeToLocalDateString(notBefore, certIssuedInfo);
++      }
++      PRTime notAfter;
++      rv = validity->GetNotAfter(&notAfter);
++      if (NS_SUCCEEDED(rv)) {
++        PRTimeToLocalDateString(notAfter, certExpiresInfo);
++      }
++    }
++  }
++
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsSMimeJSHelper::GetRecipientCertsInfo(
+     nsIMsgCompFields* compFields, nsTArray<nsString>& emailAddresses,
+     nsTArray<nsString>& certIssuedInfos, nsTArray<nsString>& certExpiresInfos,
+     nsTArray<RefPtr<nsIX509Cert>>& certs, bool* canEncrypt) {
+   NS_ENSURE_ARG_POINTER(canEncrypt);
+ 
+   nsTArray<nsCString> mailboxes;
+   nsresult rv = getMailboxList(compFields, mailboxes);
+@@ -74,16 +138,17 @@ NS_IMETHODIMP nsSMimeJSHelper::GetRecipi
+     const nsCString& email = mailboxes[i];
+     nsCOMPtr<nsIX509Cert> cert;
+     nsString certIssuedInfo;
+     nsString certExpiresInfo;
+ 
+     nsCString email_lowercase;
+     ToLowerCase(email, email_lowercase);
+ 
++    // Find certificate regardless of validity.
+     if (NS_SUCCEEDED(composeSecure->FindCertByEmailAddress(
+             email_lowercase, false, getter_AddRefs(cert)))) {
+       nsCOMPtr<nsIX509CertValidity> validity;
+       rv = cert->GetValidity(getter_AddRefs(validity));
+       if (NS_SUCCEEDED(rv)) {
+         PRTime notBefore;
+         rv = validity->GetNotBefore(&notBefore);
+         if (NS_SUCCEEDED(rv)) {
