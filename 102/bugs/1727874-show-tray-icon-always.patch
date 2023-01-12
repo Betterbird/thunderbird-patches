@@ -1,0 +1,184 @@
+# HG changeset patch
+# User Aramir <aramir.great@gmail.com>
+# Date 1673536746 -3600
+# Node ID 0342d0aeb14fc91d56225cc955d03041139905f9
+# Parent  2ea4df40fb36857d452cd85dcf46a75416ebd2ec
+Bug 1727874 - Added an option to always show the tray icon on Windows. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D165584
+
+diff --git a/mailnews/base/src/MailNotificationManager.jsm b/mailnews/base/src/MailNotificationManager.jsm
+--- a/mailnews/base/src/MailNotificationManager.jsm
++++ b/mailnews/base/src/MailNotificationManager.jsm
+@@ -63,18 +63,20 @@ class MailNotificationManager {
+       Services.obs.addObserver(this, "unread-im-count-changed");
+       Services.obs.addObserver(this, "profile-before-change");
+     }
+ 
+     if (AppConstants.platform == "macosx") {
+       Services.obs.addObserver(this, "new-directed-incoming-message");
+     }
+     if (AppConstants.platform == "win") {
++      Services.obs.addObserver(this, "profile-after-change");
+       Services.obs.addObserver(this, "windows-refresh-badge-tray");
+       Services.prefs.addObserver("mail.biff.show_badge", this);
++      Services.prefs.addObserver("mail.biff.show_tray_icon_always", this);
+     }
+ 
+     XPCOMUtils.defineLazyGetter(this, "_osIntegration", () => {
+       try {
+         let osIntegration = Cc[
+           "@mozilla.org/messenger/osintegration;1"
+         ].getService(Ci.nsIMessengerOSIntegration);
+         if (AppConstants.platform == "win") {
+@@ -105,26 +107,33 @@ class MailNotificationManager {
+         this._updateUnreadCount();
+         return;
+       case "new-directed-incoming-messenger":
+         this._animateDockIcon();
+         return;
+       case "windows-refresh-badge-tray":
+         this._updateUnreadCount();
+         return;
++      case "profile-after-change":
++        // enabling initial display of tray icon on windows
++        this._updateUnreadCount();
++        return;
+       case "profile-before-change":
+         this._osIntegration?.onExit();
+         return;
+       case "newmailalert-closed":
+         // newmailalert.xhtml is closed, try to show the next queued folder.
+         this._customizedAlertShown = false;
+         this._showCustomizedAlert();
+         return;
+       case "nsPref:changed":
+-        if (data == "mail.biff.show_badge") {
++        if (
++          data == "mail.biff.show_badge" ||
++          data == "mail.biff.show_tray_icon_always"
++        ) {
+           this._updateUnreadCount();
+         }
+     }
+   }
+ 
+   /**
+    * Following are nsIFolderListener interfaces. Do nothing about them.
+    */
+diff --git a/mailnews/base/src/nsMessengerWinIntegration.cpp b/mailnews/base/src/nsMessengerWinIntegration.cpp
+--- a/mailnews/base/src/nsMessengerWinIntegration.cpp
++++ b/mailnews/base/src/nsMessengerWinIntegration.cpp
+@@ -18,16 +18,17 @@
+ #include "nsIWindowMediator.h"
+ #include "nsMessengerWinIntegration.h"
+ #include "nsMsgBaseCID.h"
+ #include "nsMsgDBFolder.h"
+ #include "nsPIDOMWindow.h"
+ 
+ #define IDI_MAILBIFF 32576
+ #define SHOW_TRAY_ICON_PREF "mail.biff.show_tray_icon"
++#define SHOW_TRAY_ICON_ALWAYS_PREF "mail.biff.show_tray_icon_always"
+ 
+ // since we are including windows.h in this file, undefine get user name....
+ #ifdef GetUserName
+ #  undef GetUserName
+ #endif
+ 
+ #ifndef NIIF_USER
+ #  define NIIF_USER 0x00000004
+@@ -112,17 +113,22 @@ LRESULT CALLBACK nsMessengerWinIntegrati
+     case WM_USER:
+       if (msg == WM_USER && lp == WM_LBUTTONDOWN) {
+         nsCOMPtr<nsIPrefBranch> prefBranch =
+             do_GetService(NS_PREFSERVICE_CONTRACTID, &rv);
+         NS_ENSURE_SUCCESS(rv, FALSE);
+         bool showTrayIcon;
+         rv = prefBranch->GetBoolPref(SHOW_TRAY_ICON_PREF, &showTrayIcon);
+         NS_ENSURE_SUCCESS(rv, FALSE);
+-        if (!showTrayIcon || !sUnreadCount) {
++        bool showTrayIconAlways;
++        if (NS_FAILED(prefBranch->GetBoolPref(SHOW_TRAY_ICON_ALWAYS_PREF,
++                                              &showTrayIconAlways))) {
++          showTrayIconAlways = false;
++        }
++        if ((!showTrayIcon || !sUnreadCount) && !showTrayIconAlways) {
+           ::Shell_NotifyIconW(NIM_DELETE, &sMailIconData);
+           if (auto instance = reinterpret_cast<nsMessengerWinIntegration*>(
+                   ::GetWindowLongPtrW(msgWindow, GWLP_USERDATA))) {
+             instance->mTrayIconShown = false;
+           }
+         }
+ 
+         // No minimzed window, bring the most recent 3pane window to the front.
+@@ -337,19 +343,28 @@ nsresult nsMessengerWinIntegration::Upda
+   if (!mPrefBranch) {
+     mPrefBranch = do_GetService(NS_PREFSERVICE_CONTRACTID, &rv);
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   rv = SetTooltip();
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  if (sUnreadCount > 0) {
+-    sMailIconData.hIcon =
+-        ::LoadIcon(::GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAILBIFF));
++  bool showTrayIconAlways;
++  if (NS_FAILED(mPrefBranch->GetBoolPref(SHOW_TRAY_ICON_ALWAYS_PREF,
++                                         &showTrayIconAlways))) {
++    showTrayIconAlways = false;
++  }
++  if (sUnreadCount > 0 || showTrayIconAlways) {
++    auto idi = IDI_APPLICATION;
++    if (sUnreadCount > 0) {
++      // Only showing the new mail marker when there are actual unread mail
++      idi = MAKEINTRESOURCE(IDI_MAILBIFF);
++    }
++    sMailIconData.hIcon = ::LoadIcon(::GetModuleHandle(NULL), idi);
+     if (mTrayIconShown) {
+       // If the tray icon is already shown, just modify it.
+       ::Shell_NotifyIconW(NIM_MODIFY, &sMailIconData);
+     } else {
+       bool showTrayIcon;
+       rv = mPrefBranch->GetBoolPref(SHOW_TRAY_ICON_PREF, &showTrayIcon);
+       NS_ENSURE_SUCCESS(rv, rv);
+       if (showTrayIcon) {
+@@ -360,16 +375,16 @@ nsresult nsMessengerWinIntegration::Upda
+       }
+     }
+   } else if (mTrayIconShown) {
+     if (sHiddenWindows.Length() > 0) {
+       // At least one window is minimized, modify the icon only.
+       sMailIconData.hIcon =
+           ::LoadIcon(::GetModuleHandle(NULL), IDI_APPLICATION);
+       ::Shell_NotifyIconW(NIM_MODIFY, &sMailIconData);
+-    } else {
++    } else if (!showTrayIconAlways) {
+       // No unread, no need to show the tray icon.
+       ::Shell_NotifyIconW(NIM_DELETE, &sMailIconData);
+       mTrayIconShown = false;
+     }
+   }
+   return rv;
+ }
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -861,16 +861,17 @@ pref("mail.biff.play_sound", true);
+ pref("mail.biff.play_sound.type", 0);
+ // _moz_mailbeep is a magic key, for the default sound.
+ // otherwise, this needs to be a file url
+ pref("mail.biff.play_sound.url", "");
+ pref("mail.biff.show_alert", true);
+ #ifdef XP_WIN
+ pref("mail.biff.show_badge", true);
+ pref("mail.biff.show_tray_icon", true);
++pref("mail.biff.show_tray_icon_always", false);
+ pref("mail.biff.use_system_alert", false);
+ #elifdef XP_MACOSX
+ pref("mail.biff.animate_dock_icon", false);
+ #elifdef XP_UNIX
+ pref("mail.biff.use_system_alert", true);
+ #endif
+ 
+ // add jitter to biff interval
