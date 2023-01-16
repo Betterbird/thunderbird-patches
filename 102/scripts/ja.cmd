@@ -80,26 +80,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "file-new-movemail-account ="            >> localization\ja\messenger\menubar.ftl
 %lecho% "    .label = Movemail プアカウント..."      >> localization\ja\messenger\menubar.ftl
 %lecho% "    .accesskey = M"                     >> localization\ja\messenger\menubar.ftl
-
-:: Fix new strings from bug 1776706, https://hg.mozilla.org/releases/comm-esr102/rev/8018a64a9d62#l6.12
-%lecho% "about-addressbook-details-impp-header = インスタントメッセージ" >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "vcard-impp2-header = インスタントメッセージ"                    >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-impp-select = プロトコル"                             >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-impp-option-other = その他"                         >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-impp-input-label = URI"                            >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-impp-input-title = インスタントメッセージ の URI"         >> localization\ja\messenger\addressbook\vcard.ftl
-
-:: More new strings from bug 1777780, https://hg.mozilla.org/releases/comm-esr102/rev/3dfd43ae97e1#l6.12
-%lecho% "vcard-org-title-input ="                  >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .title = 身分または職種"                >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .placeholder = 役職名"                >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-org-role-input ="                   >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .title = 特定の状況における職務または分担" >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .placeholder = プロジェクトの担当"         >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-org-org-input ="                    >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .title = 組織名"                      >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .placeholder = 会社名"                >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-org-org-unit = 部門"                >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "vcard-org-org-unit-input ="               >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .title = 組織の部門名"                 >> localization\ja\messenger\addressbook\vcard.ftl
-%lecho% "    .placeholder = 部門"                  >> localization\ja\messenger\addressbook\vcard.ftl
