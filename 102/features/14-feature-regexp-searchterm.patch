@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1674575300 -3600
+# Date 1674691292 -3600
 # Parent  657fbb3f39a882310bff115289b94e379e4a64fd
 Feature: RegExp in search terms. Reported as https://bugzilla.mozilla.org/show_bug.cgi?id=19442 in 1999.
 
 diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/nsMsgSearchTerm.h
 --- a/mailnews/search/public/nsMsgSearchTerm.h
 +++ b/mailnews/search/public/nsMsgSearchTerm.h
-@@ -1,15 +1,19 @@
+@@ -1,15 +1,22 @@
  /* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -18,6 +18,9 @@ diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/n
 +
 +#include <regex>
 +#include <string>
++#ifndef WIN32
++#  include <codecvt>
++#endif
 +
  //---------------------------------------------------------------------------
  // nsMsgSearchTerm specifies one criterion, e.g. name contains phil
@@ -27,7 +30,7 @@ diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/n
  #include "nsIMsgSearchTerm.h"
  #include "nsIMsgSearchCustomTerm.h"
  
-@@ -78,11 +82,19 @@ class nsMsgSearchTerm : public nsIMsgSea
+@@ -78,11 +85,35 @@ class nsMsgSearchTerm : public nsIMsgSea
     *
     * @param aValue  the string to switch
     */
@@ -39,11 +42,27 @@ diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/n
 +
 +  // Used for Regex search.
 +  nsAutoString mLastNeedle;
-+#ifdef WIN32
++
++  // Here is the story:
++  // On Windows, wchar_t is 16 bits and std::wregex works.
++  // On now-Windows, wchar_t is 32 bits and for that type, std::wregex also
++  // works. std::basic_regex<char16_t> doesn't work, see:
++  // https://stackoverflow.com/questions/64007157/can-i-use-the-stl-regex-library-on-strings-of-char16-t
++  // http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0169r0.html
++  // std::regex doesn't work in general since "XöXX", doesn't match "X.XX",
++  // "X..XX" does. Try it on Linux:
++  // clang-format off
++  // Compile with g++ -std=c++11 prog.cpp -o a.out
++  // #include <regex>
++  // #include <string>
++  // int main() {
++  //   std::regex r(std::regex("X..XX", std::regex::icase));
++  //   std::smatch m;
++  //   const std::string s("XöXX");
++  //   if (std::regex_search(s, m, r)) printf("matches\n"); else printf("doesn't match\n");
++  // }
++  // clang-format on
 +  std::wregex mRegex;
-+#else
-+  std::basic_regex<char16_t> mRegex;
-+#endif
  };
  
  #endif
@@ -786,7 +805,32 @@ diff --git a/mailnews/search/src/nsMsgSearchNews.cpp b/mailnews/search/src/nsMsg
 diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
 --- a/mailnews/search/src/nsMsgSearchTerm.cpp
 +++ b/mailnews/search/src/nsMsgSearchTerm.cpp
-@@ -1039,16 +1039,54 @@ nsresult nsMsgSearchTerm::MatchString(co
+@@ -1007,16 +1007,24 @@ nsresult nsMsgSearchTerm::MatchString(co
+                                       bool* pResult) {
+   NS_ENSURE_ARG_POINTER(pResult);
+ 
+   bool result = false;
+ 
+   nsresult rv = NS_OK;
+   auto needle = m_value.utf16String;
+ 
++#ifndef WIN32
++  // Used to convert to wchar_t, which is not char16_t on non-Windows.
++  // https://stackoverflow.com/questions/8540090/clang-converting-const-char16-t-utf-16-to-wstring-ucs-4
++  std::wstring_convert<
++      std::codecvt_utf16<wchar_t, 0x10ffff, std::little_endian>, wchar_t>
++      wconv;
++#endif
++
+   switch (m_operator) {
+     case nsMsgSearchOp::Contains:
+       if (CaseInsensitiveFindInReadable(needle, utf16StrToMatch)) result = true;
+       break;
+     case nsMsgSearchOp::DoesntContain:
+       if (!CaseInsensitiveFindInReadable(needle, utf16StrToMatch))
+         result = true;
+       break;
+@@ -1039,16 +1047,66 @@ nsresult nsMsgSearchTerm::MatchString(co
                             nsCaseInsensitiveStringComparator))
          result = true;
        break;
@@ -800,16 +844,22 @@ diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsg
 +#ifdef WIN32
 +        mRegex = std::wregex(needle.get(), std::regex::icase);
 +#else
-+        mRegex = std::basic_regex<char16_t>(needle.get(), std::regex::icase);
++        mRegex = std::wregex(
++            wconv.from_bytes(
++                reinterpret_cast<const char*>(needle.BeginReading()),
++                reinterpret_cast<const char*>(needle.EndReading())),
++            std::regex::icase);
 +#endif
 +        mLastNeedle = needle;
 +      }
-+#ifdef WIN32
 +      std::wsmatch m;
-+      const std::wstring s(PromiseFlatString(utf16StrToMatch).get());
++#ifdef WIN32
++      const std::wstring s(utf16StrToMatch.BeginReading(),
++                           utf16StrToMatch.EndReading());
 +#else
-+      std::match_results<std::basic_string<char16_t>::const_iterator> m;
-+      const std::basic_string<char16_t> s(PromiseFlatString(utf16StrToMatch).get());
++      const std::wstring s = wconv.from_bytes(
++          reinterpret_cast<const char*>(utf16StrToMatch.BeginReading()),
++          reinterpret_cast<const char*>(utf16StrToMatch.EndReading()));
 +#endif
 +      if (std::regex_search(s, m, mRegex)) result = true;
 +      break;
@@ -819,16 +869,22 @@ diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsg
 +#ifdef WIN32
 +        mRegex = std::wregex(needle.get(), std::regex::icase);
 +#else
-+        mRegex = std::basic_regex<char16_t>(needle.get(), std::regex::icase);
++        mRegex = std::wregex(
++            wconv.from_bytes(
++                reinterpret_cast<const char*>(needle.BeginReading()),
++                reinterpret_cast<const char*>(needle.EndReading())),
++            std::regex::icase);
 +#endif
 +        mLastNeedle = needle;
 +      }
-+#ifdef WIN32
 +      std::wsmatch m;
-+      const std::wstring s(PromiseFlatString(utf16StrToMatch).get());
++#ifdef WIN32
++      const std::wstring s(utf16StrToMatch.BeginReading(),
++                           utf16StrToMatch.EndReading());
 +#else
-+      std::match_results<std::basic_string<char16_t>::const_iterator> m;
-+      const std::basic_string<char16_t> s(PromiseFlatString(utf16StrToMatch).get());
++      const std::wstring s = wconv.from_bytes(
++          reinterpret_cast<const char*>(utf16StrToMatch.BeginReading()),
++          reinterpret_cast<const char*>(utf16StrToMatch.EndReading()));
 +#endif
 +      if (!std::regex_search(s, m, mRegex)) result = true;
 +      break;
