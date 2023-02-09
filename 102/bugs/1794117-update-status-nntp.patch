@@ -1,0 +1,195 @@
+# HG changeset patch
+# User Ping Chen <remotenonsense@gmail.com>
+# Date 1675955194 -3600
+# Node ID 23e5c509a257805c461fe41212e515031e9ee7d3
+# Parent  6fa90c0c03d5398b0dd761853895eb51348125f0
+Bug 1794117 - Update status bar when network status change in nntp-js. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D168926
+
+diff --git a/mailnews/news/src/NntpClient.jsm b/mailnews/news/src/NntpClient.jsm
+--- a/mailnews/news/src/NntpClient.jsm
++++ b/mailnews/news/src/NntpClient.jsm
+@@ -4,16 +4,19 @@
+ 
+ const EXPORTED_SYMBOLS = ["NntpClient"];
+ 
+ var { AppConstants } = ChromeUtils.import(
+   "resource://gre/modules/AppConstants.jsm"
+ );
+ var { CommonUtils } = ChromeUtils.import("resource://services-common/utils.js");
+ var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
++var { MailServices } = ChromeUtils.import(
++  "resource:///modules/MailServices.jsm"
++);
+ var { LineReader } = ChromeUtils.import("resource:///modules/LineReader.jsm");
+ var { NntpNewsGroup } = ChromeUtils.import(
+   "resource:///modules/NntpNewsGroup.jsm"
+ );
+ 
+ // Server response code.
+ const AUTH_ACCEPTED = 281;
+ const AUTH_PASSWORD_REQUIRED = 381;
+@@ -103,16 +106,17 @@ class NntpClient {
+         }`
+       );
+       this._socket = new TCPSocket(hostname, this._server.port, {
+         binaryType: "arraybuffer",
+         useSecureTransport,
+       });
+       this._socket.onopen = this._onOpen;
+       this._socket.onerror = this._onError;
++      this._showNetworkStatus(Ci.nsISocketTransport.STATUS_CONNECTING_TO);
+     }
+   }
+ 
+   /**
+    * Construct an nsIMsgMailNewsUrl instance, setup urlListener to notify when
+    * the current request is finished.
+    * @param {nsIUrlListener} urlListener - Callback for the request.
+    * @param {nsIMsgWindow} msgWindow - The associated msg window.
+@@ -123,16 +127,19 @@ class NntpClient {
+     this.urlListener = urlListener;
+     this._msgWindow = msgWindow;
+     this.runningUri = runningUri;
+     if (!this.runningUri) {
+       this.runningUri = Services.io
+         .newURI(`news://${this._server.hostName}:${this._server.port}`)
+         .QueryInterface(Ci.nsIMsgMailNewsUrl);
+     }
++    if (msgWindow) {
++      this.runningUri.msgWindow = msgWindow;
++    }
+     this.urlListener?.OnStartRunningUrl(this.runningUri, Cr.NS_OK);
+     this.runningUri.SetUrlState(true, Cr.NS_OK);
+     return this.runningUri;
+   }
+ 
+   /**
+    * The open event handler.
+    */
+@@ -145,16 +152,17 @@ class NntpClient {
+     this._nextAction = ({ status }) => {
+       if ([200, 201].includes(status)) {
+         this._nextAction = null;
+         this.onOpen();
+       } else {
+         this.quit(Cr.NS_ERROR_FAILURE);
+       }
+     };
++    this._showNetworkStatus(Ci.nsISocketTransport.STATUS_CONNECTED_TO);
+   };
+ 
+   /**
+    * The data event handler.
+    * @param {TCPSocketEvent} event - The data event.
+    */
+   _onData = event => {
+     let stringPayload = CommonUtils.arrayBufferToByteString(
+@@ -218,16 +226,47 @@ class NntpClient {
+   };
+ 
+   /**
+    * The error event handler.
+    * @param {TCPSocketErrorEvent} event - The error event.
+    */
+   _onError = event => {
+     this._logger.error(event, event.name, event.message, event.errorCode);
++    let errorName;
++    switch (event.errorCode) {
++      case Cr.NS_ERROR_UNKNOWN_HOST:
++      case Cr.NS_ERROR_UNKNOWN_PROXY_HOST:
++        errorName = "unknownHostError";
++        break;
++      case Cr.NS_ERROR_CONNECTION_REFUSED:
++      case Cr.NS_ERROR_PROXY_CONNECTION_REFUSED:
++        errorName = "connectionRefusedError";
++        break;
++      case Cr.NS_ERROR_NET_TIMEOUT:
++        errorName = "netTimeoutError";
++        break;
++      case Cr.NS_ERROR_NET_RESET:
++        errorName = "netResetError";
++        break;
++      case Cr.NS_ERROR_NET_INTERRUPT:
++        errorName = "netInterruptError";
++        break;
++    }
++    if (errorName) {
++      let bundle = Services.strings.createBundle(
++        "chrome://messenger/locale/messenger.properties"
++      );
++      let errorMessage = bundle.formatStringFromName(errorName, [
++        this._server.hostName,
++      ]);
++      MailServices.mailSession.alertUser(errorMessage, this.runningUri);
++    }
++
++    this._msgWindow?.statusFeedback?.showStatusString("");
+     this.quit(event.errorCode);
+   };
+ 
+   /**
+    * The close event handler.
+    */
+   _onClose = () => {
+     this._logger.debug("Connection closed.");
+@@ -807,16 +846,29 @@ class NntpClient {
+     if (status && status != XPAT_OK) {
+       this._actionError(NNTP_ERROR_MESSAGE, statusText);
+       return;
+     }
+     this._lineReader.read(data, this.onData, this._actionXPat);
+   }
+ 
+   /**
++   * Show network status in the status bar.
++   *
++   * @param {number} status - See NS_NET_STATUS_* in nsISocketTransport.idl.
++   */
++  _showNetworkStatus(status) {
++    let statusMessage = Services.strings.formatStatusMessage(
++      status,
++      this._server.hostName
++    );
++    this._msgWindow?.statusFeedback?.showStatusString(statusMessage);
++  }
++
++  /**
+    * Show an error prompt.
+    * @param {number} errorId - An error name corresponds to an entry of
+    *   news.properties.
+    * @param {string} serverErrorMsg - Error message returned by the server.
+    */
+   _actionError(errorId, serverErrorMsg) {
+     this._logger.error(`Got an error id=${errorId}`);
+     let msgWindow = this._msgWindow;
+diff --git a/mailnews/news/src/NntpNewsGroup.jsm b/mailnews/news/src/NntpNewsGroup.jsm
+--- a/mailnews/news/src/NntpNewsGroup.jsm
++++ b/mailnews/news/src/NntpNewsGroup.jsm
+@@ -72,18 +72,24 @@ class NntpNewsGroup {
+         this._db.lowWaterArticleNum,
+         this._db.highWaterArticleNum
+       );
+     }
+     if (this._knownKeySet.has(lastPossible)) {
+       let bundle = Services.strings.createBundle(
+         "chrome://messenger/locale/news.properties"
+       );
++      let messengerBundle = Services.strings.createBundle(
++        "chrome://messenger/locale/messenger.properties"
++      );
+       msgWindow?.statusFeedback.showStatusString(
+-        bundle.GetStringFromName("noNewMessages")
++        messengerBundle.formatStringFromName("statusMessage", [
++          this._server.prettyName,
++          bundle.GetStringFromName("noNewMessages"),
++        ])
+       );
+     }
+ 
+     if (this._getOldMessages || !this._knownKeySet.has(lastPossible)) {
+       let [start, end] = this._knownKeySet.getLastMissingRange(
+         firstPossible,
+         lastPossible
+       );

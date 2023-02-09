@@ -1,6 +1,6 @@
 #!/bin/sh
 MOZILLA_REPO=https://hg.mozilla.org/releases/mozilla-esr102/
-MOZILLA_REV=cff83fd04112a3b0d4091a1982d7219d200f6fa6
+MOZILLA_REV=291d5baee192abe6f859a6528a9444d6aa24bb8a
 COMM_REPO=https://hg.mozilla.org/releases/comm-esr102/
-COMM_REV=bd348a7dd1a9a55cb65afe08f39022fbcd032f84
+COMM_REV=6e6055c23ae0ac3eb022b255f5bfbfdb303173fa
 RUST_VER=1.60.0
