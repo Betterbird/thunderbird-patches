@@ -129,3 +129,17 @@ sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\de\locale\de\m
 %lecho% "vcard-org-org-unit-input ="                                >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "    .title = Organizational unit name"                     >> localization\de\messenger\addressbook\vcard.ftl
 %lecho% "    .placeholder = Department"                             >> localization\de\messenger\addressbook\vcard.ftl
+
+:: More new strings from bug 1799874, https://hg.mozilla.org/releases/comm-esr102/rev/5861ab971be6#l8.14
+:: Fix missing break at end of file first.
+%lecho% "" >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "mail-libs-title = Bibliotheken-Versionen"                                             >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-table-heading-library = Bibliothek"                                              >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-table-heading-expected-version = Minimal vorausgesetzte Version"                 >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-table-heading-loaded-version = Verwendete Version"                               >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-table-heading-path = Dateipfad"                                                  >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-table-heading-status = Status"                                                   >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-rnp-status-ok = OK"                                                              >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-rnp-status-load-failed = Failed to load. OpenPGP will not work."                 >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-rnp-status-incompatible = Incompatible version. OpenPGP will not work."          >> localization\de\messenger\aboutSupportMail.ftl
+%lecho% "libs-rnp-status-unofficial = Unofficial version. OpenPGP might not work as expected." >> localization\de\messenger\aboutSupportMail.ftl
