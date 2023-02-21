@@ -1,13 +1,14 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1676933190 -3600
-# Parent  f1054a034bc99a89b43965fbf2607ffdc31157bc
-Bug 1812386 - Further optimisation as per profiler showing a lot of time spent in FindURLStart/End in nsTSubstring.
+# Parent  01e3a78c61afdf42ff57e7fc1c9d1bb23cb418f2
+Bug 1812386 - Optimisation as per profiler showing a lot of time spent in FindURLStart/End in nsTSubstring.
+
+Also limit result to 1000 URLs and match look-ahead to 2000 characters.
 
 diff --git a/netwerk/streamconv/converters/mozTXTToHTMLConv.cpp b/netwerk/streamconv/converters/mozTXTToHTMLConv.cpp
 --- a/netwerk/streamconv/converters/mozTXTToHTMLConv.cpp
 +++ b/netwerk/streamconv/converters/mozTXTToHTMLConv.cpp
-@@ -177,20 +177,28 @@ bool mozTXTToHTMLConv::FindURLStart(cons
+@@ -181,20 +181,28 @@ bool mozTXTToHTMLConv::FindURLStart(cons
      case RFC1738: {
        if (!NS_strncmp(&aInString[std::max(int32_t(pos - 4), 0)], u"<URL:", 5)) {
          start = pos + 1;
@@ -39,7 +40,7 @@ diff --git a/netwerk/streamconv/converters/mozTXTToHTMLConv.cpp b/netwerk/stream
      case freetext: {
        int32_t i = pos - 1;
        for (; i >= 0 &&
-@@ -241,22 +249,29 @@ bool mozTXTToHTMLConv::FindURLStart(cons
+@@ -245,22 +253,29 @@ bool mozTXTToHTMLConv::FindURLStart(cons
  
  bool mozTXTToHTMLConv::FindURLEnd(const char16_t* aInString,
                                    int32_t aInStringLength, const uint32_t pos,
@@ -74,3 +75,60 @@ diff --git a/netwerk/streamconv/converters/mozTXTToHTMLConv.cpp b/netwerk/stream
      case freetext:
      case abbreviated: {
        uint32_t i = pos + 1;
+@@ -592,17 +607,18 @@ bool mozTXTToHTMLConv::ItMatchesDelimite
+ }
+ 
+ uint32_t mozTXTToHTMLConv::NumberOfMatches(const char16_t* aInString,
+                                            int32_t aInStringLength,
+                                            const char16_t* rep, int32_t aRepLen,
+                                            LIMTYPE before, LIMTYPE after) {
+   uint32_t result = 0;
+ 
+-  const uint32_t len = mozilla::AssertedCast<uint32_t>(aInStringLength);
++  uint32_t len = mozilla::AssertedCast<uint32_t>(aInStringLength);
++  len = std::min(len, 2000u);
+   GraphemeClusterBreakIteratorUtf16 ci(Span<const char16_t>(aInString, len));
+   for (uint32_t pos = 0; pos < len; pos = *ci.Next()) {
+     if (ItMatchesDelimited(aInString + pos, aInStringLength - pos, rep, aRepLen,
+                            before, after)) {
+       result++;
+     }
+   }
+   return result;
+@@ -967,16 +983,17 @@ mozTXTToHTMLConv::ScanTXT(const nsAStrin
+   }
+ 
+   if (!aOutString.SetCapacity(uint32_t(aInString.Length() * growthRate),
+                               mozilla::fallible)) {
+     return NS_ERROR_OUT_OF_MEMORY;
+   }
+ 
+   bool doURLs = 0 != (whattodo & kURLs);
++  uint32_t countURLs = 0;  // Doing URLs is expensive.
+   bool doGlyphSubstitution = 0 != (whattodo & kGlyphSubstitution);
+   bool doStructPhrase = 0 != (whattodo & kStructPhrase);
+ 
+   uint32_t structPhrase_strong = 0;  // Number of currently open tags
+   uint32_t structPhrase_underline = 0;
+   uint32_t structPhrase_italic = 0;
+   uint32_t structPhrase_code = 0;
+ 
+@@ -1071,16 +1088,18 @@ mozTXTToHTMLConv::ScanTXT(const nsAStrin
+               if (aOutString.Length() - replaceBefore < endOfLastURLOutput) {
+                 break;
+               }
+               aOutString.Cut(aOutString.Length() - replaceBefore,
+                              replaceBefore);
+               aOutString += outputHTML;
+               endOfLastURLOutput = aOutString.Length();
+               i = *ci.Seek(i + replaceAfter);
++              countURLs++;
++              if (countURLs > 1000) doURLs = false;
+               continue;
+             }
+           }
+           break;
+       }  // switch
+     }
+ 
+     switch (aInString[i]) {
