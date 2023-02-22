@@ -1,0 +1,82 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1677091272 -3600
+# Parent  11db2441cbdaf322f37f3a5a12ab2b3410079d35
+Bug 1745130 - More tweaks to IMAP error handling.
+
+When the save to Sent failed due to network down, TB finds another existing connection to do the retry.
+Often that connection is idling in selected state. So to use that connection, it has to exit idle state
+using EndIdle(). The new URL to do the IMAP append is directed to a different folder (the Sent folder),
+so m_imapMailFolderSink now references the Sent folder. The problem is at the end of EndIdle() the
+new sink pointer is nulled destroying the sink pointer to Sent folder.
+
+Since the network is down, the retry using this other connection also fails. But since the sink pointer
+is null there is no way to report the failure and the progress dialog just hangs waiting for a completion
+status. 
+
+diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
+--- a/mailnews/compose/content/sendProgress.js
++++ b/mailnews/compose/content/sendProgress.js
+@@ -17,17 +17,19 @@ var gBundle;
+ 
+ window.addEventListener("DOMContentLoaded", onLoad);
+ window.addEventListener("unload", onUnload);
+ document.addEventListener("dialogcancel", onCancel);
+ 
+ // all progress notifications are done through the nsIWebProgressListener implementation...
+ var progressListener = {
+   onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
+-    // Only need to handle STATE_STOP.
++    // Only need to handle STATE_STOP. On STATE_START the value of the
++    // attribute is 0 leading to a correct display. Removing the attribute
++    // at start previously led to an incorrect 100% display.
+     if (aStateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
+       // we are done sending/saving the message...
+       // Indicate completion in status area.
+       var msg;
+       if (itsASaveOperation) {
+         msg = gBundle.GetStringFromName("messageSaved");
+       } else {
+         msg = gBundle.GetStringFromName("messageSent");
+@@ -64,17 +66,18 @@ var progressListener = {
+       // Advance progress meter.
+       dialog.progress.value = percent;
+ 
+       // Update percentage label on progress meter.
+       dialog.progressText.value = gBundle.formatStringFromName("percentMsg", [
+         percent,
+       ]);
+     } else {
+-      // Progress meter should show no value in this case.
++      // Progress meter should show no value in this case. Note that removing
++      // the attribute leads to a 100% display.
+       dialog.progress.removeAttribute("value");
+       dialog.progressText.value = "";
+     }
+   },
+ 
+   onLocationChange(aWebProgress, aRequest, aLocation, aFlags) {
+     // we can ignore this notification
+   },
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -7973,17 +7973,17 @@ void nsImapProtocol::EndIdle(bool waitFo
+     // mentioned in the IDLE rfc as a possibility. This is similar to the checks
+     // done in OnStatusForFolder().
+     if (waitForResponse && m_imapMailFolderSinkSelected &&
+         GetServerStateParser().UntaggedResponse()) {
+       Log("EndIdle", nullptr, "idle response after idle DONE");
+       m_imapMailFolderSinkSelected->OnNewIdleMessages();
+     }
+   }
+-  m_imapMailFolderSink = nullptr;
++  m_imapMailFolderSinkSelected  = nullptr;
+ }
+ 
+ void nsImapProtocol::Search(const char* searchCriteria, bool useUID,
+                             bool notifyHit /* true */) {
+   m_notifySearchHit = notifyHit;
+   ProgressEventFunctionUsingName("imapStatusSearchMailbox");
+   IncrementCommandTagNumber();
+ 
