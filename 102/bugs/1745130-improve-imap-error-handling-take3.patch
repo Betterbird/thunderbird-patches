@@ -1,0 +1,204 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1677511732 -3600
+# Parent  11db2441cbdaf322f37f3a5a12ab2b3410079d35
+Bug 1745130 - Fix hang at 100% during failed imap save to sent. r=mkmelin
+
+diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
+--- a/mailnews/compose/content/sendProgress.js
++++ b/mailnews/compose/content/sendProgress.js
+@@ -1,33 +1,36 @@
+ /* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+ 
+-// dialog is just an array we'll use to store various properties from the dialog document...
++// dialog is just an array we'll use to store various properties from the dialog
++// document...
+ var dialog;
+ 
+ // the msgProgress is a nsIMsgProgress object
+ var msgProgress = null;
+ 
+ // random global variables...
+ var itsASaveOperation = false;
+ var gBundle;
+ 
+ window.addEventListener("DOMContentLoaded", onLoad);
+ window.addEventListener("unload", onUnload);
+ document.addEventListener("dialogcancel", onCancel);
+ 
+-// all progress notifications are done through the nsIWebProgressListener implementation...
++// all progress notifications are done through the nsIWebProgressListener
++// implementation...
+ var progressListener = {
+   onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
+-    // Only need to handle STATE_STOP.
++    // Only need to handle STATE_STOP. No need to remove the progress attribute
++    // which would show a quick indeterminate progress display at STATE_START.
+     if (aStateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
+       // we are done sending/saving the message...
+       // Indicate completion in status area.
+       var msg;
+       if (itsASaveOperation) {
+         msg = gBundle.GetStringFromName("messageSaved");
+       } else {
+         msg = gBundle.GetStringFromName("messageSent");
+@@ -51,30 +54,31 @@ var progressListener = {
+     aCurSelfProgress,
+     aMaxSelfProgress,
+     aCurTotalProgress,
+     aMaxTotalProgress
+   ) {
+     // Calculate percentage.
+     var percent;
+     if (aMaxTotalProgress > 0) {
+-      percent = Math.round((aCurTotalProgress / aMaxTotalProgress) * 100);
++      // trunc() instead of round() so don't show 100% until completely done.
++      percent = Math.trunc((aCurTotalProgress / aMaxTotalProgress) * 100);
+       if (percent > 100) {
+         percent = 100;
+       }
+ 
+       // Advance progress meter.
+       dialog.progress.value = percent;
+ 
+       // Update percentage label on progress meter.
+       dialog.progressText.value = gBundle.formatStringFromName("percentMsg", [
+         percent,
+       ]);
+     } else {
+-      // Progress meter should show no value in this case.
++      // Have progress meter show indeterminate with denominator <= 0.
+       dialog.progress.removeAttribute("value");
+       dialog.progressText.value = "";
+     }
+   },
+ 
+   onLocationChange(aWebProgress, aRequest, aLocation, aFlags) {
+     // we can ignore this notification
+   },
+@@ -156,11 +160,12 @@ function onUnload() {
+ function onCancel(event) {
+   // Cancel app launcher.
+   try {
+     msgProgress.processCanceledByUser = true;
+   } catch (e) {
+     return;
+   }
+ 
+-  // Don't close up dialog, the backend will close the dialog when everything will be aborted.
++  // Don't close up dialog, the backend will close the dialog when everything
++  // will be aborted.
+   event.preventDefault();
+ }
+diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
+--- a/mailnews/compose/src/SmtpService.jsm
++++ b/mailnews/compose/src/SmtpService.jsm
+@@ -146,30 +146,42 @@ SmtpService.prototype = {
+       while (sstream.available()) {
+         let chunk = sstream.read(65536);
+         let canSendMore = client.send(chunk);
+         if (!canSendMore) {
+           // Socket buffer is full, wait for the ondrain event.
+           await new Promise(resolve => (socketOnDrain = resolve));
+         }
+         // In practice, chunks are buffered by TCPSocket, progress reaches 100%
+-        // almost immediately.
++        // almost immediately unless message is much larger than chunk size.
+         sentSize += chunk.length;
+         progressListener?.onProgressChange(
+           null,
+           null,
+           sentSize,
+           totalSize,
+           sentSize,
+           totalSize
+         );
+       }
+       sstream.close();
+       fstream.close();
+       client.end();
++
++      // Reset progress meter to 0% for possible save to sent folder.
++      sentSize = 0;
++      totalSize = messageFile.fileSize;
++      progressListener?.onProgressChange(
++        null,
++        null,
++        sentSize,
++        totalSize,
++        sentSize,
++        totalSize
++      );
+     };
+     client.ondrain = () => {
+       // Socket buffer is empty, safe to continue sending.
+       socketOnDrain();
+     };
+     client.ondone = exitCode => {
+       if (!AppConstants.MOZ_SUITE) {
+         Services.telemetry.scalarAdd("tb.mails.sent", 1);
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -6324,18 +6324,29 @@ void nsImapProtocol::UploadMessageFromFi
+       if (NS_SUCCEEDED(rv) && !readCount) rv = NS_ERROR_FAILURE;
+ 
+       if (NS_SUCCEEDED(rv)) {
+         NS_ASSERTION(readCount <= (uint32_t)totalSize,
+                      "got more bytes than there should be");
+         dataBuffer[readCount] = 0;
+         rv = SendData(dataBuffer);
+         totalSize -= readCount;
+-        PercentProgressUpdateEvent(""_ns, u""_ns, fileSize - totalSize,
+-                                   fileSize);
++        if (totalSize) {
++          PercentProgressUpdateEvent(""_ns, u""_ns, fileSize - totalSize,
++                                     fileSize);
++        } else {
++          // The full message has been queued for sending, but the actual send
++          // is typically just now starting and can potentially fail. So just
++          // indicate 99% complelte instead of 100% so that the user does not
++          // see a misleading 100% complete before being prompted to retry.
++          // First set the "m_last*" values to ensure a progress bar update.
++          m_lastProgressTime = 0;
++          m_lastPercent = 0;
++          PercentProgressUpdateEvent(""_ns, u""_ns, 99, 100);
++        }
+       }
+     }  // end while appending chunks
+ 
+     if (NS_SUCCEEDED(rv)) {  // complete the append
+       if (m_allowUTF8Accept)
+         rv = SendData(")" CRLF);
+       else
+         rv = SendData(CRLF);
+@@ -7973,17 +7984,23 @@ void nsImapProtocol::EndIdle(bool waitFo
+     // mentioned in the IDLE rfc as a possibility. This is similar to the checks
+     // done in OnStatusForFolder().
+     if (waitForResponse && m_imapMailFolderSinkSelected &&
+         GetServerStateParser().UntaggedResponse()) {
+       Log("EndIdle", nullptr, "idle response after idle DONE");
+       m_imapMailFolderSinkSelected->OnNewIdleMessages();
+     }
+   }
+-  m_imapMailFolderSink = nullptr;
++  // Set m_imapMailFolderSink null only if shutting down or if DONE succeeds.
++  // We need to keep m_imapMailFolderSink if DONE fails or times out when not
++  // shutting down so the URL that is attempting to run on this connection can
++  // retry or signal a failed status when SetUrlState is called in
++  // ProcessCurrentUrl to invoke nsIUrlListener.onStopRunningUrl.
++  if (!waitForResponse || GetServerStateParser().LastCommandSuccessful())
++    m_imapMailFolderSink = nullptr;
+ }
+ 
+ void nsImapProtocol::Search(const char* searchCriteria, bool useUID,
+                             bool notifyHit /* true */) {
+   m_notifySearchHit = notifyHit;
+   ProgressEventFunctionUsingName("imapStatusSearchMailbox");
+   IncrementCommandTagNumber();
+ 
