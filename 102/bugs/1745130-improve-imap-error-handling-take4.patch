@@ -1,24 +1,21 @@
 # HG changeset patch
 # User Gene Smith <gds@chartertn.net>
-# Date 1677511732 -3600
+# Date 1677685992 -3600
 # Parent  11db2441cbdaf322f37f3a5a12ab2b3410079d35
 Bug 1745130 - Fix hang at 100% during failed imap save to sent. r=mkmelin
 
 diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/messenger.css
 --- a/mail/themes/shared/mail/messenger.css
 +++ b/mail/themes/shared/mail/messenger.css
-@@ -1254,24 +1254,21 @@ label.statusbarpanel {
-   appearance: none;
-   background-color: var(--primary);
-   border-radius: 2px;
+@@ -1257,21 +1257,21 @@ label.statusbarpanel {
  }
  
  #dialog\.progress:indeterminate::-moz-progress-bar,
  #shutdown_progressmeter:indeterminate::-moz-progress-bar,
  .progressmeter-statusbar:indeterminate::-moz-progress-bar {
--  /* Make a white reflecting animation.
--     Create a gradient with 2 identical pattern, and enlarge the size to 200%.
--     This allows us to animate background-position with percentage. */
+   /* Make a white reflecting animation.
+      Create a gradient with 2 identical pattern, and enlarge the size to 200%.
+      This allows us to animate background-position with percentage. */
 -  background-image: linear-gradient(90deg, transparent 0%,
 -                                           rgba(255, 255, 255, 0.5) 25%,
 -                                           transparent 50%,
@@ -84,7 +81,27 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
          msg = gBundle.GetStringFromName("messageSaved");
        } else {
          msg = gBundle.GetStringFromName("messageSent");
-@@ -64,17 +71,17 @@ var progressListener = {
+@@ -36,17 +43,18 @@ var progressListener = {
+ 
+       // Put progress meter at 100%.
+       dialog.progress.setAttribute("value", 100);
+       dialog.progressText.setAttribute(
+         "value",
+         gBundle.formatStringFromName("percentMsg", [100])
+       );
+ 
+-      window.close();
++      // Allow the user 750ms to see the final status before closing the window.
++      window.setTimeout(() => window.close(), 750);
+     }
+   },
+ 
+   onProgressChange(
+     aWebProgress,
+     aRequest,
+     aCurSelfProgress,
+     aMaxSelfProgress,
+@@ -64,17 +72,17 @@ var progressListener = {
        // Advance progress meter.
        dialog.progress.value = percent;
  
@@ -103,7 +120,7 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
    onLocationChange(aWebProgress, aRequest, aLocation, aFlags) {
      // we can ignore this notification
    },
-@@ -156,11 +163,12 @@ function onUnload() {
+@@ -156,11 +164,12 @@ function onUnload() {
  function onCancel(event) {
    // Cancel app launcher.
    try {
@@ -120,7 +137,7 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
 diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
 --- a/mailnews/compose/src/SmtpService.jsm
 +++ b/mailnews/compose/src/SmtpService.jsm
-@@ -146,30 +146,42 @@ SmtpService.prototype = {
+@@ -146,30 +146,40 @@ SmtpService.prototype = {
        while (sstream.available()) {
          let chunk = sstream.read(65536);
          let canSendMore = client.send(chunk);
@@ -145,16 +162,14 @@ diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpSer
        fstream.close();
        client.end();
 +
-+      // Set progress to indeterminate while SMTP transfer occurs.
-+      sentSize = 0;
-+      totalSize = 0;
++      // Set progress to indeterminate.
 +      progressListener?.onProgressChange(
 +        null,
 +        null,
-+        sentSize,
-+        totalSize,
-+        sentSize,
-+        totalSize
++        0,
++        -1,
++        0,
++        -1
 +      );
      };
      client.ondrain = () => {
@@ -167,7 +182,26 @@ diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpSer
 diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
 --- a/mailnews/imap/src/nsImapProtocol.cpp
 +++ b/mailnews/imap/src/nsImapProtocol.cpp
-@@ -6326,16 +6326,27 @@ void nsImapProtocol::UploadMessageFromFi
+@@ -6218,18 +6218,16 @@ void nsImapProtocol::OnAppendMsgFromFile
+   }
+ }
+ 
+ void nsImapProtocol::UploadMessageFromFile(nsIFile* file,
+                                            const char* mailboxName, PRTime date,
+                                            imapMessageFlagsType flags,
+                                            nsCString& keywords) {
+   if (!file || !mailboxName) return;
+-  // Zero the progress bar and text % after possible SMTP send of the file.
+-  PercentProgressUpdateEvent(""_ns, u""_ns, 0, 100);
+   IncrementCommandTagNumber();
+ 
+   int64_t fileSize = 0;
+   int64_t totalSize;
+   uint32_t readCount;
+   char* dataBuffer = nullptr;
+   nsCString command(GetServerCommandTag());
+   nsCString escapedName;
+@@ -6326,16 +6324,27 @@ void nsImapProtocol::UploadMessageFromFi
        if (NS_SUCCEEDED(rv)) {
          NS_ASSERTION(readCount <= (uint32_t)totalSize,
                       "got more bytes than there should be");
@@ -195,7 +229,7 @@ diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProt
          rv = SendData(")" CRLF);
        else
          rv = SendData(CRLF);
-@@ -7973,17 +7984,23 @@ void nsImapProtocol::EndIdle(bool waitFo
+@@ -7973,17 +7982,23 @@ void nsImapProtocol::EndIdle(bool waitFo
      // mentioned in the IDLE rfc as a possibility. This is similar to the checks
      // done in OnStatusForFolder().
      if (waitForResponse && m_imapMailFolderSinkSelected &&
