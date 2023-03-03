@@ -1,0 +1,99 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1677801309 -3600
+# Parent  0cfec36a4213abfa0e661b1d6ff81e144e488456
+Bug 1745130 - Destroy compose window after a timeout so send process can stay up for a little longer.
+
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -1313,16 +1313,22 @@ bool nsMsgCompose::IsLastWindow() {
+       if (NS_SUCCEEDED(windowEnumerator->GetNext(getter_AddRefs(isupports))))
+         if (NS_SUCCEEDED(windowEnumerator->HasMoreElements(&more)))
+           return !more;
+     }
+   }
+   return true;
+ }
+ 
++void nsMsgCompose::CloseTimer(nsITimer* timer, void* aMsgCompose) {
++  nsMsgCompose* compose = (nsMsgCompose*)aMsgCompose;
++  nsCOMPtr<nsIBaseWindow> window = compose->m_baseWindow.forget();
++  window->Destroy();
++}
++
+ NS_IMETHODIMP nsMsgCompose::CloseWindow(void) {
+   nsresult rv;
+ 
+   nsCOMPtr<nsIMsgComposeService> composeService =
+       do_GetService(NS_MSGCOMPOSESERVICE_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // unregister the compose object with the compose service
+@@ -1336,18 +1342,25 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+ 
+   // We are going away for real, we need to do some clean up first
+   if (m_baseWindow) {
+     if (m_editor) {
+       // The editor will be destroyed during the close window.
+       // Set it to null to be sure we won't use it anymore.
+       m_editor = nullptr;
+     }
+-    nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
+-    rv = window->Destroy();
++    rv = m_baseWindow->SetVisibility(false);
++    NS_ENSURE_SUCCESS(rv, rv);
++    // Destroy the window after 2 seconds to the progress
++    // window can hang around for a little longer.
++    nsCOMPtr<nsITimer> timer;
++    rv = NS_NewTimerWithFuncCallback(
++        getter_AddRefs(timer), nsMsgCompose::CloseTimer, (void*)this, 2000,
++        nsITimer::TYPE_ONE_SHOT, "nsMsgCompose::CloseWindow", nullptr);
++    NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   m_window = nullptr;
+   return rv;
+ }
+ 
+ nsresult nsMsgCompose::Abort() {
+   if (mMsgSend) mMsgSend->Abort();
+diff --git a/mailnews/compose/src/nsMsgCompose.h b/mailnews/compose/src/nsMsgCompose.h
+--- a/mailnews/compose/src/nsMsgCompose.h
++++ b/mailnews/compose/src/nsMsgCompose.h
+@@ -16,16 +16,17 @@
+ #include "nsIMsgCopyServiceListener.h"
+ #include "nsIBaseWindow.h"
+ #include "nsIAbDirectory.h"
+ #include "nsIWebProgressListener.h"
+ #include "nsIMimeConverter.h"
+ #include "nsIMsgFolder.h"
+ #include "mozIDOMWindow.h"
+ #include "mozilla/dom/Element.h"
++#include "nsITimer.h"
+ 
+ // Forward declares
+ class QuotingOutputStreamListener;
+ class nsMsgComposeSendListener;
+ class nsIEditor;
+ class nsIArray;
+ struct nsMsgMailList;
+ 
+@@ -135,16 +136,17 @@ class nsMsgCompose : public nsIMsgCompos
+ 
+   bool mAllowRemoteContent;
+   MSG_DeliverMode mDeliverMode;  // nsIMsgCompDeliverMode long.
+ 
+   friend class QuotingOutputStreamListener;
+   friend class nsMsgComposeSendListener;
+ 
+  private:
++  static void CloseTimer(nsITimer* timer, void* aMsgCompose);
+   void DeleteTmpAttachments();
+   bool mTmpAttachmentsDeleted;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////////
+ // THIS IS THE CLASS THAT IS THE STREAM Listener OF THE HTML OUTPUT
+ // FROM LIBMIME. THIS IS FOR QUOTING
+ ////////////////////////////////////////////////////////////////////////////////////
