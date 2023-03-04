@@ -1,13 +1,21 @@
 # HG changeset patch
 # User Gene Smith <gds@chartertn.net>
-# Date 1677685992 -3600
-# Parent  11db2441cbdaf322f37f3a5a12ab2b3410079d35
-Bug 1745130 - Fix hang at 100% during failed imap save to sent. r=mkmelin
+# Date 1677944237 -3600
+# Node ID 8005c8f26289897dc9142d6368b4ded9c3ba884e
+# Parent  589e85fedd4e9709fda74b56d35d467c05a76e6f
+Bug 1745130 - Fix hang at 100% during failed imap save to sent. r=mkmelin,micahilbery
+
+Changes to:
+ mailnews/compose/src/nsMsgCompose.cpp
+ mailnews/compose/src/nsMsgCompose.h
+Based on https://github.com/Betterbird/thunderbird-patches/blob/main/102/bugs/1745130-close-compose-later.patch
+
+Differential Revision: https://phabricator.services.mozilla.com/D171035
 
 diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/messenger.css
 --- a/mail/themes/shared/mail/messenger.css
 +++ b/mail/themes/shared/mail/messenger.css
-@@ -1257,21 +1257,21 @@ label.statusbarpanel {
+@@ -1257,24 +1257,36 @@ label.statusbarpanel {
  }
  
  #dialog\.progress:indeterminate::-moz-progress-bar,
@@ -29,11 +37,26 @@ diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/mes
    background-size: 200% 100%;
  }
  
++@media (prefers-color-scheme: dark) {
++  #dialog\.progress:indeterminate::-moz-progress-bar,
++  #shutdown_progressmeter:indeterminate::-moz-progress-bar,
++  .progressmeter-statusbar:indeterminate::-moz-progress-bar {
++    background-image: linear-gradient(90deg, rgba(0,0,0, 0.5) 0%,
++                                             rgba(0,0,0, 0.1) 25%,
++                                             rgba(0,0,0, 0.5) 50%,
++                                             rgba(0,0,0, 0.1) 75%,
++                                             rgba(0,0,0, 0.5) 100%);
++  }
++}
++
  @media (prefers-reduced-motion: no-preference) {
    #dialog\.progress:indeterminate::-moz-progress-bar,
    #shutdown_progressmeter:indeterminate::-moz-progress-bar,
    .progressmeter-statusbar:indeterminate::-moz-progress-bar {
      animation: progressSlideX 1.5s linear infinite;
+   }
+ 
+   @keyframes progressSlideX {
 diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
 --- a/mailnews/compose/content/sendProgress.js
 +++ b/mailnews/compose/content/sendProgress.js
@@ -91,8 +114,8 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
        );
  
 -      window.close();
-+      // Allow the user 750ms to see the final status before closing the window.
-+      window.setTimeout(() => window.close(), 750);
++      // Allow the user 1 sec to see the final status before closing the window.
++      setTimeout(() => window.close(), 1000);
      }
    },
  
@@ -137,7 +160,7 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
 diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
 --- a/mailnews/compose/src/SmtpService.jsm
 +++ b/mailnews/compose/src/SmtpService.jsm
-@@ -146,30 +146,40 @@ SmtpService.prototype = {
+@@ -146,30 +146,33 @@ SmtpService.prototype = {
        while (sstream.available()) {
          let chunk = sstream.read(65536);
          let canSendMore = client.send(chunk);
@@ -147,7 +170,7 @@ diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpSer
          }
          // In practice, chunks are buffered by TCPSocket, progress reaches 100%
 -        // almost immediately.
-+        // almost immediately unless message is much larger than chunk size.
++        // almost immediately unless message is larger than chunk size.
          sentSize += chunk.length;
          progressListener?.onProgressChange(
            null,
@@ -163,14 +186,7 @@ diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpSer
        client.end();
 +
 +      // Set progress to indeterminate.
-+      progressListener?.onProgressChange(
-+        null,
-+        null,
-+        0,
-+        -1,
-+        0,
-+        -1
-+      );
++      progressListener?.onProgressChange(null, null, 0, -1, 0, -1);
      };
      client.ondrain = () => {
        // Socket buffer is empty, safe to continue sending.
@@ -179,6 +195,117 @@ diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpSer
      client.ondone = exitCode => {
        if (!AppConstants.MOZ_SUITE) {
          Services.telemetry.scalarAdd("tb.mails.sent", 1);
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -1313,16 +1313,23 @@ bool nsMsgCompose::IsLastWindow() {
+       if (NS_SUCCEEDED(windowEnumerator->GetNext(getter_AddRefs(isupports))))
+         if (NS_SUCCEEDED(windowEnumerator->HasMoreElements(&more)))
+           return !more;
+     }
+   }
+   return true;
+ }
+ 
++// Timer callback for delaying the destruction of the compose window.
++void nsMsgCompose::CloseTimer(nsITimer* timer, void* aMsgCompose) {
++  nsMsgCompose* compose = (nsMsgCompose*)aMsgCompose;
++  nsCOMPtr<nsIBaseWindow> window = compose->m_baseWindow.forget();
++  window->Destroy();
++}
++
+ NS_IMETHODIMP nsMsgCompose::CloseWindow(void) {
+   nsresult rv;
+ 
+   nsCOMPtr<nsIMsgComposeService> composeService =
+       do_GetService(NS_MSGCOMPOSESERVICE_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // unregister the compose object with the compose service
+@@ -1336,18 +1343,24 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+ 
+   // We are going away for real, we need to do some clean up first
+   if (m_baseWindow) {
+     if (m_editor) {
+       // The editor will be destroyed during the close window.
+       // Set it to null to be sure we won't use it anymore.
+       m_editor = nullptr;
+     }
+-    nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
+-    rv = window->Destroy();
++    // First hide the compose window and then destroy it after a 2 second delay.
++    // This allows any child progress window to show the final status.
++    rv = m_baseWindow->SetVisibility(false);
++    NS_ENSURE_SUCCESS(rv, rv);
++    rv = NS_NewTimerWithFuncCallback(
++        getter_AddRefs(m_Timer), nsMsgCompose::CloseTimer, (void*)this, 2000,
++        nsITimer::TYPE_ONE_SHOT, "nsMsgCompose::CloseWindow", nullptr);
++    NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   m_window = nullptr;
+   return rv;
+ }
+ 
+ nsresult nsMsgCompose::Abort() {
+   if (mMsgSend) mMsgSend->Abort();
+diff --git a/mailnews/compose/src/nsMsgCompose.h b/mailnews/compose/src/nsMsgCompose.h
+--- a/mailnews/compose/src/nsMsgCompose.h
++++ b/mailnews/compose/src/nsMsgCompose.h
+@@ -16,16 +16,17 @@
+ #include "nsIMsgCopyServiceListener.h"
+ #include "nsIBaseWindow.h"
+ #include "nsIAbDirectory.h"
+ #include "nsIWebProgressListener.h"
+ #include "nsIMimeConverter.h"
+ #include "nsIMsgFolder.h"
+ #include "mozIDOMWindow.h"
+ #include "mozilla/dom/Element.h"
++#include "nsITimer.h"
+ 
+ // Forward declares
+ class QuotingOutputStreamListener;
+ class nsMsgComposeSendListener;
+ class nsIEditor;
+ class nsIArray;
+ struct nsMsgMailList;
+ 
+@@ -101,16 +102,17 @@ class nsMsgCompose : public nsIMsgCompos
+ 
+   // Helper function. Parameters are not checked.
+   bool mConvertStructs;  // for TagConvertible
+ 
+   nsCOMPtr<nsIEditor> m_editor;
+   mozIDOMWindowProxy* m_window;
+   nsCOMPtr<nsIDocShell> mDocShell;
+   nsCOMPtr<nsIBaseWindow> m_baseWindow;
++  nsCOMPtr<nsITimer> m_Timer;
+   RefPtr<nsMsgCompFields> m_compFields;
+   nsCOMPtr<nsIMsgIdentity> m_identity;
+   bool m_composeHTML;
+   RefPtr<QuotingOutputStreamListener> mQuoteStreamListener;
+   nsCOMPtr<nsIOutputStream> mBaseStream;
+ 
+   nsCOMPtr<nsIMsgSend> mMsgSend;  // for composition back end
+   nsCOMPtr<nsIMsgProgress>
+@@ -135,16 +137,17 @@ class nsMsgCompose : public nsIMsgCompos
+ 
+   bool mAllowRemoteContent;
+   MSG_DeliverMode mDeliverMode;  // nsIMsgCompDeliverMode long.
+ 
+   friend class QuotingOutputStreamListener;
+   friend class nsMsgComposeSendListener;
+ 
+  private:
++  static void CloseTimer(nsITimer* timer, void* aMsgCompose);
+   void DeleteTmpAttachments();
+   bool mTmpAttachmentsDeleted;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////////
+ // THIS IS THE CLASS THAT IS THE STREAM Listener OF THE HTML OUTPUT
+ // FROM LIBMIME. THIS IS FOR QUOTING
+ ////////////////////////////////////////////////////////////////////////////////////
 diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
 --- a/mailnews/imap/src/nsImapProtocol.cpp
 +++ b/mailnews/imap/src/nsImapProtocol.cpp
