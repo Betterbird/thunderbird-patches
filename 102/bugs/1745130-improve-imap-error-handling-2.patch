@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Gene Smith <gds@chartertn.net>
-# Date 1677944237 -3600
+# Date 1678147170 -3600
 # Node ID 8005c8f26289897dc9142d6368b4ded9c3ba884e
 # Parent  589e85fedd4e9709fda74b56d35d467c05a76e6f
 Bug 1745130 - Fix hang at 100% during failed imap save to sent. r=mkmelin,micahilbery
@@ -41,11 +41,11 @@ diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/mes
 +  #dialog\.progress:indeterminate::-moz-progress-bar,
 +  #shutdown_progressmeter:indeterminate::-moz-progress-bar,
 +  .progressmeter-statusbar:indeterminate::-moz-progress-bar {
-+    background-image: linear-gradient(90deg, rgba(0,0,0, 0.5) 0%,
-+                                             rgba(0,0,0, 0.1) 25%,
-+                                             rgba(0,0,0, 0.5) 50%,
-+                                             rgba(0,0,0, 0.1) 75%,
-+                                             rgba(0,0,0, 0.5) 100%);
++    background-image: linear-gradient(90deg, rgba(0, 0, 0, 0.5) 0%,
++                                             rgba(0, 0, 0, 0.1) 25%,
++                                             rgba(0, 0, 0, 0.5) 50%,
++                                             rgba(0, 0, 0, 0.1) 75%,
++                                             rgba(0, 0, 0, 0.5) 100%);
 +  }
 +}
 +
@@ -60,18 +60,7 @@ diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/mes
 diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
 --- a/mailnews/compose/content/sendProgress.js
 +++ b/mailnews/compose/content/sendProgress.js
-@@ -1,33 +1,40 @@
- /* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
- /* This Source Code Form is subject to the terms of the Mozilla Public
-  * License, v. 2.0. If a copy of the MPL was not distributed with this
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
- var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
- 
--// dialog is just an array we'll use to store various properties from the dialog document...
-+// dialog is just an array we'll use to store various properties from the dialog
-+// document...
- var dialog;
+@@ -10,43 +10,55 @@ var dialog;
  
  // the msgProgress is a nsIMsgProgress object
  var msgProgress = null;
@@ -80,13 +69,15 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
  var itsASaveOperation = false;
  var gBundle;
  
++// Prevent not wanted status strings such as "Opening folder Drafts…" from
++// appearing during STATE_STOP and overwriting the final status string.
++var inStateStop = false;
++
  window.addEventListener("DOMContentLoaded", onLoad);
  window.addEventListener("unload", onUnload);
  document.addEventListener("dialogcancel", onCancel);
  
--// all progress notifications are done through the nsIWebProgressListener implementation...
-+// all progress notifications are done through the nsIWebProgressListener
-+// implementation...
+ // all progress notifications are done through the nsIWebProgressListener implementation...
  var progressListener = {
    onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
 -    // Only need to handle STATE_STOP.
@@ -99,12 +90,14 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
      if (aStateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
        // we are done sending/saving the message...
        // Indicate completion in status area.
++      inStateStop = true;
        var msg;
        if (itsASaveOperation) {
          msg = gBundle.GetStringFromName("messageSaved");
        } else {
          msg = gBundle.GetStringFromName("messageSent");
-@@ -36,17 +43,18 @@ var progressListener = {
+       }
+       dialog.status.setAttribute("value", msg);
  
        // Put progress meter at 100%.
        dialog.progress.setAttribute("value", 100);
@@ -114,7 +107,8 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
        );
  
 -      window.close();
-+      // Allow the user 1 sec to see the final status before closing the window.
++      // Allow the user 1 second to see the final status string before closing
++      // the progress window.
 +      setTimeout(() => window.close(), 1000);
      }
    },
@@ -124,7 +118,7 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
      aRequest,
      aCurSelfProgress,
      aMaxSelfProgress,
-@@ -64,17 +72,17 @@ var progressListener = {
+@@ -64,28 +76,28 @@ var progressListener = {
        // Advance progress meter.
        dialog.progress.value = percent;
  
@@ -134,7 +128,7 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
        ]);
      } else {
 -      // Progress meter should show no value in this case.
-+      // Have progress meter show indeterminate with denominator <= 0.
++      // Have progress meter show indeterminate when denominator is <= 0.
        dialog.progress.removeAttribute("value");
        dialog.progressText.value = "";
      }
@@ -143,20 +137,18 @@ diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content
    onLocationChange(aWebProgress, aRequest, aLocation, aFlags) {
      // we can ignore this notification
    },
-@@ -156,11 +164,12 @@ function onUnload() {
- function onCancel(event) {
-   // Cancel app launcher.
-   try {
-     msgProgress.processCanceledByUser = true;
-   } catch (e) {
-     return;
-   }
  
--  // Don't close up dialog, the backend will close the dialog when everything will be aborted.
-+  // Don't close up dialog, the backend will close the dialog when everything
-+  // will be aborted.
-   event.preventDefault();
- }
+   onStatusChange(aWebProgress, aRequest, aStatus, aMessage) {
+-    if (aMessage != "") {
++    if (aMessage != "" && !inStateStop) {
+       dialog.status.setAttribute("value", aMessage);
+     }
+   },
+ 
+   onSecurityChange(aWebProgress, aRequest, state) {
+     // we can ignore this notification
+   },
+ 
 diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
 --- a/mailnews/compose/src/SmtpService.jsm
 +++ b/mailnews/compose/src/SmtpService.jsm
@@ -222,7 +214,7 @@ diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgC
    NS_ENSURE_SUCCESS(rv, rv);
  
    // unregister the compose object with the compose service
-@@ -1336,18 +1343,24 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+@@ -1336,18 +1343,30 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
  
    // We are going away for real, we need to do some clean up first
    if (m_baseWindow) {
@@ -233,9 +225,15 @@ diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgC
      }
 -    nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
 -    rv = window->Destroy();
-+    // First hide the compose window and then destroy it after a 2 second delay.
-+    // This allows any child progress window to show the final status.
++    // First make the compose window invisible and then destroy it after a
++    // 2 second delay. This allows any child progress window to show the final
++    // status.
 +    rv = m_baseWindow->SetVisibility(false);
++    NS_ENSURE_SUCCESS(rv, rv);
++    // We need to disble the window since, due to a bug in the Mozilla
++    // platform, invisible windows still return visibility of true.
++    // In our tests we need to have a way to ignore "soon to die" windows.
++    rv = m_baseWindow->SetEnabled(false);
 +    NS_ENSURE_SUCCESS(rv, rv);
 +    rv = NS_NewTimerWithFuncCallback(
 +        getter_AddRefs(m_Timer), nsMsgCompose::CloseTimer, (void*)this, 2000,
