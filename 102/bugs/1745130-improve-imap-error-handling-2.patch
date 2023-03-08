@@ -1,14 +1,20 @@
 # HG changeset patch
 # User Gene Smith <gds@chartertn.net>
-# Date 1678147170 -3600
+# Date 1678308674 -3600
 # Node ID 8005c8f26289897dc9142d6368b4ded9c3ba884e
 # Parent  589e85fedd4e9709fda74b56d35d467c05a76e6f
-Bug 1745130 - Fix hang at 100% during failed imap save to sent. r=mkmelin,micahilbery
+Bug 1745130 - Improve error detection and reporting during imap save to sent. r=mkmelin,micahilbery
 
 Changes to:
- mailnews/compose/src/nsMsgCompose.cpp
- mailnews/compose/src/nsMsgCompose.h
+mailnews/compose/src/nsMsgCompose.cpp
+mailnews/compose/src/nsMsgCompose.h
 Based on https://github.com/Betterbird/thunderbird-patches/blob/main/102/bugs/1745130-close-compose-later.patch
+
+CSS and test changes based on BB's comments in
+https://bugzilla.mozilla.org/show_bug.cgi?id=1745130#c103
+https://bugzilla.mozilla.org/show_bug.cgi?id=1745130#c115
+https://bugzilla.mozilla.org/show_bug.cgi?id=1745130#c125
+https://bugzilla.mozilla.org/show_bug.cgi?id=1745130#c130
 
 Differential Revision: https://phabricator.services.mozilla.com/D171035
 
@@ -214,7 +220,7 @@ diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgC
    NS_ENSURE_SUCCESS(rv, rv);
  
    // unregister the compose object with the compose service
-@@ -1336,18 +1343,30 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+@@ -1336,18 +1343,47 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
  
    // We are going away for real, we need to do some clean up first
    if (m_baseWindow) {
@@ -225,16 +231,33 @@ diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgC
      }
 -    nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
 -    rv = window->Destroy();
-+    // First make the compose window invisible and then destroy it after a
-+    // 2 second delay. This allows any child progress window to show the final
-+    // status.
 +    rv = m_baseWindow->SetVisibility(false);
 +    NS_ENSURE_SUCCESS(rv, rv);
-+    // We need to disble the window since, due to a bug in the Mozilla
-+    // platform, invisible windows still return visibility of true.
++
++#if 0
++    Enable to fix tests.
 +    // In our tests we need to have a way to ignore "soon to die" windows.
-+    rv = m_baseWindow->SetEnabled(false);
++    // Due to a bug in the Mozilla platform, invisible windows still return
++    // visibility of true. To distinguish we set a custom attribute.
++    nsCOMPtr<nsPIDOMWindowOuter> window = do_QueryInterface(m_window, &rv);
 +    NS_ENSURE_SUCCESS(rv, rv);
++    NS_ENSURE_TRUE(window, NS_ERROR_FAILURE);
++
++    mozilla::dom::Document* domDocument = window->GetDoc();
++    NS_ENSURE_TRUE(domDocument, NS_ERROR_FAILURE);
++
++    mozilla::dom::Element* domElement = domDocument->GetDocumentElement();
++    NS_ENSURE_TRUE(domElement, NS_ERROR_FAILURE);
++
++    ErrorResult rv2;
++    domElement->SetAttribute(u"windowdestroy"_ns, u"yes"_ns, rv2);
++    if (rv2.Failed()) {
++      return rv2.StealNSResult();
++    }
++#endif
++
++    // Destroy the window after 2 seconds so the progress
++    // window can hang around for a little longer.
 +    rv = NS_NewTimerWithFuncCallback(
 +        getter_AddRefs(m_Timer), nsMsgCompose::CloseTimer, (void*)this, 2000,
 +        nsITimer::TYPE_ONE_SHOT, "nsMsgCompose::CloseWindow", nullptr);
