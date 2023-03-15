@@ -1,0 +1,117 @@
+# HG changeset patch
+# User Ping Chen <remotenonsense@gmail.com>
+# Date 1671552419 -3600
+# Node ID ce7822519deb145ec349ce291c75f5d0aad9e40e
+# Parent  a548473d6d04fd888fca94f267e43636278df76f
+Bug 1801286 - Wait for QUIT response in Pop3Client.jsm. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D162447
+* * *
+Bug 1801286 follow-up - Fix for browser_mailAccountSetupWizard.js. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D163070
+
+diff --git a/mailnews/local/src/Pop3Client.jsm b/mailnews/local/src/Pop3Client.jsm
+--- a/mailnews/local/src/Pop3Client.jsm
++++ b/mailnews/local/src/Pop3Client.jsm
+@@ -253,28 +253,35 @@ class Pop3Client {
+       });
+       this._uidlMapChanged = true;
+     }
+     await this._writeUidlState(true);
+   }
+ 
+   /**
+    * Send `QUIT` request to the server.
++   * @param {Function} nextAction - Callback function after QUIT response.
+    */
+-  quit() {
+-    this._send("QUIT");
+-    this._nextAction = this.close;
++  quit(nextAction) {
++    this._onData = () => {};
++    this._onError = () => {};
++    if (this._socket?.readyState == "open") {
++      this._send("QUIT");
++      this._nextAction = nextAction || this.close;
++    } else if (nextAction) {
++      nextAction();
++    }
+   }
+ 
+   /**
+    * Close the socket.
+    */
+-  close() {
++  close = () => {
+     this._socket.close();
+-  }
++  };
+ 
+   /**
+    * The open event handler.
+    */
+   _onOpen = () => {
+     this._logger.debug("Connected");
+     this._socket.ondata = this._onData;
+     this._socket.onclose = this._onClose;
+@@ -1422,16 +1429,20 @@ class Pop3Client {
+     }
+ 
+     let errorTitle = bundle.formatStringFromName("pop3ErrorDialogTitle", [
+       this._server.prettyName,
+     ]);
+     this._msgWindow.promptDialog.alert(errorTitle, errorMsg);
+   }
+ 
++  /**
++   * Save popstate.dat when necessary, send QUIT.
++   * @param {nsresult} status - Indicate if the last action succeeded.
++   */
+   _actionDone = (status = Cr.NS_OK) => {
+     this._logger.debug(`Done with status=${status}`);
+     this._authenticating = false;
+     if (status == Cr.NS_OK) {
+       if (this._newMessageTotal) {
+         this._updateStatus("receivedMsgs", [
+           this._newMessageTotal,
+           this._newMessageTotal,
+@@ -1439,21 +1450,36 @@ class Pop3Client {
+       } else {
+         this._updateStatus("noNewMessages");
+       }
+     } else if (this._currentMessage) {
+       // Put _currentMessage back to the queue to prevent loss of popstate.
+       this._messagesToHandle.unshift(this._currentMessage);
+     }
+     this._writeUidlState(true);
++    // Normally we clean up after QUIT response.
++    this.quit(() => this._cleanUp(status));
++    // If we didn't receive QUIT response after 3 seconds, clean up anyway.
++    setTimeout(() => {
++      if (!this._cleanedUp) {
++        this._cleanUp(status);
++      }
++    }, 3000);
++  };
++
++  /**
++   * Notify listeners, close the socket and rest states.
++   * @param {nsresult} status - Indicate if the last action succeeded.
++   */
++  _cleanUp = status => {
++    this._cleanedUp = true;
++    this.close();
+     this.urlListener?.OnStopRunningUrl(this.runningUri, status);
+-    this.quit();
+     this.runningUri.SetUrlState(false, Cr.NS_OK);
+     this.onDone?.(status);
+-
+     if (this._folderLocked) {
+       this._sink.abortMailDelivery(this);
+       this._folderLocked = false;
+       this._logger.debug("Folder lock released.");
+     }
+     this._server.wrappedJSObject.runningClient = null;
+   };
+ 
