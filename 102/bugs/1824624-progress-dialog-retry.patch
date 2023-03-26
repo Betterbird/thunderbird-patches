@@ -1,0 +1,122 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1679865212 -7200
+# Parent  ff132eb2adc771f13cf1dbbc95479dc6afa4dbb1
+Bug 1824624 - Make sure there is a progress dialog during retry.
+
+diff --git a/mailnews/compose/src/MessageSend.jsm b/mailnews/compose/src/MessageSend.jsm
+--- a/mailnews/compose/src/MessageSend.jsm
++++ b/mailnews/compose/src/MessageSend.jsm
+@@ -24,17 +24,20 @@ const nsMsgKey_None = 0xffffffff;
+ /**
+  * A module to manage sending processes.
+  *
+  * @implements {nsIMsgSend}
+  */
+ function MessageSend() {}
+ 
+ MessageSend.prototype = {
+-  QueryInterface: ChromeUtils.generateQI(["nsIMsgSend"]),
++  QueryInterface: ChromeUtils.generateQI([
++    "nsIMsgSend",
++    "nsIWebProgressListener",
++  ]),
+   classID: Components.ID("{028b9c1e-8d0a-4518-80c2-842e07846eaa}"),
+ 
+   async createAndSendMessage(
+     editor,
+     userIdentity,
+     accountKey,
+     compFields,
+     isDigest,
+@@ -269,16 +272,39 @@ MessageSend.prototype = {
+     this._messageKey = nsMsgKey_None;
+ 
+     // Create a local file from MimeMessage, then pass it to _deliverMessage.
+     this._message
+       .createMessageFile()
+       .then(messageFile => this._deliverMessage(messageFile));
+   },
+ 
++  // nsIWebProgressListener.
++  onLocationChange(aWebProgress, aRequest, aLocation, aFlags) {},
++  onProgressChange(
++    aWebProgress,
++    aRequest,
++    aCurSelfProgress,
++    aMaxSelfProgress,
++    aCurTotalProgress,
++    aMaxTotalProgress
++  ) {},
++  onStatusChange(aWebProgress, aRequest, aStatus, aMessage) {},
++  onSecurityChange(aWebProgress, aRequest, state) {},
++  onContentBlockingEvent(aWebProgress, aRequest, aEvent) {},
++  onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
++    if (
++      aStateFlags & Ci.nsIWebProgressListener.STATE_STOP &&
++      aStatus != Cr.NS_OK
++    ) {
++      MsgUtils.sendLogger.debug("onStateChange with failure. Aborting.");
++      this.abort();
++    }
++  },
++
+   abort() {
+     if (this._aborting) {
+       return;
+     }
+     this._aborting = true;
+     if (this._smtpRequest?.value) {
+       this._smtpRequest.value.cancel(Cr.NS_ERROR_ABORT);
+       this._smtpRequest = null;
+@@ -454,16 +480,50 @@ MessageSend.prototype = {
+           buttonLabelRety,
+           null,
+           null,
+           null,
+           showCheckBox
+         );
+         if (buttonPressed == 0) {
+           // retry button clicked
++          // Check we have a progress dialog.
++          if (
++            this._sendProgress.processCanceledByUser &&
++            Services.prefs.getBoolPref("mailnews.show_send_progress")
++          ) {
++            let progress = Cc[
++              "@mozilla.org/messenger/progress;1"
++            ].createInstance(Ci.nsIMsgProgress);
++
++            let params = Cc[
++              "@mozilla.org/messengercompose/composeprogressparameters;1"
++            ].createInstance(Ci.nsIMsgComposeProgressParams);
++            params.subject = this._parentWindow.gMsgCompose.compFields.subject;
++            params.deliveryMode = this._deliverMode;
++
++            progress.openProgressDialog(
++              this._parentWindow,
++              this._sendProgress.msgWindow,
++              "chrome://messenger/content/messengercompose/sendProgress.xhtml",
++              false,
++              params
++            );
++
++            this._sendProgress = progress;
++            progress.onStateChange(
++              null,
++              null,
++              Ci.nsIWebProgressListener.STATE_START,
++              Cr.NS_OK
++            );
++
++            // We want to hear when this is cancelled.
++            progress.registerListener(this);
++          }
+           this._mimeDoFcc();
+           return;
+         } else if (buttonPressed == 2) {
+           try {
+             // Try to save to Local Folders/<account name>. Pass null to save
+             // to local folders and not the configured fcc.
+             this._mimeDoFcc(null, true, Ci.nsIMsgSend.nsMsgDeliverNow);
+             return;
