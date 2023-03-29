@@ -32,7 +32,7 @@ rm -rf localization\en-US
 
 :: lessecho uses LR instead of CRLF
 lessecho %~1> update.locale
-lessecho %~1,en-US> res\multilocale.txt
+lessecho %~1> res\multilocale.txt
 
 :: Edit chrome\chrome.manifest
 sed -i -e 's/en-US en-US\/locale\/en-US/%~1 %~1\/locale\/%~1/' chrome\chrome.manifest
