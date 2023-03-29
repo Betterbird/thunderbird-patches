@@ -1,0 +1,204 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1680127101 -7200
+# Parent  de9b191c05a1351ce261973a29072e5aee9b6fdb
+Bug 1824624 - Make sure there is a progress dialog during retry.
+
+diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
+--- a/mailnews/compose/content/sendProgress.js
++++ b/mailnews/compose/content/sendProgress.js
+@@ -22,32 +22,34 @@ var progressListener = {
+   onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
+     if (aStateFlags & Ci.nsIWebProgressListener.STATE_START) {
+       // Set progress meter to show indeterminate.
+       dialog.progress.removeAttribute("value");
+       dialog.progressText.value = "";
+     }
+ 
+     if (aStateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
+-      // we are done sending/saving the message...
+-      // Indicate completion in status area.
+-      var msg;
+-      if (itsASaveOperation) {
+-        msg = gBundle.GetStringFromName("messageSaved");
+-      } else {
+-        msg = gBundle.GetStringFromName("messageSent");
++      if (Components.isSuccessCode(aStatus)) {
++        // we are done sending/saving the message...
++        // Indicate completion in status area.
++        let msg;
++        if (itsASaveOperation) {
++          msg = gBundle.GetStringFromName("messageSaved");
++        } else {
++          msg = gBundle.GetStringFromName("messageSent");
++        }
++        dialog.status.setAttribute("value", msg);
++
++        // Put progress meter at 100%.
++        dialog.progress.setAttribute("value", 100);
++        dialog.progressText.setAttribute(
++          "value",
++          gBundle.formatStringFromName("percentMsg", [100])
++        );
+       }
+-      dialog.status.setAttribute("value", msg);
+-
+-      // Put progress meter at 100%.
+-      dialog.progress.setAttribute("value", 100);
+-      dialog.progressText.setAttribute(
+-        "value",
+-        gBundle.formatStringFromName("percentMsg", [100])
+-      );
+ 
+       window.close();
+     }
+   },
+ 
+   onProgressChange(
+     aWebProgress,
+     aRequest,
+diff --git a/mailnews/compose/src/MessageSend.jsm b/mailnews/compose/src/MessageSend.jsm
+--- a/mailnews/compose/src/MessageSend.jsm
++++ b/mailnews/compose/src/MessageSend.jsm
+@@ -30,17 +30,20 @@ const nsMsgKey_None = 0xffffffff;
+ /**
+  * A module to manage sending processes.
+  *
+  * @implements {nsIMsgSend}
+  */
+ function MessageSend() {}
+ 
+ MessageSend.prototype = {
+-  QueryInterface: ChromeUtils.generateQI(["nsIMsgSend"]),
++  QueryInterface: ChromeUtils.generateQI([
++    "nsIMsgSend",
++    "nsIWebProgressListener",
++  ]),
+   classID: Components.ID("{028b9c1e-8d0a-4518-80c2-842e07846eaa}"),
+ 
+   async createAndSendMessage(
+     editor,
+     userIdentity,
+     accountKey,
+     compFields,
+     isDigest,
+@@ -275,16 +278,40 @@ MessageSend.prototype = {
+     this._messageKey = nsMsgKey_None;
+ 
+     // Create a local file from MimeMessage, then pass it to _deliverMessage.
+     this._message
+       .createMessageFile()
+       .then(messageFile => this._deliverMessage(messageFile));
+   },
+ 
++  // nsIWebProgressListener.
++  onLocationChange(aWebProgress, aRequest, aLocation, aFlags) {},
++  onProgressChange(
++    aWebProgress,
++    aRequest,
++    aCurSelfProgress,
++    aMaxSelfProgress,
++    aCurTotalProgress,
++    aMaxTotalProgress
++  ) {},
++  onStatusChange(aWebProgress, aRequest, aStatus, aMessage) {},
++  onSecurityChange(aWebProgress, aRequest, state) {},
++  onContentBlockingEvent(aWebProgress, aRequest, aEvent) {},
++  onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
++    if (
++      aStateFlags & Ci.nsIWebProgressListener.STATE_STOP &&
++      !Components.isSuccessCode(aStatus)
++    ) {
++      lazy.MsgUtils.sendLogger.debug("onStateChange with failure. Aborting.");
++      this._isRetry = false;
++      this.abort();
++    }
++  },
++
+   abort() {
+     if (this._aborting) {
+       return;
+     }
+     this._aborting = true;
+     if (this._smtpRequest?.value) {
+       this._smtpRequest.value.cancel(Cr.NS_ERROR_ABORT);
+       this._smtpRequest = null;
+@@ -392,16 +419,25 @@ MessageSend.prototype = {
+   notifyListenerOnProgressCopy(progress, progressMax) {
+     lazy.MsgUtils.sendLogger.debug("notifyListenerOnProgressCopy");
+     if (this._sendListener instanceof Ci.nsIMsgCopyServiceListener) {
+       this._sendListener.OnProgress(progress, progressMax);
+     }
+   },
+ 
+   notifyListenerOnStopCopy(status) {
++    if (this._isRetry) {
++      // If we got here via retry, take down our progress dialog
++      // if we don't need it any more.
++      if (Components.isSuccessCode(status)) {
++        this._sendProgress.unregisterListener(this);
++        this._sendProgress.closeProgressDialog(false);
++        this._isRetry = false;
++      }
++    }
+     lazy.MsgUtils.sendLogger.debug(
+       `notifyListenerOnStopCopy; status=${status}`
+     );
+     this._msgCopy = null;
+ 
+     let statusMsgEntry = Components.isSuccessCode(status)
+       ? "copyMessageComplete"
+       : "copyMessageFailed";
+@@ -462,16 +498,52 @@ MessageSend.prototype = {
+           buttonLabelRety,
+           null,
+           null,
+           null,
+           showCheckBox
+         );
+         if (buttonPressed == 0) {
+           // retry button clicked
++          // Check we have a progress dialog.
++          if (
++            this._sendProgress.processCanceledByUser &&
++            Services.prefs.getBoolPref("mailnews.show_send_progress")
++          ) {
++            let progress = Cc[
++              "@mozilla.org/messenger/progress;1"
++            ].createInstance(Ci.nsIMsgProgress);
++
++            let params = Cc[
++              "@mozilla.org/messengercompose/composeprogressparameters;1"
++            ].createInstance(Ci.nsIMsgComposeProgressParams);
++            params.subject = this._parentWindow.gMsgCompose.compFields.subject;
++            params.deliveryMode = this._deliverMode;
++
++            progress.openProgressDialog(
++              this._parentWindow,
++              this._sendProgress.msgWindow,
++              "chrome://messenger/content/messengercompose/sendProgress.xhtml",
++              false,
++              params
++            );
++
++            progress.onStateChange(
++              null,
++              null,
++              Ci.nsIWebProgressListener.STATE_START,
++              Cr.NS_OK
++            );
++
++            // We want to hear when this is cancelled.
++            progress.registerListener(this);
++
++            this._sendProgress = progress;
++            this._isRetry = true;
++          }
+           this._mimeDoFcc();
+           return;
+         } else if (buttonPressed == 2) {
+           try {
+             // Try to save to Local Folders/<account name>. Pass null to save
+             // to local folders and not the configured fcc.
+             this._mimeDoFcc(null, true, Ci.nsIMsgSend.nsMsgDeliverNow);
+             return;
