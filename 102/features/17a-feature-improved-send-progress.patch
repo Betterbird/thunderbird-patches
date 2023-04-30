@@ -1,0 +1,149 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1682853498 -7200
+# Parent  9dc7c6d69f3b894087d092bef336d13cf7e0c9ac
+Feature: Improve send progress window: Wait until progress window closes.
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -6214,16 +6214,28 @@ async function CompleteGenericSendMessag
+       progress
+     );
+   } catch (ex) {
+     Cu.reportError("GenericSendMessage FAILED: " + ex);
+     ToggleWindowLock(false);
+     sendError = ex;
+   }
+ 
++  if (progress?.progressWindow) {
++    // Wait until the progress window closes.
++    // When we get there, the progress window was created, but hasn't loaded yet,
++    // that is run its `onLoad()` function. If we listen to "unload", we get
++    // two events, first when the "incomplete" window is replaced with the
++    // real one, second when the real one is unloaded. So use "beforeunload"
++    // which is called only once.
++    await new Promise(r =>
++      progress.progressWindow.addEventListener("beforeunload", r)
++    );
++  }
++
+   if (
+     msgType == Ci.nsIMsgCompDeliverMode.Now ||
+     msgType == Ci.nsIMsgCompDeliverMode.Later ||
+     msgType == Ci.nsIMsgCompDeliverMode.Background
+   ) {
+     window.dispatchEvent(new CustomEvent("aftersend"));
+ 
+     let maxSize =
+diff --git a/mailnews/base/public/nsIMsgProgress.idl b/mailnews/base/public/nsIMsgProgress.idl
+--- a/mailnews/base/public/nsIMsgProgress.idl
++++ b/mailnews/base/public/nsIMsgProgress.idl
+@@ -30,9 +30,11 @@ interface nsIMsgProgress: nsIWebProgress
+ 
+   /* Unregister a Web Progress Listener */
+   void unregisterListener(in nsIWebProgressListener listener);
+ 
+   /* Indicated if the user asked to cancel the current process */
+   attribute boolean processCanceledByUser;
+ 
+   attribute nsIMsgWindow msgWindow;
++
++  attribute mozIDOMWindowProxy progressWindow;
+ };
+diff --git a/mailnews/base/src/nsMsgProgress.cpp b/mailnews/base/src/nsMsgProgress.cpp
+--- a/mailnews/base/src/nsMsgProgress.cpp
++++ b/mailnews/base/src/nsMsgProgress.cpp
+@@ -63,18 +63,22 @@ NS_IMETHODIMP nsMsgProgress::OpenProgres
+   array->AppendElement(parameters);
+ 
+   // Open the dialog.
+   RefPtr<mozilla::dom::BrowsingContext> newWindow;
+ 
+   nsString chromeOptions(u"chrome,dependent,centerscreen"_ns);
+   if (inDisplayModal) chromeOptions.AppendLiteral(",modal");
+ 
+-  return parent->OpenDialog(NS_ConvertASCIItoUTF16(dialogURL), u"_blank"_ns,
+-                            chromeOptions, array, getter_AddRefs(newWindow));
++  rv = parent->OpenDialog(NS_ConvertASCIItoUTF16(dialogURL), u"_blank"_ns,
++                          chromeOptions, array, getter_AddRefs(newWindow));
++
++  // Grab the new window. Warning: It hasn't loaded yet!
++  if (newWindow) m_msgProgressWindow = newWindow->GetDOMWindow();
++  return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgProgress::CloseProgressDialog(bool forceClose) {
+   m_closeProgress = true;
+   return OnStateChange(nullptr, nullptr, nsIWebProgressListener::STATE_STOP,
+                        forceClose ? NS_ERROR_FAILURE : NS_OK);
+ }
+ 
+@@ -222,16 +226,26 @@ NS_IMETHODIMP nsMsgProgress::GetMsgWindo
+   if (m_msgWindow)
+     CallQueryReferent(m_msgWindow.get(), aMsgWindow);
+   else
+     *aMsgWindow = nullptr;
+ 
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgProgress::SetProgressWindow(mozIDOMWindowProxy* aProgressWindow) {
++  m_msgProgressWindow = aProgressWindow;
++  return NS_OK;
++}
++
++NS_IMETHODIMP nsMsgProgress::GetProgressWindow(mozIDOMWindowProxy** aProgressWindow) {
++  NS_IF_ADDREF(*aProgressWindow = m_msgProgressWindow);
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgProgress::OnProgress(nsIRequest* request, int64_t aProgress,
+                                         int64_t aProgressMax) {
+   // XXX: What should the nsIWebProgress be?
+   // XXX: This truncates 64-bit to 32-bit
+   return OnProgressChange(nullptr, request, int32_t(aProgress),
+                           int32_t(aProgressMax),
+                           int32_t(aProgress) /* current total progress */,
+                           int32_t(aProgressMax) /* max total progress */);
+diff --git a/mailnews/base/src/nsMsgProgress.h b/mailnews/base/src/nsMsgProgress.h
+--- a/mailnews/base/src/nsMsgProgress.h
++++ b/mailnews/base/src/nsMsgProgress.h
+@@ -35,11 +35,12 @@ class nsMsgProgress : public nsIMsgProgr
+ 
+   bool m_closeProgress;
+   bool m_processCanceled;
+   nsString m_pendingStatus;
+   int32_t m_pendingStateFlags;
+   nsresult m_pendingStateValue;
+   nsWeakPtr m_msgWindow;
+   nsCOMArray<nsIWebProgressListener> m_listenerList;
++  nsCOMPtr<mozIDOMWindowProxy> m_msgProgressWindow;
+ };
+ 
+ #endif  // nsMsgProgress_h_
+diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
+--- a/mailnews/compose/content/sendProgress.js
++++ b/mailnews/compose/content/sendProgress.js
+@@ -51,17 +51,20 @@ var progressListener = {
+         dialog.progressText.setAttribute(
+           "value",
+           gBundle.formatStringFromName("percentMsg", [100])
+         );
+       }
+ 
+       // Allow the user 750 ms to see the final status string before closing
+       // the progress window.
+-      setTimeout(() => window.close(), 750);
++      setTimeout(() => {
++        msgProgress.progressWindow = null;
++        window.close();
++      }, 750);
+     }
+   },
+ 
+   onProgressChange(
+     aWebProgress,
+     aRequest,
+     aCurSelfProgress,
+     aMaxSelfProgress,
