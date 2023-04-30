@@ -1,0 +1,331 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1682890600 -7200
+# Parent  b5a8b5182e5745afc30000ab2b01552c677edb0e
+Misc: Add update check and fix release notes link.
+* * *
+Misc: Startup update check.
+* * *
+Misc: Add more logging to update check.
+* * *
+Misc: CSS tweak so download link aligns correctly.
+* * *
+Misc: Improve behaviour when update check fails.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -110,17 +110,17 @@ pref("app.update.service.enabled", true)
+ #endif
+ 
+ #ifdef XP_WIN
+ // This pref prevents BITS from being used by Thunderbird to download updates.
+ pref("app.update.BITS.enabled", false);
+ #endif
+ 
+ // Release notes URL
+-pref("app.releaseNotesURL", "https://live.thunderbird.net/%APP%/releasenotes?locale=%LOCALE%&version=%VERSION%&channel=%CHANNEL%&os=%OS%&buildid=%APPBUILDID%");
++pref("app.releaseNotesURL", "https://www.betterbird.eu/releasenotes?locale=%LOCALE%&version=%VERSION%&channel=%CHANNEL%&os=%OS%&buildid=%APPBUILDID%");
+ 
+ #ifdef XP_MACOSX
+   // If set to true, Thunderbird will automatically restart if it is left
+   // running with no windows open.
+   pref("app.update.noWindowAutoRestart.enabled", true);
+   // How long to wait after all windows are closed before restarting,
+   // in milliseconds. 5 min = 300000 ms.
+   pref("app.update.noWindowAutoRestart.delayMs", 300000);
+diff --git a/mail/base/content/aboutDialog.css b/mail/base/content/aboutDialog.css
+--- a/mail/base/content/aboutDialog.css
++++ b/mail/base/content/aboutDialog.css
+@@ -164,16 +164,24 @@ body {
+ }
+ 
+ #currentChannel {
+   margin: 0;
+   padding: 0;
+   font-weight: bold;
+ }
+ 
++#noUpdatesFound label {
++  margin-inline-start: 0;
++}
++#manualUpdate label {
++  margin-inline: 0 0.3em;
++  margin-block: 1px 2px;  /* align with link */
++}
++
+ #icons > .icon {
+   -moz-context-properties: fill;
+   margin: 10px 5px;
+   width: 16px;
+   height: 16px;
+ }
+ 
+ #icons:not(.checkingForUpdates, .downloading, .applying, .restarting) > .update-throbber,
+diff --git a/mail/base/content/aboutDialog.js b/mail/base/content/aboutDialog.js
+--- a/mail/base/content/aboutDialog.js
++++ b/mail/base/content/aboutDialog.js
+@@ -17,17 +17,17 @@ if (AppConstants.MOZ_UPDATER) {
+ }
+ 
+ window.addEventListener("DOMContentLoaded", onLoad);
+ if (AppConstants.MOZ_UPDATER) {
+   // This method is in the aboutDialog-appUpdater.js file.
+   window.addEventListener("unload", onUnload);
+ }
+ 
+-function onLoad(event) {
++async function onLoad(event) {
+   if (event.target !== document) {
+     return;
+   }
+ 
+   let defaults = Services.prefs.getDefaultBranch(null);
+   let distroId = defaults.getCharPref("distribution.id", "");
+   if (distroId) {
+     let distroAbout = defaults.getStringPref("distribution.about", "");
+@@ -115,16 +115,73 @@ function onLoad(event) {
+   }
+   // Open internal (about:) links open in Thunderbird tab
+   for (const link of document.getElementsByClassName("tab-link")) {
+     link.onclick = event => {
+       event.preventDefault();
+       openAboutTab(event.target.href);
+     };
+   }
++
++  await BetterbirdUpdateCheck(window);
++}
++
++async function BetterbirdUpdateCheck(win) {
++  let needsUpdate = "arguments" in win && win.arguments[0].needsUpdate;
++  let cantCheck = false;
++  if (!needsUpdate) {
++    try {
++      let response = await fetch(
++        "https://www.betterbird.eu/start/versions.txt",
++        { cache: "no-store" }
++      );
++      if (!response.ok) {
++        console.error("Betterbird update check FAILED");
++        cantCheck = true;
++      } else {
++        let content = await response.text();
++        let lines = content.split("\n");
++        let version = Services.appinfo.version;
++        let buildID = Services.appinfo.appBuildID;
++        let os = Services.appinfo.OS;
++        for (let l of lines) {
++          let parts = l.split(",");
++          // Format is os,version,buildid.
++          if (version.startsWith(parts[1]) && os == parts[0]) {
++            if (parts[2] > buildID) {
++              needsUpdate = true;
++              console.info(
++                `Betterbird update available for ${os}, new build ${parts[2]}, current build ${buildID}`
++              );
++            } else {
++              console.info(
++                `Betterbird update-to-date for ${os}, published build ${parts[2]}, current build ${buildID}`
++              );
++            }
++            break;
++          }
++        }
++      }
++    } catch (ex) {
++      console.error("Betterbird update check FAILED");
++      cantCheck = true;
++    }
++  }
++
++  if (needsUpdate) {
++    let el = document.getElementById("manualUpdate");
++    el.style = "display: normal";
++  } else if (cantCheck) {
++    let el = document.getElementById("checkingFailed");
++    el.style = "display: normal";
++  } else {
++    // Up to date.
++    let el = document.getElementById("noUpdatesFound");
++    el.style = "display: normal";
++  }
+ }
+ 
+ // This function is used to open about: tabs. The caller should ensure the url
+ // is only an about: url.
+ function openAboutTab(url) {
+   // Check existing windows
+   let mailWindow = Services.wm.getMostRecentWindow("mail:3pane");
+   if (mailWindow) {
+diff --git a/mail/base/content/aboutDialog.xhtml b/mail/base/content/aboutDialog.xhtml
+--- a/mail/base/content/aboutDialog.xhtml
++++ b/mail/base/content/aboutDialog.xhtml
+@@ -40,16 +40,30 @@
+              data-l10n-id="release-notes-link"></a>
+         </xul:hbox>
+ 
+         <span id="distribution" class="text-blurb"></span>
+         <span id="distributionId" class="text-blurb"></span>
+ 
+         <xul:vbox id="detailsBox">
+           <xul:hbox id="updateBox">
++            <div id="noUpdatesFound" style="display: none;">
++              <span data-l10n-id="update-no-updates-found"></span>
++            </div>
++            <div id="checkingFailed" style="display: none;">
++              <span data-l10n-id="aboutdialog-update-checking-failed"></span>
++                <a id="manualLink2" data-l10n-name="manual-link"
++                   class="manualLink text-link browser-link"></a>
++            </div>
++            <div id="manualUpdate" style="display: none;">
++              <span data-l10n-id="update-manual">
++                <a id="manualLink" data-l10n-name="manual-link"
++                   class="manualLink text-link browser-link"></a>
++              </span>
++            </div>
+ #ifdef MOZ_UPDATER
+             <div id="icons">
+               <img class="icon update-throbber" role="presentation"/>
+               <img class="icon noUpdatesFound" src="chrome://global/skin/icons/check.svg" role="presentation"/>
+               <img class="icon apply" src="chrome://global/skin/icons/reload.svg" role="presentation"/>
+             </div>
+             <xul:vbox>
+               <xul:deck id="updateDeck" orient="vertical">
+diff --git a/mail/components/MailGlue.jsm b/mail/components/MailGlue.jsm
+--- a/mail/components/MailGlue.jsm
++++ b/mail/components/MailGlue.jsm
+@@ -701,16 +701,17 @@ MailGlue.prototype = {
+    * _scheduleBestEffortUserIdleTasks.
+    * Don't be fooled by thinking that the use of the timeout parameter
+    * will delay your function: it will just ensure that it potentially
+    * happens _earlier_ than expected (when the timeout limit has been reached),
+    * but it will not make it happen later (and out of order) compared
+    * to the other ones scheduled together.
+    */
+   _scheduleStartupIdleTasks() {
++    let self = this;
+     const idleTasks = [
+       {
+         task() {
+           // This module needs to be loaded so it registers to receive
+           // FormAutoComplete:GetSelectedIndex messages and respond
+           // appropriately, otherwise we get error messages like the one
+           // reported in bug 1635422.
+           ChromeUtils.importESModule(
+@@ -779,16 +780,21 @@ MailGlue.prototype = {
+       {
+         condition: AppConstants.MOZ_UPDATER,
+         task: () => {
+           lazy.UpdateListener.maybeShowUnsupportedNotification();
+         },
+       },
+       {
+         task() {
++          self.BetterbirdUpdateCheck();
++        },
++      },
++      {
++        task() {
+           // Use idleDispatch a second time to run this after the per-window
+           // idle tasks.
+           ChromeUtils.idleDispatch(() => {
+             Services.obs.notifyObservers(
+               null,
+               "mail-startup-idle-tasks-finished"
+             );
+           });
+@@ -894,16 +900,93 @@ MailGlue.prototype = {
+           type: "contentTab",
+           tabParams,
+         }
+       );
+       linkHandled.data = true;
+     }
+   },
+ 
++  async BetterbirdUpdateCheck() {
++    let lastCheckTime = Services.prefs.getIntPref(
++      "betterbird.update.lastCheckTime",
++      0
++    );
++    let now = Math.round(Date.now() / 1000);
++    // We check once a week. 604800 = 7 * 24 * 60 * 60.
++    if (now - lastCheckTime < 604800) {
++      console.info(
++        `Betterbird skipping update check, last done ${new Date(lastCheckTime * 1000).toLocaleString()}`
++      );
++      return;
++    }
++    Services.prefs.setIntPref("betterbird.update.lastCheckTime", now);
++    let needsUpdate = false;
++    try {
++      let response = await fetch(
++        "https://www.betterbird.eu/start/versions.txt",
++        { cache: "no-store" }
++      );
++      if (!response.ok) {
++        console.error(
++          `Betterbird update check FAILED, last done ${new Date(lastCheckTime * 1000).toLocaleString()}`
++        );
++        return;
++      }
++      let content = await response.text();
++      let lines = content.split("\n");
++      let version = Services.appinfo.version;
++      let buildID = Services.appinfo.appBuildID;
++      let os = Services.appinfo.OS;
++      for (let l of lines) {
++        let parts = l.split(",");
++        // Format is os,version,buildid.
++        if (version.startsWith(parts[1]) && os == parts[0]) {
++          if (parts[2] > buildID) {
++            needsUpdate = true;
++            console.info(
++              `Betterbird update available for ${os}, new build ${parts[2]}, current build ${buildID}`
++            );
++          } else {
++            console.info(
++              `Betterbird update-to-date for ${os}, published build ${parts[2]}, current build ${buildID}`
++            );
++          }
++          break;
++        }
++      }
++    } catch (ex) {
++      console.error(
++        `Betterbird update check FAILED, last done ${new Date(lastCheckTime * 1000).toLocaleString()}`
++      );
++      return;
++    }
++    if (!needsUpdate) {
++      return;
++    }
++    let win = Services.wm.getMostRecentWindow("mail:3pane");
++    if (!win) {
++      return;
++    }
++    let features = "chrome,";
++    if (AppConstants.platform == "win") {
++      features += "centerscreen,dependent";
++    } else if (AppConstants.platform == "macosx") {
++      features += "resizable=no,minimizable=no";
++    } else {
++      features += "centerscreen,dependent,dialog=no";
++    }
++    win.openDialog(
++      "chrome://messenger/content/aboutDialog.xhtml",
++      "",
++      features,
++      { needsUpdate }
++    );
++  },
++
+   // for XPCOM
+   QueryInterface: ChromeUtils.generateQI(["nsIObserver"]),
+ };
+ 
+ /**
+  * Report account types to telemetry. For im accounts, use `im_protocol` as
+  * scalar key name.
+  */
