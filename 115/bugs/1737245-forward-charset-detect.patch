@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1639346592 -3600
-# Parent  6e9dadaae1fe5204df35d9ed25c8be51acc653d0
+# Date 1683049442 -7200
+# Parent  5072c9c61430b767bf94fb01d8f8c048358baeee
 Bug 1737245 - Add charset detection also for the 'forward/edit as new' codepath.
 
 diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
 --- a/mailnews/mime/src/mimedrft.cpp
 +++ b/mailnews/mime/src/mimedrft.cpp
-@@ -1167,19 +1167,18 @@ static void mime_parse_stream_complete(n
+@@ -1189,19 +1189,20 @@ static void mime_parse_stream_complete(n
  
      NS_ASSERTION(mdd->options == mdd->obj->options,
                   "mime draft options not same as obj->options");
@@ -19,6 +19,8 @@ diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
 -      if ((!mdd->mailcharset || charsetOverride) &&
 -          mdd->options->default_charset) {
 -        PR_Free(mdd->mailcharset);
++      // Override the charset only if requested. If the message doesn't have
++      // one and we're not overriding, we'll detect it later.
 +      if (charsetOverride && mdd->options->default_charset) {
 +        PR_FREEIF(mdd->mailcharset);
          mdd->mailcharset = strdup(mdd->options->default_charset);
@@ -29,7 +31,8 @@ diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
        delete mdd->options;
        mdd->options = 0;
      }
-@@ -1396,16 +1395,27 @@ static void mime_parse_stream_complete(n
+@@ -1436,32 +1437,43 @@ static void mime_parse_stream_complete(n
+ 
            // Convert the body to UTF-8
            char* mimeCharset = nullptr;
            // Get a charset from the header if no override is set.
@@ -37,23 +40,44 @@ diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
              mimeCharset = MimeHeaders_get_parameter(
                  mdd->messageBody->m_type.get(), "charset", nullptr, nullptr);
            // If no charset is specified in the header then use the default.
-           char* bodyCharset = mimeCharset ? mimeCharset : mdd->mailcharset;
-+          // This is a little hacky: The following needs to be declared
-+          // in the same scope as `bodyCharset` since the variable will
-+          // point to the internal buffer of the smart string.
-+          nsAutoCString detectedCharset;
-+          if (!bodyCharset) {
+-          char* bodyCharset = mimeCharset ? mimeCharset : mdd->mailcharset;
+-          if (bodyCharset) {
++          nsAutoCString bodyCharset;
++          if (mimeCharset) {
++            bodyCharset.Adopt(mimeCharset);
++          } else if (mdd->mailcharset) {
++            bodyCharset.Assign(mdd->mailcharset);
++          }
++          if (bodyCharset.IsEmpty()) {
++            nsAutoCString detectedCharset;
 +            // We need to detect it.
 +            rv = MIME_detect_charset(body, bodyLen, detectedCharset);
 +            if (NS_SUCCEEDED(rv) && !detectedCharset.IsEmpty()) {
-+              bodyCharset = (char*)detectedCharset.get();
++              bodyCharset = detectedCharset;
 +            }
 +          }
-           if (bodyCharset) {
++          if (!bodyCharset.IsEmpty()) {
              nsAutoString tmpUnicodeBody;
-             rv = nsMsgI18NConvertToUnicode(nsDependentCString(bodyCharset),
-                                            nsDependentCString(body),
-                                            tmpUnicodeBody);
+-            rv = nsMsgI18NConvertToUnicode(nsDependentCString(bodyCharset),
+-                                           nsDependentCString(body),
+-                                           tmpUnicodeBody);
++            rv = nsMsgI18NConvertToUnicode(
++                bodyCharset, nsDependentCString(body), tmpUnicodeBody);
              if (NS_FAILED(rv))  // Tough luck, ASCII/ISO-8859-1 then...
                CopyASCIItoUTF16(nsDependentCString(body), tmpUnicodeBody);
  
+             char* newBody = ToNewUTF8String(tmpUnicodeBody);
+             if (newBody) {
+               PR_Free(body);
+               body = newBody;
+             }
+           }
+-          PR_FREEIF(mimeCharset);
+         }
+       }
+ 
+       bool convertToPlainText = false;
+       if (forward_inline) {
+         if (mdd->identity) {
+           bool identityComposeHTML;
+           mdd->identity->GetComposeHtml(&identityComposeHTML);
