@@ -1,0 +1,229 @@
+# HG changeset patch
+# User Sean Burke <sean@thunderbird.net>
+# Date 1683232711 -7200
+# Node ID 013de2263ecd4d3165d4209c834bdab04880aad7
+# Parent  45f598b5c7bb78762ac06ddebdfafc5f3a4ab2af
+Bug 1792078 - avoid extraneous description newlines for Google Calendar. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D175078
+
+diff --git a/calendar/base/content/item-editing/calendar-item-iframe.js b/calendar/base/content/item-editing/calendar-item-iframe.js
+--- a/calendar/base/content/item-editing/calendar-item-iframe.js
++++ b/calendar/base/content/item-editing/calendar-item-iframe.js
+@@ -439,16 +439,22 @@ function onLoad() {
+ 
+   top.document.commandDispatcher.addCommandUpdater(
+     document.getElementById("styleMenuItems"),
+     "style",
+     "*"
+   );
+   EditorSharedStartup();
+ 
++  // We want to keep HTML output as simple as possible, so don't try to use divs
++  // as separators. As a bonus, this avoids a bug in the editor which sometimes
++  // causes the user to have to hit enter twice for it to take effect.
++  const editor = GetCurrentEditor();
++  editor.document.execCommand("defaultparagraphseparator", false, "br");
++
+   onLoad.hasLoaded = true;
+ }
+ // Set a variable to allow or prevent actions before the dialog is done loading.
+ onLoad.hasLoaded = false;
+ 
+ function onEventDialogUnload() {
+   Services.obs.removeObserver(eventDialogRequestObserver, "http-on-modify-request");
+   Services.obs.removeObserver(eventDialogQuitObserver, "quit-application-requested");
+@@ -1545,25 +1551,30 @@ function saveDialog(item) {
+     let att = gAttachMap[hashId];
+     item.addAttachment(att);
+   }
+ 
+   // Description
+   let editorElement = document.getElementById("item-description");
+   let editor = editorElement.getHTMLEditor(editorElement.contentWindow);
+   if (editor.documentModified) {
+-    // Using the same mode as the HTML downconverter in calItemBase.js
++    // Get editor output as HTML. We request raw output to avoid any
++    // pretty-printing which may cause issues with Google Calendar (see comments
++    // in calViewUtils.fixGoogleCalendarDescription() for more information).
+     let mode =
++      Ci.nsIDocumentEncoder.OutputRaw |
+       Ci.nsIDocumentEncoder.OutputDropInvisibleBreak |
+-      Ci.nsIDocumentEncoder.OutputWrap |
+-      Ci.nsIDocumentEncoder.OutputLFLineBreak |
+-      Ci.nsIDocumentEncoder.OutputNoScriptContent |
+-      Ci.nsIDocumentEncoder.OutputNoFramesContent |
+       Ci.nsIDocumentEncoder.OutputBodyOnly;
+-    item.descriptionHTML = editor.outputToString("text/html", mode);
++
++    const editorOutput = editor.outputToString("text/html", mode);
++
++    // The editor gives us output wrapped in a body tag. We don't really want
++    // that, so strip it. (Yes, it's a regex with HTML, but a _very_ specific
++    // one.)
++    item.descriptionHTML = editorOutput.replace(/^<body>(.+)<\/body>$/, "$1");
+   }
+ 
+   // Event Status
+   if (item.isEvent()) {
+     if (gConfig.status && gConfig.status != "NONE") {
+       item.setProperty("STATUS", gConfig.status);
+     } else {
+       item.deleteProperty("STATUS");
+diff --git a/calendar/base/modules/utils/calViewUtils.jsm b/calendar/base/modules/utils/calViewUtils.jsm
+--- a/calendar/base/modules/utils/calViewUtils.jsm
++++ b/calendar/base/modules/utils/calViewUtils.jsm
+@@ -396,39 +396,55 @@ var calview = {
+       gParserUtils.SanitizerDropForms |
+       gParserUtils.SanitizerDropMedia;
+ 
+     let uri = Services.io.newURI(doc.baseURI);
+     return gParserUtils.parseFragment(html, flags, false, uri, doc.createElement("div"));
+   },
+ 
+   /**
+-   * Fixes up a description of a Google Calendar item
++   * Correct the description of a Google Calendar item so that it will display
++   * as intended.
+    *
+-   * @param item      The item to check
++   * @param {calIItemBase} item - The item to correct.
+    */
+   fixGoogleCalendarDescription(item) {
+-    let description = item.descriptionText;
+-    if (description) {
+-      // Google Calendar descriptions are actually HTML,
+-      // but they contain bare URLs and newlines, so fix those up here.
+-      let mode = Ci.mozITXTToHTMLConv.kURLs;
+-      // scanHTML only allows &lt; &gt; and &amp; so decode other entities now
+-      description = description.replace(/&#?\w+;?/g, entity => {
+-        let body = new DOMParser().parseFromString(entity, "text/html").body;
++    // Google Calendar inserts bare HTML into its description field instead of
++    // using the standard Alternate Text Representation mechanism. However,
++    // the HTML is a poor representation of how it displays descriptions on
++    // the site: links may be included as bare URLs and line breaks may be
++    // included as raw newlines, so in order to display descriptions as Google
++    // intends, we need to make some corrections.
++    if (item.descriptionText) {
++      // Convert HTML entities which scanHTML won't handle into their standard
++      // text representation.
++      let description = item.descriptionText.replace(/&#?\w+;?/g, potentialEntity => {
++        // Attempt to parse the pattern match as an HTML entity.
++        let body = new DOMParser().parseFromString(potentialEntity, "text/html").body;
++
++        // Don't replace text that didn't parse as an entity or that parsed as
++        // an entity which could break HTML parsing below.
+         return body.innerText.length == 1 && !'"&<>'.includes(body.innerText)
+           ? body.innerText
+-          : entity; // Entity didn't decode to a character, so leave it
++          : potentialEntity;
+       });
+-      description = gTextToHtmlConverter.scanHTML(description, mode);
++
++      // Replace bare URLs with links and convert remaining entities.
++      description = gTextToHtmlConverter.scanHTML(description, Ci.mozITXTToHTMLConv.kURLs);
++
++      // Setting the HTML description will mark the item dirty, but we want to
++      // avoid unnecessary updates; preserve modification time.
+       let stamp = item.stampTime;
+       let lastModified = item.lastModifiedTime;
++
+       item.descriptionHTML = description.replace(/\r?\n/g, "<br>");
++
++      // Restore modification time.
+       item.setProperty("DTSTAMP", stamp);
+-      item.setProperty("LAST-MODIFIED", lastModified); // undirty the item
++      item.setProperty("LAST-MODIFIED", lastModified);
+     }
+   },
+ };
+ 
+ /**
+  * Adds CSS variables for each calendar to registered windows for coloring
+  * UI elements. Automatically tracks calendar creation, changes, and deletion.
+  */
+diff --git a/calendar/base/src/calItemBase.js b/calendar/base/src/calItemBase.js
+--- a/calendar/base/src/calItemBase.js
++++ b/calendar/base/src/calItemBase.js
+@@ -414,34 +414,39 @@ calItemBase.prototype = {
+     }
+     let mode = Ci.mozITXTToHTMLConv.kStructPhrase | Ci.mozITXTToHTMLConv.kURLs;
+     description = gTextToHtmlConverter.scanTXT(description, mode);
+     return description.replace(/\r?\n/g, "<br>");
+   },
+ 
+   set descriptionHTML(html) {
+     if (html) {
+-      // Using the same mode as the HTML description editor
+-      // in calendar-item-iframe.js
++      // We need to output a plaintext version of the description, even if we're
++      // using the ALTREP parameter.
+       let mode =
+         Ci.nsIDocumentEncoder.OutputDropInvisibleBreak |
+         Ci.nsIDocumentEncoder.OutputWrap |
+         Ci.nsIDocumentEncoder.OutputLFLineBreak |
+-        Ci.nsIDocumentEncoder.OutputNoScriptContent |
+-        Ci.nsIDocumentEncoder.OutputNoFramesContent |
+         Ci.nsIDocumentEncoder.OutputBodyOnly;
+       let text = gParserUtils.convertToPlainText(html, mode, 80);
++
+       this.setProperty("DESCRIPTION", text);
++
++      // If the text is non-empty, create a standard ALTREP representation of
++      // the description as HTML.
++      // N.B. There's logic in nsMsgCompose for determining if HTML is
++      // convertible to plaintext without losing formatting. We could test if we
++      // could leave this part off if we generalized that logic.
+       if (text) {
+         this.setPropertyParameter(
+           "DESCRIPTION",
+           "ALTREP",
+           "data:text/html," + encodeURIComponent(html)
+         );
+-      } // else: can't set a property parameter if the property is empty
++      }
+     } else {
+       this.deleteProperty("DESCRIPTION");
+     }
+   },
+ 
+   // Each inner array has two elements: a string and a nsIVariant.
+   // readonly attribute Array<Array<jsval> > properties;
+   get properties() {
+diff --git a/calendar/providers/caldav/modules/CalDavRequest.jsm b/calendar/providers/caldav/modules/CalDavRequest.jsm
+--- a/calendar/providers/caldav/modules/CalDavRequest.jsm
++++ b/calendar/providers/caldav/modules/CalDavRequest.jsm
+@@ -1182,19 +1182,30 @@ class FreeBusyResponse extends CalDavSim
+   /**
+    * The data for the first recipient, useful if just one recipient was requested
+    */
+   get firstRecipient() {
+     return Object.values(this.data)[0];
+   }
+ }
+ 
++/**
++ * Set item description to a format Google Calendar understands if the item
++ * will be uploaded to Google Calendar.
++ *
++ * @param {calIItemBase} aItem - The item we may want to modify.
++ * @param {nsIURI} aUri - The URI the item will be uploaded to.
++ * @returns {calItemBase} - A calendar item with appropriately-set description.
++ */
+ function fixGoogleDescription(aItem, aUri) {
+   if (aUri.spec.startsWith("https://apidata.googleusercontent.com/caldav/")) {
+-    // Move the HTML to the DESCRIPTION field, because that's where
+-    // Google puts HTML, which is a ICS spec violation. :-(
++    // Google expects item descriptions to be bare HTML in violation of spec,
++    // rather than using the standard Alternate Text Representation.
+     aItem = aItem.clone();
+     aItem.descriptionText = aItem.descriptionHTML;
+-    // Mark items mangled by us for Google, so one can later revert it.
++
++    // Mark items we've modified for Google compatibility for informational
++    // purposes.
+     aItem.setProperty("X-MOZ-GOOGLE-HTML-DESCRIPTION", true);
+   }
++
+   return aItem;
+ }
