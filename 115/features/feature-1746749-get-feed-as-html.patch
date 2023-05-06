@@ -1,0 +1,133 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1683364850 -7200
+# Parent  f2ee691d914f7129de64831710ad1e4dce90f7bd
+Bug 1746749 - Feeds: Implement fallback to HTML if fetching XML fails.
+
+diff --git a/mailnews/extensions/newsblog/Feed.jsm b/mailnews/extensions/newsblog/Feed.jsm
+--- a/mailnews/extensions/newsblog/Feed.jsm
++++ b/mailnews/extensions/newsblog/Feed.jsm
+@@ -86,16 +86,17 @@ Feed.prototype = {
+   resource: null,
+   itemsToStore: [],
+   itemsStored: 0,
+   fileSize: 0,
+   mFolder: null,
+   mInvalidFeed: false,
+   mFeedType: null,
+   mLastModified: null,
++  mRetryHTML: false,
+ 
+   get folder() {
+     return this.mFolder;
+   },
+ 
+   set folder(aFolder) {
+     this.mFolder = aFolder;
+   },
+@@ -144,17 +145,17 @@ Feed.prototype = {
+         "Feed.download: invalid protocol for - " + this.url
+       );
+       this.onParseError(this);
+       return;
+     }
+ 
+     // Before we try to download the feed, make sure we aren't already
+     // processing the feed by looking up the url in our feed cache.
+-    if (FeedCache.getFeed(this.url)) {
++    if (!this.mRetryHTML && FeedCache.getFeed(this.url)) {
+       if (this.downloadCallback) {
+         this.downloadCallback.downloaded(
+           this,
+           lazy.FeedUtils.kNewsBlogFeedIsBusy
+         );
+       }
+ 
+       // Return, the feed is already in use.
+@@ -184,17 +185,21 @@ Feed.prototype = {
+     // not sent If-Modified-Since, as in the case of an unsubscribe and new
+     // subscribe.  Send start of century date to force a download; some servers
+     // will 304 on older dates (such as epoch 1970).
+     let lastModified = this.lastModified || "Sat, 01 Jan 2000 00:00:00 GMT";
+     this.request.setRequestHeader("If-Modified-Since", lastModified);
+ 
+     // Only order what you're going to eat...
+     this.request.responseType = "document";
+-    this.request.overrideMimeType("text/xml");
++    if (this.mRetryHTML) {
++      this.request.overrideMimeType("text/html");
++    } else {
++      this.request.overrideMimeType("text/xml");
++    }
+     this.request.setRequestHeader("Accept", lazy.FeedUtils.REQUEST_ACCEPT);
+     this.request.timeout = lazy.FeedUtils.REQUEST_TIMEOUT;
+     this.request.onload = this.onDownloaded;
+     this.request.onreadystatechange = this.onReadyStateChange;
+     this.request.onerror = this.onDownloadError;
+     this.request.ontimeout = this.onDownloadError;
+     FeedCache.putFeed(this);
+     this.request.send(null);
+@@ -466,19 +471,62 @@ Feed.prototype = {
+   set link(aNewLink) {
+     if (!aNewLink) {
+       return;
+     }
+     lazy.FeedUtils.setSubscriptionAttr(this.url, this.server, "link", aNewLink);
+   },
+ 
+   parse() {
++    let doc;
++    if (this.mRetryHTML) {
++      this.mRetryHTML = false;
++      let xml = new XMLSerializer().serializeToString(this.request.responseXML);
++      // No idea why links have a closing tag missing.
++      xml = xml.replace(/<link \/>(.*)/g, "<link>$1</link>");
++      // Clean up some things related to CDADA.
++      xml = xml.replace(/<!--\[CDATA\[(.*?)-->/g, "<![CDATA[$1>");
++      xml = xml.replace(/&lt;!\[CDATA\[(.*?)&gt;/g, "<![CDATA[$1>");
++      xml = xml.replace(/\]\]&gt;/g, "]]>");
++      try {
++        doc = new DOMParser().parseFromString(xml, "text/xml");
++      } catch (ex) {
++        lazy.FeedUtils.log.error(
++          "Feed.parse: HTML to XML conversion error" + xml
++        );
++        this.onParseError(this);
++        this.request = null;
++        this.mInvalidFeed = false;
++        return;
++      }
++      lazy.FeedUtils.log.info("Feed.parse: Fallback to HTML successful");
++    } else {
++      doc = this.request.responseXML;
++      let docElem = doc.documentElement;
++      if (docElem.namespaceURI == lazy.FeedUtils.MOZ_PARSERERROR_NS) {
++        // Gecko caught a basic parsing error.
++        let errStr =
++          docElem.firstChild.textContent +
++          "\n" +
++          docElem.firstElementChild.textContent;
++        lazy.FeedUtils.log.info(
++          "Feed.parse: XML error, trying HTML download: - " + errStr
++        );
++
++        // We asked for text/xml and got back an error, so let's try again
++        // with text/html.
++        this.mRetryHTML = true;
++        this.download(this.parseItems, this.downloadCallback);
++        return;
++      }
++    }
++
+     // Create a feed parser which will parse the feed.
+     let parser = new lazy.FeedParser();
+-    this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
++    this.itemsToStore = parser.parseFeed(this, doc);
+     parser = null;
+ 
+     if (this.mInvalidFeed) {
+       this.request = null;
+       this.mInvalidFeed = false;
+       return;
+     }
+ 
