@@ -1,0 +1,440 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1683418427 -7200
+#      Wed Jun 01 22:24:24 2022 +0200
+# Node ID fadcdcce2d8b9e8589d75598fe7993ce9e23ad5c
+# Parent  47eeec8d54832ca8f581f99b408eb9d5600a2bbf
+Bug 683809 - QF for untagged messages, two-button solution.
+* * *
+Bug 683809 - fix rebase error and improve SVG for untagged messages.
+
+diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
+--- a/mail/base/content/quickFilterBar.inc.xhtml
++++ b/mail/base/content/quickFilterBar.inc.xhtml
+@@ -58,16 +58,26 @@
+                     class="button check-button"
+                     data-l10n-id="quick-filter-bar-text-filter-subject"></button>
+             <button is="toggle-button" id="qfb-qs-body"
+                     class="button check-button"
+                     data-l10n-id="quick-filter-bar-text-filter-body"></button>
+           </div>
+         </div>
+         <div id="quickFilterBarTagsContainer" hidden="hidden">
++          <xul:toolbarbutton id="qfb-tag-untagged"
++                         type="checkbox"
++                         persist="checked"
++                         data-l10n-id="quick-filter-bar-untagged-button"
++                         class="toolbarbutton-1"/>
++          <xul:toolbarbutton id="qfb-tag-tagged"
++                         type="checkbox"
++                         persist="checked"
++                         data-l10n-id="quick-filter-bar-tagged-button"
++                         class="toolbarbutton-1"/>
+           <xul:menulist id="qfb-boolean-mode" value="OR">
+             <xul:menupopup>
+               <xul:menuitem id="qfb-boolean-mode-or"
+                             value="OR"
+                             data-l10n-id="quick-filter-bar-boolean-mode-any"
+                             default="default"/>
+               <xul:menuitem id="qfb-boolean-mode-and"
+                             value="AND"
+diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/messenger/about3Pane.ftl
+--- a/mail/locales/en-US/messenger/about3Pane.ftl
++++ b/mail/locales/en-US/messenger/about3Pane.ftl
+@@ -91,16 +91,21 @@ quick-filter-bar-boolean-mode =
+ quick-filter-bar-boolean-mode-any =
+     .label = Any of
+     .title = At least one of the selected tag criteria should match
+ # The All-of tagging mode.
+ quick-filter-bar-boolean-mode-all =
+     .label = All of
+     .title = All of the selected tag criteria must match
+ 
++quick-filter-bar-untagged-button =
++    .tooltiptext = Show messages with no tags
++quick-filter-bar-tagged-button =
++    .tooltiptext = Show messages with one or more tags. Right-click to clear individual tag selection.
++
+ # This label explains what the sender/recipients/subject/body buttons do.
+ # This string should ideally be kept short because the label and the text
+ # filter buttons share their bar (that appears when there is text in the text
+ # filter box) with the list of tags when the tag filter is active, and the
+ # tag sub-bar wants as much space as possible. (Overflow is handled by an
+ # arrow scroll box.)
+ quick-filter-bar-text-filter-explanation = Filter messages by:
+ # The button label that toggles whether the text filter searches the message
+diff --git a/mail/modules/QuickFilterManager.jsm b/mail/modules/QuickFilterManager.jsm
+--- a/mail/modules/QuickFilterManager.jsm
++++ b/mail/modules/QuickFilterManager.jsm
+@@ -680,28 +680,62 @@ var TagFacetingFilter = {
+    *  exclusion.
+    */
+   appendTerms(aTermCreator, aTerms, aFilterValue) {
+     if (aFilterValue == null) {
+       return null;
+     }
+ 
+     let term, value;
++    let showUntagged = false;
+ 
+-    // just the true/false case
+-    if (this.isSimple(aFilterValue)) {
++    // `aFilterValue == true` means that we want to see all tagged messages.
++    // This happens when the tag bar is first expanded.
++    if (typeof aFilterValue == "object" && aFilterValue.untagged) {
++      // Get all untagged messages.
++      showUntagged = true;
++      term = aTermCreator.createTerm();
++      term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++      value = term.value;
++      value.str = "";
++      term.value = value;
++      term.op = Ci.nsMsgSearchOp.IsEmpty;
++      term.booleanAnd = true;
++      aTerms.push(term);
++    }
++
++    // Check for simple filter with no special settings for tags.
++    let simple = this.isSimple(aFilterValue);
++
++    if (simple && typeof aFilterValue == "object" && !aFilterValue.tagged) {
++      // We don't want tagged messages.
++      if (!showUntagged) {
++        // Create a term that will yield no results.
++        term = aTermCreator.createTerm();
++        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++        value = term.value;
++        value.str = "\x01\x02\x03";
++        term.value = value;
++        term.op = Ci.nsMsgSearchOp.Contains;
++        term.booleanAnd = true;
++        aTerms.push(term);
++      }
++      return null;
++    }
++
++    if (simple) {
+       term = aTermCreator.createTerm();
+       term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+       value = term.value;
+       value.str = "";
+       term.value = value;
+       term.op = aFilterValue
+         ? Ci.nsMsgSearchOp.IsntEmpty
+         : Ci.nsMsgSearchOp.IsEmpty;
+-      term.booleanAnd = true;
++      term.booleanAnd = !showUntagged;
+       aTerms.push(term);
+ 
+       // we need to perform faceting if the value is literally true.
+       if (aFilterValue === true) {
+         return this;
+       }
+     } else {
+       let firstIncludeClause = true,
+@@ -718,19 +752,24 @@ var TagFacetingFilter = {
+           term = aTermCreator.createTerm();
+           term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+           value = term.value;
+           value.attrib = term.attrib;
+           value.str = key;
+           term.value = value;
+           if (shouldFilter) {
+             term.op = Ci.nsMsgSearchOp.Contains;
+-            // AND for the group. Inside the group we also want AND if the
+-            // mode is set to "All of".
+-            term.booleanAnd = firstIncludeClause || mode === "AND";
++            if (showUntagged) {
++              // We need to OR with the previous condition.
++              term.booleanAnd = false;
++            } else {
++              // AND for the group. Inside the group we also want AND if the
++              // mode is set to "All of".
++              term.booleanAnd = firstIncludeClause || mode === "AND";
++            }
+             term.beginsGrouping = firstIncludeClause ? 1 : 0;
+             aTerms.push(term);
+             firstIncludeClause = false;
+             lastIncludeTerm = term;
+           } else {
+             term.op = Ci.nsMsgSearchOp.DoesntContain;
+             // you need to not include all of the tags marked excluded.
+             term.booleanAnd = true;
+@@ -752,17 +791,17 @@ var TagFacetingFilter = {
+         // (we need to add has a tag)
+         if (!lastIncludeTerm) {
+           term = aTermCreator.createTerm();
+           term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+           value = term.value;
+           value.str = "";
+           term.value = value;
+           term.op = Ci.nsMsgSearchOp.IsntEmpty;
+-          term.booleanAnd = true;
++          term.booleanAnd = !showUntagged;
+           aTerms.push(term);
+         }
+ 
+         // (extend in the exclusions)
+         excludeTerms[excludeTerms.length - 1].endsGrouping = 1;
+         aTerms.push.apply(aTerms, excludeTerms);
+       }
+     }
+@@ -837,72 +876,128 @@ var TagFacetingFilter = {
+     // Tag filtering mode menu (All of/Any of)
+     function commandHandler(aEvent) {
+       let filterValue = aMuxer.getFilterValueForMutation(
+         TagFacetingFilter.name
+       );
+       filterValue.mode = aEvent.target.value;
+       aMuxer.updateSearch();
+     }
++    function untaggedHandler(aEvent) {
++      let filterValue = aMuxer.getFilterValueForMutation(
++        TagFacetingFilter.name
++      );
++      filterValue.untagged = aEvent.target.checked;
++      aMuxer.updateSearch();
++    }
++    function taggedHandler(aEvent) {
++      let filterValue = aMuxer.getFilterValueForMutation(
++        TagFacetingFilter.name
++      );
++      filterValue.tagged = aEvent.target.checked;
++      // If tagged button is clicked, regardless of state, individual tags are switched off.
++      // As a bonus, a right-click won't change the button state, but switch the individuals off.
++      for (let key in filterValue.tags) {
++        let tagButton = aDocument.getElementById("qfb-tag-" + key);
++        tagButton.checked = false;
++        tagButton.removeAttribute("inverted");
++        filterValue.tags[key] = null;
++      }
++      aMuxer.updateSearch();
++    }
+     aDocument
+       .getElementById("qfb-boolean-mode")
+       .addEventListener("ValueChange", commandHandler);
++    aDocument
++      .getElementById("qfb-tag-untagged")
++      .addEventListener("click", untaggedHandler);
++    aDocument
++      .getElementById("qfb-tag-tagged")
++      .addEventListener("click", taggedHandler);
+   },
+ 
+   reflectInDOM(aNode, aFilterValue, aDocument, aMuxer) {
+     aNode.pressed = aFilterValue;
+     if (aFilterValue != null && typeof aFilterValue == "object") {
+       this._populateTagBar(aFilterValue, aDocument, aMuxer);
+     } else {
+       aDocument.getElementById("quickFilterBarTagsContainer").hidden = true;
+     }
+   },
+ 
+   _populateTagBar(aState, aDocument, aMuxer) {
++    let that = this;
+     let tagbar = aDocument.getElementById("quickFilterBarTagsContainer");
+     let keywordMap = aState.tags;
+ 
+     // If we have a mode stored use that. If we don't have a mode, then update
+     // our state to agree with what the UI is currently displaying;
+     // this will happen for fresh profiles.
+     let qbm = aDocument.getElementById("qfb-boolean-mode");
+     if (aState.mode) {
+       qbm.value = aState.mode;
+     } else {
+       aState.mode = qbm.value;
+     }
+ 
+-    function clickHandler(aEvent) {
+-      let tagKey = this.getAttribute("value");
+-      let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-      state.tags[tagKey] = this.pressed ? true : null;
+-      this.removeAttribute("inverted");
+-      aMuxer.updateSearch();
++    // Similarly, update untagged/tagged button.
++    let untagged = aDocument.getElementById("qfb-tag-untagged");
++    if (typeof aState.untagged === "boolean") {
++      untagged.checked = aState.untagged;
++    } else {
++      // `untagged` is usually missing from the object and we get a simple state.
++      untagged.checked = false;
++      aState.untagged = untagged.checked;
++    }
++    let tagged = aDocument.getElementById("qfb-tag-tagged");
++    if (typeof aState.tagged === "boolean") {
++      tagged.checked = aState.tagged;
++    } else {
++      // `tagged` is usually missing from the object and we get a simple state.
++      tagged.checked = true;
++      aState.tagged = tagged.checked;
+     }
+ 
+-    function rightClickHandler(aEvent) {
++    function clickHandler(aEvent) {
++      // There are three possible current states: null, true, and false (inverted).
++      let buttonState = null;
++      if (this.pressed) {
++        buttonState = !(this.getAttribute("inverted") == "true");
++      }
++
++      this.removeAttribute("inverted");
+       if (aEvent.button == 2) {
+         // Toggle isn't triggered by a contextmenu event, so do it here.
+         this.pressed = !this.pressed;
+-
+-        let tagKey = this.getAttribute("value");
+-        let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-        state.tags[tagKey] = this.pressed ? false : null;
+         if (this.pressed) {
+           this.setAttribute("inverted", "true");
++          buttonState = false;
+         } else {
+-          this.removeAttribute("inverted");
++          buttonState = null;
+         }
+-        aMuxer.updateSearch();
+-        aEvent.preventDefault();
+       }
++      let tagKey = this.getAttribute("value");
++      let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
++      state.tags[tagKey] = buttonState;
++      aEvent.stopPropagation();
++      aEvent.preventDefault();
++
++      // Set qfb-tag-tagged accordingly. Need to clear if individuals are set.
++      if (that.isSimple(state)) {
++        aDocument.getElementById("qfb-tag-tagged").checked = true;
++        state.tagged = true;
++      } else {
++        aDocument.getElementById("qfb-tag-tagged").checked = false;
++        state.tagged = false;
++      }
++      aMuxer.updateSearch();
+     }
+ 
+     // -- nuke existing exposed tags, but not the mode selector (which is first)
+-    while (tagbar.children.length > 1) {
++    while (tagbar.children.length > 3) {
+       tagbar.lastElementChild.remove();
+     }
+ 
+     let addCount = 0;
+ 
+     // -- create an element for each tag
+     let tags = MailServices.tags.getAllTags();
+     let tagCount = tags.length;
+@@ -914,17 +1009,17 @@ var TagFacetingFilter = {
+ 
+         // Keep in mind that the XBL does not get built for dynamically created
+         //  elements such as these until they get displayed, which definitely
+         //  means not before we append it into the tree.
+         let button = aDocument.createElement("button", { is: "toggle-button" });
+ 
+         button.setAttribute("id", "qfb-tag-" + tag.key);
+         button.addEventListener("click", clickHandler);
+-        button.addEventListener("contextmenu", rightClickHandler);
++        button.addEventListener("contextmenu", clickHandler);
+         if (keywordMap[tag.key] !== null) {
+           button.pressed = true;
+           if (!keywordMap[tag.key]) {
+             button.setAttribute("inverted", "true");
+           }
+         }
+         button.textContent = tag.tag;
+         button.setAttribute("value", tag.key);
+diff --git a/mail/themes/shared/jar.inc.mn b/mail/themes/shared/jar.inc.mn
+--- a/mail/themes/shared/jar.inc.mn
++++ b/mail/themes/shared/jar.inc.mn
+@@ -599,16 +599,17 @@
+   skin/classic/messenger/icons/new/compact/sort.svg           (../shared/mail/icons/new/compact/sort.svg)
+   skin/classic/messenger/icons/new/compact/spaces-menu.svg    (../shared/mail/icons/new/compact/spaces-menu.svg)
+   skin/classic/messenger/icons/new/compact/spam.svg           (../shared/mail/icons/new/compact/spam.svg)
+   skin/classic/messenger/icons/new/compact/spelling.svg       (../shared/mail/icons/new/compact/spelling.svg)
+   skin/classic/messenger/icons/new/compact/star.svg           (../shared/mail/icons/new/compact/star.svg)
+   skin/classic/messenger/icons/new/compact/subtract-circle.svg (../shared/mail/icons/new/compact/subtract-circle.svg)
+   skin/classic/messenger/icons/new/compact/sync.svg           (../shared/mail/icons/new/compact/sync.svg)
+   skin/classic/messenger/icons/new/compact/tag.svg            (../shared/mail/icons/new/compact/tag.svg)
++  skin/classic/messenger/icons/new/compact/untag.svg          (../shared/mail/icons/new/compact/untag.svg)
+   skin/classic/messenger/icons/new/compact/tasks.svg          (../shared/mail/icons/new/compact/tasks.svg)
+   skin/classic/messenger/icons/new/compact/template.svg       (../shared/mail/icons/new/compact/template.svg)
+   skin/classic/messenger/icons/new/compact/tentative.svg      (../shared/mail/icons/new/compact/tentative.svg)
+   skin/classic/messenger/icons/new/compact/thread.svg         (../shared/mail/icons/new/compact/thread.svg)
+   skin/classic/messenger/icons/new/compact/thread-ignored.svg (../shared/mail/icons/new/compact/thread-ignored.svg)
+   skin/classic/messenger/icons/new/compact/subthread-ignored.svg (../shared/mail/icons/new/compact/subthread-ignored.svg)
+   skin/classic/messenger/icons/new/compact/tools.svg          (../shared/mail/icons/new/compact/tools.svg)
+   skin/classic/messenger/icons/new/compact/trash.svg          (../shared/mail/icons/new/compact/trash.svg)
+diff --git a/mail/themes/shared/mail/icons.css b/mail/themes/shared/mail/icons.css
+--- a/mail/themes/shared/mail/icons.css
++++ b/mail/themes/shared/mail/icons.css
+@@ -115,16 +115,17 @@
+   --icon-sort: url("chrome://messenger/skin/icons/new/compact/sort.svg");
+   --icon-spaces-menu: url("chrome://messenger/skin/icons/new/compact/spaces-menu.svg");
+   --icon-spam: url("chrome://messenger/skin/icons/new/compact/spam.svg");
+   --icon-spelling: url("chrome://messenger/skin/icons/new/compact/spelling.svg");
+   --icon-star: url("chrome://messenger/skin/icons/new/compact/star.svg");
+   --icon-subtract-circle-sm: url("chrome://messenger/skin/icons/new/subtract-circle-sm.svg");
+   --icon-sync: url("chrome://messenger/skin/icons/new/compact/sync.svg");
+   --icon-tag: url("chrome://messenger/skin/icons/new/compact/tag.svg");
++  --icon-untag: url("chrome://messenger/skin/icons/new/compact/untag.svg");
+   --icon-tasks: url("chrome://messenger/skin/icons/new/compact/tasks.svg");
+   --icon-template: url("chrome://messenger/skin/icons/new/compact/template.svg");
+   --icon-tentative: url("chrome://messenger/skin/icons/new/compact/tentative.svg");
+   --icon-thread: url("chrome://messenger/skin/icons/new/compact/thread.svg");
+   --icon-thread-ignored: url("chrome://messenger/skin/icons/new/compact/thread-ignored.svg");
+   --icon-subthread-ignored: url("chrome://messenger/skin/icons/new/compact/subthread-ignored.svg");
+   --icon-tools: url("chrome://messenger/skin/icons/new/compact/tools.svg");
+   --icon-trash: url("chrome://messenger/skin/icons/new/compact/trash.svg");
+diff --git a/mail/themes/shared/mail/icons/new/compact/untag.svg b/mail/themes/shared/mail/icons/new/compact/untag.svg
+new file mode 100644
+--- /dev/null
++++ b/mail/themes/shared/mail/icons/new/compact/untag.svg
+@@ -0,0 +1,8 @@
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<svg xmlns="http://www.w3.org/2000/svg" fill-opacity="context-fill-opacity" viewBox="0 0 16 16" height="16" width="16">
++  <path d="M6.5 2.5 6 3l2.58 2.58A1.5 1.5 0 0 1 10 4.5a1.5 1.5 0 0 1 .43 2.93l2.58 2.58.5-.51v-7H6.5zM2.98 5.98.78 8.14a1 1 0 0 0 0 1.41l5.67 5.66a1 1 0 0 0 1.4 0l2.17-2.19-7.04-7.04z" fill="context-fill"/>
++  <path d="M6.5 2a.5.5 0 0 0-.35.14l-.5.5.7.7L6.7 3H13v6.3l-.35.35.7.7.5-.5A.5.5 0 0 0 14 9.5v-7a.5.5 0 0 0-.5-.5h-7zM10 4a2 2 0 0 0-1.81 1.19L9 6a1 1 0 0 1 1-1 1 1 0 0 1 1 1 1 1 0 0 1-1 1l.81.81A2 2 0 0 0 12 6a2 2 0 0 0-2-2zM2.63 5.63.43 7.78a1.5 1.5 0 0 0 0 2.13l5.67 5.65a1.5 1.5 0 0 0 2.12 0l2.15-2.19-.7-.7-2.16 2.19c-.2.2-.5.2-.7 0L1.13 9.2a.49.49 0 0 1 0-.7l2.2-2.17-.7-.7z" fill="context-stroke"/>
++  <path d="m14.108 12.392-10.5-10.5c-.31-.31-1.158-.032-1.458.258-.32.336-.578 1.122-.258 1.458l10.5 10.5c.45.43 1.188.012 1.458-.258.33-.33.558-1.158.258-1.458z" fill="#ff555f"/>
++</svg>
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -30,16 +30,37 @@
+ #qfb-tags {
+   background-image: var(--icon-tag);
+ }
+ 
+ #qfb-attachment {
+   background-image: var(--icon-attachment);
+ }
+ 
++#qfb-tag-untagged {
++  list-style-image: var(--icon-untag)
++}
++
++#qfb-tag-tagged {
++  list-style-image: var(--icon-tag);
++}
++
++#qfb-tag-untagged,
++#qfb-tag-tagged {
++  margin-block: 0 2px;
++  -moz-context-properties: fill, stroke, fill-opacity;
++  fill: color-mix(in srgb, currentColor 20%, transparent);
++  stroke: currentColor;
++}
++
++#qfb-tag-untagged > .toolbarbutton-text,
++#qfb-tag-tagged > .toolbarbutton-text {
++  display: none;
++}
++
+ #qfb-results-label {
+   margin: 3px;
+   color: var(--color-green-60);
+   text-align: end;
+   align-self: center;
+ }
+ 
+ #quick-filter-bar[filterActive="nomatches"] #qfb-results-label {
