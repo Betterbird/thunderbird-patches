@@ -1,0 +1,182 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1683755043 -7200
+# Parent  5838fa0daa4f477d6084e9f0cbd6bb2755689578
+Feature: Configurable icons.
+
+diff --git a/mailnews/base/src/nsMessengerWinIntegration.cpp b/mailnews/base/src/nsMessengerWinIntegration.cpp
+--- a/mailnews/base/src/nsMessengerWinIntegration.cpp
++++ b/mailnews/base/src/nsMessengerWinIntegration.cpp
+@@ -48,16 +48,114 @@ NS_IMPL_ADDREF(nsMessengerWinIntegration
+ NS_IMPL_RELEASE(nsMessengerWinIntegration)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsMessengerWinIntegration)
+   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIMessengerOSIntegration)
+   NS_INTERFACE_MAP_ENTRY(nsIMessengerWindowsIntegration)
+   NS_INTERFACE_MAP_ENTRY(nsIMessengerOSIntegration)
+ NS_INTERFACE_MAP_END
+ 
++// Copied from widget/nsBaseWidget.cpp, it's private :-(
++#define NS_APP_CHROME_DIR "AChrom"
++#define NS_APP_CHROME_DIR_LIST "AChromDL"
++static bool ResolveIconNameHelper(nsIFile* aFile, const nsAString& aIconName,
++                                  const nsAString& aIconSuffix) {
++  aFile->Append(u"icons"_ns);
++  aFile->Append(u"default"_ns);
++  aFile->Append(aIconName + aIconSuffix);
++
++  bool readable;
++  return NS_SUCCEEDED(aFile->IsReadable(&readable)) && readable;
++}
++
++static void ResolveIconName(const nsAString& aIconName,
++                            const nsAString& aIconSuffix, nsIFile** aResult) {
++  *aResult = nullptr;
++
++  nsCOMPtr<nsIProperties> dirSvc =
++      do_GetService(NS_DIRECTORY_SERVICE_CONTRACTID);
++  if (!dirSvc) return;
++
++  // first check auxilary chrome directories
++
++  nsCOMPtr<nsISimpleEnumerator> dirs;
++  dirSvc->Get(NS_APP_CHROME_DIR_LIST, NS_GET_IID(nsISimpleEnumerator),
++              getter_AddRefs(dirs));
++  if (dirs) {
++    bool hasMore;
++    while (NS_SUCCEEDED(dirs->HasMoreElements(&hasMore)) && hasMore) {
++      nsCOMPtr<nsISupports> element;
++      dirs->GetNext(getter_AddRefs(element));
++      if (!element) continue;
++      nsCOMPtr<nsIFile> file = do_QueryInterface(element);
++      if (!file) continue;
++      if (ResolveIconNameHelper(file, aIconName, aIconSuffix)) {
++        NS_ADDREF(*aResult = file);
++        return;
++      }
++    }
++  }
++
++  // then check the main app chrome directory
++
++  nsCOMPtr<nsIFile> file;
++  dirSvc->Get(NS_APP_CHROME_DIR, NS_GET_IID(nsIFile), getter_AddRefs(file));
++  if (file && ResolveIconNameHelper(file, aIconName, aIconSuffix))
++    NS_ADDREF(*aResult = file);
++}
++
++static HICON GetIcon(LPCWSTR idi) {
++  static bool iconsCached = false;
++  static HICON iconApp;
++  static HICON iconBiff;
++
++  if (!iconsCached) {
++    nsCOMPtr<nsIFile> iconAppFile;
++    nsCOMPtr<nsIFile> iconBiffFile;
++
++    ResolveIconName(u"messengerWindow"_ns, u".ico"_ns,
++                    getter_AddRefs(iconAppFile));
++    if (!iconAppFile) {
++      iconApp = ::LoadIcon(::GetModuleHandle(NULL), IDI_APPLICATION);
++    } else {
++      nsAutoString iconAppPath;
++      iconAppFile->GetPath(iconAppPath);
++      ::SetLastError(0);
++      iconApp =
++          (HICON)::LoadImageW(nullptr, (LPCWSTR)iconAppPath.get(), IMAGE_ICON,
++                              ::GetSystemMetrics(SM_CXICON),
++                              ::GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE);
++      if (!iconApp) {
++        iconApp = ::LoadIcon(::GetModuleHandle(NULL), IDI_APPLICATION);
++      }
++    }
++
++    ResolveIconName(u"newmail"_ns, u".ico"_ns, getter_AddRefs(iconBiffFile));
++    if (!iconBiffFile) {
++      iconBiff =
++          ::LoadIcon(::GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAILBIFF));
++    } else {
++      nsAutoString iconBiffPath;
++      iconBiffFile->GetPath(iconBiffPath);
++      ::SetLastError(0);
++      iconBiff =
++          (HICON)::LoadImageW(nullptr, (LPCWSTR)iconBiffPath.get(), IMAGE_ICON,
++                              ::GetSystemMetrics(SM_CXICON),
++                              ::GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE);
++      if (!iconBiff) {
++        iconBiff =
++            LoadIcon(::GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAILBIFF));
++      }
++    }
++
++    iconsCached = true;
++  }
++  return idi == IDI_APPLICATION ? iconApp : iconBiff;
++}
++
+ static HWND hwndForDOMWindow(mozIDOMWindowProxy* window) {
+   if (!window) {
+     return 0;
+   }
+   nsCOMPtr<nsPIDOMWindowOuter> pidomwindow = nsPIDOMWindowOuter::From(window);
+ 
+   nsCOMPtr<nsIBaseWindow> ppBaseWindow =
+       do_QueryInterface(pidomwindow->GetDocShell());
+@@ -210,17 +308,17 @@ nsresult nsMessengerWinIntegration::Hide
+   rv = CreateIconWindow();
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (!mTrayIconShown) {
+     auto idi = IDI_APPLICATION;
+     if (sUnreadCount > 0) {
+       idi = MAKEINTRESOURCE(IDI_MAILBIFF);
+     }
+-    sMailIconData.hIcon = ::LoadIcon(::GetModuleHandle(NULL), idi);
++    sMailIconData.hIcon = GetIcon(idi);
+     nsresult rv = SetTooltip();
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     ::Shell_NotifyIconW(NIM_ADD, &sMailIconData);
+     ::Shell_NotifyIconW(NIM_SETVERSION, &sMailIconData);
+     mTrayIconShown = true;
+   }
+   return NS_OK;
+@@ -355,17 +453,17 @@ nsresult nsMessengerWinIntegration::Upda
+     showTrayIconAlways = false;
+   }
+   if (sUnreadCount > 0 || showTrayIconAlways) {
+     auto idi = IDI_APPLICATION;
+     if (sUnreadCount > 0) {
+       // Only showing the new mail marker when there are actual unread mail
+       idi = MAKEINTRESOURCE(IDI_MAILBIFF);
+     }
+-    sMailIconData.hIcon = ::LoadIcon(::GetModuleHandle(NULL), idi);
++    sMailIconData.hIcon = GetIcon(idi);
+     if (mTrayIconShown) {
+       // If the tray icon is already shown, just modify it.
+       ::Shell_NotifyIconW(NIM_MODIFY, &sMailIconData);
+     } else {
+       bool showTrayIcon;
+       rv = mPrefBranch->GetBoolPref(SHOW_TRAY_ICON_PREF, &showTrayIcon);
+       NS_ENSURE_SUCCESS(rv, rv);
+       if (showTrayIcon) {
+@@ -373,18 +471,17 @@ nsresult nsMessengerWinIntegration::Upda
+         ::Shell_NotifyIconW(NIM_ADD, &sMailIconData);
+         ::Shell_NotifyIconW(NIM_SETVERSION, &sMailIconData);
+         mTrayIconShown = true;
+       }
+     }
+   } else if (mTrayIconShown) {
+     if (sHiddenWindows.Length() > 0) {
+       // At least one window is minimized, modify the icon only.
+-      sMailIconData.hIcon =
+-          ::LoadIcon(::GetModuleHandle(NULL), IDI_APPLICATION);
++      sMailIconData.hIcon = GetIcon(IDI_APPLICATION);
+       ::Shell_NotifyIconW(NIM_MODIFY, &sMailIconData);
+     } else if (!showTrayIconAlways) {
+       // No unread, no need to show the tray icon.
+       ::Shell_NotifyIconW(NIM_DELETE, &sMailIconData);
+       mTrayIconShown = false;
+     }
+   }
+   return rv;
