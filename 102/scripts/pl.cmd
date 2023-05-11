@@ -56,11 +56,11 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 ::     .accesskey = O
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option =" >> localization\pl\messenger\preferences\preferences.ftl
-%lecho% "    .label = Zwykły tekst czy HTML"  >> localization\pl\messenger\preferences\preferences.ftl
+%lecho% "    .label = Zwykły tekst lub HTML"  >> localization\pl\messenger\preferences\preferences.ftl
 %lecho% "compose-send-plain-or-html-description = Jeśli wiadomość nie zawiera żadnych stylów, wyślij zwykły tekst. W przeciwnym razie, wyślij tylko HTML." >> localization\pl\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\pl\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Zwykły tekst czy HTML"     >> localization\pl\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Zwykły tekst lub HTML"     >> localization\pl\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\pl\messenger\messengercompose\messengercompose.ftl
 
 :: Fix missing ! in the about box.
