@@ -1,6 +1,6 @@
 #!/bin/sh
 MOZILLA_REPO=https://hg.mozilla.org/mozilla-central/
-MOZILLA_REV=625c1ea4c73b8f777dfd07a6524db0b4b8994d1a
+MOZILLA_REV=896ce1fb1f9ca2333a46dde452ed9328eb94a649
 COMM_REPO=https://hg.mozilla.org/comm-central
-COMM_REV=3f221d710269c19f697028e5fdbf1bbc7b8569c1
+COMM_REV=4afd838d6921bd4f42c6f277521fb81b5b2401f8
 RUST_VER=1.67.0
