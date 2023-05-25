@@ -1,0 +1,95 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1685007193 -7200
+# Node ID 6cdea3150f640099b84cfcb68d7ae83675ffe408
+# Parent  2dc5bdc2aa89458a1f389d085af8e38af5a88d91
+Bug 1816596 - Make pop3 cert override work again. r=rnons
+
+It seems bug 1798785 would kind of have caused this. Before that we could be "done" many times.
+
+Differential Revision: https://phabricator.services.mozilla.com/D169794
+
+diff --git a/mailnews/local/src/Pop3Client.jsm b/mailnews/local/src/Pop3Client.jsm
+--- a/mailnews/local/src/Pop3Client.jsm
++++ b/mailnews/local/src/Pop3Client.jsm
+@@ -158,17 +158,17 @@ class Pop3Client {
+    * @param {nsIMsgWindow} msgWindow - The associated msg window.
+    * @param {nsIMsgFolder} folder - The folder to save the messages to.
+    */
+   async getMail(downloadMail, msgWindow, folder) {
+     this._downloadMail = downloadMail;
+     this._msgWindow = msgWindow;
+     this._sink.folder = folder;
+     this._actionAfterAuth = this._actionStat;
+-    this.urlListener?.OnStartRunningUrl(this.runningUri, Cr.NS_OK);
++    this.urlListener.OnStartRunningUrl(this.runningUri, Cr.NS_OK);
+ 
+     await this._loadUidlState();
+     this._actionCapa();
+   }
+ 
+   /**
+    * Verify that we can logon to the server. Exit after auth success/failure.
+    * @param {nsIMsgWindow} msgWindow - The associated msg window.
+@@ -187,17 +187,17 @@ class Pop3Client {
+    */
+   async fetchBodyForUidl(sink, uidl) {
+     this._logger.debug(`Fetching body for uidl=${uidl}`);
+ 
+     this._downloadMail = true;
+     this._sink = sink;
+     this._sink.buildMessageUri = true;
+     this.urlListener = sink.folder.QueryInterface(Ci.nsIUrlListener);
+-    this.urlListener?.OnStartRunningUrl(this.runningUri, Cr.NS_OK);
++    this.urlListener.OnStartRunningUrl(this.runningUri, Cr.NS_OK);
+ 
+     await this._loadUidlState();
+ 
+     let uidlState = this._uidlMap.get(uidl);
+     if (!uidlState) {
+       // This uidl is no longer on the server, use this._sink to delete the
+       // msgHdr.
+       try {
+@@ -354,16 +354,23 @@ class Pop3Client {
+    */
+   _onError = event => {
+     this._logger.error(`${event.name}: a ${event.message} error occurred`);
+     this._server.serverBusy = false;
+     this.quit();
+     let secInfo = event.target.transport?.securityInfo;
+     if (secInfo) {
+       this.runningUri.failedSecInfo = secInfo;
++      // Notify about the error directly. Due to the await above, the _onClose
++      // event is likely to complete before we get here, which means _actionDone
++      // ran and won't run again.
++      // Betterbird note:
++      // This patch was taken from C-C were `secInfo` is obtained async.
++      // Likely the patch isn't needed in 102.
++      this.urlListener.OnStopRunningUrl(this.runningUri, event.errorCode);
+     }
+     this._actionDone(event.errorCode);
+   };
+ 
+   /**
+    * The close event handler.
+    */
+   _onClose = () => {
+@@ -1473,17 +1480,17 @@ class Pop3Client {
+ 
+   /**
+    * Notify listeners, close the socket and rest states.
+    * @param {nsresult} status - Indicate if the last action succeeded.
+    */
+   _cleanUp = status => {
+     this._cleanedUp = true;
+     this.close();
+-    this.urlListener?.OnStopRunningUrl(this.runningUri, status);
++    this.urlListener.OnStopRunningUrl(this.runningUri, status);
+     this.runningUri.SetUrlState(false, Cr.NS_OK);
+     this.onDone?.(status);
+     if (this._folderLocked) {
+       this._sink.abortMailDelivery(this);
+       this._folderLocked = false;
+       this._logger.debug("Folder lock released.");
+     }
+     this._server.wrappedJSObject.runningClient = null;
