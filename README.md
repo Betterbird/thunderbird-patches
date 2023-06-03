@@ -13,7 +13,7 @@ To build successfully on Linux, you need at least 16 GB of memory or swap space.
 We executed the steps successfully on a Ubuntu 20.04 cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk).
 Building for aarch64 (aka arm64) is also supported. You need to run the build on a aarch64 machine (which you can hire at Amazon EC2).
 Sadly `./mach bootstrap` doesn't work on Linux/aarch64, so please read [here](./build/build-env-aarch64.MD).
-This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html).
+This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html) copied below:
 1. Prepare to install necessary dependencies: `sudo apt update`
 1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
 1. Install Mercurial: `sudo apt-get install mercurial` if the Mercurial in your distribution is new enough (as it should be for Ubuntu 20.04). Otherwise use the following two steps.
@@ -31,8 +31,12 @@ Voilà. :heavy_check_mark: For subsequent builds you only need to repeat the las
 Please note that the [Ansible-betterbird](https://github.com/4ch1m/ansible-betterbird) build has been replaced and is no longer supported.
 
 Mac users follow these instructions:
-You need to have at least macOS 12 (Monterey) and you need to install Xcode from the Apple App Store (which requires an Apple ID).
-Then follow the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html), the Thunderbird documentation is incomplete.
+You need to install Xcode from the Apple App Store or [developer.apple.com/download/](https://developer.apple.com/download/)
+(which requires an Apple ID). Note the dependency of Xcode version and macOS version (details [here](https://xcodereleases.com/)).
+On our latest development machine we're using macOS 12.6.6 (Monterey) with Xcode 13.4.1.
+Then follow the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html) copied below,
+the [Thunderbird documentation](https://developer.thunderbird.net/thunderbird-development/building-thunderbird/macos-build-prerequisites)
+is incomplete:
 1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
 1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`
 1. Install Mercurial: `echo 'export PATH="'"$(python3 -m site --user-base)"'/bin:$PATH"' >> ~/.zshenv` and `python3 -m pip install --user mercurial==6.1.4`
