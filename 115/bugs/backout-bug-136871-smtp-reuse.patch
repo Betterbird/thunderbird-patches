@@ -1,0 +1,683 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1686594363 -7200
+# Parent  858e68cb718d40b418f7819fd6602ad05e812f4f
+Backout bug 136871 for causing bug 1801668 and bug 1816540
+
+diff --git a/mailnews/compose/public/nsISmtpServer.idl b/mailnews/compose/public/nsISmtpServer.idl
+--- a/mailnews/compose/public/nsISmtpServer.idl
++++ b/mailnews/compose/public/nsISmtpServer.idl
+@@ -90,22 +90,16 @@ interface nsISmtpServer : nsISupports {
+    * their servers and therefore users get an error on sending. See bug 244030
+    * for more discussion.
+    */
+   readonly attribute ACString helloArgument;
+ 
+   /// Returns the URI of the server (smtp:///)
+   readonly attribute AUTF8String serverURI;
+ 
+-  /** Limit of concurrent connections to a server. */
+-  attribute long maximumConnectionsNumber;
+-
+-  /** Close cached server connections. */
+-  void closeCachedConnections();
+-
+   /**
+    * Gets a password for this server, using a UI prompt if necessary.
+    *
+    * @param promptString  The string to prompt the user with when asking for
+    *                      the password.
+    * @param promptTitle   The title of the prompt.
+    * @return              The password to use (may be null if no password was
+    *                      obtained).
+diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClient.jsm
+--- a/mailnews/compose/src/SmtpClient.jsm
++++ b/mailnews/compose/src/SmtpClient.jsm
+@@ -61,16 +61,19 @@ class SmtpClient {
+       requireTLS: server.socketType == Ci.nsMsgSocketType.SSL,
+     };
+ 
+     this.socket = false; // Downstream TCP socket to the SMTP server, created with TCPSocket
+     this.waitDrain = false; // Keeps track if the downstream socket is currently full and a drain event should be waited for or not
+ 
+     // Private properties
+ 
++    // Indicates if the connection has been closed and can't be used anymore
++    this._destroyed = false;
++
+     this._server = server;
+     this._authenticator = new SmtpAuthenticator(server);
+     this._authenticating = false;
+     // A list of auth methods detected from the EHLO response.
+     this._supportedAuthMethods = [];
+     // A list of auth methods that worth a try.
+     this._possibleAuthMethods = [];
+     // Auth method set by user preference.
+@@ -101,65 +104,64 @@ class SmtpClient {
+ 
+     // Event placeholders
+     this.onerror = (e, failedSecInfo) => {}; // Will be run when an error occurs. The `onclose` event will fire subsequently.
+     this.ondrain = () => {}; // More data can be buffered in the socket.
+     this.onclose = () => {}; // The connection to the server has been closed
+     this.onidle = () => {}; // The connection is established and idle, you can send mail now
+     this.onready = failedRecipients => {}; // Waiting for mail body, lists addresses that were not accepted as recipients
+     this.ondone = success => {}; // The mail has been sent. Wait for `onidle` next. Indicates if the message was queued by the server.
+-    // Callback when this client is ready to be reused.
+-    this.onFree = () => {};
+   }
+ 
+   /**
+    * Initiate a connection to the server
+    */
+   connect() {
+-    if (this.socket?.readyState == "open") {
+-      this.logger.debug("Reusing a connection");
+-      this.onidle();
+-    } else {
+-      let hostname = this._server.hostname.toLowerCase();
+-      let port = this._server.port || (this.options.requireTLS ? 465 : 587);
+-      this.logger.debug(`Connecting to smtp://${hostname}:${port}`);
+-      this._secureTransport = this.options.requireTLS;
+-      this.socket = new TCPSocket(hostname, port, {
+-        binaryType: "arraybuffer",
+-        useSecureTransport: this._secureTransport,
+-      });
++    let hostname = this._server.hostname.toLowerCase();
++    let port = this._server.port || (this.options.requireTLS ? 465 : 587);
++    this.logger.debug(`Connecting to smtp://${hostname}:${port}`);
++    this._secureTransport = this.options.requireTLS;
++    this.socket = new TCPSocket(hostname, port, {
++      binaryType: "arraybuffer",
++      useSecureTransport: this._secureTransport,
++    });
+ 
+-      this.socket.onerror = this._onError;
+-      this.socket.onopen = this._onOpen;
+-    }
+-    this._freed = false;
++    // allows certificate handling for platform w/o native tls support
++    // oncert is non standard so setting it might throw if the socket object is immutable
++    try {
++      this.socket.oncert = this.oncert;
++    } catch (E) {}
++    this.socket.onerror = this._onError;
++    this.socket.onopen = this._onOpen;
++
++    this._destroyed = false;
+   }
+ 
+   /**
+    * Sends QUIT
+    */
+   quit() {
+     this._authenticating = false;
+-    this._freed = true;
++    this._destroyed = true;
+     this._sendCommand("QUIT");
+     this._currentAction = this.close;
+   }
+ 
+   /**
+    * Closes the connection to the server
+    *
+    * @param {boolean} [immediately] - Close the socket without waiting for
+    *   unsent data.
+    */
+   close(immediately) {
+     this.logger.debug("Closing connection...");
+     if (this.socket && this.socket.readyState === "open") {
+       immediately ? this.socket.closeImmediately() : this.socket.close();
+     } else {
+-      this._free();
++      this._destroy();
+     }
+   }
+ 
+   // Mail related methods
+ 
+   /**
+    * Initiates a new message by submitting envelope data, starting with
+    * `MAIL FROM:` command. Use after `onidle` event
+@@ -427,22 +429,20 @@ class SmtpClient {
+ 
+   /**
+    * Error handler. Emits an nsresult value.
+    *
+    * @param {Error|TCPSocketErrorEvent} e - An Error or TCPSocketErrorEvent object.
+    */
+   _onError = async e => {
+     this.logger.error(e);
+-    if (this._freed) {
+-      // Ignore socket errors if already freed.
++    if (this._destroyed) {
++      // Ignore socket errors if already destroyed.
+       return;
+     }
+-    this._free();
+-
+     this.quit();
+     let nsError = Cr.NS_ERROR_FAILURE;
+     let secInfo = null;
+     if (TCPSocketErrorEvent.isInstance(e)) {
+       nsError = e.errorCode;
+       secInfo =
+         await e.target.transport?.tlsSocketControl?.asyncGetSecurityInfo();
+     }
+@@ -491,17 +491,17 @@ class SmtpClient {
+     this.close();
+   }
+ 
+   /**
+    * Indicates that the socket has been closed
+    */
+   _onClose = () => {
+     this.logger.debug("Socket closed.");
+-    this._free();
++    this._destroy();
+     if (this._authenticating) {
+       // In some cases, socket is closed for invalid username/password.
+       this._onAuthFailed({ data: "Socket closed." });
+     }
+   };
+ 
+   /**
+    * This is not a socket data handler but the handler for data emitted by the parser,
+@@ -516,22 +516,22 @@ class SmtpClient {
+       );
+     }
+     if (typeof this._currentAction === "function") {
+       this._currentAction(command);
+     }
+   }
+ 
+   /**
+-   * This client has finished the current process and ready to be reused.
++   * Ensures that the connection is closed and such
+    */
+-  _free() {
+-    if (!this._freed) {
+-      this._freed = true;
+-      this.onFree();
++  _destroy() {
++    if (!this._destroyed) {
++      this._destroyed = true;
++      this.onclose();
+     }
+   }
+ 
+   /**
+    * Sends a string to the socket.
+    *
+    * @param {string} chunk ASCII string (quoted-printable, base64 etc.) to be sent to the server
+    * @returns {boolean} If true, it is safe to send more data, if false, you *should* wait for the ondrain event before sending more
+@@ -570,21 +570,19 @@ class SmtpClient {
+    *
+    * @param {string} str - String to be sent to the server.
+    * @param {boolean} [suppressLogging=false] - If true and not in dev mode,
+    *   do not log the str. For non-release builds output won't be suppressed,
+    *   so that debugging auth problems is easier.
+    */
+   _sendCommand(str, suppressLogging = false) {
+     if (this.socket.readyState !== "open") {
+-      if (str != "QUIT") {
+-        this.logger.warn(
+-          `Failed to send "${str}" because socket state is ${this.socket.readyState}`
+-        );
+-      }
++      this.logger.warn(
++        `Failed to send "${str}" because socket state is ${this.socket.readyState}`
++      );
+       return;
+     }
+     // "C: " is used to denote that this is data from the Client.
+     if (suppressLogging && AppConstants.MOZ_UPDATE_CHANNEL != "default") {
+       this.logger.debug(
+         "C: Logging suppressed (it probably contained auth information)"
+       );
+     } else {
+@@ -696,17 +694,17 @@ class SmtpClient {
+ 
+     this._onAuthFailed({
+       data: `Unknown authentication method ${this._currentAuthMethod}`,
+     });
+   }
+ 
+   _onAuthFailed(command) {
+     this.logger.error(`Authentication failed: ${command.data}`);
+-    if (!this._freed) {
++    if (!this._destroyed) {
+       if (this._nextAuthMethod) {
+         // Try the next auth method.
+         this._authenticateUser();
+         return;
+       } else if (!this._currentAuthMethod) {
+         // No auth method was even tried.
+         let err;
+         if (
+@@ -745,17 +743,17 @@ class SmtpClient {
+       this._onNsError(MsgUtils.NS_ERROR_SMTP_AUTH_FAILURE);
+       return;
+     } else if (action == 2) {
+       // 'New password' button pressed. Forget cached password, new password
+       // will be asked.
+       this._authenticator.forgetPassword();
+     }
+ 
+-    if (this._freed) {
++    if (this._destroyed) {
+       // If connection is lost, reconnect.
+       this.connect();
+       return;
+     }
+ 
+     // Reset _nextAuthMethod to start again.
+     this._nextAuthMethod = this._possibleAuthMethods[0];
+     if (action == 2 || action == 0) {
+@@ -1262,12 +1260,16 @@ class SmtpClient {
+       this._currentAction = this._actionIdle;
+       if (command.success) {
+         this.ondone(0);
+       } else {
+         this._onNsError(MsgUtils.NS_ERROR_SENDING_MESSAGE, command.data);
+       }
+     }
+ 
+-    this._freed = true;
+-    this.onFree();
++    // If the client wanted to do something else (eg. to quit), do not force idle
++    if (this._currentAction === this._actionIdle) {
++      // Waiting for new connections
++      this.logger.debug("Idling while waiting for new connections...");
++      this.onidle();
++    }
+   }
+ }
+diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
+--- a/mailnews/compose/src/SmtpServer.jsm
++++ b/mailnews/compose/src/SmtpServer.jsm
+@@ -1,27 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const EXPORTED_SYMBOLS = ["SmtpServer"];
+ 
+-const { XPCOMUtils } = ChromeUtils.importESModule(
+-  "resource://gre/modules/XPCOMUtils.sys.mjs"
+-);
+ var { MailServices } = ChromeUtils.import(
+   "resource:///modules/MailServices.jsm"
+ );
+ 
+-const lazy = {};
+-
+-XPCOMUtils.defineLazyModuleGetters(lazy, {
+-  SmtpClient: "resource:///modules/SmtpClient.jsm",
+-});
+-
+ /**
+  * This class represents a single SMTP server.
+  *
+  * @implements {nsISmtpServer}
+  */
+ 
+ class SmtpServer {
+   QueryInterface = ChromeUtils.generateQI(["nsISmtpServer"]);
+@@ -164,28 +155,16 @@ class SmtpServer {
+   get helloArgument() {
+     return this._getCharPrefWithDefault("hello_argument");
+   }
+ 
+   get serverURI() {
+     return this._getServerURI(true);
+   }
+ 
+-  get maximumConnectionsNumber() {
+-    let maxConnections = this._getIntPrefWithDefault(
+-      "max_cached_connections",
+-      3
+-    );
+-    return maxConnections > 1 ? maxConnections : 1;
+-  }
+-
+-  set maximumConnectionsNumber(value) {
+-    this._prefs.setIntPref("max_cached_connections", value);
+-  }
+-
+   get password() {
+     if (this._password) {
+       return this._password;
+     }
+     let incomingAccountKey = this._prefs.getCharPref("incomingAccount", "");
+     let incomingServer;
+     if (incomingAccountKey) {
+       incomingServer =
+@@ -385,76 +364,9 @@ class SmtpServer {
+    */
+   _getIntPrefWithDefault(name, defaultValue) {
+     try {
+       return this._prefs.getIntPref(name);
+     } catch (e) {
+       return this._defaultPrefs.getIntPref(name, defaultValue);
+     }
+   }
+-
+-  get wrappedJSObject() {
+-    return this;
+-  }
+-
+-  // @type {SmtpClient[]} - An array of connections can be used.
+-  _freeConnections = [];
+-  // @type {SmtpClient[]} - An array of connections in use.
+-  _busyConnections = [];
+-  // @type {Function[]} - An array of Promise.resolve functions.
+-  _connectionWaitingQueue = [];
+-
+-  closeCachedConnections() {
+-    // Close all connections.
+-    for (let client of [...this._freeConnections, ...this._busyConnections]) {
+-      client.quit();
+-    }
+-    // Cancel all waitings in queue.
+-    for (let resolve of this._connectionWaitingQueue) {
+-      resolve(false);
+-    }
+-    this._freeConnections = [];
+-    this._busyConnections = [];
+-  }
+-
+-  /**
+-   * Get an idle connection that can be used.
+-   *
+-   * @returns {SmtpClient}
+-   */
+-  async _getNextClient() {
+-    // The newest connection is the least likely to have timed out.
+-    let client = this._freeConnections.pop();
+-    if (client) {
+-      this._busyConnections.push(client);
+-      return client;
+-    }
+-    if (
+-      this._freeConnections.length + this._busyConnections.length <
+-      this.maximumConnectionsNumber
+-    ) {
+-      // Create a new client if the pool is not full.
+-      client = new lazy.SmtpClient(this);
+-      this._busyConnections.push(client);
+-      return client;
+-    }
+-    // Wait until a connection is available.
+-    await new Promise(resolve => this._connectionWaitingQueue.push(resolve));
+-    return this._getNextClient();
+-  }
+-  /**
+-   * Do some actions with a connection.
+-   *
+-   * @param {Function} handler - A callback function to take a SmtpClient
+-   *   instance, and do some actions.
+-   */
+-  async withClient(handler) {
+-    let client = await this._getNextClient();
+-    client.onFree = () => {
+-      this._busyConnections = this._busyConnections.filter(c => c != client);
+-      this._freeConnections.push(client);
+-      // Resovle the first waiting in queue.
+-      this._connectionWaitingQueue.shift()?.();
+-    };
+-    handler(client);
+-    client.connect();
+-  }
+ }
+diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
+--- a/mailnews/compose/src/SmtpService.jsm
++++ b/mailnews/compose/src/SmtpService.jsm
+@@ -86,126 +86,124 @@ class SmtpService {
+     outRequest
+   ) {
+     this._logger.debug(`Sending message ${messageId}`);
+     let server = this.getServerByIdentity(userIdentity);
+     if (password) {
+       server.password = password;
+     }
+     let runningUrl = this._getRunningUri(server);
+-    server.wrappedJSObject.withClient(client => {
+-      deliveryListener?.OnStartRunningUrl(runningUrl, 0);
+-      let fresh = true;
+-      client.onidle = () => {
+-        // onidle can be emitted multiple times, but we should not init sending
+-        // process again.
+-        if (!fresh) {
+-          return;
+-        }
+-        fresh = false;
+-        let from = sender;
+-        let to = MailServices.headerParser
+-          .parseEncodedHeaderW(decodeURIComponent(recipients))
+-          .map(rec => rec.email);
++    let client = new lazy.SmtpClient(server);
++    deliveryListener?.OnStartRunningUrl(runningUrl, 0);
++    client.connect();
++    let fresh = true;
++    client.onidle = () => {
++      // onidle can be emitted multiple times, but we should not init sending
++      // process again.
++      if (!fresh) {
++        return;
++      }
++      fresh = false;
++      let from = sender;
++      let to = MailServices.headerParser
++        .parseEncodedHeaderW(decodeURIComponent(recipients))
++        .map(rec => rec.email);
+ 
+-        if (
+-          !Services.prefs.getBoolPref(
+-            "mail.smtp.useSenderForSmtpMailFrom",
+-            false
+-          )
+-        ) {
+-          from = userIdentity.email;
+-        }
+-        if (!messageId) {
+-          messageId = Cc["@mozilla.org/messengercompose/computils;1"]
+-            .createInstance(Ci.nsIMsgCompUtils)
+-            .msgGenerateMessageId(userIdentity);
+-        }
+-        client.useEnvelope({
+-          from: MailServices.headerParser.parseEncodedHeaderW(
+-            decodeURIComponent(from)
+-          )[0].email,
+-          to,
+-          size: messageFile.fileSize,
+-          requestDSN,
+-          messageId,
+-        });
+-      };
+-      let socketOnDrain;
+-      client.onready = async () => {
+-        let fstream = Cc[
+-          "@mozilla.org/network/file-input-stream;1"
+-        ].createInstance(Ci.nsIFileInputStream);
+-        // PR_RDONLY
+-        fstream.init(messageFile, 0x01, 0, 0);
++      if (
++        !Services.prefs.getBoolPref("mail.smtp.useSenderForSmtpMailFrom", false)
++      ) {
++        from = userIdentity.email;
++      }
++      if (!messageId) {
++        messageId = Cc["@mozilla.org/messengercompose/computils;1"]
++          .createInstance(Ci.nsIMsgCompUtils)
++          .msgGenerateMessageId(userIdentity);
++      }
++      client.useEnvelope({
++        from: MailServices.headerParser.parseEncodedHeaderW(
++          decodeURIComponent(from)
++        )[0].email,
++        to,
++        size: messageFile.fileSize,
++        requestDSN,
++        messageId,
++      });
++    };
++    let socketOnDrain;
++    client.onready = async () => {
++      let fstream = Cc[
++        "@mozilla.org/network/file-input-stream;1"
++      ].createInstance(Ci.nsIFileInputStream);
++      // PR_RDONLY
++      fstream.init(messageFile, 0x01, 0, 0);
+ 
+-        let sstream = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(
+-          Ci.nsIScriptableInputStream
+-        );
+-        sstream.init(fstream);
++      let sstream = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(
++        Ci.nsIScriptableInputStream
++      );
++      sstream.init(fstream);
+ 
+-        let sentSize = 0;
+-        let totalSize = messageFile.fileSize;
+-        let progressListener = statusListener?.QueryInterface(
+-          Ci.nsIWebProgressListener
+-        );
++      let sentSize = 0;
++      let totalSize = messageFile.fileSize;
++      let progressListener = statusListener?.QueryInterface(
++        Ci.nsIWebProgressListener
++      );
+ 
+-        while (sstream.available()) {
+-          let chunk = sstream.read(65536);
+-          let canSendMore = client.send(chunk);
+-          if (!canSendMore) {
+-            // Socket buffer is full, wait for the ondrain event.
+-            await new Promise(resolve => (socketOnDrain = resolve));
+-          }
+-          // In practice, chunks are buffered by TCPSocket, progress reaches 100%
+-          // almost immediately unless message is larger than chunk size.
+-          sentSize += chunk.length;
+-          progressListener?.onProgressChange(
+-            null,
+-            null,
+-            sentSize,
+-            totalSize,
+-            sentSize,
+-            totalSize
+-          );
++      while (sstream.available()) {
++        let chunk = sstream.read(65536);
++        let canSendMore = client.send(chunk);
++        if (!canSendMore) {
++          // Socket buffer is full, wait for the ondrain event.
++          await new Promise(resolve => (socketOnDrain = resolve));
+         }
+-        sstream.close();
+-        fstream.close();
+-        client.end();
++        // In practice, chunks are buffered by TCPSocket, progress reaches 100%
++        // almost immediately unless message is larger than chunk size.
++        sentSize += chunk.length;
++        progressListener?.onProgressChange(
++          null,
++          null,
++          sentSize,
++          totalSize,
++          sentSize,
++          totalSize
++        );
++      }
++      sstream.close();
++      fstream.close();
++      client.end();
+ 
+-        // Set progress to indeterminate.
+-        progressListener?.onProgressChange(null, null, 0, -1, 0, -1);
+-      };
+-      client.ondrain = () => {
+-        // Socket buffer is empty, safe to continue sending.
+-        socketOnDrain();
+-      };
+-      client.ondone = exitCode => {
+-        if (!AppConstants.MOZ_SUITE) {
+-          Services.telemetry.scalarAdd("tb.mails.sent", 1);
+-        }
+-        deliveryListener?.OnStopRunningUrl(runningUrl, exitCode);
+-      };
+-      client.onerror = (nsError, errorMessage, secInfo) => {
+-        runningUrl.QueryInterface(Ci.nsIMsgMailNewsUrl);
+-        if (secInfo) {
+-          // TODO(emilio): Passing the failed security info as part of the URI is
+-          // quite a smell, but monkey see monkey do...
+-          runningUrl.failedSecInfo = secInfo;
+-        }
+-        runningUrl.errorMessage = errorMessage;
+-        deliveryListener?.OnStopRunningUrl(runningUrl, nsError);
+-      };
++      // Set progress to indeterminate.
++      progressListener?.onProgressChange(null, null, 0, -1, 0, -1);
++    };
++    client.ondrain = () => {
++      // Socket buffer is empty, safe to continue sending.
++      socketOnDrain();
++    };
++    client.ondone = exitCode => {
++      if (!AppConstants.MOZ_SUITE) {
++        Services.telemetry.scalarAdd("tb.mails.sent", 1);
++      }
++      deliveryListener?.OnStopRunningUrl(runningUrl, exitCode);
++      client.quit();
++    };
++    client.onerror = (nsError, errorMessage, secInfo) => {
++      runningUrl.QueryInterface(Ci.nsIMsgMailNewsUrl);
++      if (secInfo) {
++        // TODO(emilio): Passing the failed security info as part of the URI is
++        // quite a smell, but monkey see monkey do...
++        runningUrl.failedSecInfo = secInfo;
++      }
++      runningUrl.errorMessage = errorMessage;
++      deliveryListener?.OnStopRunningUrl(runningUrl, nsError);
++    };
+ 
+-      outRequest.value = {
+-        cancel() {
+-          client.close(true);
+-        },
+-      };
+-    });
++    outRequest.value = {
++      cancel() {
++        client.close(true);
++      },
++    };
+   }
+ 
+   /**
+    * @see nsISmtpService
+    */
+   verifyLogon(server, urlListener, msgWindow) {
+     let client = new lazy.SmtpClient(server);
+     client.connect();
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -520,17 +520,16 @@ pref("mail.default_sendlater_uri", "mail
+ pref("mail.server.default.clientid", "");
+ pref("mail.smtpserver.default.clientid", "");
+ 
+ // This is not to be enabled by default until the prerequisite
+ // changes are completed. See here for details:
+ //  https://bugzilla.mozilla.org/show_bug.cgi?id=1565379
+ pref("mail.server.default.clientidEnabled", false);
+ pref("mail.smtpserver.default.clientidEnabled", false);
+-pref("mail.smtpserver.default.max_cached_connections", 3);
+ 
+ pref("mail.smtpservers", "");
+ pref("mail.accountmanager.accounts", "");
+ 
+ // Last used account key value
+ pref("mail.account.lastKey", 0);
+ 
+ pref("mail.server.default.port", -1);
