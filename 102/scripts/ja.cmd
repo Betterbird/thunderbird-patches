@@ -75,8 +75,8 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "serverType-movemail=Unix Movemail"                               >> chrome\ja\locale\ja\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="  >> localization\ja\messenger\accountManager.ftl
-%lecho% "    .label = Movemail プアカウントを追加..." >> localization\ja\messenger\accountManager.ftl
+%lecho% "    .label = Movemail アカウントを追加..." >> localization\ja\messenger\accountManager.ftl
 %lecho% "    .accesskey = M"                     >> localization\ja\messenger\accountManager.ftl
 %lecho% "file-new-movemail-account ="            >> localization\ja\messenger\menubar.ftl
-%lecho% "    .label = Movemail プアカウント..."      >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = Movemail アカウント..."      >> localization\ja\messenger\menubar.ftl
 %lecho% "    .accesskey = M"                     >> localization\ja\messenger\menubar.ftl
