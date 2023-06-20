@@ -1,0 +1,200 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1687218566 -7200
+# Parent  e1885fe6305ed1059ac04428ddb4e194424a66e0
+Bug 1839226 - Fix quoting selection of non-flowed messages.
+
+diff --git a/mail/base/content/mailCommands.js b/mail/base/content/mailCommands.js
+--- a/mail/base/content/mailCommands.js
++++ b/mail/base/content/mailCommands.js
+@@ -64,25 +64,27 @@ function GetMsgKeyFromURI(uri) {
+  *
+  * @param {nsIMsgCompType} type - Type of composition (new message, reply, draft, etc.)
+  * @param {nsIMsgCompFormat} format - Requested format (plain text, html, default)
+  * @param {nsIMsgFolder} folder - Folder where the original message is stored
+  * @param {string[]} messageArray - Array of message URIs to process, often only
+  *   holding one element.
+  * @param {Selection} [selection=null] - A DOM selection to be quoted, or null
+  *   to quote the whole message, if quoting is appropriate (e.g. in a reply).
++ * @param {boolean} [needsPre=false] - This comes from a pre-formatted message.
+  * @param {boolean} [autodetectCharset=false] - If quoting the whole message,
+  *   whether automatic character set detection should be used.
+  */
+ async function ComposeMessage(
+   type,
+   format,
+   folder,
+   messageArray,
+   selection = null,
++  needsPre = false,
+   autodetectCharset = false
+ ) {
+   function findDeliveredToIdentityEmail(hdr) {
+     // This function reads from currentHeaderData, which is only useful if we're
+     // looking at the currently-displayed message. Otherwise, just return
+     // immediately so we don't waste time.
+     if (hdr != window.gMessageDisplay?.displayedMessage) {
+       return "";
+@@ -405,16 +407,17 @@ async function ComposeMessage(
+                   hdr,
+                   messageUri,
+                   type,
+                   format,
+                   identity,
+                   matchingHint.toString(),
+                   msgWindow,
+                   selection,
++                  needsPre,
+                   autodetectCharset
+                 );
+               },
+               true,
+               { saneBodySize: true }
+             );
+           } else {
+             // Fall back to traditional behavior.
+@@ -428,16 +431,17 @@ async function ComposeMessage(
+               hdr,
+               messageUri,
+               type,
+               format,
+               hdrIdentity,
+               null,
+               msgWindow,
+               selection,
++              needsPre,
+               autodetectCharset
+             );
+           }
+         }
+       }
+   }
+ }
+ /* eslint-enable complexity */
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -704,47 +704,54 @@ var commandController = {
+     let msgUris =
+       gFolder || gViewWrapper.isSynthetic
+         ? gDBView?.getURIsForSelection()
+         : [window.gMessageURI];
+ 
+     let messagePaneBrowser;
+     let autodetectCharset;
+     let selection;
++    let needsPre;
+     if (!mailContextMenu.selectionIsOverridden) {
+       if (window.messageBrowser) {
+         if (!window.messageBrowser.hidden) {
+           messagePaneBrowser =
+             window.messageBrowser.contentWindow.getMessagePaneBrowser();
+           autodetectCharset =
+             window.messageBrowser.contentWindow.autodetectCharset;
+         }
+       } else {
+         messagePaneBrowser = window.getMessagePaneBrowser();
+         autodetectCharset = window.autodetectCharset;
+       }
+       selection = messagePaneBrowser?.contentWindow?.getSelection();
++      needsPre =
++        messagePaneBrowser?.contentWindow?.document.body.lastElementChild.classList.contains(
++          "moz-text-plain"
++        );
+     }
+ 
+     if (event && event.shiftKey) {
+       window.browsingContext.topChromeWindow.ComposeMessage(
+         composeType,
+         Ci.nsIMsgCompFormat.OppositeOfDefault,
+         msgFolder,
+         msgUris,
+         selection,
++        needsPre,
+         autodetectCharset
+       );
+     } else {
+       window.browsingContext.topChromeWindow.ComposeMessage(
+         composeType,
+         Ci.nsIMsgCompFormat.Default,
+         msgFolder,
+         msgUris,
+         selection,
++        needsPre,
+         autodetectCharset
+       );
+     }
+   },
+ 
+   _navigate(navigationType) {
+     let resultKey = { value: nsMsgKey_None };
+     let resultIndex = { value: nsMsgViewIndex_None };
+diff --git a/mailnews/compose/public/nsIMsgComposeService.idl b/mailnews/compose/public/nsIMsgComposeService.idl
+--- a/mailnews/compose/public/nsIMsgComposeService.idl
++++ b/mailnews/compose/public/nsIMsgComposeService.idl
+@@ -42,16 +42,17 @@ interface nsIMsgComposeService : nsISupp
+                          in nsIMsgDBHdr msgHdr,
+                          in AUTF8String originalMsgURI,
+                          in MSG_ComposeType type,
+                          in MSG_ComposeFormat format,
+                          in nsIMsgIdentity identity,
+                          in AUTF8String from,
+                          in nsIMsgWindow aMsgWindow,
+                          [optional] in Selection aSelection,
++                         [optional] in boolean needsPre,
+                          [optional] in boolean autodetectCharset);
+ 
+   /**
+    * Open a compose window given a mailto url and (optionally) an identity.
+    *
+    * @param aMsgComposeWindowURL Can be null in most cases. If you have your
+    *                             own chrome url you want to use in bringing up a
+    *                             compose window, pass it in here.
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -319,17 +319,17 @@ nsMsgComposeService::GetOrigWindowSelect
+   return rv;
+ }
+ 
+ MOZ_CAN_RUN_SCRIPT_FOR_DEFINITION NS_IMETHODIMP
+ nsMsgComposeService::OpenComposeWindow(
+     const nsACString& msgComposeWindowURL, nsIMsgDBHdr* origMsgHdr,
+     const nsACString& originalMsgURI, MSG_ComposeType type,
+     MSG_ComposeFormat format, nsIMsgIdentity* aIdentity, const nsACString& from,
+-    nsIMsgWindow* aMsgWindow, mozilla::dom::Selection* selection,
++    nsIMsgWindow* aMsgWindow, mozilla::dom::Selection* selection, bool needsPre,
+     bool autodetectCharset) {
+   nsresult rv;
+ 
+   nsCOMPtr<nsIMsgIdentity> identity = aIdentity;
+   if (!identity) GetDefaultIdentity(getter_AddRefs(identity));
+ 
+   /* Actually, the only way to implement forward inline is to simulate a
+      template message. Maybe one day when we will have more time we can change
+@@ -382,18 +382,23 @@ nsMsgComposeService::OpenComposeWindow(
+       // that we should quote
+       if (selection &&
+           (type == nsIMsgCompType::Reply || type == nsIMsgCompType::ReplyAll ||
+            type == nsIMsgCompType::ReplyToSender ||
+            type == nsIMsgCompType::ReplyToGroup ||
+            type == nsIMsgCompType::ReplyToSenderAndGroup ||
+            type == nsIMsgCompType::ReplyToList)) {
+         nsAutoCString selHTML;
+-        if (NS_SUCCEEDED(GetOrigWindowSelection(type, selection, selHTML)))
+-          pMsgComposeParams->SetHtmlToQuote(selHTML);
++        if (NS_SUCCEEDED(GetOrigWindowSelection(type, selection, selHTML))) {
++          if (needsPre) {
++            pMsgComposeParams->SetHtmlToQuote("<pre>"_ns + selHTML + "</pre>"_ns);
++          } else {
++            pMsgComposeParams->SetHtmlToQuote(selHTML);
++          }
++        }
+       }
+ 
+       if (!originalMsgURI.IsEmpty()) {
+         if (type == nsIMsgCompType::NewsPost) {
+           nsAutoCString newsURI(originalMsgURI);
+           nsAutoCString group;
+           nsAutoCString host;
+ 
