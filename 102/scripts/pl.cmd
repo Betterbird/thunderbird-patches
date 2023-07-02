@@ -68,12 +68,12 @@ sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\pl\locale\pl\m
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/pl/file/619e43c2d9f9374c770f964c810182d978b5d74e/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Otworzenie pliku poczty (%S) było niemożliwe." >> chrome\pl\locale\pl\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Utworzenie pliku blokującego %S było niemożliwe. Dostęp do poczty Movemail wymaga możliwości tworzenia plików blokujących w systemowym katalogu poczty. W przypadku większości systemów wystarczy ustawić prawa dostępu do systemowego katalogu poczty na 01777." >> chrome\pl\locale\pl\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Usunięcie pliku blokującego %S było niemożliwe."      >> chrome\pl\locale\pl\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Skrócenie pliku poczty %S było niemożliwe."    >> chrome\pl\locale\pl\messenger\localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Otworzenie pliku poczty %%S było niemożliwe." >> chrome\pl\locale\pl\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Utworzenie pliku blokującego %%S było niemożliwe. Dostęp do poczty Movemail wymaga możliwości tworzenia plików blokujących w systemowym katalogu poczty. W przypadku większości systemów wystarczy ustawić prawa dostępu do systemowego katalogu poczty na 01777." >> chrome\pl\locale\pl\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Usunięcie pliku blokującego %%S było niemożliwe."      >> chrome\pl\locale\pl\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Skrócenie pliku poczty %%S było niemożliwe."    >> chrome\pl\locale\pl\messenger\localMsgs.properties
 %lecho% "movemailSpoolFileNotFound=Odnalezienie pliku poczty było niemożliwe."        >> chrome\pl\locale\pl\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Wystąpił błąd podczas wczytywania pliku „%S”. Plik poczty może być uszkodzony lub nieprawidłowy." >> chrome\pl\locale\pl\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Wystąpił błąd podczas wczytywania pliku %%S. Plik poczty może być uszkodzony lub nieprawidłowy." >> chrome\pl\locale\pl\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                                           >> chrome\pl\locale\pl\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account =" >> localization\pl\messenger\accountManager.ftl

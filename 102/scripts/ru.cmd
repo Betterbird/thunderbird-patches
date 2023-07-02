@@ -68,12 +68,12 @@ sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\ru\locale\ru\m
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/ru/file/bc8d9fcff386f8c2b02202fc8d2725ea76fa5d99/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Не удалось открыть файл почтового буфера «%S»." >> chrome\ru\locale\ru\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Не удалось создать блокирующий файл «%S». Для работы Movemail необходимо создание блокирующих файлов в каталоге почтового буфера. Для большинства систем достаточно установить этому каталогу права 01777." >> chrome\ru\locale\ru\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Не удалось удалить блокирующий файл «%S»."         >> chrome\ru\locale\ru\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Не удалось уменьшить файл буфера «%S»."     >> chrome\ru\locale\ru\messenger\localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Не удалось открыть файл почтового буфера «%%S»." >> chrome\ru\locale\ru\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Не удалось создать блокирующий файл «%%S». Для работы Movemail необходимо создание блокирующих файлов в каталоге почтового буфера. Для большинства систем достаточно установить этому каталогу права 01777." >> chrome\ru\locale\ru\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Не удалось удалить блокирующий файл «%%S»."         >> chrome\ru\locale\ru\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Не удалось уменьшить файл буфера «%%S»."     >> chrome\ru\locale\ru\messenger\localMsgs.properties
 %lecho% "movemailSpoolFileNotFound=Не удалось найти файл почтового буфера."        >> chrome\ru\locale\ru\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Не удалось обработать файл буфера «%S». Файл может быть повреждён или некорректен." >> chrome\ru\locale\ru\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Не удалось обработать файл буфера «%%S». Файл может быть повреждён или некорректен." >> chrome\ru\locale\ru\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                                        >> chrome\ru\locale\ru\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="   >> localization\ru\messenger\accountManager.ftl

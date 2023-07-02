@@ -68,12 +68,12 @@ sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\nl\locale\nl\m
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/nl/file/9447d0706ca82640642ede3f8800f72db78e2f90/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Kan e-mailspoolbestand %S niet openen." >> chrome\nl\locale\nl\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Kan lock-bestand %S niet aanmaken. Om movemail te laten werken, is het nodig om lock-bestanden aan te maken in de e-mailspoolmap. Op veel systemen kan dit het beste worden bereikt door de spoolmap de modus 01777 te geven." >> chrome\nl\locale\nl\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Kan lock-bestand %S niet verwijderen."     >> chrome\nl\locale\nl\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Kan spoolbestand %S niet afkappen." >> chrome\nl\locale\nl\messenger\localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Kan e-mailspoolbestand %%S niet openen." >> chrome\nl\locale\nl\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Kan lock-bestand %%S niet aanmaken. Om movemail te laten werken, is het nodig om lock-bestanden aan te maken in de e-mailspoolmap. Op veel systemen kan dit het beste worden bereikt door de spoolmap de modus 01777 te geven." >> chrome\nl\locale\nl\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Kan lock-bestand %%S niet verwijderen."     >> chrome\nl\locale\nl\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Kan spoolbestand %%S niet afkappen." >> chrome\nl\locale\nl\messenger\localMsgs.properties
 %lecho% "movemailSpoolFileNotFound=Kan e-mailspoolbestand niet vinden."    >> chrome\nl\locale\nl\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Kan spoolbestand %S niet parsen. Het bestand is mogelijk beschadigd of niet geldig." >> chrome\nl\locale\nl\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Kan spoolbestand %%S niet parsen. Het bestand is mogelijk beschadigd of niet geldig." >> chrome\nl\locale\nl\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                                >> chrome\nl\locale\nl\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="    >> localization\nl\messenger\accountManager.ftl

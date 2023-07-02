@@ -68,12 +68,12 @@ sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\it\locale\it\m
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/it/file/a9f0e247fd8dccaadcb09b37e01066da3a7c2e19/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Impossibile aprire il file di spool %S."       >> chrome\it\locale\it\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Impossibile creare il file di lock %S. Per far funzionare movemail è indispensabile creare file di lock nella cartella di spool della posta. In molti sistemi è indispensabile fare in modo che la cartella di spool abbia modalità 01777." >> chrome\it\locale\it\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Impossibile cancellare il file di lock %S."       >> chrome\it\locale\it\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Impossibile troncare il file di spool %S." >> chrome\it\locale\it\messenger\localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Impossibile aprire il file di spool %%S."       >> chrome\it\locale\it\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Impossibile creare il file di lock %%S. Per far funzionare movemail è indispensabile creare file di lock nella cartella di spool della posta. In molti sistemi è indispensabile fare in modo che la cartella di spool abbia modalità 01777." >> chrome\it\locale\it\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Impossibile cancellare il file di lock %%S."       >> chrome\it\locale\it\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Impossibile troncare il file di spool %%S." >> chrome\it\locale\it\messenger\localMsgs.properties
 %lecho% "movemailSpoolFileNotFound=Impossibile individuare il file di spool."     >> chrome\it\locale\it\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Impossibile analizzare il file di spool %S. Il file potrebbe essere corrotto o non valido." >> chrome\it\locale\it\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Impossibile analizzare il file di spool %%S. Il file potrebbe essere corrotto o non valido." >> chrome\it\locale\it\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                                       >> chrome\it\locale\it\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="   >> localization\it\messenger\accountManager.ftl

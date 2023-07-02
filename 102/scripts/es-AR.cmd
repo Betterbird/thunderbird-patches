@@ -68,12 +68,12 @@ sed -i -e 's/ENTITY helpus.end.*""/ENTITY helpus.end "!"/' chrome\es-AR\locale\e
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/es-AR/file/cd5519457360f8cc3b5fd0504920769bcccc3cbb/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=No se puede abrir el archivo de spool de correo %S."  >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=No se puede crear el archivo de bloqueo %S. Para que movemail funcione, hay que crear archivos de bloqueo en el directorio de spool de correo. En muchos sistemas, esto se hace fijando el modo 01777 en el directorio spool." >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=No se puede borrar el archivo de bloqueo %S."            >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=No se puede truncar el archivo de spool %S."      >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=No se puede abrir el archivo de spool de correo %%S."  >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=No se puede crear el archivo de bloqueo %%S. Para que movemail funcione, hay que crear archivos de bloqueo en el directorio de spool de correo. En muchos sistemas, esto se hace fijando el modo 01777 en el directorio spool." >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=No se puede borrar el archivo de bloqueo %%S."            >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=No se puede truncar el archivo de spool %%S."      >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
 %lecho% "movemailSpoolFileNotFound=No se puede encontrar el archivo de spool de correo." >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=No se puede analizar el archivo de spool %S. El archivo puede estar corrupto o no es válido." >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=No se puede analizar el archivo de spool %%S. El archivo puede estar corrupto o no es válido." >> chrome\es-AR\locale\es-AR\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                                              >> chrome\es-AR\locale\es-AR\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="       >> localization\es-AR\messenger\accountManager.ftl

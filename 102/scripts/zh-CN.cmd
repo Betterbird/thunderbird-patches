@@ -65,12 +65,12 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/zh-CN/file/e61e1a64227e0b4e9d26e6f38fd6a4b04f6a2831/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=无法打开邮件缓冲文件 %S。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=无法创建锁文件 %S.。在邮件缓冲文件夹中创建锁文件是必要的。在大多系统中，将缓冲文件夹权限设置为 01777 即可。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=无法删除锁文件 %S。"          >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=无法截除缓冲文件 %S。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=无法打开邮件缓冲文件 %%S。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=无法创建锁文件 %%S。在邮件缓冲文件夹中创建锁文件是必要的。在大多系统中，将缓冲文件夹权限设置为 01777 即可。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=无法删除锁文件 %%S。"          >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=无法截除缓冲文件 %%S。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
 %lecho% "movemailSpoolFileNotFound=无法定位邮件缓冲文件。"    >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=无法解析缓冲文件 %S。文件可能损坏或者无效。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=无法解析缓冲文件 %%S。文件可能损坏或者无效。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                 >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account =" >> localization\zh-CN\messenger\accountManager.ftl
