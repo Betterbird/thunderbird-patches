@@ -5,7 +5,7 @@ cd langpacks
 wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.0b6-candidates/build1/linux-x86_64/xpi/%~1.xpi
 
 :: Remove stuff we don't want from the language pack
-7z d %~1.xpi chrome\%~1\locale\%~1\branding
+7z d %~1.xpi chrome\%~1\locale\branding
 7z d %~1.xpi localization\%~1\branding
 
 :: Unpack the language pack
@@ -19,9 +19,9 @@ sed -i -e 's/"gecko": {/"gecko": { "update_url": "https:\/\/www.betterbird.eu\/d
 
 :: Copy US branding
 7z x ..\betterbird-%~2.en-US.win64.installer.exe core\omni.ja
-7z x core\omni.ja chrome\en-US\locale\en-US\branding\
+7z x core\omni.ja chrome\en-US\locale\branding\
 7z x core\omni.ja localization\en-US\branding
-mv chrome\en-US\locale\en-US\branding\ chrome\%~1\locale\%~1\branding\
+mv chrome\en-US\locale\branding\ chrome\%~1\locale\branding\
 mv localization\en-US\branding localization\%~1\branding\
 rmdir /s /q chrome\en-US
 rmdir /s /q localization\en-US
