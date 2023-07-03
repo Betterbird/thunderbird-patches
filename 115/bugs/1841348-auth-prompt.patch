@@ -1,0 +1,167 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1688409617 -7200
+# Parent  f9c8817c04f1918d41f490919cb61df830065b06
+Bug 1841348 - Fix nsIAuthPrompt issue with minimal change.
+
+diff --git a/calendar/base/content/publish.js b/calendar/base/content/publish.js
+--- a/calendar/base/content/publish.js
++++ b/calendar/base/content/publish.js
+@@ -181,17 +181,19 @@ function publishItemArray(aItemArray, aP
+   }
+ }
+ 
+ var notificationCallbacks = {
+   // nsIInterfaceRequestor interface
+   getInterface(iid, instance) {
+     if (iid.equals(Ci.nsIAuthPrompt)) {
+       // use the window watcher service to get a nsIAuthPrompt impl
+-      return Services.ww.getNewAuthPrompter(null);
++      return Cc["@mozilla.org/messenger/msgAuthPrompt;1"].getService(
++        Ci.nsIAuthPrompt
++      );
+     }
+ 
+     throw Components.Exception("", Cr.NS_ERROR_NO_INTERFACE);
+   },
+ };
+ 
+ /**
+  * Listener object to pass to `channel.asyncOpen()`. A reference to the current dialog window
+diff --git a/mailnews/addrbook/modules/LDAPListenerBase.jsm b/mailnews/addrbook/modules/LDAPListenerBase.jsm
+--- a/mailnews/addrbook/modules/LDAPListenerBase.jsm
++++ b/mailnews/addrbook/modules/LDAPListenerBase.jsm
+@@ -15,18 +15,18 @@ class LDAPListenerBase {
+   onLDAPInit() {
+     let outPassword = {};
+     if (this._directory.authDn && this._directory.saslMechanism != "GSSAPI") {
+       // If authDn is set, we're expected to use it to get a password.
+       let bundle = Services.strings.createBundle(
+         "chrome://mozldap/locale/ldap.properties"
+       );
+ 
+-      let authPrompt = Services.ww.getNewAuthPrompter(
+-        Services.wm.getMostRecentWindow(null)
++      let authPrompt = Cc["@mozilla.org/messenger/msgAuthPrompt;1"].getService(
++        Ci.nsIAuthPrompt
+       );
+       authPrompt.promptPassword(
+         bundle.GetStringFromName("authPromptTitle"),
+         bundle.formatStringFromName("authPromptText", [
+           this._directory.lDAPURL.host,
+         ]),
+         this._directory.lDAPURL.spec,
+         Ci.nsIAuthPrompt.SAVE_PASSWORD_PERMANENTLY,
+diff --git a/mailnews/base/src/MsgIncomingServer.jsm b/mailnews/base/src/MsgIncomingServer.jsm
+--- a/mailnews/base/src/MsgIncomingServer.jsm
++++ b/mailnews/base/src/MsgIncomingServer.jsm
+@@ -835,18 +835,17 @@ class MsgIncomingServer {
+     let ok;
+     let authPrompt;
+     try {
+       // This prompt has a checkbox for saving password.
+       authPrompt = Cc["@mozilla.org/messenger/msgAuthPrompt;1"].getService(
+         Ci.nsIAuthPrompt
+       );
+     } catch (e) {
+-      // Often happens in tests. This prompt has no checkbox for saving password.
+-      authPrompt = Services.ww.getNewAuthPrompter(null);
++      throw Components.Exception("Can't prompt for password", Cr.NS_ERROR_ABORT);
+     }
+     if (this.username) {
+       ok = authPrompt.promptPassword(
+         promptTitle,
+         promptMessage,
+         this.serverURI,
+         Ci.nsIAuthPrompt.SAVE_PASSWORD_PERMANENTLY,
+         outPassword
+diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
+--- a/mailnews/compose/src/SmtpServer.jsm
++++ b/mailnews/compose/src/SmtpServer.jsm
+@@ -218,18 +218,17 @@ class SmtpServer {
+   getPasswordWithUI(promptMessage, promptTitle) {
+     let authPrompt;
+     try {
+       // This prompt has a checkbox for saving password.
+       authPrompt = Cc["@mozilla.org/messenger/msgAuthPrompt;1"].getService(
+         Ci.nsIAuthPrompt
+       );
+     } catch (e) {
+-      // Often happens in tests. This prompt has no checkbox for saving password.
+-      authPrompt = Services.ww.getNewAuthPrompter(null);
++      throw Components.Exception("Password dialog canceled", Cr.NS_ERROR_ABORT);
+     }
+     let password = this._getPasswordWithoutUI();
+     if (password) {
+       this.password = password;
+       return this.password;
+     }
+     let outUsername = {};
+     let outPassword = {};
+diff --git a/mailnews/extensions/smime/certFetchingStatus.js b/mailnews/extensions/smime/certFetchingStatus.js
+--- a/mailnews/extensions/smime/certFetchingStatus.js
++++ b/mailnews/extensions/smime/certFetchingStatus.js
+@@ -97,17 +97,19 @@ function getLDAPOperation() {
+   );
+ 
+   gLdapOperation.init(gLdapConnection, new ldapMessageListener(), null);
+ }
+ 
+ function getPassword() {
+   // we only need a password if we are using credentials
+   if (gLogin) {
+-    let authPrompter = Services.ww.getNewAuthPrompter(window);
++    let authPrompter = Cc["@mozilla.org/messenger/msgAuthPrompt;1"].getService(
++      Ci.nsIAuthPrompt
++    );
+     let strBundle = document.getElementById("bundle_ldap");
+     let password = { value: "" };
+ 
+     // nsLDAPAutocompleteSession uses asciiHost instead of host for the prompt text, I think we should be
+     // consistent.
+     if (
+       authPrompter.promptPassword(
+         strBundle.getString("authPromptTitle"),
+diff --git a/mailnews/news/src/nsNewsFolder.cpp b/mailnews/news/src/nsNewsFolder.cpp
+--- a/mailnews/news/src/nsNewsFolder.cpp
++++ b/mailnews/news/src/nsNewsFolder.cpp
+@@ -23,17 +23,16 @@
+ #include "nsNewsUtils.h"
+ 
+ #include "nsIMsgIncomingServer.h"
+ #include "nsINntpIncomingServer.h"
+ #include "nsINewsDatabase.h"
+ #include "nsILineInputStream.h"
+ 
+ #include "nsIMsgWindow.h"
+-#include "nsIWindowWatcher.h"
+ 
+ #include "nsNetUtil.h"
+ #include "nsIAuthPrompt.h"
+ #include "nsIURL.h"
+ #include "nsNetCID.h"
+ #include "nsINntpUrl.h"
+ 
+ #include "nsNewsDownloader.h"
+@@ -1059,20 +1058,17 @@ nsMsgNewsFolder::GetAuthenticationCreden
+   }
+ 
+   // Show the prompt if we need to
+   if (mustPrompt ||
+       (mayPrompt && (mGroupUsername.IsEmpty() || mGroupPassword.IsEmpty()))) {
+     nsCOMPtr<nsIAuthPrompt> authPrompt =
+         do_GetService("@mozilla.org/messenger/msgAuthPrompt;1");
+     if (!authPrompt) {
+-      nsCOMPtr<nsIWindowWatcher> wwatch(
+-          do_GetService(NS_WINDOWWATCHER_CONTRACTID));
+-      if (wwatch) wwatch->GetNewAuthPrompter(0, getter_AddRefs(authPrompt));
+-      if (!authPrompt) return NS_ERROR_FAILURE;
++      return NS_ERROR_FAILURE;
+     }
+ 
+     if (authPrompt) {
+       // Format the prompt text strings
+       nsString promptTitle, promptText;
+       bundle->GetStringFromName("enterUserPassTitle", promptTitle);
+ 
+       nsString serverName;
