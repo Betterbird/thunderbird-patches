@@ -74,7 +74,7 @@ if [ -d $MOZILLA_DIR ]; then
   cd $MOZILLA_DIR
 else
   echo "Mozilla directory $MOZILLA_DIR not found"
-  echo "Do you want to clone the Mozilla repo."
+  echo "Do you want to clone the Mozilla repo?"
   echo "This will take 30 minutes or more and will pull 2 GB of data."
   read -p "Proceed? (Y/N) " ANSWER
   if [ "$ANSWER" != "Y" ]; then
