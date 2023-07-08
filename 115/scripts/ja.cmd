@@ -78,7 +78,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "totalMsgStatus=合計: %%S"      >> chrome\ja\locale\ja\messenger\messenger.properties
 
 :: https://bugzilla.mozilla.org/show_bug.cgi?id=1827257
-:: Missing on 02 July 2023:
+:: Missing from about3Pane.ftl on 08 July 2023:
 :: folder-pane-mode-move-up =
 ::   .label = Move Up
 :: folder-pane-mode-move-down =

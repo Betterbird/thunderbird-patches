@@ -76,10 +76,3 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "unreadMsgStatus=Não lidas: %%S"      >> chrome\pt-BR\locale\pt-BR\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Selecionadas: %%S" >> chrome\pt-BR\locale\pt-BR\messenger\messenger.properties
 %lecho% "totalMsgStatus=Total: %%S"           >> chrome\pt-BR\locale\pt-BR\messenger\messenger.properties
-
-:: https://bugzilla.mozilla.org/show_bug.cgi?id=1827257
-:: Missing on 02 July 2023:
-:: folder-pane-mode-move-up =
-::   .label = Move Up
-:: folder-pane-mode-move-down =
-::   .label = Move Down
