@@ -1,0 +1,86 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1688859746 -7200
+# Parent  a6af18f625793e9544ca171f8f8bc511d1467a89
+Fix and optimise startup of notification manager.
+
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -396,16 +396,24 @@ var gMailInit = {
+     this.delayedStartupFinished = true;
+     _resolveDelayedStartup(window);
+     Services.obs.notifyObservers(window, "browser-delayed-startup-finished");
+ 
+     // Notify observer to resolve the browserStartupPromise, which is used for the
+     // delayed background startup of WebExtensions.
+     Services.obs.notifyObservers(window, "extensions-late-startup");
+ 
++    // Start these services before `_loadComponentsAtStartup()` goes fetching new mail.
++    Cc["@mozilla.org/newMailNotificationService;1"].getService(
++      Ci.mozINewMailNotificationService
++    );
++    Cc["@mozilla.org/mail/notification-manager;1"].getService(
++      Ci.mozINewMailListener
++    );
++
+     this._loadComponentsAtStartup();
+   },
+ 
+   /**
+    * Load all the necessary components to make Thunderbird usable before
+    * checking for existing accounts.
+    */
+   async _loadComponentsAtStartup() {
+diff --git a/mail/components/MailGlue.jsm b/mail/components/MailGlue.jsm
+--- a/mail/components/MailGlue.jsm
++++ b/mail/components/MailGlue.jsm
+@@ -586,22 +586,16 @@ MailGlue.prototype = {
+           .getService(Ci.nsIApplicationUpdateService)
+           .checkForBackgroundUpdates();
+       }
+     }
+   },
+ 
+   _onFirstWindowLoaded() {
+     // Start these services.
+-    Cc["@mozilla.org/newMailNotificationService;1"].getService(
+-      Ci.mozINewMailNotificationService
+-    );
+-    Cc["@mozilla.org/mail/notification-manager;1"].getService(
+-      Ci.mozINewMailListener
+-    );
+     Cc["@mozilla.org/chat/logger;1"].getService(Ci.imILogger);
+ 
+     this._checkForOldBuildUpdates();
+ 
+     // On Windows 7 and above, initialize the jump list module.
+     const WINTASKBAR_CONTRACTID = "@mozilla.org/windows-taskbar;1";
+     if (
+       WINTASKBAR_CONTRACTID in Cc &&
+diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
+--- a/mailnews/base/src/MailNotificationService.jsm
++++ b/mailnews/base/src/MailNotificationService.jsm
+@@ -39,17 +39,21 @@ function NewMailNotificationService() {
+   MailServices.mailSession.AddFolderListener(
+     this,
+     Ci.nsIFolderListener.intPropertyChanged |
+       Ci.nsIFolderListener.boolPropertyChanged |
+       Ci.nsIFolderListener.added |
+       Ci.nsIFolderListener.removed |
+       Ci.nsIFolderListener.propertyFlagChanged
+   );
+-  this._initUnreadCount();
++  // If we're counting new instead of unread, we don't need to expensively
++  // get the unread count for all folders.
++  if (!this.countNew) {
++    this._initUnreadCount();
++  }
+ }
+ 
+ NewMailNotificationService.prototype = {
+   QueryInterface: ChromeUtils.generateQI([
+     "nsIObserver",
+     "nsIFolderListener",
+     "mozINewMailNotificationService",
+   ]),
