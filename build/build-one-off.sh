@@ -10,7 +10,7 @@ NOCLOBBER=""
 if [ "$#" -eq 2 ]; then
   if [ "$2" = "apply" ]; then
     APPLY="apply"
-  elif [ "$2" = "noclobber" ]; then
+    elif [ "$2" = "noclobber" ]; then
     NOCLOBBER="noclobber"
   else
     echo "Usage: $0 VERSION [apply|noclobber]" >&2
@@ -91,7 +91,7 @@ SOURCE=$(cat $APPDATA_FILE | sed -rz 's@.+<artifact type="source">\s*<location>(
 echo
 echo "======================================================="
 echo "Retrieving $SOURCE"
-wget -nc $SOURCE
+wget -q -nc $SOURCE
 ARCHIVE="$(basename $SOURCE)"
 
 echo
@@ -150,36 +150,36 @@ echo
 echo "======================================================="
 echo "Applying patch series for main repository"
 cat patches/series | while read line || [[ -n $line ]]
-  do 
-    patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
-    if [[ -n "${patch// }" ]]; then
-      if [[ -f patches/$patch ]]; then
-        echo Applying patch $patch ... 
-        git apply --apply --whitespace=nowarn patches/$patch
-      else
-        echo Patch $patch not found. Exiting.
-        exit 1
-      fi
+do
+  patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
+  if [[ -n "${patch// }" ]]; then
+    if [[ -f patches/$patch ]]; then
+      echo Applying patch $patch ...
+      git apply --apply --whitespace=nowarn patches/$patch
+    else
+      echo Patch $patch not found. Exiting.
+      exit 1
     fi
-  done
+  fi
+done
 
 echo
 echo "======================================================="
 echo "Applying patch series for comm repository"
 cd comm
 cat patches/series | while read line || [[ -n $line ]]
-  do
-    patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
-    if [[ -n "${patch// }" ]]; then
-      if [[ -f patches/$patch ]]; then
-        echo Applying patch $patch ... 
-        git apply --apply --whitespace=nowarn patches/$patch
-      else
-        echo Patch $patch not found. Exiting.
-        exit 1
-      fi
+do
+  patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
+  if [[ -n "${patch// }" ]]; then
+    if [[ -f patches/$patch ]]; then
+      echo Applying patch $patch ...
+      git apply --apply --whitespace=nowarn patches/$patch
+    else
+      echo Patch $patch not found. Exiting.
+      exit 1
     fi
-  done
+  fi
+done
 cd ..
 
 if [ "$APPLY" = "apply" ]; then
@@ -219,18 +219,18 @@ if [ "$UNAME" = "Linux" ]; then
     echo "======================================================="
     echo "Copying mozconfig-Linux"
     cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-  elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    elif [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "Copying mozconfig-Linux-aarch64"
     cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
   fi
-elif [ "$UNAME" = "Darwin" ]; then
+  elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig-Mac"
   cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
-elif [ "$UNAME" = "Windows" ]; then
+  elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig for Windows"
@@ -275,18 +275,18 @@ if [ "$UNAME" = "Linux" ]; then
     echo "======================================================="
     echo "Find your archive here"
     ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
-  elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    elif [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "Find your archive here"
     ls  $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
   fi
-elif [ "$UNAME" = "Darwin" ]; then
+  elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"
   ls  $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
-elif [ "$UNAME" = "Windows" ]; then
+  elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"
