@@ -79,7 +79,13 @@ if [ -d $MOZILLA_DIR ]; then
   rm -rf $MOZILLA_DIR
 fi
 
-APPDATA_FILE="thunderbird-patches/metadata/eu.betterbird.Betterbird.appdata.xml"
+if [ "$VERSION" = "115" ]; then
+  APPDATA_FILE="thunderbird-patches/metadata/eu.betterbird.Betterbird.115.appdata.xml"
+else
+  APPDATA_FILE="thunderbird-patches/metadata/eu.betterbird.Betterbird.appdata.xml"
+  echo "This script only works for the 115 build, see: https://bugzilla.mozilla.org/show_bug.cgi?id=1798746."
+  exit 1
+fi
 SOURCE=$(cat $APPDATA_FILE | sed -rz 's@.+<artifact type="source">\s*<location>([^<]+)<\/location>.+@\1@')
 
 echo
@@ -192,21 +198,19 @@ else
   echo "======================================================="
   echo "Bootstrapping environment ONCE. This is controlled by ./mach_bootstrap_was_run_$VERSION."
   echo "Note that this may require a restart of the shell."
-  echo "This is very much 'work in progress'."
-  echo "./mach --no-interactive bootstrap does not work since this is neither a hg nor git checkout."
+  echo "This only works from 115 onwards, see https://bugzilla.mozilla.org/show_bug.cgi?id=1798746."
   touch ../mach_bootstrap_was_run_$VERSION
-  # ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
-  # $HOME/.cargo/bin/rustup override set $RUST_VER
-  ./mach create-mach-environment
-  ./mach configure
-  echo
-  echo "======================================================="
-  echo "./mach configure likely failed to complete."
-  echo "You will need to install LLVM, clang, nodejs (nvm, node, npm) and other dependencies manually."
-  echo "For aarch64 there are some instructions here:"
-  echo "https://github.com/Betterbird/thunderbird-patches/blob/main/build/build-env-aarch64.MD"
-  echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
-  exit 1
+  ./mach --no-interactive bootstrap --application-choice "Firefox for Desktop"
+  $HOME/.cargo/bin/rustup override set $RUST_VER
+  if [ "$UNAME" = "Linux" ] && [ "$UNAME_ARCH" = "aarch64" ]; then
+    echo
+    echo "======================================================="
+    echo "./mach bootstrap on Linux/aarch64 likely failed to complete."
+    echo "Please follow the instructions here:"
+    echo "https://github.com/Betterbird/thunderbird-patches/blob/main/build/build-env-aarch64.MD"
+    echo "You only need to do all of these steps once or whenever the Betterbird build requires updated software versions."
+    exit 1
+  fi
 fi
 
 if [ "$UNAME" = "Linux" ]; then
