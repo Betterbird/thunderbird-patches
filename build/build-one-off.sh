@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
   echo "Usage: $0 VERSION [apply|noclobber]" >&2
