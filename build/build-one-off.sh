@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
   echo "Usage: $0 VERSION [apply|noclobber]" >&2
@@ -155,7 +156,7 @@ cat patches/series | while read line || [[ -n $line ]]
     if [[ -n "${patch// }" ]]; then
       if [[ -f patches/$patch ]]; then
         echo Applying patch $patch ... 
-        git apply --apply patches/$patch
+        git apply --apply --allow-empty patches/$patch
       else
         echo Patch $patch not found. Exiting.
         exit 1
@@ -173,7 +174,7 @@ cat patches/series | while read line || [[ -n $line ]]
     if [[ -n "${patch// }" ]]; then
       if [[ -f patches/$patch ]]; then
         echo Applying patch $patch ... 
-        git apply --apply patches/$patch
+        git apply --apply --allow-empty patches/$patch
       else
         echo Patch $patch not found. Exiting.
         exit 1
