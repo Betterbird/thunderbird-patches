@@ -31,7 +31,7 @@ cd thunderbird-patches
 git pull
 cd ..
 
-DIFF=$(diff -q build.sh thunderbird-patches/build/build.sh)
+DIFF=$(diff -q build-one-off.sh thunderbird-patches/build/build-one-off.sh)
 if [ "|$DIFF|" != "||" ]; then
   echo "Newer version of build script available."
   echo "Please |cp thunderbird-patches/build/build.sh .| and restart"
