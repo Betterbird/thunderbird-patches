@@ -16,6 +16,7 @@ Sadly `./mach bootstrap` doesn't work on Linux/aarch64, so please read [here](./
 This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html) copied below:
 1. Prepare to install necessary dependencies: `sudo apt update`
 1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
+1. More packages: `sudo aptitude install libdbusmenu-gtk3-dev`
 1. Install Mercurial: `sudo apt-get install mercurial` if the Mercurial in your distribution is new enough (as it should be for Ubuntu 20.04). Otherwise use the following two steps.
 1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.bashrc` and `python3 -m pip install --user mercurial`
 1. In a new shell: `hg version`
@@ -85,6 +86,12 @@ We don't store those patches here. Those patches will have a comment in the seri
 Linux users please note that `08-branding-m-c.patch` patches a Windows installer script making use of Windows PowerShell.
 However, that part of the build system should not be triggered for Linux builds.
 Windows users please note that packaging will fail without an appropriate code signing certificate installed.
+
+## One-off build
+
+The standard build script `build.sh` initially pulls two Mozilla repositories. This is fine if you want to repeat the
+build later. For so-called one-off builds we have a script `build-one-off.sh` which works off the published tarball for
+the corresponding Thunderbird release. This downloads a lot less data and is hence faster during the code preparation stage.
 
 ## Bug Reporting / Support
 
