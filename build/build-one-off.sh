@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e # fail on failing commands
+
 if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
   echo "Usage: $0 VERSION [apply|noclobber]" >&2
   exit 1
@@ -10,7 +12,7 @@ NOCLOBBER=""
 if [ "$#" -eq 2 ]; then
   if [ "$2" = "apply" ]; then
     APPLY="apply"
-    elif [ "$2" = "noclobber" ]; then
+  elif [ "$2" = "noclobber" ]; then
     NOCLOBBER="noclobber"
   else
     echo "Usage: $0 VERSION [apply|noclobber]" >&2
@@ -28,13 +30,13 @@ echo
 echo "======================================================="
 echo "Updating Betterbird patches"
 cd thunderbird-patches
-git pull
+git pull || true # Allowed to fail on tagged builds
 cd ..
 
 DIFF=$(diff -q build-one-off.sh thunderbird-patches/build/build-one-off.sh)
 if [ "|$DIFF|" != "||" ]; then
   echo "Newer version of build script available."
-  echo "Please |cp thunderbird-patches/build/build.sh .| and restart"
+  echo "Please |cp thunderbird-patches/build/build-one-off.sh .| and restart"
   exit 1
 fi
 
@@ -124,9 +126,9 @@ echo
 echo "======================================================="
 echo "Retrieving external patches for Mozilla repo"
 echo "#!/bin/sh" > external.sh
-grep " # " patches/series >> external.sh
+grep " # " patches/series >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1 || true/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
@@ -136,9 +138,9 @@ echo "======================================================="
 echo "Retrieving external patches for comm repo"
 cd comm
 echo "#!/bin/sh" > external.sh
-grep " # " patches/series >> external.sh
+grep " # " patches/series >> external.sh  || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1 || true/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
@@ -219,18 +221,18 @@ if [ "$UNAME" = "Linux" ]; then
     echo "======================================================="
     echo "Copying mozconfig-Linux"
     cp ../thunderbird-patches/$VERSION/mozconfig-Linux mozconfig
-    elif [ "$UNAME_ARCH" = "aarch64" ]; then
+  elif [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "Copying mozconfig-Linux-aarch64"
     cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
   fi
-  elif [ "$UNAME" = "Darwin" ]; then
+elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig-Mac"
   cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
-  elif [ "$UNAME" = "Windows" ]; then
+elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig for Windows"
@@ -275,18 +277,18 @@ if [ "$UNAME" = "Linux" ]; then
     echo "======================================================="
     echo "Find your archive here"
     ls  $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
-    elif [ "$UNAME_ARCH" = "aarch64" ]; then
+  elif [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "Find your archive here"
     ls  $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
   fi
-  elif [ "$UNAME" = "Darwin" ]; then
+elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"
   ls  $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
-  elif [ "$UNAME" = "Windows" ]; then
+elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Find you disk image here"

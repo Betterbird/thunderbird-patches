@@ -84,12 +84,12 @@ else
   echo
   echo "======================================================="
   echo "Cloning $MOZILLA_REPO"
-  hg clone $MOZILLA_REPO
+  hg clone $MOZILLA_REPO || exit 1
   echo
   echo "======================================================="
   echo "Cloning $COMM_REPO"
   cd $MOZILLA_DIR
-  hg clone $COMM_REPO comm
+  hg clone $COMM_REPO comm || exit 1
 fi
 
 if [ "$UNAME" = "Linux" ] || [ "$UNAME" = "Darwin" ]; then
@@ -113,6 +113,9 @@ else
     fi
   fi
 fi
+
+set -e # fail on failing commands
+# this is not at start of file due to grep "mq =" causing exit
 
 echo
 echo "======================================================="
@@ -159,9 +162,9 @@ echo
 echo "======================================================="
 echo "Retrieving external patches for Mozilla repo"
 echo "#!/bin/sh" > external.sh
-grep " # " .hg/patches/series >> external.sh
+grep " # " .hg/patches/series >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1 || true/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
@@ -171,9 +174,9 @@ echo "======================================================="
 echo "Retrieving external patches for comm repo"
 cd comm
 echo "#!/bin/sh" > external.sh
-grep " # " .hg/patches/series >> external.sh
+grep " # " .hg/patches/series >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1 || true/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
