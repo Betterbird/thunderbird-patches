@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e # fail on failing commands
+
 if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
   echo "Usage: $0 VERSION [apply|noclobber]" >&2
   exit 1
@@ -28,13 +30,13 @@ echo
 echo "======================================================="
 echo "Updating Betterbird patches"
 cd thunderbird-patches
-git pull
+git pull || true # Allowed to fail on tagged builds
 cd ..
 
 DIFF=$(diff -q build-one-off.sh thunderbird-patches/build/build-one-off.sh)
 if [ "|$DIFF|" != "||" ]; then
   echo "Newer version of build script available."
-  echo "Please |cp thunderbird-patches/build/build.sh .| and restart"
+  echo "Please |cp thunderbird-patches/build/build-one-off.sh .| and restart"
   exit 1
 fi
 
@@ -91,7 +93,7 @@ SOURCE=$(cat $APPDATA_FILE | sed -rz 's@.+<artifact type="source">\s*<location>(
 echo
 echo "======================================================="
 echo "Retrieving $SOURCE"
-wget -nc $SOURCE
+wget -q -nc $SOURCE
 ARCHIVE="$(basename $SOURCE)"
 
 echo
@@ -124,9 +126,9 @@ echo
 echo "======================================================="
 echo "Retrieving external patches for Mozilla repo"
 echo "#!/bin/sh" > external.sh
-grep " # " patches/series >> external.sh
+grep " # " patches/series >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1 || true/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
@@ -136,9 +138,9 @@ echo "======================================================="
 echo "Retrieving external patches for comm repo"
 cd comm
 echo "#!/bin/sh" > external.sh
-grep " # " patches/series >> external.sh
+grep " # " patches/series >> external.sh  || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1/' external.sh
+sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1 || true/' external.sh
 chmod 700 external.sh
 . ./external.sh
 rm external.sh
@@ -150,36 +152,36 @@ echo
 echo "======================================================="
 echo "Applying patch series for main repository"
 cat patches/series | while read line || [[ -n $line ]]
-  do 
-    patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
-    if [[ -n "${patch// }" ]]; then
-      if [[ -f patches/$patch ]]; then
-        echo Applying patch $patch ... 
-        git apply --apply --whitespace=nowarn patches/$patch
-      else
-        echo Patch $patch not found. Exiting.
-        exit 1
-      fi
+do
+  patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
+  if [[ -n "${patch// }" ]]; then
+    if [[ -f patches/$patch ]]; then
+      echo Applying patch $patch ...
+      git apply --apply --whitespace=nowarn patches/$patch
+    else
+      echo Patch $patch not found. Exiting.
+      exit 1
     fi
-  done
+  fi
+done
 
 echo
 echo "======================================================="
 echo "Applying patch series for comm repository"
 cd comm
 cat patches/series | while read line || [[ -n $line ]]
-  do
-    patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
-    if [[ -n "${patch// }" ]]; then
-      if [[ -f patches/$patch ]]; then
-        echo Applying patch $patch ... 
-        git apply --apply --whitespace=nowarn patches/$patch
-      else
-        echo Patch $patch not found. Exiting.
-        exit 1
-      fi
+do
+  patch=$(echo $line | cut -f1 -d'#' | sed 's/ *$//')
+  if [[ -n "${patch// }" ]]; then
+    if [[ -f patches/$patch ]]; then
+      echo Applying patch $patch ...
+      git apply --apply --whitespace=nowarn patches/$patch
+    else
+      echo Patch $patch not found. Exiting.
+      exit 1
     fi
-  done
+  fi
+done
 cd ..
 
 if [ "$APPLY" = "apply" ]; then
