@@ -158,6 +158,13 @@ cp ../thunderbird-patches/$VERSION/features/*.patch comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/misc/*.patch     comm/.hg/patches/
 mv comm/.hg/patches/*-m-c.patch .hg/patches/
 
+if [ -d ../private-patches ]; then
+  echo
+  echo "======================="
+  echo "Copying private patches"
+  cp ../private-patches/*.patch comm/.hg/patches/
+fi
+
 echo
 echo "======================================================="
 echo "Retrieving external patches for Mozilla repo"
