@@ -1,45 +1,102 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
+# Date 1690056861 -7200
 # Parent  0f2218a7f7d580ca5e81bb34fa37e7baef2dae4f
 Fix issue when making messages unread manually.
 
 diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
 --- a/mailnews/base/src/MailNotificationService.jsm
 +++ b/mailnews/base/src/MailNotificationService.jsm
-@@ -223,20 +223,32 @@ NewMailNotificationService.prototype = {
-           Math.max(folderCount + newCount, 0)
-         );
+@@ -195,54 +195,45 @@ NewMailNotificationService.prototype = {
+         // For new folders, there is a call with old == -1 and new == 0.
+         this._updateNewCount(folder, newValue - Math.max(oldValue, 0));
        }
-       /* eslint-enable no-lonely-if */
+     } catch (error) {
+       this._log.error("onFolderIntPropertyChanged: exception " + error);
+     }
+   },
+ 
+-  _updateNewCount(folder, newCount, allowNegative = false) {
++  _updateNewCount(folder, newCount, isCompensation = false) {
+     if (!this.confirmShouldCount(folder)) {
+       return;
      }
  
-     let folderNew = this.folderNewMap.get(folder.URI);
-     if (!folderNew) {
+     this._log.debug(`_updateNewCount: ${folder.URI} new messages: ${newCount}`);
+-    let folderCount = this.folderCountMap.get(folder.URI);
+-    if (!folderCount) {
+-      if (allowNegative) {
+-        this.folderCountMap.set(folder.URI, newCount);
+-      } else {
+-        this.folderCountMap.set(folder.URI, Math.max(newCount, 0));
+-      }
+-    } else {
+-      /* eslint-disable no-lonely-if */
+-      if (allowNegative) {
+-        this.folderCountMap.set(folder.URI, folderCount + newCount);
+-      } else {
+-        this.folderCountMap.set(
+-          folder.URI,
+-          Math.max(folderCount + newCount, 0)
+-        );
+-      }
+-      /* eslint-enable no-lonely-if */
++    let folderCount = this.folderCountMap.get(folder.URI) || 0;
++    if (isCompensation) {
++      this.folderCountMap.set(folder.URI, folderCount + newCount);
++      this._mNewCount += newCount;
++      this._log.debug(
++        `_updateNewCount: Compensation for ${folder.URI}, returning with count ${this._mNewCount}`
++      );
++      return;
+     }
+-
+-    let folderNew = this.folderNewMap.get(folder.URI);
+-    if (!folderNew) {
 -      this.folderNewMap.set(folder.URI, {
 -        name: folder.name,
 -        isInbox: folder.flags & Ci.nsMsgFolderFlags.Inbox,
 -      });
-+      // Reinstate 91/102 code.
-+      this._log.debug(
-+        `_updateNewCount: ${folder.URI} not in the map, returning`
-+      );
-+      return;
-+      // The code below causes this error:
-+      // If there are no new messages, the folder is not in the map.
-+      // Continuing here will lose the temporary negative count
-+      // and lead to a phantom new message which can't be cleared.
-+      // Sadly we can't remember why the code was added in:
-+      // https://github.com/Betterbird/thunderbird-patches/commit/8bfcd49bde38633e5fba11aff9cdceb143f1e77a
-+      // and which issue it tried to address.
-+      // this.folderNewMap.set(folder.URI, {
-+      //  name: folder.name,
-+      //  isInbox: folder.flags & Ci.nsMsgFolderFlags.Inbox,
-+      //});
-     }
- 
+-    }
+-
++    this.folderCountMap.set(folder.URI, Math.max(folderCount + newCount, 0));
      this._mNewCount = Math.max(this._mNewCount + newCount, 0);
      this._log.debug(
        `_updateNewCount: ${folder.URI} new mail count: ${this._mNewCount}`
      );
++
++    let folderNew = this.folderNewMap.get(folder.URI);
++    if (!folderNew) {
++      this._log.debug(
++        `_updateNewCount: ${folder.URI} not in the map, returning with count ${this._mNewCount}`
++      );
++      return;
++    }
++
      if (this.countNew) {
        this._notifyListeners(
+         Ci.mozINewMailNotificationService.count,
+         "onCountChanged",
+         this._mNewCount,
+         this._folderInfo()
+       );
+     }
+@@ -443,17 +434,17 @@ NewMailNotificationService.prototype = {
+         !(newFlag & Ci.nsMsgMessageFlags.Read)
+       ) {
+         this._updateNewCount(msg.folder, -1, true);
+       }
+       if (
+         !(oldFlag & Ci.nsMsgMessageFlags.Read) &&
+         newFlag & Ci.nsMsgMessageFlags.Read
+       ) {
+-        this._updateNewCount(msg.folder, 1);
++        this._updateNewCount(msg.folder, 1, true);
+       }
+     }
+   },
+ 
+   onFolderRemoved(parentFolder, child) {
+     if (child.rootFolder == child) {
+       this._log.trace(`Removed root folder ${child.folderURL}`);
+     } else {
