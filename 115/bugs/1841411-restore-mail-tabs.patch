@@ -1,0 +1,109 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1690399239 -7200
+# Parent  0718a2249eb13539694262653257d041e97a5251
+Bug 1841411 - Hacky mitigation of problems due to restoring mail tabs.
+
+diff --git a/mail/base/content/tabmail.js b/mail/base/content/tabmail.js
+--- a/mail/base/content/tabmail.js
++++ b/mail/base/content/tabmail.js
+@@ -1382,34 +1382,98 @@ var { UIFontSize } = ChromeUtils.import(
+     }
+ 
+     /**
+      * Attempts to restore tabs persisted from a prior call to
+      * |persistTabs|. This is currently a synchronous operation, but in
+      * the future this may kick off an asynchronous mechanism to restore
+      * the tabs one-by-one.
+      */
+-    restoreTabs(aPersistedState, aDontRestoreFirstTab) {
++    async restoreTabs(aPersistedState, aDontRestoreFirstTab) {
+       let tabs = aPersistedState.tabs;
+       let indexToSelect = null;
++      let lastURI = "<unknown>";
+ 
+       for (let [iTab, tabState] of tabs.entries()) {
+         if (tabState.state.firstTab && aDontRestoreFirstTab) {
+           tabState.state.dontRestoreFirstTab = aDontRestoreFirstTab;
+         }
+ 
+         if (!this.restoreTab(tabState)) {
+           continue;
+         }
+ 
+         // If this persisted tab was the selected one, then mark the newest
+         //  tab as the guy to select.
+         if (iTab == aPersistedState.selectedIndex) {
+           indexToSelect = this.tabInfo.length - 1;
+         }
++
++        // There is something fundamentally wrong here.
++        // Observed behaviour is that mail tabs don't load if we don't wait until
++        // the are loaded completely. We've also seen other tabs, like Settings or the
++        // Add-ons Manage, being loaded incomplete and defective.
++        // So as a makeshift solution, we'll wait for the previous tab to load before
++        // restoring the next one.
++
++        // Check state of previously loaded tab.
++        if (
++          this.tabInfo.length >= 1 &&
++          this.tabInfo[this.tabInfo.length - 1].chromeBrowser
++        ) {
++          let chromeBrowser =
++            this.tabInfo[this.tabInfo.length - 1].chromeBrowser;
++          let stateOfPrevious = chromeBrowser.contentDocument.readyState;
++          if (stateOfPrevious != "complete") {
++            await new Promise(r => {
++              // Code from mailTabs.js.
++              // Experiments show that it mostly resolves via "DOMContentLoaded"
++              // but sometimes also via "load".
++              let resolved = false;
++              chromeBrowser.addEventListener(
++                "DOMContentLoaded",
++                event => {
++                  if (event.target == chromeBrowser.contentDocument) {
++                    if (!resolved) {
++                      resolved = true;
++                      r();
++                    }
++                  }
++                },
++                { capture: true, once: true }
++              );
++              chromeBrowser.addEventListener(
++                "load",
++                event => {
++                  if (event.target == chromeBrowser.contentDocument) {
++                    if (!resolved) {
++                      resolved = true;
++                      r();
++                    }
++                  }
++                },
++                { capture: true, once: true }
++              );
++              // Kill the wait with a timeout if the two events above haven't fired.
++              setTimeout(() => {
++                if (!resolved) {
++                  resolved = true;
++                  console.error(
++                    `Unable to restore tab for ${lastURI} after five seconds`
++                  );
++                  r();
++                }
++              }, 5000);
++            });
++          }
++        }
++        lastURI =
++          tabState.state?.messageURI ||
++          tabState.state?.folderURI ||
++          "<unknown>";
+       }
+ 
+       if (indexToSelect != null && !aDontRestoreFirstTab) {
+         this.tabContainer.selectedIndex = indexToSelect;
+       } else {
+         this.tabContainer.selectedIndex = 0;
+       }
+ 
