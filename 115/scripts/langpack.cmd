@@ -20,7 +20,7 @@ sed -i -e 's/"gecko": {/"gecko": { "update_url": "https:\/\/www.betterbird.eu\/d
 :: Copy US branding
 7z x ..\betterbird-%~2.en-US.win64.installer.exe core\omni.ja
 7z x core\omni.ja chrome\en-US\locale\branding\
-7z x core\omni.ja localization\en-US\branding
+7z x core\omni.ja localization\en-US\branding\
 mv chrome\en-US\locale\branding\ chrome\%~1\locale\branding\
 mv localization\en-US\branding localization\%~1\branding\
 rmdir /s /q chrome\en-US
