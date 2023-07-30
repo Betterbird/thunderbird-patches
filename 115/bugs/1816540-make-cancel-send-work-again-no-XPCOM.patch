@@ -1,0 +1,194 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1690749888 -7200
+# Parent  22bc0b2d1a7e28a4d10a8dcdd112f4756a28f0ff
+Bug 1816540 - Clean up async issues created in bug 136871 to make cancel sending work again.
+
+diff --git a/mailnews/compose/public/nsISmtpService.idl b/mailnews/compose/public/nsISmtpService.idl
+--- a/mailnews/compose/public/nsISmtpService.idl
++++ b/mailnews/compose/public/nsISmtpService.idl
+@@ -40,35 +40,26 @@ interface nsISmtpService : nsISupports {
+    *                                this parameter may be null.
+    * @param aStatusListener         A feedback listener for slightly different
+    *                                feedback on the message send status. This
+    *                                parameter may be null.
+    * @param aNotificationCallbacks  More notification callbacks
+    * @param aRequestDSN             Pass true to request Delivery Status
+    *                                Notification.
+    * @param aMessageId              The message id can be used as ENVID for DSN.
+-   * @param aURL                    Provides a handle on the running url. You
+-   *                                can later interrupt the action by asking the
+-   *                                netlib service manager to interrupt the url
+-   *                                you are given back. This parameter may be
+-   *                                null.
+-   * @param aRequest                Provides a handle to the running request.
+-   *                                This parameter may be null.
+    */
+-  void sendMailMessage(in nsIFile aFilePath, in string aRecipients,
+-                       in nsIMsgIdentity aSenderIdentity,
+-                       in string aSender,
+-                       in AString aPassword,
+-                       in nsIUrlListener aUrlListener,
+-                       in nsIMsgStatusFeedback aStatusListener,
+-                       in nsIInterfaceRequestor aNotificationCallbacks,
+-                       in boolean aRequestDSN,
+-                       in ACString aMessageId,
+-                       out nsIURI aURL,
+-                       out nsIRequest aRequest);
++  void sendMailMessageXPCOM(in nsIFile aFilePath, in string aRecipients,
++                            in nsIMsgIdentity aSenderIdentity,
++                            in string aSender,
++                            in AString aPassword,
++                            in nsIUrlListener aUrlListener,
++                            in nsIMsgStatusFeedback aStatusListener,
++                            in nsIInterfaceRequestor aNotificationCallbacks,
++                            in boolean aRequestDSN,
++                            in ACString aMessageId);
+ 
+   /**
+    * Verifies that we can logon to the server with given password
+    *
+    * @param  aSmtpServer       Server to try to logon to.
+    * @param  aUrlListener      Listener that will get notified whether logon
+    *                           was successful or not.
+    * @param aMsgWindow         nsIMsgWindow to use for notification callbacks.
+diff --git a/mailnews/compose/src/MessageSend.jsm b/mailnews/compose/src/MessageSend.jsm
+--- a/mailnews/compose/src/MessageSend.jsm
++++ b/mailnews/compose/src/MessageSend.jsm
+@@ -5,16 +5,19 @@
+ const EXPORTED_SYMBOLS = ["MessageSend"];
+ 
+ const { XPCOMUtils } = ChromeUtils.importESModule(
+   "resource://gre/modules/XPCOMUtils.sys.mjs"
+ );
+ const { MailServices } = ChromeUtils.import(
+   "resource:///modules/MailServices.jsm"
+ );
++const { SmtpService } = ChromeUtils.import(
++  "resource:///modules/SmtpService.jsm"
++);
+ 
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+   setTimeout: "resource://gre/modules/Timer.sys.mjs",
+ });
+ 
+ XPCOMUtils.defineLazyModuleGetters(lazy, {
+@@ -1113,17 +1116,17 @@ MessageSend.prototype = {
+       IOUtils.remove(this._messageFile.path).catch(console.error);
+       this._messageFile = null;
+     }
+   },
+ 
+   /**
+    * Send this._deliveryFile to smtp service.
+    */
+-  _deliverAsMail() {
++  async _deliverAsMail() {
+     this.sendReport.currentProcess = Ci.nsIMsgSendReport.process_SMTP;
+     this._setStatusMessage(
+       this._composeBundle.GetStringFromName("sendingMessage")
+     );
+     let recipients = [
+       this._compFields.to,
+       this._compFields.cc,
+       this._compFields.bcc,
+@@ -1142,28 +1145,30 @@ MessageSend.prototype = {
+     );
+     lazy.MsgUtils.sendLogger.debug("Delivering mail message");
+     let deliveryListener = new MsgDeliveryListener(this, false);
+     let msgStatus =
+       this._sendProgress instanceof Ci.nsIMsgStatusFeedback
+         ? this._sendProgress
+         : this._statusFeedback;
+     this._smtpRequest = {};
+-    MailServices.smtp.sendMailMessage(
++    // Call JS directly, no XPCOM. Using XPCOM gave trouble passing 
++    // back the out parameter which wasn't a complete nsIRequest.
++    let service = new SmtpService();
++    await service.sendMailMessage(
+       this._deliveryFile,
+       encodedRecipients,
+       this._userIdentity,
+       this._compFields.from,
+       this._smtpPassword,
+       deliveryListener,
+       msgStatus,
+       null,
+       this._compFields.DSN,
+       this._compFields.messageId,
+-      {},
+       this._smtpRequest
+     );
+   },
+ 
+   /**
+    * Send this._deliveryFile to nntp service.
+    */
+   _deliverAsNews() {
+diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
+--- a/mailnews/compose/src/SmtpService.jsm
++++ b/mailnews/compose/src/SmtpService.jsm
+@@ -66,28 +66,27 @@ class SmtpService {
+       );
+     }
+     return this._servers;
+   }
+ 
+   /**
+    * @see nsISmtpService
+    */
+-  sendMailMessage(
++  async sendMailMessage(
+     messageFile,
+     recipients,
+     userIdentity,
+     sender,
+     password,
+     deliveryListener,
+     statusListener,
+     notificationCallbacks,
+     requestDSN,
+     messageId,
+-    outURI,
+     outRequest
+   ) {
+     this._logger.debug(`Sending message ${messageId}`);
+     let server = this.getServerByIdentity(userIdentity);
+     if (password) {
+       server.password = password;
+     }
+     let runningUrl = this._getRunningUri(server);
+diff --git a/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp b/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp
+--- a/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp
++++ b/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp
+@@ -782,25 +782,21 @@ nsresult nsMsgMdnGenerator::OutputAllHea
+ 
+ nsresult nsMsgMdnGenerator::SendMdnMsg() {
+   DEBUG_MDN("nsMsgMdnGenerator::SendMdnMsg");
+   nsresult rv;
+   nsCOMPtr<nsISmtpService> smtpService =
+       do_GetService("@mozilla.org/messengercompose/smtp;1", &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  nsCOMPtr<nsIURI> aUri;
+-  nsCOMPtr<nsIRequest> aRequest;
+   nsCString identEmail;
+   m_identity->GetEmail(identEmail);
+-  smtpService->SendMailMessage(m_file, m_dntRrt.get(), m_identity,
+-                               identEmail.get(), EmptyString(), this, nullptr,
+-                               nullptr, false, ""_ns, getter_AddRefs(aUri),
+-                               getter_AddRefs(aRequest));
+-
++  smtpService->SendMailMessageXPCOM(m_file, m_dntRrt.get(), m_identity,
++                                    identEmail.get(), EmptyString(), this,
++                                    nullptr, nullptr, false, ""_ns);
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgMdnGenerator::WriteString(const char* str) {
+   NS_ENSURE_ARG(str);
+   uint32_t len = strlen(str);
+   uint32_t wLen = 0;
+ 
