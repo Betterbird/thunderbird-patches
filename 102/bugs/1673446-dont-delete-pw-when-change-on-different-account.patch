@@ -1,0 +1,303 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1690838254 -7200
+# Parent  2cbd92048e96cd77c30b1f839199366b3de1b45b
+Bug 1673446 - Don't delete ram password when stored login changes on a different account. r=mkmelin
+
+diff --git a/mailnews/base/src/MsgIncomingServer.jsm b/mailnews/base/src/MsgIncomingServer.jsm
+--- a/mailnews/base/src/MsgIncomingServer.jsm
++++ b/mailnews/base/src/MsgIncomingServer.jsm
+@@ -252,16 +252,69 @@ class MsgIncomingServer {
+     this.canCompactFoldersOnServer = true;
+     this.canUndoDeleteOnServer = true;
+     this.sortOrder = 100000000;
+ 
+     // @type {Map<string, number>} - The key is MsgId+Subject, the value is
+     //   this._hdrIndex.
+     this._knownHdrMap = new Map();
+     this._hdrIndex = 0;
++
++    Services.obs.addObserver(this, "passwordmgr-storage-changed");
++  }
++
++  /**
++   * Observe() receives notifications for all accounts, not just this server's
++   * account. So we ignore all notifications not intended for this server.
++   * When the state of the password manager changes we need to clear the
++   * this server's password from the cache in case the user just changed or
++   * removed the password or username.
++   * Oauth2 servers often automatically change the password manager's stored
++   * password (the token).
++   */
++  observe(subject, topic, data) {
++    if (topic == "passwordmgr-storage-changed") {
++      // Check that the notification is for this server and user.
++      let otherFullName = "";
++      let otherUsername = "";
++      if (subject instanceof Ci.nsILoginInfo) {
++        // The login info for a server has been removed with aData being
++        // "removeLogin" or "removeAllLogins".
++        otherFullName = subject.hostname;
++        otherUsername = subject.username;
++      } else if (subject instanceof Ci.nsIArray) {
++        // Probably a 2 element array containing old and new login info due to
++        // aData being "modifyLogin". E.g., a user has modified password or
++        // username in password manager or an oauth2 token string has
++        // automatically changed. Only need to look at names in first array
++        // element (login info before any modification) since the user might
++        // have changed the username as found in the 2nd elements. (The
++        // hostname can't be modified in password manager.
++        otherFullName = subject.queryElementAt(0, Ci.nsISupports).hostname;
++        otherUsername = subject.queryElementAt(0, Ci.nsISupports).username;
++      }
++      let thisHostname = this._prefs.getStringPref("hostname", "");
++      if (otherFullName) {
++        if (
++          otherFullName != "mailbox://" + thisHostname ||
++          otherUsername != this.username
++        ) {
++          // Not for this server; keep this server's cached password.
++          return;
++        }
++      } else if (data != "hostSavingDisabled") {
++        // "hostSavingDisabled" only occurs during test_smtpServer.js and
++        // expects the password to be removed from memory cache. Otherwise, we
++        // don't have enough information to decide to remove the cached
++        // password, so keep it.
++        return;
++      }
++      // Remove the password for this server cached in memory.
++      this.password = "";
++    }
+   }
+ 
+   /**
+    * Set up getters/setters for attributes that map directly to pref values.
+    * @param {string[]} - An array of attributes, each attribute is defined by
+    *   its type, name and corresponding prefName.
+    */
+   _mapAttrsToPrefs(attributes) {
+diff --git a/mailnews/base/src/OAuth2Module.jsm b/mailnews/base/src/OAuth2Module.jsm
+--- a/mailnews/base/src/OAuth2Module.jsm
++++ b/mailnews/base/src/OAuth2Module.jsm
+@@ -119,21 +119,23 @@ OAuth2Module.prototype = {
+     let logins = Services.logins.findLogins(
+       this._loginOrigin,
+       null,
+       this._scope
+     );
+     for (let login of logins) {
+       if (login.username == this._username) {
+         if (token) {
+-          let propBag = Cc["@mozilla.org/hash-property-bag;1"].createInstance(
+-            Ci.nsIWritablePropertyBag
+-          );
+-          propBag.setProperty("password", token);
+-          Services.logins.modifyLogin(login, propBag);
++          if (token != login.password) {
++            let propBag = Cc["@mozilla.org/hash-property-bag;1"].createInstance(
++              Ci.nsIWritablePropertyBag
++            );
++            propBag.setProperty("password", token);
++            Services.logins.modifyLogin(login, propBag);
++          }
+         } else {
+           Services.logins.removeLogin(login);
+         }
+         return;
+       }
+     }
+ 
+     // Unless the token is null, we need to create and fill in a new login
+diff --git a/mailnews/base/src/nsMsgIncomingServer.cpp b/mailnews/base/src/nsMsgIncomingServer.cpp
+--- a/mailnews/base/src/nsMsgIncomingServer.cpp
++++ b/mailnews/base/src/nsMsgIncomingServer.cpp
+@@ -45,16 +45,17 @@
+ #include "nsMsgMessageFlags.h"
+ #include "nsIMsgSearchTerm.h"
+ #include "nsAppDirectoryServiceDefs.h"
+ #include "mozilla/Services.h"
+ #include "Services.h"
+ #include "nsIMsgFilter.h"
+ #include "nsIObserverService.h"
+ #include "mozilla/Unused.h"
++#include "nsArrayUtils.h"
+ 
+ #define PORT_NOT_SET -1
+ 
+ nsMsgIncomingServer::nsMsgIncomingServer()
+     : m_rootFolder(nullptr),
+       m_downloadedHdrs(50),
+       m_numMsgsDownloaded(0),
+       m_biffState(nsIMsgFolder::nsMsgBiffState_Unknown),
+@@ -74,39 +75,84 @@ nsresult nsMsgIncomingServer::Init() {
+   return NS_OK;
+ }
+ 
+ nsMsgIncomingServer::~nsMsgIncomingServer() {}
+ 
+ NS_IMPL_ISUPPORTS(nsMsgIncomingServer, nsIMsgIncomingServer,
+                   nsISupportsWeakReference, nsIObserver)
+ 
++/**
++ * Observe() receives notifications for all accounts, not just this server's
++ * account. So we ignore all notifications not intended for this server.
++ * When the state of the password manager changes we need to clear the
++ * this server's password from the cache in case the user just changed or
++ * removed the password or username.
++ * Oauth2 servers often automatically change the password manager's stored
++ * password (the token).
++ */
+ NS_IMETHODIMP
+ nsMsgIncomingServer::Observe(nsISupports* aSubject, const char* aTopic,
+                              const char16_t* aData) {
+   nsresult rv;
+-
+-  // When the state of the password manager changes we need to clear the
+-  // password from the cache in case the user just removed it.
+   if (strcmp(aTopic, "passwordmgr-storage-changed") == 0) {
++    nsAutoString otherFullName;
++    nsAutoString otherUserName;
+     // Check that the notification is for this server.
+     nsCOMPtr<nsILoginInfo> loginInfo = do_QueryInterface(aSubject);
+     if (loginInfo) {
+-      nsAutoString hostnameInfo;
+-      loginInfo->GetHostname(hostnameInfo);
+-      nsAutoCString hostname;
+-      GetHostName(hostname);
+-      nsAutoCString fullName;
+-      GetType(fullName);
+-      if (fullName.EqualsLiteral("pop3")) {
+-        fullName = "mailbox://"_ns + hostname;
++      // The login info for this server has been removed with aData being
++      // "removeLogin" or "removeAllLogins".
++      loginInfo->GetHostname(otherFullName);
++      loginInfo->GetUsername(otherUserName);
++    } else {
++      // Probably a 2 element array containing old and new login info due to
++      // aData being "modifyLogin". E.g., a user has modified password or
++      // username in password manager or an oauth2 token string has
++      // automatically changed.
++      nsCOMPtr<nsIArray> logins = do_QueryInterface(aSubject);
++      if (logins) {
++        // Only need to look at names in first array element (login info before
++        // any modification) since the user might have changed the username as
++        // found in the 2nd elements. (The hostname can't be modified in password
++        // manager.)
++        nsCOMPtr<nsILoginInfo> login;
++        logins->QueryElementAt(0, NS_GET_IID(nsILoginInfo),
++                               getter_AddRefs(login));
++        if (login) {
++          login->GetHostname(otherFullName);
++          login->GetUsername(otherUserName);
++        }
++      }
++    }
++    if (!otherFullName.IsEmpty()) {
++      nsAutoCString thisHostname;
++      nsAutoCString thisUsername;
++      GetHostName(thisHostname);
++      GetUsername(thisUsername);
++      nsAutoCString thisFullName;
++      GetType(thisFullName);
++      if (thisFullName.EqualsLiteral("pop3")) {
++        // Note: POP3 now handled by MsgIncomingServer.jsm so does not occur.
++        MOZ_ASSERT_UNREACHABLE("should NOT go here");
++        thisFullName = "mailbox://"_ns + thisHostname;
+       } else {
+-        fullName += "://"_ns + hostname;
++        thisFullName += "://"_ns + thisHostname;
++      }
++      if (!thisFullName.Equals(NS_ConvertUTF16toUTF8(otherFullName)) ||
++          !thisUsername.Equals(NS_ConvertUTF16toUTF8(otherUserName))) {
++        // Not for this server; keep this server's cached password.
++        return NS_OK;
+       }
+-      if (!fullName.Equals(NS_ConvertUTF16toUTF8(hostnameInfo))) return NS_OK;
++    } else if (NS_strcmp(aData, u"hostSavingDisabled") != 0) {
++      // "hostSavingDisabled" only occurs during test_smtpServer.js and
++      // expects the password to be removed from memory cache. Otherwise, we
++      // don't have enough information to decide to remove the cached
++      // password, so keep it.
++      return NS_OK;
+     }
+     rv = ForgetSessionPassword();
+     NS_ENSURE_SUCCESS(rv, rv);
+   } else if (strcmp(aTopic, NS_XPCOM_SHUTDOWN_OBSERVER_ID) == 0) {
+     // Now remove ourselves from the observer service as well.
+     nsCOMPtr<nsIObserverService> observerService =
+         mozilla::services::GetObserverService();
+     NS_ENSURE_TRUE(observerService, NS_ERROR_UNEXPECTED);
+diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
+--- a/mailnews/compose/src/SmtpServer.jsm
++++ b/mailnews/compose/src/SmtpServer.jsm
+@@ -20,27 +20,62 @@ function SmtpServer() {
+ 
+   Services.obs.addObserver(this, "passwordmgr-storage-changed");
+ }
+ 
+ SmtpServer.prototype = {
+   QueryInterface: ChromeUtils.generateQI(["nsISmtpServer"]),
+   classID: Components.ID("{3a75f5ea-651e-4696-9813-848c03da8bbd}"),
+ 
++  /**
++   * Observe() receives notifications for all accounts, not just this SMTP
++   * server's * account. So we ignore all notifications not intended for this
++   * server. When the state of the password manager changes we need to clear the
++   * this server's password from the cache in case the user just changed or
++   * removed the password or username.
++   * Oauth2 servers often automatically change the password manager's stored
++   * password (the token).
++   */
+   observe(subject, topic, data) {
+     if (topic == "passwordmgr-storage-changed") {
+-      // Check that the notification is for this server.
+-      if (
+-        subject instanceof Ci.nsILoginInfo &&
+-        subject.hostname != "smtp://" + this.hostname
+-      ) {
++      // Check that the notification is for this server and user.
++      let otherFullName = "";
++      let otherUsername = "";
++      if (subject instanceof Ci.nsILoginInfo) {
++        // The login info for a server has been removed with aData being
++        // "removeLogin" or "removeAllLogins".
++        otherFullName = subject.hostname;
++        otherUsername = subject.username;
++      } else if (subject instanceof Ci.nsIArray) {
++        // Probably a 2 element array containing old and new login info due to
++        // aData being "modifyLogin". E.g., a user has modified password or
++        // username in password manager or an oauth2 token string has
++        // automatically changed. Only need to look at names in first array
++        // element (login info before any modification) since the user might
++        // have changed the username as found in the 2nd elements. (The
++        // hostname can't be modified in password manager.
++        otherFullName = subject.queryElementAt(0, Ci.nsISupports).hostname;
++        otherUsername = subject.queryElementAt(0, Ci.nsISupports).username;
++      }
++      if (otherFullName) {
++        if (
++          otherFullName != "smtp://" + this.hostname ||
++          otherUsername != this.username
++        ) {
++          // Not for this account; keep this account's password.
++          return;
++        }
++      } else if (data != "hostSavingDisabled") {
++        // "hostSavingDisabled" only occurs during test_smtpServer.js and
++        // expects the password to be removed from memory cache. Otherwise, we
++        // don't have enough information to decide to remove the cached
++        // password, so keep it.
+         return;
+       }
+-      // When the state of the password manager changes we need to clear the
+-      // password from the cache in case the user just removed it.
++      // Remove the password for this server cached in memory.
+       this.password = "";
+     }
+   },
+ 
+   get key() {
+     return this._key;
+   },
+ 
