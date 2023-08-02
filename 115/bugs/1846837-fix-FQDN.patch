@@ -1,0 +1,137 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1691010658 -7200
+# Parent  7bfebbf1c89735154d1913ff3e5b27ac39c375e2
+Bug 1846837 - Re-establish FQDN after bug 1727181.
+
+diff --git a/mailnews/compose/public/nsIMsgCompUtils.idl b/mailnews/compose/public/nsIMsgCompUtils.idl
+--- a/mailnews/compose/public/nsIMsgCompUtils.idl
++++ b/mailnews/compose/public/nsIMsgCompUtils.idl
+@@ -12,21 +12,22 @@ interface nsIMsgCompUtils : nsISupports 
+ 
+   /**
+    * Generate a message ID using the provided host.
+    *
+    * Used when the address for the sender of the message differs from the
+    * address of the identity used to send the message.
+    *
+    * @param string The host to use to generate the message ID.
++   * @param nsIMsgIdentity The identity to use to generate the message ID.
+    *
+    * @returns A message ID usable in a Message-ID header, or an empty string
+    *          if no message ID could be generated.
+    */
+-  string msgGenerateMessageIdFromHost(in string host);
++  string msgGenerateMessageIdFromHost(in string host, in nsIMsgIdentity identity);
+ 
+   /**
+    * Generate a message ID using the domain in the email address for the
+    * provided identity.
+    *
+    * Should not be used when the address for the sender of the message differs
+    * from the address for the identity, otherwise the resulting message ID might
+    * be generated with the wrong domain (use msgGenerateMessageIdFromHost instead
+diff --git a/mailnews/compose/src/MimeMessage.jsm b/mailnews/compose/src/MimeMessage.jsm
+--- a/mailnews/compose/src/MimeMessage.jsm
++++ b/mailnews/compose/src/MimeMessage.jsm
+@@ -166,17 +166,17 @@ class MimeMessage {
+       const fromAddr = fromHdr[0].email;
+ 
+       // Extract the host from the address, if any, and generate a message ID from it.
+       // If we can't get a host for the message ID, let SMTP populate the header.
+       const atIndex = fromAddr.indexOf("@");
+       if (atIndex >= 0) {
+         messageId = Cc["@mozilla.org/messengercompose/computils;1"]
+           .createInstance(Ci.nsIMsgCompUtils)
+-          .msgGenerateMessageIdFromHost(fromAddr.slice(atIndex + 1));
++          .msgGenerateMessageIdFromHost(fromAddr.slice(atIndex + 1), this._userIdentity);
+       }
+ 
+       this._compFields.messageId = messageId;
+     }
+     let headers = new Map([
+       ["message-id", messageId],
+       ["date", new Date()],
+       ["mime-version", "1.0"],
+diff --git a/mailnews/compose/src/nsMsgCompUtils.cpp b/mailnews/compose/src/nsMsgCompUtils.cpp
+--- a/mailnews/compose/src/nsMsgCompUtils.cpp
++++ b/mailnews/compose/src/nsMsgCompUtils.cpp
+@@ -47,28 +47,50 @@ char* msg_generate_message_id(const char
+ char* msg_generate_message_id_from_identity(nsIMsgIdentity*);
+ 
+ NS_IMPL_ISUPPORTS(nsMsgCompUtils, nsIMsgCompUtils)
+ 
+ nsMsgCompUtils::nsMsgCompUtils() {}
+ 
+ nsMsgCompUtils::~nsMsgCompUtils() {}
+ 
++static bool isValidHost(const char* host) {
++  if (host)
++    for (const char* s = host; *s; ++s)
++      if (!isalpha(*s) && !isdigit(*s) && *s != '-' && *s != '_' && *s != '.') {
++        host = nullptr;
++        break;
++      }
++
++  return nullptr != host;
++}
++
+ NS_IMETHODIMP nsMsgCompUtils::MimeMakeSeparator(const char* prefix,
+                                                 char** _retval) {
+   NS_ENSURE_ARG_POINTER(prefix);
+   NS_ENSURE_ARG_POINTER(_retval);
+   *_retval = mime_make_separator(prefix);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgCompUtils::MsgGenerateMessageIdFromHost(const char* host,
++                                                           nsIMsgIdentity* identity,
+                                                            char** _retval) {
+   NS_ENSURE_ARG_POINTER(host);
+   NS_ENSURE_ARG_POINTER(_retval);
++  nsCString forcedFQDN;
++  nsresult rv = NS_OK;
++
++  // Check if the identity forces an FQDN.
++  rv = identity->GetCharAttribute("FQDN", forcedFQDN);
++  if (NS_SUCCEEDED(rv) && !forcedFQDN.IsEmpty()) {
++    const char* hostFQDN = forcedFQDN.get();
++    if (isValidHost(hostFQDN)) host = hostFQDN;
++  }
++
+   *_retval = msg_generate_message_id(host);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgCompUtils::MsgGenerateMessageIdFromIdentity(
+     nsIMsgIdentity* identity, char** _retval) {
+   NS_ENSURE_ARG_POINTER(identity);
+   NS_ENSURE_ARG_POINTER(_retval);
+@@ -526,27 +548,16 @@ char* mime_make_separator(const char* pr
+       "%02X%02X%02X%02X"
+       "%02X%02X%02X%02X"
+       "%02X%02X%02X%02X",
+       prefix, rand_buf[0], rand_buf[1], rand_buf[2], rand_buf[3], rand_buf[4],
+       rand_buf[5], rand_buf[6], rand_buf[7], rand_buf[8], rand_buf[9],
+       rand_buf[10], rand_buf[11]);
+ }
+ 
+-static bool isValidHost(const char* host) {
+-  if (host)
+-    for (const char* s = host; *s; ++s)
+-      if (!isalpha(*s) && !isdigit(*s) && *s != '-' && *s != '_' && *s != '.') {
+-        host = nullptr;
+-        break;
+-      }
+-
+-  return nullptr != host;
+-}
+-
+ char* msg_generate_message_id(const char* host) {
+   if (!isValidHost(host)) {
+     // If we couldn't find a valid host name to use, we can't generate a
+     // valid message ID, so bail, and let NNTP and SMTP generate them.
+     return nullptr;
+   }
+ 
+   // Generate 128-bit UUID for the local part of the ID. `nsID` provides us with
