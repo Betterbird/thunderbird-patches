@@ -1,10 +1,14 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1689716264 -7200
-# Parent  8bd10c9cbb77379a71584b0ba38e217b935e26d5
+# Parent  c21a6be92d8b57af413bfb71065470a95b2d1c95
 Bug 1831500 - Reinstate feedback during search.
 * * *
 Backout of bug 1830550 (rev. 037ea96d7379) to re-establish matches/nomatches
+* * *
+Add forgotten call to mJSTree->RowCountChanged(0, -oldSize); to clear tree when search starts.
+* * *
+Backout part of bug 1827003 (rev. ce8b1a51da8a) for wrecking search feedback.
 
 diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterListDialog.js
 --- a/mail/base/content/FilterListDialog.js
@@ -35,7 +39,7 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
 diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
 --- a/mail/base/content/mailCommon.js
 +++ b/mail/base/content/mailCommon.js
-@@ -855,17 +855,33 @@ var dbViewWrapperListener = {
+@@ -865,17 +865,33 @@ var dbViewWrapperListener = {
    },
    get shouldDeferMessageDisplayUntilAfterServerConnect() {
      return false;
@@ -70,7 +74,7 @@ diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
          gViewWrapper.sortImpliesTemporalOrdering &&
          gViewWrapper.isSortedAscending
        ) {
-@@ -900,16 +916,25 @@ var dbViewWrapperListener = {
+@@ -910,16 +926,25 @@ var dbViewWrapperListener = {
      // Try to restore what was selected. Keep the saved selection (if there is
      // one) until we have all of the messages.
      window.threadPane?.restoreSelection(all);
@@ -99,7 +103,7 @@ diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
 diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilterBar.js
 --- a/mail/base/content/quickFilterBar.js
 +++ b/mail/base/content/quickFilterBar.js
-@@ -330,19 +330,23 @@ var quickFilterBar = {
+@@ -332,19 +332,23 @@ var quickFilterBar = {
      this.domNode.hidden = !this.filterer.visible;
    },
  
@@ -124,7 +128,7 @@ diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilter
      if (!gDBView) {
        return;
      }
-@@ -351,19 +355,33 @@ var quickFilterBar = {
+@@ -353,19 +357,33 @@ var quickFilterBar = {
      if (!gViewWrapper.search || !gViewWrapper.search.userTerms) {
        threadPane.removeAttribute("filterActive");
        this.domNode.removeAttribute("filterActive");
@@ -212,7 +216,7 @@ diff --git a/mail/themes/shared/mail/filterDialog.css b/mail/themes/shared/mail/
 diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
 --- a/mail/themes/shared/mail/quickFilterBar.css
 +++ b/mail/themes/shared/mail/quickFilterBar.css
-@@ -42,20 +42,25 @@
+@@ -50,20 +50,25 @@
  
  #qfd-dropdown {
    background-image: var(--icon-filter);
@@ -238,7 +242,7 @@ diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mai
    max-width: 450px;
  }
  
-@@ -171,19 +176,50 @@
+@@ -179,19 +184,50 @@
  #quick-filter-bar-filter-text-bar > .button-group > .button {
    min-width: 0;
  }
@@ -295,3 +299,64 @@ diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mai
 -#threadTree[filterActive="searching"] {
 -  background-image: url("chrome://messenger/skin/icons/search-spinner.svg");
 -}*/
+diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+@@ -285,18 +285,16 @@ nsMsgQuickSearchDBView::OnSearchHit(nsIM
+   if (m_cacheEmpty || FindKey(key, false) == nsMsgViewIndex_None)
+     return AddHdr(aMsgHdr);
+   else
+     return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::OnSearchDone(nsresult status) {
+-  // This batch began in OnNewSearch.
+-  if (mJSTree) mJSTree->EndUpdateBatch();
+   // We're a single-folder virtual folder if viewFolder != folder, and that is
+   // the only case in which we want to be messing about with a results cache
+   // or unread counts.
+   if (m_db && m_viewFolder && m_viewFolder != m_folder) {
+     nsTArray<nsMsgKey> keyArray;
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     uint32_t count = m_hdrHits.Count();
+@@ -352,16 +350,17 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+ 
+   m_keys.Clear();
+   m_levels.Clear();
+   m_flags.Clear();
+   m_hdrHits.Clear();
+   // this needs to happen after we remove all the keys, since RowCountChanged()
+   // will call our GetRowCount()
+   if (mTree) mTree->RowCountChanged(0, -oldSize);
++  if (mJSTree) mJSTree->RowCountChanged(0, -oldSize);
+   uint32_t folderFlags = 0;
+   if (m_viewFolder) m_viewFolder->GetFlags(&folderFlags);
+   // check if it's a virtual folder - if so, we should get the cached hits
+   // from the db, and set a flag saying that we're using cached values.
+   if (folderFlags & nsMsgFolderFlags::Virtual) {
+     nsCOMPtr<nsIMsgEnumerator> cachedHits;
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+@@ -382,20 +381,16 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+         else
+           break;
+         cachedHits->HasMoreElements(&hasMore);
+       }
+       if (mTree) mTree->EndUpdateBatch();
+       if (mJSTree) mJSTree->EndUpdateBatch();
+     }
+   }
+-
+-  // Prevent updates for every message found. This batch ends in OnSearchDone.
+-  if (mJSTree) mJSTree->BeginUpdateBatch();
+-
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgQuickSearchDBView::GetFirstMessageHdrToDisplayInThread(
+     nsIMsgThread* threadHdr, nsIMsgDBHdr** result) {
+   uint32_t numChildren;
+   nsresult rv = NS_OK;
+   uint8_t minLevel = 0xff;
