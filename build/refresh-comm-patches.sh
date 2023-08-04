@@ -65,13 +65,12 @@ hg qpop
 echo
 echo "======================================================="
 echo "Copying patches and series file from thunderbird-patches"
-cp -u -v ../../thunderbird-patches/$VERSION/series           .hg/patches/series
-cp -u -v ../../thunderbird-patches/$VERSION/branding/*.patch .hg/patches/
-cp -u -v ../../thunderbird-patches/$VERSION/bugs/*.patch     .hg/patches/
-cp -u -v ../../thunderbird-patches/$VERSION/features/*.patch .hg/patches/
-cp -u -v ../../thunderbird-patches/$VERSION/misc/*.patch     .hg/patches/
-# XXX TODO: This copied all m-c patches to comm, so remove them again.
-rm .hg/patches/*-m-c.patch 2> /dev/null
+# cp -u doesn't work on Mac :-(
+rsync -u -i ../../thunderbird-patches/$VERSION/series .hg/patches/series
+rsync -u -i ../../thunderbird-patches/$VERSION/branding/*.patch --exclude=*-m-c.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/bugs/*.patch     --exclude=*-m-c.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/features/*.patch --exclude=*-m-c.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/misc/*.patch     --exclude=*-m-c.patch .hg/patches/
 
 if [ -d ../../private-patches ]; then
   echo
