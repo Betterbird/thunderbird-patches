@@ -57,7 +57,7 @@ else
 fi
 
 echo
-echo "==================================================================="
+echo "======================================================="
 echo "Positioning before specified patch $PATCH_NAME on $MOZILLA_DIR/comm"
 hg qgo $PATCH_NAME
 hg qpop
@@ -74,7 +74,7 @@ rsync -u -i ../../thunderbird-patches/$VERSION/misc/*.patch     --exclude=*-m-c.
 
 if [ -d ../../private-patches ]; then
   echo
-  echo "======================="
+  echo "======================================================="
   echo "Copying private patches"
   cp ../../private-patches/*.patch .hg/patches/
 fi
@@ -86,6 +86,21 @@ hg qpush -all
 hg qseries
 
 echo
-echo "================================================================"
-echo "Patches applied, please: cd $MOZILLA_DIR && ./mach build && ./mach package"
-exit 0
+echo "======================================================="
+echo "Patches applied. Continue to build?"
+read -p "Proceed? (Y/N) " ANSWER
+if [ "$ANSWER" != "Y" ]; then
+  echo "When ready, please: cd $MOZILLA_DIR && ./mach build && ./mach package"
+  exit 0
+fi
+
+echo
+echo "======================================================="
+echo "Building"
+cd ..
+./mach build
+
+echo
+echo "======================================================="
+echo "Packaging"
+./mach package
