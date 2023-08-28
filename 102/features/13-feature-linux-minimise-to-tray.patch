@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1673864379 -3600
-# Parent  f951dbd93c25caa87d19124c3a6cd40111f47aab
+# Date 1693259801 -10800
+# Parent  0b76405981fed5c2746315d148e6aab5eb88f053
 Feature: Minimise to tray for Linux.
 
 Adapted from
@@ -12,7 +12,7 @@ https://hg.mozilla.org/comm-central/rev/0bc379dfb518
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
 +++ b/mail/app/profile/all-thunderbird.js
-@@ -1285,17 +1285,17 @@ pref("toolkit.telemetry.updatePing.enabl
+@@ -1290,19 +1290,22 @@ pref("toolkit.telemetry.updatePing.enabl
  pref("toolkit.telemetry.bhrPing.enabled", true);
  // Whether to enable Ecosystem Telemetry, requires a restart.
  #ifdef NIGHTLY_BUILD
@@ -22,19 +22,24 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
  #endif
  
 -#ifdef XP_WIN
-+#if defined(XP_WIN) || defined(XP_UNIX)
++#if defined(XP_WIN) || defined(UNIX_BUT_NOT_MAC)
  pref("mail.minimizeToTray", false);
  #endif
++#ifdef UNIX_BUT_NOT_MAC
++pref("mail.minimizeToTray.supportedDesktops", "kde,gnome");
++#endif
  
  pref("prompts.defaultModalType", 3);
  pref("prompts.contentPromptSubDialog", false);
  
  // The URL for the privacy policy related to recommended extensions.
  pref("extensions.recommendations.privacyPolicyUrl", "https://www.mozilla.org/en-US/privacy/thunderbird/#addons");
+ 
+ // Used by pdf.js to know the first time Thunderbird is run with it installed
 diff --git a/mail/base/content/messenger.xhtml b/mail/base/content/messenger.xhtml
 --- a/mail/base/content/messenger.xhtml
 +++ b/mail/base/content/messenger.xhtml
-@@ -157,17 +157,17 @@
+@@ -157,19 +157,21 @@
    <script defer="defer" src="chrome://messenger/content/messenger-customization.js"></script>
    <script defer="defer" src="chrome://messenger/content/customizable-toolbar.js"></script>
    <!-- panelUI.js is for the appmenus. -->
@@ -45,14 +50,18 @@ diff --git a/mail/base/content/messenger.xhtml b/mail/base/content/messenger.xht
  #endif
 -#ifdef XP_WIN
 +#if defined(XP_WIN) || defined(XP_UNIX)
++#ifndef XP_MACOSX
    <script defer="defer" src="chrome://messenger/content/minimizeToTray.js"></script>
  #endif
++#endif
  
    <script defer="defer" src="chrome://messenger/content/threadPane.js"></script>
  
    <!-- calendar imip bar -->
    <script defer="defer" src="chrome://calendar/content/imip-bar.js"></script>
    <!-- calendar invitation display -->
+   <script defer="defer" src="chrome://calendar/content/calendar-invitation-display.js"></script>
+   <!-- calendar-management.js also needed for multiple calendar support and today pane -->
 diff --git a/mail/base/content/minimizeToTray.js b/mail/base/content/minimizeToTray.js
 --- a/mail/base/content/minimizeToTray.js
 +++ b/mail/base/content/minimizeToTray.js
@@ -94,7 +103,7 @@ diff --git a/mail/base/jar.mn b/mail/base/jar.mn
  *   content/messenger/messenger.xhtml               (content/messenger.xhtml)
      content/messenger/webextensions.css             (content/webextensions.css)
 -#ifdef XP_WIN
-+#if defined(XP_WIN) || defined(XP_UNIX)
++#if defined(XP_WIN) || defined(XP_LINUX)
      content/messenger/minimizeToTray.js             (content/minimizeToTray.js)
  #endif
      content/messenger/migrationProgress.js          (content/migrationProgress.js)
@@ -106,7 +115,7 @@ diff --git a/mail/base/jar.mn b/mail/base/jar.mn
 diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
 --- a/mail/components/preferences/general.inc.xhtml
 +++ b/mail/components/preferences/general.inc.xhtml
-@@ -99,17 +99,17 @@
+@@ -99,22 +99,24 @@
                      unset-default-tooltip,
                      checkbox-email-label.label,
                      checkbox-newsgroups-label.label,
@@ -117,14 +126,21 @@ diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/pre
        </hbox>
 -#ifdef XP_WIN
 +#if defined(XP_WIN) || defined(XP_UNIX)
++#ifndef XP_MACOSX
        <hbox align="start">
          <checkbox data-l10n-id="minimize-to-tray-label"
                    preference="mail.minimizeToTray"/>
        </hbox>
  #endif
++#endif
        <hbox id="searchIntegrationContainer">
          <checkbox id="searchIntegration"
                    preference="searchintegration.enable"
+                   data-l10n-id="search-integration-label"/>
+       </hbox>
+       </vbox>
+     </html:fieldset>
+     </html:div>
 diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
 --- a/mail/components/preferences/general.js
 +++ b/mail/components/preferences/general.js
@@ -220,7 +236,7 @@ new file mode 100644
 diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
 --- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
 +++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
-@@ -1,28 +1,118 @@
+@@ -1,66 +1,201 @@
  /* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -237,8 +253,10 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +#include "nsIBaseWindow.h"
 +#include "nsIPrefService.h"
 +#include "nsIWidget.h"
++#include "mozilla/WidgetUtilsGtk.h"
 +#include "nsIWindowMediator.h"
 +#include "nsPIDOMWindow.h"
++#include <time.h>
 +
 +#define SHOW_TRAY_ICON_PREF "mail.biff.show_tray_icon"
 +#define SHOW_TRAY_ICON_ALWAYS_PREF "mail.biff.show_tray_icon_always"
@@ -247,6 +265,7 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +static uint32_t sLastUnreadCount;
 +static nsAutoString sLastUnreadTooltip;
 +static AppIndicator *ci = NULL;
++static struct timespec sTimeActivated;
 +
 +using namespace mozilla;
  
@@ -267,21 +286,10 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +  privateWindow->Focus(mozilla::dom::CallerType::System);
 +}
 +
-+static void activated(void) {
-+  // TODO: Somehow get this called when the user clicks the app indicator icon.
-+  fprintf(stderr, "=== nsMessengerUnixIntegration static activated\n");
++static void activated(AppIndicator* self, gint x, gint y, gpointer data) {
 +  nsresult rv;
-+  nsCOMPtr<nsIPrefBranch> prefBranch =
-+      do_GetService(NS_PREFSERVICE_CONTRACTID, &rv);
-+  NS_ENSURE_SUCCESS_VOID(rv);
-+  bool showTrayIcon;
-+  rv = prefBranch->GetBoolPref(SHOW_TRAY_ICON_PREF, &showTrayIcon);
-+  NS_ENSURE_SUCCESS_VOID(rv);
-+  bool showTrayIconAlways;
-+  if (NS_FAILED(prefBranch->GetBoolPref(SHOW_TRAY_ICON_ALWAYS_PREF,
-+                                        &showTrayIconAlways))) {
-+    showTrayIconAlways = false;
-+  }
++  bool showTrayIcon = mozilla::Preferences::GetBool(SHOW_TRAY_ICON_PREF, false);
++  bool showTrayIconAlways = mozilla::Preferences::GetBool(SHOW_TRAY_ICON_ALWAYS_PREF, false);
 +  if ((!showTrayIcon || !sLastUnreadCount) && !showTrayIconAlways) {
 +    if (ci) {
 +      app_indicator_set_status(ci, APP_INDICATOR_STATUS_PASSIVE);
@@ -295,7 +303,7 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +    NS_ENSURE_SUCCESS_VOID(rv);
 +
 +    nsCOMPtr<mozIDOMWindowProxy> domWindow;
-+    rv = windowMediator->GetMostRecentBrowserWindow(
++    rv = windowMediator->GetMostRecentWindow(u"mail:3pane",
 +        getter_AddRefs(domWindow));
 +    NS_ENSURE_SUCCESS_VOID(rv);
 +    if (domWindow) {
@@ -317,10 +325,17 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +    if (!widget) {
 +      continue;
 +    }
-+    // TODO: Do something with the `widget` or remove code above.
++    // Raise the window, no good if it appears in the background.
++    // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
++    void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
++    if (gtkWidget) gtk_window_present(GTK_WINDOW(gtkWidget));
++    widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
 +  }
 +
 +  sHiddenWindows.Clear();
++  // Strangely we get "sizemodechange" event with STATE_MINIMIZED,
++  // so we ignore that for some milliseconds.
++  clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
 +}
  
  NS_IMETHODIMP
@@ -342,7 +357,25 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
      size_t len = readlink("/proc/self/exe", icon_path0, PATH_MAX);
      char* q = icon_path0 + len - 1;
      while (*q != '/') q--;
-@@ -42,25 +132,40 @@ nsMessengerUnixIntegration::UpdateUnread
+     *q = 0;
+     strcpy(icon_pathN, icon_path0);
+     strcat(icon_path0, "/chrome/icons/default/default.svg");
+     strcat(icon_pathN, "/chrome/icons/default/newmail.svg");
+ 
+     ci = app_indicator_new("Betterbird-systray-icon",
+                            unreadCount > 0 ? icon_pathN : icon_path0,
+                            APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
++    g_signal_connect(ci, APP_INDICATOR_SIGNAL_ACTIVATE_EVENT, G_CALLBACK(activated), NULL);
++
++    // Initialise to something non-zero, subtract a second
++    // so it predates any mimizing via "startup minimized".
++    clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
++    sTimeActivated.tv_sec--;
+   }
+ 
+   if (unreadCount > 0) {
+     const nsCString& tooltip = NS_ConvertUTF16toUTF8(unreadTooltip);
+     // Set both title and tooltip. It appears that some platforms do
      // one but not the other.
      app_indicator_set_title(ci, tooltip.get());
      app_indicator_set_tooltip_full(ci,
@@ -373,6 +406,31 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +
 +nsresult nsMessengerUnixIntegration::HideWindow(nsIBaseWindow* aWindow) {
 +  NS_ENSURE_ARG(aWindow);
++  struct timespec now;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  // Ignore any hiding for 500ms.
++  int64_t timediff =
++    (now.tv_sec - sTimeActivated.tv_sec) * 1000 +
++    (now.tv_nsec - sTimeActivated.tv_nsec) / 1000000;
++  if (timediff < 500) {
++    return NS_OK;
++  }
++
++  nsAutoCString prefValue;
++  mozilla::Preferences::GetCString("mail.minimizeToTray.supportedDesktops", prefValue);
++  const nsCString& desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
++  if (!FindInReadable(desktop, prefValue)) {
++    fprintf(stderr, "Betterbird: Window NOT minimized to system tray!\n");
++    fprintf(stderr, "            You are using desktop environment %s.\n", desktop.get());
++    fprintf(stderr, "            Minimize to system tray is only supported for these desktops:\n");
++    fprintf(stderr, "            %s.\n", prefValue.get());
++    fprintf(stderr, "            As an experiment, add %s to preference\n", desktop.get());
++    fprintf(stderr, "            mail.minimizeToTray.supportedDesktops.\n");
++    fprintf(stderr, "            You might not be able to maximize the window again and\n");
++    fprintf(stderr, "            will have to kill Betterbird.\n");
++    fprintf(stderr, "            USE AT YOUR OWN RISK! If successful, contact support@betterbird.eu\n\n");
++    return NS_OK;
++  }
 +  aWindow->SetVisibility(false);
 +  sHiddenWindows.AppendElement(aWindow);
 +  UpdateUnreadCount(sLastUnreadCount, sLastUnreadTooltip);
