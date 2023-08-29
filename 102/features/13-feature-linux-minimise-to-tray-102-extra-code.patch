@@ -1,0 +1,104 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Parent  24ea915637cdcbddbb8aa7f7d033f664abcc10d5
+Feature: Minimise to tray on Linux, extra code from the Mozilla platform.
+
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -156,31 +156,33 @@ nsMessengerUnixIntegration::UpdateUnread
+   }
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMessengerUnixIntegration::OnExit() { return NS_OK; }
+ 
++static const nsCString& GetDesktopEnvironmentIdentifier();
++
+ nsresult nsMessengerUnixIntegration::HideWindow(nsIBaseWindow* aWindow) {
+   NS_ENSURE_ARG(aWindow);
+   struct timespec now;
+   clock_gettime(CLOCK_MONOTONIC, &now);
+   // Ignore any hiding for 500ms.
+   int64_t timediff =
+     (now.tv_sec - sTimeActivated.tv_sec) * 1000 +
+     (now.tv_nsec - sTimeActivated.tv_nsec) / 1000000;
+   if (timediff < 500) {
+     return NS_OK;
+   }
+ 
+   nsAutoCString prefValue;
+   mozilla::Preferences::GetCString("mail.minimizeToTray.supportedDesktops", prefValue);
+-  const nsCString& desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
++  const nsCString& desktop = GetDesktopEnvironmentIdentifier();
+   if (!FindInReadable(desktop, prefValue)) {
+     fprintf(stderr, "Betterbird: Window NOT minimized to system tray!\n");
+     fprintf(stderr, "            You are using desktop environment %s.\n", desktop.get());
+     fprintf(stderr, "            Minimize to system tray is only supported for these desktops:\n");
+     fprintf(stderr, "            %s.\n", prefValue.get());
+     fprintf(stderr, "            As an experiment, add %s to preference\n", desktop.get());
+     fprintf(stderr, "            mail.minimizeToTray.supportedDesktops.\n");
+     fprintf(stderr, "            You might not be able to maximize the window again and\n");
+@@ -194,8 +196,60 @@ nsresult nsMessengerUnixIntegration::Hid
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMessengerUnixIntegration::ShowWindow(mozIDOMWindowProxy* aWindow) {
+   activateWindow(aWindow);
+   return NS_OK;
+ }
++
++// In Mozilla platform from version 111.
++static const nsCString& GetDesktopEnvironmentIdentifier() {
++  MOZ_ASSERT(NS_IsMainThread());
++  static const nsDependentCString sIdentifier = [] {
++    nsCString ident = [] {
++      auto Env = [](const char* aKey) -> const char* {
++        const char* v = getenv(aKey);
++        return v && *v ? v : nullptr;
++      };
++      if (const char* currentDesktop = Env("XDG_CURRENT_DESKTOP")) {
++        return nsCString(currentDesktop);
++      }
++      // if (auto wm = GetWindowManagerName(); !wm.IsEmpty()) {
++      //   return wm;
++      // }
++      if (const char* sessionDesktop = Env("XDG_SESSION_DESKTOP")) {
++        // This is not really standardized in freedesktop.org, but it is
++        // documented here, and should be set in systemd systems.
++        // https://www.freedesktop.org/software/systemd/man/pam_systemd.html#%24XDG_SESSION_DESKTOP
++        return nsCString(sessionDesktop);
++      }
++      // We try first the DE-specific variables, then SESSION_DESKTOP, to match
++      // the documented order in:
++      // https://wiki.archlinux.org/title/Xdg-utils#Environment_variables
++      if (getenv("GNOME_DESKTOP_SESSION_ID")) {
++        return nsCString("gnome"_ns);
++      }
++      if (getenv("KDE_FULL_SESSION")) {
++        return nsCString("kde"_ns);
++      }
++      if (getenv("MATE_DESKTOP_SESSION_ID")) {
++        return nsCString("mate"_ns);
++      }
++      if (getenv("LXQT_SESSION_CONFIG")) {
++        return nsCString("lxqt"_ns);
++      }
++      if (const char* desktopSession = Env("DESKTOP_SESSION")) {
++        // Try the legacy DESKTOP_SESSION as a last resort.
++        return nsCString(desktopSession);
++      }
++      return nsCString();
++    }();
++    ToLowerCase(ident);
++    // Intentionally put into a ToNewCString copy, rather than just making a
++    // static nsCString to avoid leakchecking errors, since we really want to
++    // leak this string.
++    return nsDependentCString(ToNewCString(ident), ident.Length());
++  }();
++  return sIdentifier;
++}
++
