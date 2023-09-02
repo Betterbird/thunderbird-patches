@@ -76,3 +76,17 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "unreadMsgStatus=Ongelezen: %%S"      >> chrome\nl\locale\nl\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Geselecteerd: %%S" >> chrome\nl\locale\nl\messenger\messenger.properties
 %lecho% "totalMsgStatus=Totaal: %%S"          >> chrome\nl\locale\nl\messenger\messenger.properties
+
+:: Original strings:
+:: vertical-tabs-label =
+::     .label = Enable vertical tabs
+::     .accesskey = v
+:: attachments-display-top-label =
+::     .label = Display attachment list above message
+::     .accesskey = p
+%lecho% "vertical-tabs-label ="                      >> localization\nl\messenger\preferences\preferences.ftl
+%lecho% "    .label = Tabbladen verticaal weergeven" >> localization\nl\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = v"                         >> localization\nl\messenger\preferences\preferences.ftl
+%lecho% "attachments-display-top-label ="            >> localization\nl\messenger\preferences\preferences.ftl
+%lecho% "    .label = Toon bijlagen boven bericht"   >> localization\nl\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = o"                         >> localization\nl\messenger\preferences\preferences.ftl

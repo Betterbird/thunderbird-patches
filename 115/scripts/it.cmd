@@ -76,3 +76,17 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "unreadMsgStatus=Non letti: %%S"     >> chrome\it\locale\it\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Selezionato: %%S" >> chrome\it\locale\it\messenger\messenger.properties
 %lecho% "totalMsgStatus=Totale: %%S"         >> chrome\it\locale\it\messenger\messenger.properties
+
+:: Original strings:
+:: vertical-tabs-label =
+::     .label = Enable vertical tabs
+::     .accesskey = v
+:: attachments-display-top-label =
+::     .label = Display attachment list above message
+::     .accesskey = p
+%lecho% "vertical-tabs-label ="                               >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .label = Mostra le schede verticalmente"         >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = v"                                  >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "attachments-display-top-label ="                     >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .label = Mostra gli allegati sopra il messaggio" >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = o"                                  >> localization\it\messenger\preferences\preferences.ftl
