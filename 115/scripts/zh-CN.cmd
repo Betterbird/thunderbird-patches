@@ -76,3 +76,17 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "unreadMsgStatus=未读: %%S"   >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 %lecho% "selectedMsgStatus=已选: %%S" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 %lecho% "totalMsgStatus=总计: %%S"    >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
+
+:: Original strings:
+:: vertical-tabs-label =
+::     .label = Enable vertical tabs
+::     .accesskey = v
+:: attachments-display-top-label =
+::     .label = Display attachment list above message
+::     .accesskey = p
+%lecho% "vertical-tabs-label ="            >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = 显示垂直标签页"         >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = v"               >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "attachments-display-top-label ="  >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = 在消息内容前列出附件列表" >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = p"               >> localization\zh-CN\messenger\preferences\preferences.ftl
