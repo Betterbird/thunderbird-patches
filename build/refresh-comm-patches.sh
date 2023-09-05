@@ -49,10 +49,22 @@ else
   exit 1
 fi
 
+QPARENT=`hg tags | grep qparent | sed s/.*://`
+if [ $QPARENT != ${MOZILLA_REV:0:12} ]; then
+  echo "Parent of Mozilla repo is $QPARENT, expected ${MOZILLA_REV:0:12}"
+  exit 1
+fi
+
 if [ -d comm ]; then
   cd comm
 else
   echo "Mozilla directory $MOZILLA_DIR/comm not found"
+  exit 1
+fi
+
+QPARENT=`hg tags | grep qparent | sed s/.*://`
+if [ $QPARENT != ${COMM_REV:0:12} ]; then
+  echo "Parent of comm repo is $QPARENT, expected ${COMM_REV:0:12}"
   exit 1
 fi
 
