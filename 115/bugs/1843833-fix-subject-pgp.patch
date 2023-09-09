@@ -1,50 +1,52 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1689750761 -7200
-# Parent  1fb70d8e501d905c9994e2f07439f2614dfa9534
+# Date 1694296891 -7200
+# Parent  abd4d5ddf65d4a1633fa429469aad42e98f9ba83
 Bug 1843833 - Restore invalidating the thread tree when setting the subject in PGP code.
 
-diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
---- a/mail/base/content/about3Pane.js
-+++ b/mail/base/content/about3Pane.js
-@@ -5787,17 +5787,22 @@ var folderListener = {
-     switch (property) {
-       case "Name":
-         if (folder.isServer) {
-           folderPane.changeServerName(folder, newValue);
-         }
-         break;
-     }
-   },
--  onFolderPropertyFlagChanged(folder, property, oldFlag, newFlag) {},
-+  onFolderPropertyFlagChanged(message, property, oldFlag, newFlag) {
-+    let index = threadTree?.view?.findIndexOfMsgHdr(message, false);
-+    if (index != null && index != nsMsgViewIndex_None) {
-+      threadTree.invalidateRow(index);
-+    }
-+  },
-   onFolderEvent(folder, event) {
-     if (event == "RenameCompleted") {
-       // If a folder is renamed, we get an `onFolderAdded` notification for
-       // the folder but we are not notified about the descendants.
-       for (let f of folder.descendants) {
-         folderPane.addFolder(f.parent, f);
-       }
-     }
 diff --git a/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js b/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
 --- a/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
 +++ b/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
-@@ -753,16 +753,18 @@ Enigmail.hdrView = {
+@@ -736,33 +736,44 @@ Enigmail.hdrView = {
+           EnigmailConstants.PGP_MIME_ENCRYPTED)
+       );
+     }
+     return canDetach;
+   },
+ 
+   setSubject(subject) {
+     // Strip multiple localised Re: prefixes. This emulates NS_MsgStripRE().
+-    let prefixes = Services.prefs.getStringPref("mailnews.localizedRe", "Re");
+-    prefixes = prefixes.split(",");
++    let rawPrefixes = Services.prefs.getComplexValue(
++      "mailnews.localizedRe",
++      Ci.nsIPrefLocalizedString
++    ).data;
++    let prefixes = [];
++    if (rawPrefixes.length > 0) {
++      prefixes = rawPrefixes.split(",");
++    }
+     if (!prefixes.includes("Re")) {
+       prefixes.push("Re");
+     }
+     // Construct a regular expression like this: ^(Re: |Aw: )+
+     let newSubject = subject.replace(
+       new RegExp(`^(${prefixes.join(": |")}: )+`, "i"),
+       ""
      );
      let hadRe = newSubject != subject;
  
      // Update the message.
      gMessage.subject = newSubject;
++    let oldFlags = gMessage.flags;
++    let newFlags = oldFlags;
      if (hadRe) {
-       gMessage.flags |= Ci.nsMsgMessageFlags.HasRe;
+-      gMessage.flags |= Ci.nsMsgMessageFlags.HasRe;
++      newFlags = oldFlags | Ci.nsMsgMessageFlags.HasRe;
++      gMessage.flags = newFlags;
      }
-+    // Update the tree, hack to get this redrawn in all views.
-+    gMessage.folder.NotifyPropertyFlagChanged(gMessage, "dummy", 0, 1);
++    // This even works if the flags haven't changed. Causes repaint in all thread trees.
++    gMessage.folder.msgDatabase.notifyHdrChangeAll(gMessage, oldFlags, newFlags, {});
    },
  
    updateHdrBox(header, value) {
