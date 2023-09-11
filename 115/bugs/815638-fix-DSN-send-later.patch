@@ -1,0 +1,140 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1694457200 -7200
+# Parent  0772b0f1f550cf84bb50c52e64cf67853b94606d
+Bug 815638 - Fix DSN for send later.
+
+diff --git a/mailnews/compose/src/nsMsgSendLater.cpp b/mailnews/compose/src/nsMsgSendLater.cpp
+--- a/mailnews/compose/src/nsMsgSendLater.cpp
++++ b/mailnews/compose/src/nsMsgSendLater.cpp
+@@ -32,16 +32,20 @@
+ #include "mozilla/Services.h"
+ 
+ // Consts for checking and sending mail in milliseconds
+ 
+ // 1 second from mail into the unsent messages folder to initially trying to
+ // send it.
+ const uint32_t kInitialMessageSendTime = 1000;
+ 
++extern char* MimeHeaders_get_parameter(const char* header_value,
++                                       const char* parm_name, char** charset,
++                                       char** language);
++
+ NS_IMPL_ISUPPORTS(nsMsgSendLater, nsIMsgSendLater, nsIFolderListener,
+                   nsIRequestObserver, nsIStreamListener, nsIObserver,
+                   nsIUrlListener, nsIMsgShutdownTask)
+ 
+ nsMsgSendLater::nsMsgSendLater() {
+   mSendingMessages = false;
+   mTimerSet = false;
+   mTotalSentSuccessfully = 0;
+@@ -61,30 +65,32 @@ nsMsgSendLater::nsMsgSendLater() {
+ 
+   m_bytesRead = 0;
+   m_position = 0;
+   m_flagsPosition = 0;
+   m_headersSize = 0;
+ 
+   mIdentityKey = nullptr;
+   mAccountKey = nullptr;
++  mDraftInfo = nullptr;
+ 
+   mUserInitiated = false;
+ }
+ 
+ nsMsgSendLater::~nsMsgSendLater() {
+   PR_Free(m_to);
+   PR_Free(m_fcc);
+   PR_Free(m_bcc);
+   PR_Free(m_newsgroups);
+   PR_Free(m_newshost);
+   PR_Free(m_headers);
+   PR_Free(mLeftoverBuffer);
+   PR_Free(mIdentityKey);
+   PR_Free(mAccountKey);
++  PR_Free(mDraftInfo);
+ }
+ 
+ nsresult nsMsgSendLater::Init() {
+   nsresult rv;
+   nsCOMPtr<nsIPrefBranch> prefs = do_GetService(NS_PREFSERVICE_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   bool sendInBackground;
+@@ -497,16 +503,33 @@ nsresult nsMsgSendLater::CompleteMailFil
+   }
+ 
+   if (m_fcc) {
+     fields->SetFcc(m_fcc);
+   }
+ 
+   if (m_newsgroups) fields->SetNewsgroups(m_newsgroups);
+ 
++  // Extract the returnReceipt, receiptHeaderType and DSN from the draft info.
++  if (mDraftInfo) {
++    char* param = MimeHeaders_get_parameter(mDraftInfo, "receipt", nullptr, nullptr);
++    if (!param || strcmp(param, "0") == 0) {
++      fields->SetReturnReceipt(false);
++    } else {
++      int receiptType = 0;
++      fields->SetReturnReceipt(true);
++      sscanf(param, "%d", &receiptType);
++      fields->SetReceiptHeaderType(((int32_t)receiptType) - 1);
++    }
++    PR_FREEIF(param);
++    param = MimeHeaders_get_parameter(mDraftInfo, "DSN", nullptr, nullptr);
++    fields->SetDSN(param && strcmp(param, "1") == 0);
++    PR_FREEIF(param);
++  }
++
+ #if 0
+   // needs cleanup. Is this needed?
+   if (m_newshost)
+     fields->SetNewspostUrl(m_newshost);
+ #endif
+ 
+   // Create the listener for the send operation...
+   RefPtr<SendOperationListener> sendListener = new SendOperationListener(this);
+@@ -894,19 +917,20 @@ nsresult nsMsgSendLater::BuildHeaders() 
+       case 'X':
+       case 'x': {
+         if (buf + strlen(HEADER_X_MOZILLA_STATUS2) == end &&
+             !PL_strncasecmp(HEADER_X_MOZILLA_STATUS2, buf, end - buf))
+           prune_p = true;
+         else if (buf + strlen(HEADER_X_MOZILLA_STATUS) == end &&
+                  !PL_strncasecmp(HEADER_X_MOZILLA_STATUS, buf, end - buf))
+           prune_p = do_flags_p = true;
+-        else if (!PL_strncasecmp(HEADER_X_MOZILLA_DRAFT_INFO, buf, end - buf))
++        else if (!PL_strncasecmp(HEADER_X_MOZILLA_DRAFT_INFO, buf, end - buf)) {
+           prune_p = true;
+-        else if (!PL_strncasecmp(HEADER_X_MOZILLA_KEYWORDS, buf, end - buf))
++          header = &mDraftInfo;
++        } else if (!PL_strncasecmp(HEADER_X_MOZILLA_KEYWORDS, buf, end - buf))
+           prune_p = true;
+         else if (!PL_strncasecmp(HEADER_X_MOZILLA_NEWSHOST, buf, end - buf)) {
+           prune_p = true;
+           header = &m_newshost;
+         } else if (!PL_strncasecmp(HEADER_X_MOZILLA_IDENTITY_KEY, buf,
+                                    end - buf)) {
+           prune_p = true;
+           header = &mIdentityKey;
+diff --git a/mailnews/compose/src/nsMsgSendLater.h b/mailnews/compose/src/nsMsgSendLater.h
+--- a/mailnews/compose/src/nsMsgSendLater.h
++++ b/mailnews/compose/src/nsMsgSendLater.h
+@@ -128,15 +128,16 @@ class nsMsgSendLater : public nsIMsgSend
+   int32_t m_headersPosition;
+   int32_t m_bytesRead;
+   int32_t m_position;
+   int32_t m_flagsPosition;
+   int32_t m_headersSize;
+   char* mLeftoverBuffer;
+   char* mIdentityKey;
+   char* mAccountKey;
++  char *mDraftInfo;
+ 
+   bool mSendingMessages;
+   bool mUserInitiated;
+   nsCOMPtr<nsIMsgIdentity> mIdentity;
+ };
+ 
+ #endif /* _nsMsgSendLater_H_ */
