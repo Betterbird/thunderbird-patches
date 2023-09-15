@@ -1,41 +1,151 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1694731246 -7200
-# Parent  c3f4cec10e0bdbfb06ccac04a1073cb2c5d2a883
+# Date 1694798011 -7200
+# Parent  5ccf20fd0fd2ad6a794df61b5bcc636c686ba574
 Bug 1851320 - Restore thread state after messages are loaded.
 
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
 +++ b/mail/base/content/about3Pane.js
-@@ -4924,22 +4924,19 @@ var threadPane = {
-       }
+@@ -4899,52 +4899,91 @@ var threadPane = {
  
-       // The message for this key can't be found. Perhaps the thread it's in
-       // has been collapsed? Select the root message in that case.
-       try {
-         let msgHdr = gFolder.GetMessageHeader(key);
-         let thread = gDBView.getThreadContainingMsgHdr(msgHdr);
-         let rootMsgHdr = thread.getRootHdr();
--        index = gDBView.findIndexOfMsgHdr(rootMsgHdr, false);
-+        index = gDBView.findIndexOfMsgHdr(rootMsgHdr, true);
-         if (index != nsMsgViewIndex_None) {
--          indices.add(index);
--          if (key == currentKey) {
--            currentIndex = index;
--          }
-+          threadTree.expandRowAtIndex(index);
-         }
-       } catch (ex) {
-         console.error(ex);
-       }
+   /**
+    * Restore the previously saved thread tree selection.
+    *
+    * @param {boolean} [discard=true] - If false, the selection data should be
+    *   kept after restoring the selection, otherwise it is forgotten.
+    * @param {boolean} [notify=true] - Whether a change in "select" event
+    *   should be fired.
+-   */
+-  restoreSelection(discard = true, notify = true) {
++   * @param {boolean} [collapseAll=false] - If this is called from
++   *   "collapse all", we don't want to expand when restoring.
++   */
++  restoreSelection(discard = true, notify = true, collapseAll = false) {
+     if (!this._savedSelections.has(gFolder?.URI) || !threadTree.view) {
+       return;
      }
+ 
++    // Something weird is going on here: When we enter a folder,
++    // `restoreSelection()` is called twice: Once from
++    // dbViewWrapperListener.onMessagesLoaded() and once from
++    // folderPane._onSelect().
++
+     let { currentKey, selectedKeys } = this._savedSelections.get(gFolder.URI);
+-    let currentIndex = nsMsgViewIndex_None;
+-    let indices = new Set();
+-    for (let key of selectedKeys) {
+-      let index = gDBView.findIndexFromKey(key, false);
+-      if (index != nsMsgViewIndex_None) {
+-        indices.add(index);
+-        if (key == currentKey) {
+-          currentIndex = index;
+-        }
+-        continue;
+-      }
+-
+-      // The message for this key can't be found. Perhaps the thread it's in
+-      // has been collapsed? Select the root message in that case.
+-      try {
+-        let msgHdr = gFolder.GetMessageHeader(key);
+-        let thread = gDBView.getThreadContainingMsgHdr(msgHdr);
+-        let rootMsgHdr = thread.getRootHdr();
+-        index = gDBView.findIndexOfMsgHdr(rootMsgHdr, false);
++    let rerun;
++    let indices;
++    let currentIndex;
++    do {
++      rerun = false;
++      currentIndex = nsMsgViewIndex_None;
++      indices = new Set();
++      for (let key of selectedKeys) {
++        let index = gDBView.findIndexFromKey(key, false);
+         if (index != nsMsgViewIndex_None) {
++          if (
++            gViewWrapper.showGroupedBySort &&
++            gViewWrapper.isGroupedByHeaderAtIndex(index) &&
++            !collapseAll
++          ) {
++            // Strangely only the first member of the collapsed group returns the
++            // view index of the dummy row. All other members fail to get an
++            // index and fall through to the processing below.
++            // So we expand and re-run the loop.
++            threadTree.expandRowAtIndex(index);
++            rerun = true;
++            continue;
++          }
+           indices.add(index);
+           if (key == currentKey) {
+             currentIndex = index;
+           }
++          continue;
+         }
+-      } catch (ex) {
+-        console.error(ex);
++
++        // The message for this key can't be found. Perhaps the thread it's in
++        // has been collapsed? Select the root message in that case.
++        try {
++          let msgHdr = gFolder.GetMessageHeader(key);
++          let thread = gDBView.getThreadContainingMsgHdr(msgHdr);
++          let rootMsgHdr = thread.getRootHdr();
++          index = gDBView.findIndexOfMsgHdr(rootMsgHdr, true);
++          if (index != nsMsgViewIndex_None) {
++            if (collapseAll) {
++              if (gViewWrapper.showGroupedBySort) {
++                // Strangely that returns the index of the first member in the
++                // group after the dummy row.
++                index--;
++              }
++              indices.add(index);
++              if (key == currentKey) {
++                currentIndex = index;
++              }
++              threadTree.collapseRowAtIndex(index);
++            } else {
++              // `findIndexOfMsgHdr(..., true)` has already expanded the row so we re-run
++              // to find all the keys.
++              rerun = true;
++            }
++          }
++        } catch (ex) {
++          console.error(ex);
++        }
+       }
+-    }
++    } while (rerun);
++
      threadTree.setSelectedIndices(indices.values(), !notify);
  
      if (currentIndex != nsMsgViewIndex_None) {
+       // Do an instant scroll before setting the index to avoid animation.
+       threadTree.scrollToIndex(currentIndex, true);
+       threadTree.currentIndex = currentIndex;
+     }
+ 
+@@ -6776,17 +6815,17 @@ commandController.registerCallback(
+   },
+   () => !!gViewWrapper?.dbView
+ );
+ commandController.registerCallback(
+   "cmd_collapseAllThreads",
+   () => {
+     threadPane.saveSelection();
+     gViewWrapper.dbView.doCommand(Ci.nsMsgViewCommandType.collapseAll);
+-    threadPane.restoreSelection();
++    threadPane.restoreSelection(undefined, undefined, true);
+   },
+   () => !!gViewWrapper?.dbView
+ );
+ 
+ function SwitchView(command) {
+   // when switching thread views, we might be coming out of quick search
+   // or a message view.
+   // first set view picker to all
 diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
 --- a/mail/base/content/mailCommon.js
 +++ b/mail/base/content/mailCommon.js
-@@ -993,16 +993,17 @@ var dbViewWrapperListener = {
+@@ -993,16 +993,19 @@ var dbViewWrapperListener = {
    onLoadingFolder(dbFolderInfo) {
      window.quickFilterBar?.onFolderChanged();
    },
@@ -44,6 +154,8 @@ diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
    onMessagesLoaded(all) {
      // Try to restore what was selected. Keep the saved selection (if there is
      // one) until we have all of the messages.
++
++    // Should this (also?) go to about3Pane.js: `folderPane._onSelect()`?
 +    window.threadPane?.restoreThreadState();
      window.threadPane?.restoreSelection(all);
  
