@@ -90,3 +90,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "attachments-display-top-label ="                 >> localization\fr\messenger\preferences\preferences.ftl
 %lecho% "    .label = Afficher les pièces jointes au-dessus du message" >> localization\fr\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = u"                              >> localization\fr\messenger\preferences\preferences.ftl
+
+:: New string from bug 1823274. The Thunderbird folks where negligent and didn't refresh l10n so it's missing everywhere :-(
+%lecho% "context-menu-cancel-msg ="       > localization\fr\messenger\messenger.ftl
+%lecho% "    .label = Annuler le message" > localization\fr\messenger\messenger.ftl

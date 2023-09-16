@@ -90,3 +90,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "attachments-display-top-label ="  >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .label = 在消息内容前列出附件列表" >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"               >> localization\zh-CN\messenger\preferences\preferences.ftl
+
+:: New string from bug 1823274. The Thunderbird folks where negligent and didn't refresh l10n so it's missing everywhere :-(
+%lecho% "context-menu-cancel-msg =" > localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .label = 取消消息"      > localization\zh-CN\messenger\messenger.ftl
