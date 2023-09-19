@@ -92,5 +92,5 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .accesskey = o"                  >> localization\de\messenger\preferences\preferences.ftl
 
 :: New string from bug 1823274. The Thunderbird folks where negligent and didn't refresh l10n so it's missing everywhere :-(
-%lecho% "context-menu-cancel-msg ="        > localization\de\messenger\messenger.ftl
-%lecho% "    .label = Nachricht verwerfen" > localization\de\messenger\messenger.ftl
+%lecho% "context-menu-cancel-msg ="        >> localization\de\messenger\messenger.ftl
+%lecho% "    .label = Nachricht verwerfen" >> localization\de\messenger\messenger.ftl
