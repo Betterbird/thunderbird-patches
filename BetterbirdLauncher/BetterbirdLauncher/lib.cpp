@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <math.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -84,6 +85,67 @@ void replaceFileContent(const TCHAR* filename, const TCHAR* content) {
   fclose(stream);
 }
 
+void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename) {
+  TCHAR currentFile[MAX_PATH_PROFILE];
+  wcscpy_s(currentFile, profilePath);
+  wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
+  TCHAR* content = fileToMemory(currentFile);
+  if (!content) return;
+
+  // Double up \ in profile path and last profile location.
+  size_t newProfilePathLen = 0;
+  TCHAR* newProfilePath = (TCHAR*)malloc((2 * wcslen(profilePath) + 1) * sizeof(TCHAR));
+  for (size_t i = 0; i < wcslen(profilePath); i++) {
+    newProfilePath[newProfilePathLen++] = profilePath[i];
+    if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
+  }
+  newProfilePath[newProfilePathLen] = 0;
+
+  size_t newlastProfilePathLen = 0;
+  TCHAR* newlastProfilePath = (TCHAR*)malloc((2 * wcslen(lastProfilePath) + 1) * sizeof(TCHAR));
+  for (size_t i = 0; i < wcslen(lastProfilePath); i++) {
+    newlastProfilePath[newlastProfilePathLen++] = lastProfilePath[i];
+    if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen++] = '\\';
+  }
+  newlastProfilePath[newlastProfilePathLen] = 0;
+
+  size_t len = wcslen(content);
+  size_t newsize;
+  TCHAR* newContent;
+  if (newProfilePathLen <= newlastProfilePathLen) {
+    newsize = len + 1;
+  } else {
+    // + 1 to round up, + 1 for the null termination.
+    newsize = lround(len * (float(newProfilePathLen) / float(newlastProfilePathLen))) + 2;
+  }
+  newContent = (TCHAR*)malloc(newsize * sizeof(TCHAR));
+
+  // Copy content over and replace.
+  size_t newlen = 0;
+  size_t i = 0;
+  while (i < len) {
+    if (wcsncmp(&content[i], newlastProfilePath, newlastProfilePathLen) != 0) {
+      newContent[newlen++] = content[i++];
+    } else {
+      newContent[newlen] = 0;
+      wcscat_s(newContent, newsize, newProfilePath);
+      newlen += newProfilePathLen;
+      i += newlastProfilePathLen;
+    }
+  }
+  newContent[newlen] = 0;
+
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Processed %ls, length (old:new): %zd:%zd%\n", currentFile, len, newlen);
+#endif
+  replaceFileContent(currentFile, newContent);
+
+  free(content);
+  free(newContent);
+  free(newProfilePath);
+  free(newlastProfilePath);
+}
+
 void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
 #if DOPRINT
   _wfopen_s(&f, L"D:\\Desktop\\launcher.txt", L"a, ccs=UTF-8");
@@ -91,22 +153,37 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
 #endif
   TCHAR profilePath[MAX_PATH_PROFILE];
   wcscpy_s(profilePath, appPath);
-  wcscat_s(profilePath, MAX_PATH_PROFILE, L"\\profile");
+  wcscat_s(profilePath, MAX_PATH_PROFILE, L"\\profile\\");
 
-  TCHAR lastProfileLocationPath[MAX_PATH_PROFILE];
-  wcscpy_s(lastProfileLocationPath, appPath);
-  wcscat_s(lastProfileLocationPath, MAX_PATH_PROFILE, L"\\last-profile-location.txt");
-  TCHAR* lastProfileLocation = fileToMemory(lastProfileLocationPath);
-  if (!lastProfileLocation) {
+  TCHAR lastProfilePathFile[MAX_PATH_PROFILE];
+  wcscpy_s(lastProfilePathFile, appPath);
+  wcscat_s(lastProfilePathFile, MAX_PATH_PROFILE, L"\\last-profile-location.txt");
+  TCHAR* lastProfilePath = fileToMemory(lastProfilePathFile);
+  if (!lastProfilePath) {
 #if DOPRINT
-    fwprintf(f, L"BetterbirdLauncher: %ls not found\n", lastProfileLocationPath);
+    fwprintf(f, L"BetterbirdLauncher: %ls not found\n", lastProfilePathFile);
 #endif
   } else {
-    fwprintf(f, L"BetterbirdLauncher: Last profile location: %ls\n", lastProfileLocation);
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Last profile location: %ls\n", lastProfilePath);
+#endif
+  }
+
+  if (wcscmp(profilePath, lastProfilePath) == 0) {
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Profile location has not changed, now: %ls\n", profilePath);
+#endif
+  } else {
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Profile location has changed, now: %ls\n", profilePath);
+#endif
+    changeAbsloutePaths(profilePath, lastProfilePath, L"folderCache.json");
+    changeAbsloutePaths(profilePath, lastProfilePath, L"extensions.json");
+    changeAbsloutePaths(profilePath, lastProfilePath, L"prefs.js");
   }
 
   // Write out current profile location.
-  replaceFileContent(lastProfileLocationPath, profilePath);
+  replaceFileContent(lastProfilePathFile, profilePath);
 #if DOPRINT
   fclose(f);
 #endif
