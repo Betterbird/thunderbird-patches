@@ -1,3 +1,5 @@
+// Copyright (c) 2022, The Betterbird Project, Jörg Knobloch. All rights reserved.
+
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <objbase.h>
