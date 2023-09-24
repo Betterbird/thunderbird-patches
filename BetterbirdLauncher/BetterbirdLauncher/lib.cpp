@@ -85,7 +85,7 @@ void replaceFileContent(const TCHAR* filename, const TCHAR* content) {
   fclose(stream);
 }
 
-void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename) {
+void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, BOOL filePath) {
   TCHAR currentFile[MAX_PATH_PROFILE];
   wcscpy_s(currentFile, profilePath);
   wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
@@ -97,7 +97,13 @@ void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath,
   TCHAR* newProfilePath = (TCHAR*)malloc((2 * wcslen(profilePath) + 1) * sizeof(TCHAR));
   for (size_t i = 0; i < wcslen(profilePath); i++) {
     newProfilePath[newProfilePathLen++] = profilePath[i];
-    if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
+    if (filePath) {
+      // Change path for use in file:// URL.
+      if (profilePath[i] == '\\') newProfilePath[newProfilePathLen - 1] = '/';
+    } else {
+      // Double up the slashes.
+      if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
+    }
   }
   newProfilePath[newProfilePathLen] = 0;
 
@@ -105,7 +111,11 @@ void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath,
   TCHAR* newlastProfilePath = (TCHAR*)malloc((2 * wcslen(lastProfilePath) + 1) * sizeof(TCHAR));
   for (size_t i = 0; i < wcslen(lastProfilePath); i++) {
     newlastProfilePath[newlastProfilePathLen++] = lastProfilePath[i];
-    if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen++] = '\\';
+    if (filePath) {
+      if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen - 1] = '/';
+    } else {
+      if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen++] = '\\';
+    }
   }
   newlastProfilePath[newlastProfilePathLen] = 0;
 
@@ -177,9 +187,10 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
 #if DOPRINT
     fwprintf(f, L"BetterbirdLauncher: Profile location has changed, now: %ls\n", profilePath);
 #endif
-    changeAbsloutePaths(profilePath, lastProfilePath, L"folderCache.json");
-    changeAbsloutePaths(profilePath, lastProfilePath, L"extensions.json");
-    changeAbsloutePaths(profilePath, lastProfilePath, L"prefs.js");
+    changeAbsloutePaths(profilePath, lastProfilePath, L"folderCache.json", false);
+    changeAbsloutePaths(profilePath, lastProfilePath, L"extensions.json", false);
+    changeAbsloutePaths(profilePath, lastProfilePath, L"extensions.json", true);
+    changeAbsloutePaths(profilePath, lastProfilePath, L"prefs.js", false);
   }
 
   // Write out current profile location.
