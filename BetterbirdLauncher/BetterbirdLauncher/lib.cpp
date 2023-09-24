@@ -17,20 +17,20 @@ TCHAR* fileToMemory(TCHAR* filename) {
   struct _stat theStat;
   if(_wstat(filename, &theStat)) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Can't stat %S\n", filename);
+    fwprintf(f, L"BetterbirdLauncher: Can't stat %ls\n", filename);
 #endif
     return NULL;
   }
   size_t len = theStat.st_size;
 #if DOPRINT
-  fprintf(f, "BetterbirdLauncher: File %S has %zd characters\n", filename, len);
+  fwprintf(f, L"BetterbirdLauncher: File %ls has %zd bytes\n", filename, len);
 #endif
 
   FILE* stream;
   errno_t err = _wfopen_s(&stream, filename, L"r, ccs=UTF-8");
   if (err) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Can't open %S\n", filename);
+    fwprintf(f, L"BetterbirdLauncher: Can't open %ls\n", filename);
 #endif
     return NULL;
   }
@@ -39,29 +39,23 @@ TCHAR* fileToMemory(TCHAR* filename) {
   TCHAR* content = (TCHAR*)malloc(bufferSize);
   size_t numread = fread_s(content, bufferSize, sizeof(TCHAR), len, stream);
   content[numread] = 0;
-  if (len != numread) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Reading from %S failed, only read %zd characters\n", filename, numread);
+  fwprintf(f, L"BetterbirdLauncher: Read %zd UTF-16 characters from %ls\n", numread, filename);
 #endif
-  } else {
-#if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Read %zd UTF-8 characters from %S\n", len, filename);
-#endif
-  }
   fclose(stream);
   return content;
 }
 
-void replaceFileContent(TCHAR* filename, TCHAR* content) {
+void replaceFileContent(const TCHAR* filename, const TCHAR* content) {
   if (DeleteFileW(filename)) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Deleted %S\n", filename);
+    fwprintf(f, L"BetterbirdLauncher: Deleted %ls\n", filename);
 #endif
   } else {
     DWORD err = GetLastError();
     if (err != ERROR_FILE_NOT_FOUND) {
 #if DOPRINT
-      fprintf(f, "BetterbirdLauncher: Can't delete %S, error %lx\n", filename, err);
+      fwprintf(f, L"BetterbirdLauncher: Can't delete %ls, error %lx\n", filename, err);
 #endif
       return;
     }
@@ -71,7 +65,7 @@ void replaceFileContent(TCHAR* filename, TCHAR* content) {
   errno_t err = _wfopen_s(&stream, filename, L"w, ccs=UTF-8");
   if (err) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Can't create %S\n", filename);
+    fwprintf(f, L"BetterbirdLauncher: Can't create %ls\n", filename);
 #endif
     return;
   }
@@ -80,11 +74,11 @@ void replaceFileContent(TCHAR* filename, TCHAR* content) {
   size_t written = fwrite(content, sizeof(TCHAR), len, stream);
   if (len != written) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Writing to %S failed\n", filename);
+    fwprintf(f, L"BetterbirdLauncher: Writing to %ls failed\n", filename);
 #endif
   } else {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: Written %zd UTF-8 characters to %S\n", len, filename);
+    fwprintf(f, L"BetterbirdLauncher: Written %zd UTF-8 code points to %ls\n", len, filename);
 #endif
   }
   fclose(stream);
@@ -92,8 +86,8 @@ void replaceFileContent(TCHAR* filename, TCHAR* content) {
 
 void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
 #if DOPRINT
-  fopen_s(&f, "D:\\Desktop\\launcher.txt", "a");
-  fprintf(f, "BetterbirdLauncher: Launcher %S\n", appPath);
+  _wfopen_s(&f, L"D:\\Desktop\\launcher.txt", L"a, ccs=UTF-8");
+  fwprintf(f, L"BetterbirdLauncher: Launcher %ls\n", appPath);
 #endif
   TCHAR profilePath[MAX_PATH_PROFILE];
   wcscpy_s(profilePath, appPath);
@@ -105,10 +99,10 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
   TCHAR* lastProfileLocation = fileToMemory(lastProfileLocationPath);
   if (!lastProfileLocation) {
 #if DOPRINT
-    fprintf(f, "BetterbirdLauncher: %S not found\n", lastProfileLocationPath);
+    fwprintf(f, L"BetterbirdLauncher: %ls not found\n", lastProfileLocationPath);
 #endif
   } else {
-    fprintf(f, "BetterbirdLauncher: Last profile location: %S\n", lastProfileLocation);
+    fwprintf(f, L"BetterbirdLauncher: Last profile location: %ls\n", lastProfileLocation);
   }
 
   // Write out current profile location.
