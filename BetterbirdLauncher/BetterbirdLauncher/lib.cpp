@@ -5,6 +5,7 @@
 #include <math.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include "lz4.h"
 
 #define MAX_PATH_PROFILE MAX_PATH + 1000
 
@@ -14,7 +15,40 @@
 FILE* f = NULL;
 #endif
 
-TCHAR* fileToMemory(TCHAR* filename) {
+char* fileToMemory(TCHAR* filename, size_t* size) {
+  struct _stat theStat;
+  if(_wstat(filename, &theStat)) {
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Can't stat %ls\n", filename);
+#endif
+    return NULL;
+  }
+  size_t len = theStat.st_size;
+#if DOPRINT
+  fwprintf(f, L"BetterbirdLauncher: File %ls has %zd bytes\n", filename, len);
+#endif
+
+  FILE* stream;
+  errno_t err = _wfopen_s(&stream, filename, L"rb");
+  if (err) {
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Can't open %ls\n", filename);
+#endif
+    return NULL;
+  }
+
+  size_t bufferSize = len + 1;
+  char* content = (char*)malloc(bufferSize);
+  size_t numread = fread_s(content, bufferSize, 1, len, stream);
+  *size = numread;
+#if DOPRINT
+  fwprintf(f, L"BetterbirdLauncher: Read %zd bytes from %ls\n", numread, filename);
+#endif
+  fclose(stream);
+  return content;
+}
+
+TCHAR* fileToMemoryW(TCHAR* filename) {
   struct _stat theStat;
   if(_wstat(filename, &theStat)) {
 #if DOPRINT
@@ -85,14 +119,8 @@ void replaceFileContent(const TCHAR* filename, const TCHAR* content) {
   fclose(stream);
 }
 
-void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, BOOL filePath) {
-  TCHAR currentFile[MAX_PATH_PROFILE];
-  wcscpy_s(currentFile, profilePath);
-  wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
-  TCHAR* content = fileToMemory(currentFile);
-  if (!content) return;
-
-  // Double up \ in profile path and last profile location.
+TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* content, BOOL filePath) {
+  // Double up \ ore replace with / in profile path and last profile path.
   size_t newProfilePathLen = 0;
   TCHAR* newProfilePath = (TCHAR*)malloc((2 * wcslen(profilePath) + 1) * sizeof(TCHAR));
   for (size_t i = 0; i < wcslen(profilePath); i++) {
@@ -101,7 +129,7 @@ void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath,
       // Change path for use in file:// URL.
       if (profilePath[i] == '\\') newProfilePath[newProfilePathLen - 1] = '/';
     } else {
-      // Double up the slashes.
+      // Double up the backslashes.
       if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
     }
   }
@@ -145,15 +173,63 @@ void changeAbsloutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath,
   }
   newContent[newlen] = 0;
 
+  free(newProfilePath);
+  free(newlastProfilePath);
+
+  return newContent;
+}
+
+void changeAbsolutePathsLZ4(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename) {
+  TCHAR currentFile[MAX_PATH_PROFILE];
+  wcscpy_s(currentFile, profilePath);
+  wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
+  size_t len;
+  int outlen = 0;
+  char* content = fileToMemory(currentFile, &len);
+  if (!content) return;
+
+  // Decompress.
+  static const char MAGIC_NUMBER[] = "mozLz40";
+  if (len < sizeof(MAGIC_NUMBER) + 4 || memcmp(MAGIC_NUMBER, content, sizeof(MAGIC_NUMBER) - 1)) {
 #if DOPRINT
-    fwprintf(f, L"BetterbirdLauncher: Processed %ls, length (old:new): %zd:%zd%\n", currentFile, len, newlen);
+    fwprintf(f, L"BetterbirdLauncher: Something wrong with LZ4 file %ls\n", currentFile);
+#endif
+    return;
+  }
+  for (size_t i = sizeof(MAGIC_NUMBER); i < sizeof(MAGIC_NUMBER) + 4; i++) {
+    // Size is encoded in 4 bytes, little endian.
+    outlen += (unsigned char)content[i] << (8 * (i - sizeof(MAGIC_NUMBER)));
+  }
+  char* decompressed = (char*)malloc(outlen + 1);
+  int decompressedSize =
+    LZ4_decompress_safe(content + sizeof(MAGIC_NUMBER) + 4, decompressed, (int)(len - sizeof(MAGIC_NUMBER) - 4), outlen);
+  if (decompressedSize != outlen) {
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Something wrong with LZ4 decompression, expected %d, got %d\n", outlen, decompressedSize);
+#endif
+    return;
+  }
+  decompressed[outlen] = 0;
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Decompressed LZ4 file %ls, length %d\n", currentFile, outlen);
+#endif
+}
+
+void changeAbsolutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, BOOL filePath) {
+  TCHAR currentFile[MAX_PATH_PROFILE];
+  wcscpy_s(currentFile, profilePath);
+  wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
+  TCHAR* content = fileToMemoryW(currentFile);
+  if (!content) return;
+
+  TCHAR* newContent = changeContent(profilePath, lastProfilePath, content, filePath);
+#if DOPRINT
+    fwprintf(f, L"BetterbirdLauncher: Processed %ls, length (old:new): %zd:%zd\n", currentFile, wcslen(content), wcslen(newContent));
 #endif
   replaceFileContent(currentFile, newContent);
 
   free(content);
   free(newContent);
-  free(newProfilePath);
-  free(newlastProfilePath);
 }
 
 void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
@@ -168,7 +244,7 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
   TCHAR lastProfilePathFile[MAX_PATH_PROFILE];
   wcscpy_s(lastProfilePathFile, appPath);
   wcscat_s(lastProfilePathFile, MAX_PATH_PROFILE, L"\\last-profile-location.txt");
-  TCHAR* lastProfilePath = fileToMemory(lastProfilePathFile);
+  TCHAR* lastProfilePath = fileToMemoryW(lastProfilePathFile);
   if (!lastProfilePath) {
 #if DOPRINT
     fwprintf(f, L"BetterbirdLauncher: %ls not found\n", lastProfilePathFile);
@@ -187,10 +263,11 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
 #if DOPRINT
     fwprintf(f, L"BetterbirdLauncher: Profile location has changed, now: %ls\n", profilePath);
 #endif
-    changeAbsloutePaths(profilePath, lastProfilePath, L"folderCache.json", false);
-    changeAbsloutePaths(profilePath, lastProfilePath, L"extensions.json", false);
-    changeAbsloutePaths(profilePath, lastProfilePath, L"extensions.json", true);
-    changeAbsloutePaths(profilePath, lastProfilePath, L"prefs.js", false);
+    changeAbsolutePaths(profilePath, lastProfilePath, L"folderCache.json", false);
+    changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", false);
+    changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", true);
+    changeAbsolutePaths(profilePath, lastProfilePath, L"prefs.js", false);
+    changeAbsolutePathsLZ4(profilePath, lastProfilePath, L"addonStartup.json.lz4");
   }
 
   // Write out current profile location.
