@@ -9,6 +9,12 @@
 
 #define MAX_PATH_PROFILE MAX_PATH + 1000
 
+const short DOUBLE_BACKSLASH = 1;
+const short BACKSLASH_TO_SLASH = 2;
+// XXX TODO: Support these two following:
+const short ENCODE_PERCENT = 4;
+const short ENCODE_JSON_STYLE = 8;
+
 #define DOPRINT 0
 
 #if DOPRINT
@@ -157,7 +163,7 @@ void replaceFileContentW(const TCHAR* filename, const TCHAR* content) {
   fclose(stream);
 }
 
-TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* content, BOOL filePath, size_t* hits) {
+TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* content, short substitution, size_t* hits) {
   *hits = 0;
 
   // Double up \ ore replace with / in profile path and last profile path.
@@ -166,12 +172,16 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
   if (!newProfilePath) return NULL;
   for (size_t i = 0; i < wcslen(profilePath); i++) {
     newProfilePath[newProfilePathLen++] = profilePath[i];
-    if (filePath) {
+    if (substitution & BACKSLASH_TO_SLASH) {
       // Change path for use in file:// URL.
       if (profilePath[i] == '\\') newProfilePath[newProfilePathLen - 1] = '/';
-    } else {
+    } else if (substitution & DOUBLE_BACKSLASH) {
       // Double up the backslashes.
       if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
+    } else if (substitution & ENCODE_PERCENT) {
+      // XXX TODO: Percent encode: á becomes: %C3%A1
+    } else if (substitution & ENCODE_JSON_STYLE) {
+      // XXX TODO: Encode JS style: á becomes: \u00e9.
     }
   }
   newProfilePath[newProfilePathLen] = 0;
@@ -181,9 +191,9 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
   if (!newProfilePath) return NULL;
   for (size_t i = 0; i < wcslen(lastProfilePath); i++) {
     newlastProfilePath[newlastProfilePathLen++] = lastProfilePath[i];
-    if (filePath) {
+    if (substitution & BACKSLASH_TO_SLASH) {
       if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen - 1] = '/';
-    } else {
+    } else if (substitution & DOUBLE_BACKSLASH) {
       if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen++] = '\\';
     }
   }
@@ -223,7 +233,7 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
   return newContent;
 }
 
-void changeAbsolutePathsLZ4(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, BOOL filePath) {
+void changeAbsolutePathsLZ4(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, short substitution) {
   TCHAR currentFile[MAX_PATH_PROFILE];
   wcscpy_s(currentFile, profilePath);
   wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
@@ -276,13 +286,16 @@ void changeAbsolutePathsLZ4(const TCHAR* profilePath, const TCHAR* lastProfilePa
   decompressedW[lenW] = 0;
 
   size_t hits;
-  TCHAR* newContentW = changeContent(profilePath, lastProfilePath, decompressedW, filePath, &hits);
+  TCHAR* newContentW = changeContent(profilePath, lastProfilePath, decompressedW, substitution, &hits);
   free(decompressedW);
   if (!newContentW) return;
 
   // Convert back to UTF-8, worst case, all the chars in the new path are 4-byte code points.
-  // If we're doing backslash double-up, we double that space. 
-  int newsize = outlen + (filePath ? 4 : 8) * (int)hits * (int)wcslen(profilePath);
+  // If we're doing backslash double-up, we double that space.
+  int multiplier = 4;
+  if (substitution & DOUBLE_BACKSLASH) multiplier *= 2;
+  if (substitution & ENCODE_PERCENT) multiplier *= 3;
+  int newsize = outlen + multiplier * (int)hits * (int)wcslen(profilePath);
   char* newContent = (char*)malloc(newsize + 1);
   if (!newContent) {
     free(newContentW);
@@ -313,7 +326,7 @@ void changeAbsolutePathsLZ4(const TCHAR* profilePath, const TCHAR* lastProfilePa
   free(compressed);
 }
 
-void changeAbsolutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, BOOL filePath) {
+void changeAbsolutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* filename, short substitution) {
   TCHAR currentFile[MAX_PATH_PROFILE];
   wcscpy_s(currentFile, profilePath);
   wcscat_s(currentFile, MAX_PATH_PROFILE, filename);
@@ -321,7 +334,7 @@ void changeAbsolutePaths(const TCHAR* profilePath, const TCHAR* lastProfilePath,
   if (!content) return;
 
   size_t hits;
-  TCHAR* newContent = changeContent(profilePath, lastProfilePath, content, filePath, &hits);
+  TCHAR* newContent = changeContent(profilePath, lastProfilePath, content, substitution, &hits);
   if (!newContent) {
     free(content);
     return;
@@ -367,17 +380,17 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
 #if DOPRINT
       fwprintf(f, L"BetterbirdLauncher: Profile location has changed, now: %ls\n", profilePath);
 #endif
-      // There are problems with replacing absolute paths since in
-      // folderCache.json non-ASCII characters are encoded like so:
-      // portableéé: portable\u00e9\u00e9 and in addonStartup.json like so:
-      // portableéé: portable%C3%A9%C3%A9.
-      changeAbsolutePaths(profilePath, lastProfilePath, L"prefs.js", false);
-      changeAbsolutePaths(profilePath, lastProfilePath, L"folderCache.json", false);
+      // In folderCache.json non-ASCII characters are encoded like so:
+      // portableéé: portable\u00e9\u00e9 - ENCODE_JSON_STYLE
+      changeAbsolutePaths(profilePath, lastProfilePath, L"prefs.js", DOUBLE_BACKSLASH);
+      changeAbsolutePaths(profilePath, lastProfilePath, L"folderCache.json", DOUBLE_BACKSLASH | ENCODE_JSON_STYLE);
 
-      changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", false);
-      changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", true);
-      changeAbsolutePathsLZ4(profilePath, lastProfilePath, L"addonStartup.json.lz4", false);
-      changeAbsolutePathsLZ4(profilePath, lastProfilePath, L"addonStartup.json.lz4", true);
+      /// In extensions.json and addonStartup.json non-ASCII characters are encoded like so in file:// URLs.
+      // portableéé: portable%C3%A9%C3%A9.
+      changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", DOUBLE_BACKSLASH);
+      changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", BACKSLASH_TO_SLASH | ENCODE_PERCENT);
+      changeAbsolutePathsLZ4(profilePath, lastProfilePath, L"addonStartup.json.lz4", DOUBLE_BACKSLASH);
+      changeAbsolutePathsLZ4(profilePath, lastProfilePath, L"addonStartup.json.lz4", BACKSLASH_TO_SLASH | ENCODE_PERCENT);
     }
   }
 
