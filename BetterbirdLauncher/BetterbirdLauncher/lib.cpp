@@ -162,7 +162,21 @@ void replaceFileContentW(const TCHAR* filename, const TCHAR* content) {
   fclose(stream);
 }
 
+void fillPercentEncoding(TCHAR c, char percent[13], int* percentLen) {
+  static char utf8[4];
+  int len = WideCharToMultiByte(CP_UTF8, 0, &c, 1, utf8, 4, NULL, NULL);
+  *percentLen = 0;
+  for (int i = 0; i < len; i++) {
+    sprintf_s(percent + *percentLen, 13 - *percentLen, "%%%02X", (unsigned char)utf8[i]);
+    *percentLen += 3;
+  }
+}
+
 TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* content, short substitution, size_t* hits) {
+  static char hexchars[5];
+  static char percent[13];
+  int percentLen;
+
   *hits = 0;
 
   // Worst case is percent encoding, this grows by a factor of 12 if it's a 4-byte UTF-8 code point.
@@ -179,11 +193,15 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
       if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
     }
     if (substitution & ENCODE_PERCENT) {
-      // XXX TODO: Percent encode: á becomes: %C3%A1
+      // Percent encode: á becomes: %C3%A1
+      if (profilePath[i] & 0xFF80) {
+        newProfilePath[newProfilePathLen - 1] = '%';
+        fillPercentEncoding(profilePath[i], percent, &percentLen);
+        for (int i = 1; i < percentLen; i++) newProfilePath[newProfilePathLen++] = percent[i];
+      }
     } else if (substitution & ENCODE_JSON_STYLE) {
       // Encode JS style: á becomes: \u00e9.
       if (profilePath[i] & 0xFF80) {
-        static char hexchars[5];
         newProfilePath[newProfilePathLen - 1] = '\\';
         newProfilePath[newProfilePathLen++] = 'u';
         sprintf_s(hexchars, sizeof(hexchars), "%04x", profilePath[i]);
@@ -196,42 +214,46 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
   }
   newProfilePath[newProfilePathLen] = 0;
 
-  size_t newlastProfilePathLen = 0;
-  TCHAR* newlastProfilePath = (TCHAR*)malloc((12 * wcslen(lastProfilePath) + 1) * sizeof(TCHAR));
+  size_t newLastProfilePathLen = 0;
+  TCHAR* newLastProfilePath = (TCHAR*)malloc((12 * wcslen(lastProfilePath) + 1) * sizeof(TCHAR));
   if (!newProfilePath) return NULL;
   for (size_t i = 0; i < wcslen(lastProfilePath); i++) {
-    newlastProfilePath[newlastProfilePathLen++] = lastProfilePath[i];
+    newLastProfilePath[newLastProfilePathLen++] = lastProfilePath[i];
     if (substitution & BACKSLASH_TO_SLASH) {
-      if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen - 1] = '/';
+      if (lastProfilePath[i] == '\\') newLastProfilePath[newLastProfilePathLen - 1] = '/';
     } else if (substitution & DOUBLE_BACKSLASH) {
-      if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen++] = '\\';
+      if (lastProfilePath[i] == '\\') newLastProfilePath[newLastProfilePathLen++] = '\\';
     }
     if (substitution & ENCODE_PERCENT) {
       // Percent encode: á becomes: %C3%A1
+      if (lastProfilePath[i] & 0xFF80) {
+        newLastProfilePath[newLastProfilePathLen - 1] = '%';
+        fillPercentEncoding(lastProfilePath[i], percent, &percentLen);
+        for (int i = 1; i < percentLen; i++) newLastProfilePath[newLastProfilePathLen++] = percent[i];
+      }
     } else if (substitution & ENCODE_JSON_STYLE) {
       // Encode JS style: á becomes: \u00e9.
       if (lastProfilePath[i] & 0xFF80) {
-        static char hexchars[5];
-        newlastProfilePath[newlastProfilePathLen - 1] = '\\';
-        newlastProfilePath[newlastProfilePathLen++] = 'u';
+        newLastProfilePath[newLastProfilePathLen - 1] = '\\';
+        newLastProfilePath[newLastProfilePathLen++] = 'u';
         sprintf_s(hexchars, sizeof(hexchars), "%04x", lastProfilePath[i]);
-        newlastProfilePath[newlastProfilePathLen++] = hexchars[0];
-        newlastProfilePath[newlastProfilePathLen++] = hexchars[1];
-        newlastProfilePath[newlastProfilePathLen++] = hexchars[2];
-        newlastProfilePath[newlastProfilePathLen++] = hexchars[3];
+        newLastProfilePath[newLastProfilePathLen++] = hexchars[0];
+        newLastProfilePath[newLastProfilePathLen++] = hexchars[1];
+        newLastProfilePath[newLastProfilePathLen++] = hexchars[2];
+        newLastProfilePath[newLastProfilePathLen++] = hexchars[3];
       }
     }
   }
-  newlastProfilePath[newlastProfilePathLen] = 0;
+  newLastProfilePath[newLastProfilePathLen] = 0;
 
   size_t len = wcslen(content);
   size_t newsize;
   TCHAR* newContent;
-  if (newProfilePathLen <= newlastProfilePathLen) {
+  if (newProfilePathLen <= newLastProfilePathLen) {
     newsize = len + 1;
   } else {
     // + 1 to round up, + 1 for the null termination.
-    newsize = lround(len * (float(newProfilePathLen) / float(newlastProfilePathLen))) + 2;
+    newsize = lround(len * (float(newProfilePathLen) / float(newLastProfilePathLen))) + 2;
   }
   newContent = (TCHAR*)malloc(newsize * sizeof(TCHAR));
   if (!newContent) return NULL;
@@ -240,20 +262,20 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
   size_t newlen = 0;
   size_t i = 0;
   while (i < len) {
-    if (wcsncmp(&content[i], newlastProfilePath, newlastProfilePathLen) != 0) {
+    if (wcsncmp(&content[i], newLastProfilePath, newLastProfilePathLen) != 0) {
       newContent[newlen++] = content[i++];
     } else {
       newContent[newlen] = 0;
       wcscat_s(newContent, newsize, newProfilePath);
       newlen += newProfilePathLen;
-      i += newlastProfilePathLen;
+      i += newLastProfilePathLen;
       (*hits)++;
     }
   }
   newContent[newlen] = 0;
 
   free(newProfilePath);
-  free(newlastProfilePath);
+  free(newLastProfilePath);
 
   return newContent;
 }
@@ -411,7 +433,9 @@ void replaceAbsolutePathsInProfileData(TCHAR* appPath) {
       changeAbsolutePaths(profilePath, lastProfilePath, L"folderCache.json", DOUBLE_BACKSLASH | ENCODE_JSON_STYLE);
 
       /// In extensions.json and addonStartup.json non-ASCII characters are encoded like so in file:// URLs.
-      // portableéé: portable%C3%A9%C3%A9.
+      // portableéé: portable%C3%A9%C3%A9 - ENCODE_PERCENT.
+      // Note that percent encoding is only used for non-ASCII characters, other characters which
+      // are usually percent encoded, like space, $ % & are not percent encoded.
       changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", DOUBLE_BACKSLASH);
       changeAbsolutePaths(profilePath, lastProfilePath, L"extensions.json", BACKSLASH_TO_SLASH | ENCODE_PERCENT);
       changeAbsolutePathsLZ4(profilePath, lastProfilePath, L"addonStartup.json.lz4", DOUBLE_BACKSLASH);
