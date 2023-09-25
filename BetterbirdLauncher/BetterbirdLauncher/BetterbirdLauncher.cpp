@@ -83,7 +83,6 @@ bool BetterBirdRunningOnOtherPath(TCHAR *appPath) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
   TCHAR appPath[MAX_PATH];
-  TCHAR cacheFile[MAX_PATH];
   TCHAR profilePath[MAX_PATH_PROFILE];
   SHELLEXECUTEINFO ShExecInfo;
 
@@ -104,7 +103,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
   // Replace absolute file path in various files in the profile.
   replaceAbsolutePathsInProfileData(appPath);
-  return 0;
 
   // Hand on the command line for opening mailto: URLs.
   wcscat_s(profilePath, MAX_PATH_PROFILE, L" ");
