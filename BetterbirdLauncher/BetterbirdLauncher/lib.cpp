@@ -11,7 +11,6 @@
 
 const short DOUBLE_BACKSLASH = 1;
 const short BACKSLASH_TO_SLASH = 2;
-// XXX TODO: Support these two following:
 const short ENCODE_PERCENT = 4;
 const short ENCODE_JSON_STYLE = 8;
 
@@ -166,9 +165,9 @@ void replaceFileContentW(const TCHAR* filename, const TCHAR* content) {
 TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, const TCHAR* content, short substitution, size_t* hits) {
   *hits = 0;
 
-  // Double up \ ore replace with / in profile path and last profile path.
+  // Worst case is percent encoding, this grows by a factor of 12 if it's a 4-byte UTF-8 code point.
   size_t newProfilePathLen = 0;
-  TCHAR* newProfilePath = (TCHAR*)malloc((2 * wcslen(profilePath) + 1) * sizeof(TCHAR));
+  TCHAR* newProfilePath = (TCHAR*)malloc((12 * wcslen(profilePath) + 1) * sizeof(TCHAR));
   if (!newProfilePath) return NULL;
   for (size_t i = 0; i < wcslen(profilePath); i++) {
     newProfilePath[newProfilePathLen++] = profilePath[i];
@@ -178,16 +177,27 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
     } else if (substitution & DOUBLE_BACKSLASH) {
       // Double up the backslashes.
       if (profilePath[i] == '\\') newProfilePath[newProfilePathLen++] = '\\';
-    } else if (substitution & ENCODE_PERCENT) {
+    }
+    if (substitution & ENCODE_PERCENT) {
       // XXX TODO: Percent encode: á becomes: %C3%A1
     } else if (substitution & ENCODE_JSON_STYLE) {
-      // XXX TODO: Encode JS style: á becomes: \u00e9.
+      // Encode JS style: á becomes: \u00e9.
+      if (profilePath[i] & 0xFF80) {
+        static char hexchars[5];
+        newProfilePath[newProfilePathLen - 1] = '\\';
+        newProfilePath[newProfilePathLen++] = 'u';
+        sprintf_s(hexchars, sizeof(hexchars), "%04x", profilePath[i]);
+        newProfilePath[newProfilePathLen++] = hexchars[0];
+        newProfilePath[newProfilePathLen++] = hexchars[1];
+        newProfilePath[newProfilePathLen++] = hexchars[2];
+        newProfilePath[newProfilePathLen++] = hexchars[3];
+      }
     }
   }
   newProfilePath[newProfilePathLen] = 0;
 
   size_t newlastProfilePathLen = 0;
-  TCHAR* newlastProfilePath = (TCHAR*)malloc((2 * wcslen(lastProfilePath) + 1) * sizeof(TCHAR));
+  TCHAR* newlastProfilePath = (TCHAR*)malloc((12 * wcslen(lastProfilePath) + 1) * sizeof(TCHAR));
   if (!newProfilePath) return NULL;
   for (size_t i = 0; i < wcslen(lastProfilePath); i++) {
     newlastProfilePath[newlastProfilePathLen++] = lastProfilePath[i];
@@ -195,6 +205,21 @@ TCHAR* changeContent(const TCHAR* profilePath, const TCHAR* lastProfilePath, con
       if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen - 1] = '/';
     } else if (substitution & DOUBLE_BACKSLASH) {
       if (lastProfilePath[i] == '\\') newlastProfilePath[newlastProfilePathLen++] = '\\';
+    }
+    if (substitution & ENCODE_PERCENT) {
+      // Percent encode: á becomes: %C3%A1
+    } else if (substitution & ENCODE_JSON_STYLE) {
+      // Encode JS style: á becomes: \u00e9.
+      if (lastProfilePath[i] & 0xFF80) {
+        static char hexchars[5];
+        newlastProfilePath[newlastProfilePathLen - 1] = '\\';
+        newlastProfilePath[newlastProfilePathLen++] = 'u';
+        sprintf_s(hexchars, sizeof(hexchars), "%04x", lastProfilePath[i]);
+        newlastProfilePath[newlastProfilePathLen++] = hexchars[0];
+        newlastProfilePath[newlastProfilePathLen++] = hexchars[1];
+        newlastProfilePath[newlastProfilePathLen++] = hexchars[2];
+        newlastProfilePath[newlastProfilePathLen++] = hexchars[3];
+      }
     }
   }
   newlastProfilePath[newlastProfilePathLen] = 0;
