@@ -1,0 +1,149 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1695853842 -7200
+# Parent  775703e03d5bd02438d62ded0eabf79cd9a54ba7
+Bug 1854567 - Optionally limit the number of messages sent per connection.
+
+diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClient.jsm
+--- a/mailnews/compose/src/SmtpClient.jsm
++++ b/mailnews/compose/src/SmtpClient.jsm
+@@ -110,31 +110,55 @@ class SmtpClient {
+     this.onFree = () => {};
+   }
+ 
+   /**
+    * Initiate a connection to the server
+    */
+   connect() {
+     if (this.socket?.readyState == "open") {
+-      this.logger.debug("Reusing a connection");
+-      this.onidle();
+-    } else {
+-      let hostname = this._server.hostname.toLowerCase();
+-      let port = this._server.port || (this.options.requireTLS ? 465 : 587);
+-      this.logger.debug(`Connecting to smtp://${hostname}:${port}`);
+-      this._secureTransport = this.options.requireTLS;
+-      this.socket = new TCPSocket(hostname, port, {
+-        binaryType: "arraybuffer",
+-        useSecureTransport: this._secureTransport,
+-      });
++      if (this.maxMessagesPerConnection <= 0) {
++        // Unlimited reuse of this connection.
++        this.messagesSent++;
++        this.logger.debug(
++          `Reusing a connection to send message #${this.messagesSent} (no limit)`
++        );
++        this.onidle();
++        this._freed = false;
++        return;
++      } else if (this.messagesSent < this.maxMessagesPerConnection) {
++        this.messagesSent++;
++        this.logger.debug(
++          `Reusing a connection to send message #${this.messagesSent} (limit: ${this.maxMessagesPerConnection})`
++        );
++        this.onidle();
++        this._freed = false;
++        return;
++      }
++      // We're over the number of messages we can send, so close the socket.
++      this.close();
++      this.logger.debug(
++        `Closed connection already used #${this.messagesSent} times (limit: ${this.maxMessagesPerConnection})`
++      );
++    }
+ 
+-      this.socket.onerror = this._onError;
+-      this.socket.onopen = this._onOpen;
+-    }
++    // Need to open a new socket.
++    let hostname = this._server.hostname.toLowerCase();
++    let port = this._server.port || (this.options.requireTLS ? 465 : 587);
++    this.logger.debug(`Connecting to smtp://${hostname}:${port}`);
++    this._secureTransport = this.options.requireTLS;
++    this.socket = new TCPSocket(hostname, port, {
++      binaryType: "arraybuffer",
++      useSecureTransport: this._secureTransport,
++    });
++    this.messagesSent = 1;
++
++    this.socket.onerror = this._onError;
++    this.socket.onopen = this._onOpen;
++
+     this._freed = false;
+   }
+ 
+   /**
+    * Sends QUIT
+    */
+   quit() {
+     this._authenticating = false;
+diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
+--- a/mailnews/compose/src/SmtpServer.jsm
++++ b/mailnews/compose/src/SmtpServer.jsm
+@@ -466,16 +466,21 @@ class SmtpServer {
+       return client;
+     }
+     if (
+       this._freeConnections.length + this._busyConnections.length <
+       this.maximumConnectionsNumber
+     ) {
+       // Create a new client if the pool is not full.
+       client = new lazy.SmtpClient(this);
++      client.messagesSent = 0;
++      client.maxMessagesPerConnection = this._getIntPrefWithDefault(
++        "max_messages_per_connection",
++        0
++      );
+       this._busyConnections.push(client);
+       return client;
+     }
+     // Wait until a connection is available.
+     await new Promise(resolve => this._connectionWaitingQueue.push(resolve));
+     return this._getNextClient();
+   }
+   /**
+diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
+--- a/mailnews/compose/src/SmtpService.jsm
++++ b/mailnews/compose/src/SmtpService.jsm
+@@ -229,16 +229,18 @@ class SmtpService {
+     });
+   }
+ 
+   /**
+    * @see nsISmtpService
+    */
+   verifyLogon(server, urlListener, msgWindow) {
+     let client = new lazy.SmtpClient(server);
++    client.messagesSent = 0;
++    client.maxMessagesPerConnection = 0; // unlimited.
+     client.connect();
+     let runningUrl = this._getRunningUri(server);
+     client.onerror = (nsError, errorMessage, secInfo) => {
+       runningUrl.QueryInterface(Ci.nsIMsgMailNewsUrl);
+       if (secInfo) {
+         runningUrl.failedSecInfo = secInfo;
+       }
+       runningUrl.errorMessage = errorMessage;
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -524,16 +524,19 @@ pref("mail.server.default.clientid", "")
+ pref("mail.smtpserver.default.clientid", "");
+ 
+ // This is not to be enabled by default until the prerequisite
+ // changes are completed. See here for details:
+ //  https://bugzilla.mozilla.org/show_bug.cgi?id=1565379
+ pref("mail.server.default.clientidEnabled", false);
+ pref("mail.smtpserver.default.clientidEnabled", false);
+ pref("mail.smtpserver.default.max_cached_connections", 3);
++// Some servers don't like to many messages on the same connection.
++// In this case, set the pref to a value greater than 0.
++pref("mail.smtpserver.default.max_messages_per_connection", 0);
+ 
+ pref("mail.smtpservers", "");
+ pref("mail.accountmanager.accounts", "");
+ 
+ // Last used account key value
+ pref("mail.account.lastKey", 0);
+ 
+ pref("mail.server.default.port", -1);
