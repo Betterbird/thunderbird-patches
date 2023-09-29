@@ -1,13 +1,19 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1693170533 -10800
-# Parent  220b3e9218f6ba4923e06e501c43315ce3248fdc
+# Parent  f0b6d399e0b4418760268794ba7f9ce96312ad74
 Feature: Minimise to tray for Linux.
 
 Adapted from
 https://hg.mozilla.org/comm-central/rev/d9c8e04388eb
 and
 https://hg.mozilla.org/comm-central/rev/0bc379dfb518
+* * *
+Feature: Minimise to tray for Linux: Use native Gtk calls to restore windows to original position and size.
+* * *
+Feature: Minimise to tray for Linux: Fix activation of window.
+* * *
+Feature: Minimise to tray for Linux: Change GTK call from gtk_window_present() to gtk_window_present_with_time().
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
@@ -166,7 +172,7 @@ diff --git a/mail/components/preferences/general.js b/mail/components/preference
 diff --git a/mail/modules/MailUtils.jsm b/mail/modules/MailUtils.jsm
 --- a/mail/modules/MailUtils.jsm
 +++ b/mail/modules/MailUtils.jsm
-@@ -357,16 +357,20 @@ var MailUtils = {
+@@ -368,16 +368,20 @@ var MailUtils = {
            return;
          }
        }
@@ -236,7 +242,7 @@ new file mode 100644
 diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
 --- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
 +++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
-@@ -1,66 +1,201 @@
+@@ -1,66 +1,302 @@
  /* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -251,6 +257,7 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
  #include "mozilla/Preferences.h"
 +#include "mozIDOMWindow.h"
 +#include "nsIBaseWindow.h"
++#include "nsIDocShell.h"
 +#include "nsIPrefService.h"
 +#include "nsIWidget.h"
 +#include "mozilla/WidgetUtilsGtk.h"
@@ -261,7 +268,14 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +#define SHOW_TRAY_ICON_PREF "mail.biff.show_tray_icon"
 +#define SHOW_TRAY_ICON_ALWAYS_PREF "mail.biff.show_tray_icon_always"
 +
++typedef struct {
++  int32_t x;
++  int32_t y;
++  int32_t w;
++  int32_t h;
++} WinDims;
 +static nsCOMArray<nsIBaseWindow> sHiddenWindows;
++static nsTArray<WinDims> sHiddenWindowsDims;
 +static uint32_t sLastUnreadCount;
 +static nsAutoString sLastUnreadTooltip;
 +static AppIndicator *ci = NULL;
@@ -282,8 +296,67 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +NS_INTERFACE_MAP_END
 +
 +static void activateWindow(mozIDOMWindowProxy* win) {
-+  nsCOMPtr<nsPIDOMWindowOuter> privateWindow = nsPIDOMWindowOuter::From(win);
-+  privateWindow->Focus(mozilla::dom::CallerType::System);
++  nsCOMPtr<nsPIDOMWindowOuter> domWindow = nsPIDOMWindowOuter::From(win);
++  nsCOMPtr<nsIBaseWindow> baseWindow =
++      do_QueryInterface(domWindow->GetDocShell());
++  if (!baseWindow) {
++    domWindow->Focus(mozilla::dom::CallerType::System);
++    fprintf(stderr, "Betterbird: Activating window via Focus() only (1)\n");
++    return;
++  }
++  // Getting the visibility doesn't work, even hidden windows are visible :-(
++  baseWindow->SetVisibility(true);
++
++  nsCOMPtr<nsIWidget> widget;
++  baseWindow->GetMainWidget(getter_AddRefs(widget));
++  if (!widget) {
++    fprintf(stderr, "Betterbird: Activating window via Focus() only (2)\n");
++    return;
++  }
++
++  // Raise the window, no good if it appears in the background.
++  // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
++  void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
++  if (gtkWidget) gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++  widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
++
++  // Now move the window to where it was. We need to find it first in the
++  // list of windows.
++  if (!gtkWidget) {
++    fprintf(stderr, "Betterbird: Activating window via Focus() only (3)\n");
++    return;
++  }
++  for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
++    auto window = sHiddenWindows.SafeElementAt(i);
++    if (!window) {
++      continue;
++    }
++    nsCOMPtr<nsIWidget> w;
++    window->GetMainWidget(getter_AddRefs(w));
++    if (widget == w) {
++      WinDims dims = sHiddenWindowsDims[i];
++      // The following isn't working well, so use native calls.
++      // Last parameter: Bits: eRepaint = 1; eDelayResize = 2;
++      // window->SetPositionAndSize(dims.x, dims.y, dims.w, dims.h, 1);
++      gtk_window_move(GTK_WINDOW(gtkWidget), dims.x, dims.y);
++      gtk_window_resize(GTK_WINDOW(gtkWidget), dims.w, dims.h);
++// #define DEBUG_RESTORE 1
++#ifdef DEBUG_RESTORE
++      fprintf(stderr, "=== Trying to restore to %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
++      // window->GetPositionAndSize(&dims.x, &dims.y, &dims.w, &dims.h);
++      gtk_window_get_position(GTK_WINDOW(gtkWidget), &dims.x, &dims.y);
++      gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
++      fprintf(stderr, "=== was restored to      %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
++#endif
++      sHiddenWindows.RemoveElementAt(i);
++      sHiddenWindowsDims.RemoveElementAt(i);
++      break;
++    }
++  }
++
++  // Strangely we get "sizemodechange" event with STATE_MINIMIZED,
++  // so we ignore that for some milliseconds.
++  clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
 +}
 +
 +static void activated(AppIndicator* self, gint x, gint y, gpointer data) {
@@ -328,11 +401,29 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +    // Raise the window, no good if it appears in the background.
 +    // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
 +    void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
-+    if (gtkWidget) gtk_window_present(GTK_WINDOW(gtkWidget));
++    if (gtkWidget) gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
 +    widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
++
++    WinDims dims = sHiddenWindowsDims[i];
++    // The following isn't working well, so use native calls.
++    // Last parameter: Bits: eRepaint = 1; eDelayResize = 2;
++    // window->SetPositionAndSize(dims.x, dims.y, dims.w, dims.h, 1);
++    if (gtkWidget) {
++      gtk_window_move(GTK_WINDOW(gtkWidget), dims.x, dims.y);
++      gtk_window_resize(GTK_WINDOW(gtkWidget), dims.w, dims.h);
++// #define DEBUG_RESTORE 1
++#ifdef DEBUG_RESTORE
++      fprintf(stderr, "=== Trying to restore to %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
++      // window->GetPositionAndSize(&dims.x, &dims.y, &dims.w, &dims.h);
++      gtk_window_get_position(GTK_WINDOW(gtkWidget), &dims.x, &dims.y);
++      gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
++      fprintf(stderr, "=== was restored to      %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
++#endif
++    }
 +  }
 +
 +  sHiddenWindows.Clear();
++  sHiddenWindowsDims.Clear();
 +  // Strangely we get "sizemodechange" event with STATE_MINIMIZED,
 +  // so we ignore that for some milliseconds.
 +  clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
@@ -431,8 +522,24 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +    fprintf(stderr, "            USE AT YOUR OWN RISK! If successful, contact support@betterbird.eu\n\n");
 +    return NS_OK;
 +  }
++  WinDims dims;
++  // The following isn't working well, so use native calls.
++  // aWindow->GetPositionAndSize(&dims.x, &dims.y, &dims.w, &dims.h);
++  nsCOMPtr<nsIWidget> widget;
++  aWindow->GetMainWidget(getter_AddRefs(widget));
++  if (widget) {
++    void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
++    if (gtkWidget) {
++      gtk_window_get_position(GTK_WINDOW(gtkWidget), &dims.x, &dims.y);
++      gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
++#ifdef DEBUG_RESTORE
++      fprintf(stderr, "=== Was at               %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
++#endif
++    }
++  }
 +  aWindow->SetVisibility(false);
 +  sHiddenWindows.AppendElement(aWindow);
++  sHiddenWindowsDims.AppendElement(dims);
 +  UpdateUnreadCount(sLastUnreadCount, sLastUnreadTooltip);
 +  return NS_OK;
 +}
