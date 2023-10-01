@@ -1,0 +1,123 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1696162778 -7200
+# Parent  644ef1f10667b945f613682f81643252c47a7ed7
+Bug 1855643 - Fix undo/redo menu activation for stand-alone window.
+
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -365,16 +365,20 @@ function displayMessage(uri, viewWrapper
+   }
+ 
+   let messageService = MailServices.messageServiceFromURI(uri);
+   gMessage = messageService.messageURIToMsgHdr(uri);
+   gFolder = gMessage.folder;
+ 
+   messageHistory.push(uri);
+ 
++  // This is needed for registering transactions on the window.
++  dbViewWrapperListener.messenger ??= parent.messenger;
++  dbViewWrapperListener.msgWindow ??= parent.msgWindow;
++
+   if (gFolder) {
+     if (viewWrapper) {
+       if (viewWrapper != gViewWrapper) {
+         gViewWrapper = viewWrapper.clone(dbViewWrapperListener);
+       }
+     } else {
+       gViewWrapper = new DBViewWrapper(dbViewWrapperListener);
+       gViewWrapper._viewFlags = Ci.nsMsgViewFlagsType.kThreadedDisplay;
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -1726,30 +1726,39 @@ function GetMessagesForAllAuthenticatedA
+ }
+ 
+ function CommandUpdate_UndoRedo() {
+   EnableMenuItem("menu_undo", SetupUndoRedoCommand("cmd_undo"));
+   EnableMenuItem("menu_redo", SetupUndoRedoCommand("cmd_redo"));
+ }
+ 
+ function SetupUndoRedoCommand(command) {
+-  let folder = document.getElementById("tabmail")?.currentTabInfo.folder;
++  let messengerToUse;
++  let tabmail = document.getElementById("tabmail");
++  let folder = null;
++  if (tabmail) {
++    folder = tabmail.currentTabInfo.folder;
++    messengerToUse = messenger;
++  } else {
++    folder = document.getElementById("messageBrowser").contentWindow.gFolder;
++    messengerToUse = window.opener.messenger;
++  }
+   if (!folder?.server.canUndoDeleteOnServer) {
+     return false;
+   }
+ 
+   let canUndoOrRedo = false;
+   let txnType;
+   try {
+     if (command == "cmd_undo") {
+-      canUndoOrRedo = messenger.canUndo();
+-      txnType = messenger.getUndoTransactionType();
++      canUndoOrRedo = messengerToUse.canUndo();
++      txnType = messengerToUse.getUndoTransactionType();
+     } else {
+-      canUndoOrRedo = messenger.canRedo();
+-      txnType = messenger.getRedoTransactionType();
++      canUndoOrRedo = messengerToUse.canRedo();
++      txnType = messengerToUse.getRedoTransactionType();
+     }
+   } catch (ex) {
+     // If this fails, assume we can't undo or redo.
+     console.error(ex);
+   }
+ 
+   if (canUndoOrRedo) {
+     let commands = {
+diff --git a/mail/base/content/messageWindow.js b/mail/base/content/messageWindow.js
+--- a/mail/base/content/messageWindow.js
++++ b/mail/base/content/messageWindow.js
+@@ -521,20 +521,20 @@ var MessageWindowController = {
+       return;
+     }
+ 
+     switch (command) {
+       case "cmd_getNewMessages":
+         MsgGetMessage();
+         break;
+       case "cmd_undo":
+-        messenger.undo(msgWindow);
++        window.opener.messenger.undo(msgWindow);
+         break;
+       case "cmd_redo":
+-        messenger.redo(msgWindow);
++        window.opener.messenger.redo(msgWindow);
+         break;
+       case "cmd_getMsgsForAuthAccounts":
+         MsgGetMessagesForAllAuthenticatedAccounts();
+         break;
+       case "cmd_getNextNMessages":
+         MsgGetNextNMessages();
+         break;
+       case "cmd_newMessage":
+@@ -601,16 +601,18 @@ var MessageWindowController = {
+ };
+ 
+ function SetupCommandUpdateHandlers() {
+   top.controllers.insertControllerAt(0, MessageWindowController);
+   top.controllers.insertControllerAt(
+     0,
+     messageBrowser.contentWindow.commandController
+   );
++  // Use the main window's transaction manager.
++  window.msgWindow.transactionManager = window.opener.msgWindow.transactionManager;
+ }
+ 
+ function UnloadCommandUpdateHandlers() {
+   top.controllers.removeController(MessageWindowController);
+   top.controllers.removeController(
+     messageBrowser.contentWindow.commandController
+   );
+ }
