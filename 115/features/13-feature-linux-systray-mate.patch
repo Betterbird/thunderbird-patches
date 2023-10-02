@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1696185960 -7200
-# Parent  1924340e6bda40d08fcfa75b60d4c80b360e10c2
+# Parent  fe2e2190a9f025a8844a381273fba8168e68c630
 Feature: Linux system tray, add Mate to supported desktops.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
 +++ b/mail/app/profile/all-thunderbird.js
-@@ -1342,17 +1342,17 @@ pref("toolkit.telemetry.bhrPing.enabled"
+@@ -1342,17 +1342,18 @@ pref("toolkit.telemetry.bhrPing.enabled"
  #else
    pref("toolkit.telemetry.ecosystemtelemetry.enabled", false);
  #endif
@@ -18,6 +18,7 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
  #ifdef UNIX_BUT_NOT_MAC
 -pref("mail.minimizeToTray.supportedDesktops", "kde,gnome,xfce");
 +pref("mail.minimizeToTray.supportedDesktops", "kde,gnome,xfce,mate");
++pref("mail.minimizeToTray.desktopsGtkWindowPresentWithTime", "mate");
  #endif
  
  pref("prompts.defaultModalType", 3);
@@ -26,3 +27,121 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
  // The URL for the privacy policy related to recommended extensions.
  pref("extensions.recommendations.privacyPolicyUrl", "https://www.mozilla.org/en-US/privacy/thunderbird/#addons");
  
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -30,16 +30,18 @@ typedef struct {
+   int32_t h;
+ } WinDims;
+ static nsCOMArray<nsIBaseWindow> sHiddenWindows;
+ static nsTArray<WinDims> sHiddenWindowsDims;
+ static uint32_t sLastUnreadCount;
+ static nsAutoString sLastUnreadTooltip;
+ static AppIndicator *ci = NULL;
+ static struct timespec sTimeActivated;
++static nsCString desktop;
++static bool useWithTime;
+ 
+ using namespace mozilla;
+ 
+ nsMessengerUnixIntegration::nsMessengerUnixIntegration() {}
+ 
+ NS_IMPL_ADDREF(nsMessengerUnixIntegration)
+ NS_IMPL_RELEASE(nsMessengerUnixIntegration)
+ 
+@@ -66,17 +68,23 @@ static void activateWindow(mozIDOMWindow
+   if (!widget) {
+     fprintf(stderr, "Betterbird: Activating window via Focus() only (2)\n");
+     return;
+   }
+ 
+   // Raise the window, no good if it appears in the background.
+   // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
+   void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
+-  if (gtkWidget) gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++  if (gtkWidget) {
++    if (useWithTime) {
++      gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++    } else {
++      gtk_window_present(GTK_WINDOW(gtkWidget));
++    }
++  }
+   widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
+ 
+   // Now move the window to where it was. We need to find it first in the
+   // list of windows.
+   if (!gtkWidget) {
+     fprintf(stderr, "Betterbird: Activating window via Focus() only (3)\n");
+     return;
+   }
+@@ -150,17 +158,23 @@ static void activated(AppIndicator* self
+     nsCOMPtr<nsIWidget> widget;
+     window->GetMainWidget(getter_AddRefs(widget));
+     if (!widget) {
+       continue;
+     }
+     // Raise the window, no good if it appears in the background.
+     // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
+     void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
+-    if (gtkWidget) gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++    if (gtkWidget) {
++      if (useWithTime) {
++        gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++      } else {
++        gtk_window_present(GTK_WINDOW(gtkWidget));
++      }
++    }
+     widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
+ 
+     WinDims dims = sHiddenWindowsDims[i];
+     // The following isn't working well, so use native calls.
+     // Last parameter: Bits: eRepaint = 1; eDelayResize = 2;
+     // window->SetPositionAndSize(dims.x, dims.y, dims.w, dims.h, 1);
+     if (gtkWidget) {
+       gtk_window_move(GTK_WINDOW(gtkWidget), dims.x, dims.y);
+@@ -191,16 +205,27 @@ nsMessengerUnixIntegration::UpdateUnread
+ 
+   if (!mozilla::Preferences::GetBool("mail.biff.show_tray_icon", false) &&
+       sHiddenWindows.Length() == 0) return NS_OK;
+ 
+   static char icon_path0[PATH_MAX + 100];
+   static char icon_pathN[PATH_MAX + 100];
+ 
+   if (!ci) {
++    // Get the desktop.
++    desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
++
++    // Work out which activation call we should use.
++    nsAutoCString prefValue;
++    mozilla::Preferences::GetCString("mail.minimizeToTray.desktopsGtkWindowPresentWithTime", prefValue);
++    useWithTime = FindInReadable(desktop, prefValue);
++#ifdef DEBUG_RESTORE
++    fprintf(stderr, "=== Desktop is %s, %susing GtkWindowPresentWithTime\n", desktop.get(), useWithTime ? "" : "not ");
++#endif
++
+     // Find icon absolute path.
+     size_t len = readlink("/proc/self/exe", icon_path0, PATH_MAX);
+     char* q = icon_path0 + len - 1;
+     while (*q != '/') q--;
+     *q = 0;
+     strcpy(icon_pathN, icon_path0);
+     strcat(icon_path0, "/chrome/icons/default/default.svg");
+     strcat(icon_pathN, "/chrome/icons/default/newmail.svg");
+@@ -255,17 +280,16 @@ nsresult nsMessengerUnixIntegration::Hid
+     (now.tv_sec - sTimeActivated.tv_sec) * 1000 +
+     (now.tv_nsec - sTimeActivated.tv_nsec) / 1000000;
+   if (timediff < 500) {
+     return NS_OK;
+   }
+ 
+   nsAutoCString prefValue;
+   mozilla::Preferences::GetCString("mail.minimizeToTray.supportedDesktops", prefValue);
+-  const nsCString& desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
+   if (!FindInReadable(desktop, prefValue)) {
+     fprintf(stderr, "Betterbird: Window NOT minimized to system tray!\n");
+     fprintf(stderr, "            You are using desktop environment %s.\n", desktop.get());
+     fprintf(stderr, "            Minimize to system tray is only supported for these desktops:\n");
+     fprintf(stderr, "            %s.\n", prefValue.get());
+     fprintf(stderr, "            As an experiment, add %s to preference\n", desktop.get());
+     fprintf(stderr, "            mail.minimizeToTray.supportedDesktops.\n");
+     fprintf(stderr, "            You might not be able to maximize the window again and\n");
