@@ -1,74 +1,49 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1695854386 -7200
-# Parent  775703e03d5bd02438d62ded0eabf79cd9a54ba7
+# Date 1696362472 -7200
+# Parent  e5f078d4fcfd1a73987ba6cffb23c1df0c968067
 Bug 1854567 - Optionally limit the number of messages sent per connection.
+
+Some ideas in this patch from Magnus Melin in https://phabricator.services.mozilla.com/D189676
 
 diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClient.jsm
 --- a/mailnews/compose/src/SmtpClient.jsm
 +++ b/mailnews/compose/src/SmtpClient.jsm
-@@ -110,31 +110,55 @@ class SmtpClient {
-     this.onFree = () => {};
-   }
+@@ -39,16 +39,21 @@ var { MailStringUtils } = ChromeUtils.im
+ var { SmtpAuthenticator } = ChromeUtils.import(
+   "resource:///modules/MailAuthenticator.jsm"
+ );
+ var { MsgUtils } = ChromeUtils.import(
+   "resource:///modules/MimeMessageUtils.jsm"
+ );
  
+ class SmtpClient {
++
++  // Number of messages sent with this client and max. number it can send.
++  messagesSent = 0;
++  maxMessagesPerConnection = 0;
++
    /**
-    * Initiate a connection to the server
-    */
-   connect() {
-     if (this.socket?.readyState == "open") {
--      this.logger.debug("Reusing a connection");
--      this.onidle();
--    } else {
--      let hostname = this._server.hostname.toLowerCase();
--      let port = this._server.port || (this.options.requireTLS ? 465 : 587);
--      this.logger.debug(`Connecting to smtp://${hostname}:${port}`);
--      this._secureTransport = this.options.requireTLS;
--      this.socket = new TCPSocket(hostname, port, {
--        binaryType: "arraybuffer",
--        useSecureTransport: this._secureTransport,
--      });
-+      if (this.maxMessagesPerConnection <= 0) {
-+        // Unlimited reuse of this connection.
-+        this.messagesSent++;
-+        this.logger.debug(
-+          `Reusing a connection to send message #${this.messagesSent} (no limit)`
-+        );
-+        this.onidle();
-+        this._freed = false;
-+        return;
-+      } else if (this.messagesSent < this.maxMessagesPerConnection) {
-+        this.messagesSent++;
-+        this.logger.debug(
-+          `Reusing a connection to send message #${this.messagesSent} (limit: ${this.maxMessagesPerConnection})`
-+        );
-+        this.onidle();
-+        this._freed = false;
-+        return;
-+      }
-+      // We're over the number of messages we can send, so close the socket.
-+      this.close();
-+      this.logger.debug(
-+        `Closed connection already used #${this.messagesSent} times (limit: ${this.maxMessagesPerConnection})`
-+      );
-+    }
+    * Creates a connection object to a SMTP server and allows to send mail through it.
+    * Call `connect` method to inititate the actual connection, the constructor only
+    * defines the properties but does not actually connect.
+    *
+    * @class
+    *
+    * @param {nsISmtpServer} server - The associated nsISmtpServer instance.
+@@ -125,16 +130,20 @@ class SmtpClient {
+       this.socket = new TCPSocket(hostname, port, {
+         binaryType: "arraybuffer",
+         useSecureTransport: this._secureTransport,
+       });
  
--      this.socket.onerror = this._onError;
--      this.socket.onopen = this._onOpen;
--    }
-+    // Need to open a new socket.
-+    let hostname = this._server.hostname.toLowerCase();
-+    let port = this._server.port || (this.options.requireTLS ? 465 : 587);
-+    this.logger.debug(`Connecting to smtp://${hostname}:${port}`);
-+    this._secureTransport = this.options.requireTLS;
-+    this.socket = new TCPSocket(hostname, port, {
-+      binaryType: "arraybuffer",
-+      useSecureTransport: this._secureTransport,
-+    });
-+    this.messagesSent = 1;
-+
-+    this.socket.onerror = this._onError;
-+    this.socket.onopen = this._onOpen;
-+
+       this.socket.onerror = this._onError;
+       this.socket.onopen = this._onOpen;
+     }
++    this.messagesSent++;
++    this.logger.debug(
++      `Connected to send message #${this.messagesSent} (limit: ${this.maxMessagesPerConnection})`
++    );
      this._freed = false;
    }
  
@@ -80,7 +55,7 @@ diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClie
 diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
 --- a/mailnews/compose/src/SmtpServer.jsm
 +++ b/mailnews/compose/src/SmtpServer.jsm
-@@ -466,16 +466,21 @@ class SmtpServer {
+@@ -466,33 +466,48 @@ class SmtpServer {
        return client;
      }
      if (
@@ -89,7 +64,6 @@ diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServ
      ) {
        // Create a new client if the pool is not full.
        client = new lazy.SmtpClient(this);
-+      client.messagesSent = 0;
 +      client.maxMessagesPerConnection = this._getIntPrefWithDefault(
 +        "max_messages_per_connection",
 +        0
@@ -102,28 +76,38 @@ diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServ
      return this._getNextClient();
    }
    /**
-diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
---- a/mailnews/compose/src/SmtpService.jsm
-+++ b/mailnews/compose/src/SmtpService.jsm
-@@ -229,16 +229,18 @@ class SmtpService {
-     });
-   }
- 
-   /**
-    * @see nsISmtpService
+    * Do some actions with a connection.
+    *
+    * @param {Function} handler - A callback function to take a SmtpClient
+    *   instance, and do some actions.
     */
-   verifyLogon(server, urlListener, msgWindow) {
-     let client = new lazy.SmtpClient(server);
-+    client.messagesSent = 0;
-+    client.maxMessagesPerConnection = 0; // unlimited.
+   async withClient(handler) {
+     let client = await this._getNextClient();
+     client.onFree = () => {
+-      this._busyConnections = this._busyConnections.filter(c => c != client);
+-      this._freeConnections.push(client);
+-      // Resovle the first waiting in queue.
+-      this._connectionWaitingQueue.shift()?.();
++      if (
++        client.maxMessagesPerConnection <= 0 ||
++        client.messagesSent < client.maxMessagesPerConnection
++      ) {
++        this._busyConnections = this._busyConnections.filter(c => c != client);
++        this._freeConnections.push(client);
++        // Resolve the first waiting in queue.
++        this._connectionWaitingQueue.shift()?.();
++      } else {
++        client.logger.debug(
++          `Sent #${client.messagesSent} messages (limit: ${client.maxMessagesPerConnection}), quitting.`
++        );
++        this._busyConnections = this._busyConnections.filter(c => c != client);
++        client.quit();
++      }
+     };
+     handler(client);
      client.connect();
-     let runningUrl = this._getRunningUri(server);
-     client.onerror = (nsError, errorMessage, secInfo) => {
-       runningUrl.QueryInterface(Ci.nsIMsgMailNewsUrl);
-       if (secInfo) {
-         runningUrl.failedSecInfo = secInfo;
-       }
-       runningUrl.errorMessage = errorMessage;
+   }
+ }
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
