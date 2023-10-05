@@ -1,13 +1,36 @@
 # HG changeset patch
-# User welpy-cw <h.w.forms@arcor.de>
-# Date 1696498016 -7200
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1696535946 -7200
 # Parent  6b7f1a470336a2adfd2d0c602988fc2053870a56
 Bug 1807063 - Restore thread state when selecting folder.
+
+Based on https://phabricator.services.mozilla.com/D190137 by welpy-cw <h.w.forms@arcor.de>
+but hacked to work for local folders and avoiding multiple calls to restore the selection.
 
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
 +++ b/mail/base/content/about3Pane.js
-@@ -2573,17 +2573,19 @@ var folderPane = {
+@@ -60,16 +60,19 @@ const messengerBundle = Services.strings
+ 
+ const { getDefaultColumns } = ChromeUtils.importESModule(
+   "chrome://messenger/content/thread-pane-columns.mjs"
+ );
+ 
+ // As defined in nsMsgDBView.h.
+ const MSG_VIEW_FLAG_DUMMY = 0x20000000;
+ 
++var selectionLastRestored = Date.now();
++var threadStateLastRestored = Date.now();
++
+ /**
+  * The TreeListbox widget that displays folders.
+  */
+ var folderTree;
+ /**
+  * The TreeView widget that displays the message list.
+  */
+ var threadTree;
+@@ -2573,17 +2576,19 @@ var folderPane = {
  
        // At this point `dbViewWrapperListener.onCreatedView` gets called,
        // setting up gDBView and scrolling threadTree to the right end.
@@ -28,7 +51,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
      window.dispatchEvent(
        new CustomEvent("folderURIChanged", { bubbles: true, detail: uri })
      );
-@@ -5032,27 +5034,29 @@ var threadPane = {
+@@ -5032,27 +5037,42 @@ var threadPane = {
  
    /**
     * Restore the previously saved thread tree selection.
@@ -43,6 +66,19 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 +   *   messages.
 +   */
 +  restoreSelection(discard = true, notify = true, expand = false) {
++    // Here we go for our daily dose of madness.
++    // This function is called from `_onSelect()` above and it's called from
++    // `onMessagesLoaded()` in `dbViewWrapperListener.onMessagesLoaded()` in mailCommon.js.
++    // For every click on a folder, it's called at least twice, normally three times.
++    // We leave it to the Thunderbird developers to work out what's going on.
++    // Let's do a hack!
++    let now = Date.now();
++    if (now - selectionLastRestored < 100) {
++      // If we last restored this less than 100 milliseconds ago, return!
++      return;
++    }
++    selectionLastRestored = now;
++
      if (!this._savedSelections.has(gFolder?.URI) || !threadTree.view) {
        return;
      }
@@ -61,3 +97,50 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
          continue;
        }
  
+@@ -5085,16 +5105,23 @@ var threadPane = {
+       this._savedSelections.delete(gFolder.URI);
+     }
+   },
+ 
+   /**
+    * Restore the collapsed or expanded state of threads.
+    */
+   restoreThreadState() {
++    let now = Date.now();
++    if (now - threadStateLastRestored < 100) {
++      // If we last restored this less than 100 milliseconds ago, return!
++      return;
++    }
++    threadStateLastRestored = now;
++
+     if (
+       gViewWrapper._threadExpandAll &&
+       !(gViewWrapper.dbView.viewFlags & Ci.nsMsgViewFlagsType.kExpandAll)
+     ) {
+       gViewWrapper.dbView.doCommand(Ci.nsMsgViewCommandType.expandAll);
+     }
+     if (
+       !gViewWrapper._threadExpandAll &&
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1006,17 +1006,18 @@ var dbViewWrapperListener = {
+   onLoadingFolder(dbFolderInfo) {
+     window.quickFilterBar?.onFolderChanged();
+   },
+   onDisplayingFolder() {},
+   onLeavingFolder() {},
+   onMessagesLoaded(all) {
+     // Try to restore what was selected. Keep the saved selection (if there is
+     // one) until we have all of the messages.
+-    window.threadPane?.restoreSelection(all);
++    window.threadPane?.restoreThreadState();
++    window.threadPane?.restoreSelection(all, undefined, true);
+ 
+     if (all) {
+       window.threadTree?.invalidate();
+     }
+     window.quickFilterBar?.onMessagesChanged();
+ 
+     let tabmail = top.document.getElementById("tabmail");
+     let tab = tabmail?.currentTabInfo;
