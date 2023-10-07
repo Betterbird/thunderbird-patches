@@ -76,3 +76,8 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "unreadMsgStatus=Të palexuar: %%S"      >> chrome\sq\locale\sq\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Të përzgjedhur: %%S" >> chrome\sq\locale\sq\messenger\messenger.properties
 %lecho% "totalMsgStatus=Gjithsej: %%S"          >> chrome\sq\locale\sq\messenger\messenger.properties
+
+:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
+%lecho% "toolbar-get-all-messages-menuitem =" >> localization\sq\messenger\unifiedToolbar.ftl
+%lecho% "  .label = Merri Krejt Mesazhet"     >> localization\sq\messenger\unifiedToolbar.ftl
+%lecho% "  .accesskey = M"                    >> localization\sq\messenger\unifiedToolbar.ftl

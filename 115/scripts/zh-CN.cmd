@@ -94,3 +94,8 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: New string from bug 1823274. The Thunderbird folks where negligent and didn't refresh l10n so it's missing everywhere :-(
 %lecho% "context-menu-cancel-msg =" >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .label = 取消消息"      >> localization\zh-CN\messenger\messenger.ftl
+
+:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
+%lecho% "toolbar-get-all-messages-menuitem =" >> localization\zh-CN\messenger\unifiedToolbar.ftl
+%lecho% "  .label = 获取所有新消息"            >> localization\zh-CN\messenger\unifiedToolbar.ftl
+%lecho% "  .accesskey = G"                    >> localization\zh-CN\messenger\unifiedToolbar.ftl
