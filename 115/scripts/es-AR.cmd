@@ -91,10 +91,6 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .label = Mostrar adjuntos por encima del mensaje" >> localization\es-AR\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = e"                          >> localization\es-AR\messenger\preferences\preferences.ftl
 
-:: New string from bug 1823274. The Thunderbird folks where negligent and didn't refresh l10n so it's missing everywhere :-(
-%lecho% "context-menu-cancel-msg ="     >> localization\es-AR\messenger\messenger.ftl
-%lecho% "    .label = Cancelar mensaje" >> localization\es-AR\messenger\messenger.ftl
-
 :: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
 %lecho% "toolbar-get-all-messages-menuitem ="          >> localization\es-AR\messenger\unifiedToolbar.ftl
 %lecho% "  .label = Recibir todos los mensajes nuevos" >> localization\es-AR\messenger\unifiedToolbar.ftl
