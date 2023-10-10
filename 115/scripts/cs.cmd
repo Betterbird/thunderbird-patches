@@ -24,7 +24,7 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 
 %lecho% "compose-send-plain-or-html-option =" >> localization\cs\messenger\preferences\preferences.ftl
 %lecho% "    .label = Prostý text nebo HTML"  >> localization\cs\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only." >> localization\cs\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-description = Pokud není ve zprávě použit žádný styl, odešlete prostý text. V opačném případě odešlete pouze HTML." >> localization\cs\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\cs\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = Prostý text nebo HTML"     >> localization\cs\messenger\messengercompose\messengercompose.ftl
