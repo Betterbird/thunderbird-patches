@@ -31,14 +31,14 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 %lecho% "    .accesskey = O"                     >> localization\cs\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
-:: Strings from https://hg.mozilla.org/l10n-central/en-GB/file/eda11f2a3883ce480a79885d5952e4655b5f9eec/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Nelze otevřít soubor spool poštovní schránky %%S."    >> chrome\cs\locale\cs\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Nelze vytvořit soubor zámku %%S. Aby mohl movemail fungovat, je nutné vytvořit soubory zámků v adresáři spool poštovního klienta. V mnoha systémech je toho nejlépe dosaženo tak, že adresář spool je v režimu 01777." >> chrome\cs\locale\cs\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Nelze odstranit soubor zámku %%S."           >> chrome\cs\locale\cs\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Nelze zkrátit soubor spool %%S." >> chrome\cs\locale\cs\messenger\localMsgs.properties
-%lecho% "movemailSpoolFileNotFound=Nelze najít soubor spool poštovní schránky."      >> chrome\cs\locale\cs\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Nelze analyzovat soubor spool %%S. Soubor může být poškozený nebo neplatný." >> chrome\cs\locale\cs\messenger\localMsgs.properties
-%lecho% "serverType-movemail=Unix Movemail"                                >> chrome\cs\locale\cs\messenger\messenger.properties
+:: Strings from https://hg.mozilla.org/l10n-central/cs/file/eb8791bb6298abbcd98b015418c950139bab57a1/mail/chrome/messenger/localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Nelze otevřít soubor %%S s příchozí poštou."   >> chrome\cs\locale\cs\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Nelze vytvořit soubor %%S se zámkem. Aby movemail pracoval, je potřeba v adresáři s příchozí poštou vytvořit soubor se zámkem. Na většině systémech se toho dosáhne nastavením práva na adresář s frontou na hodnotu 01777." >> chrome\cs\locale\cs\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Nelze smazat soubor %%S se zámkem."               >> chrome\cs\locale\cs\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Nelze zkrátit soubor %%S s místní poštou." >> chrome\cs\locale\cs\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=Nelze nalézt soubor s místní poštou."          >> chrome\cs\locale\cs\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Nelze zkrátit soubor %%S s místní poštou. Soubor může být poškozen nebo není platný." >> chrome\cs\locale\cs\messenger\localMsgs.properties
+%lecho% "serverType-movemail=Unix Movemail"                                       >> chrome\cs\locale\cs\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account =" >> localization\cs\messenger\accountManager.ftl
 %lecho% "    .label = Přidání účtu Movemail…"   >> localization\cs\messenger\accountManager.ftl
