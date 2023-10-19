@@ -1,0 +1,203 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1697740756 -7200
+# Node ID 188e9371f23197c82f125b6b9f643fdb5e836206
+# Parent  8571045debf15d59721345cb80439df6b9119472
+Bug 1857033 - Fix broken WebDav Publication. r=leftmostcat
+
+Use a working authetication prompt.
+
+Also
+ - fix misalignment in the dialog
+ - fix the progress bar
+ - hide cancel button after you can't cancel anymore
+
+Differential Revision: https://phabricator.services.mozilla.com/D190773
+
+diff --git a/calendar/base/content/dialogs/publishDialog.js b/calendar/base/content/dialogs/publishDialog.js
+--- a/calendar/base/content/dialogs/publishDialog.js
++++ b/calendar/base/content/dialogs/publishDialog.js
+@@ -47,16 +47,17 @@ document.addEventListener("dialogaccept"
+ function checkURLField() {
+   document.querySelector("dialog").getButton("accept").disabled = !document.getElementById(
+     "publish-remotePath-textbox"
+   ).validity.valid;
+ }
+ 
+ var progressDialog = {
+   onStartUpload() {
+-    document.getElementById("publish-progressmeter").removeAttribute("value");
++    document.getElementById("publish-progressmeter").setAttribute("value", "0");
++    document.querySelector("dialog").getButton("cancel").hidden = true;
+   },
+ 
+-  onStopUpload() {
+-    document.getElementById("publish-progressmeter").setAttribute("value", "0");
++  onStopUpload(percentage) {
++    document.getElementById("publish-progressmeter").setAttribute("value", percentage);
+   },
+ };
+ progressDialog.wrappedJSObject = progressDialog;
+diff --git a/calendar/base/content/dialogs/publishDialog.xhtml b/calendar/base/content/dialogs/publishDialog.xhtml
+--- a/calendar/base/content/dialogs/publishDialog.xhtml
++++ b/calendar/base/content/dialogs/publishDialog.xhtml
+@@ -3,19 +3,20 @@
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ 
+ <?xml-stylesheet type="text/css" href="chrome://messenger/skin/messenger.css"?>
+ <?xml-stylesheet type="text/css" href="chrome://messenger/skin/colors.css"?>
+ <?xml-stylesheet type="text/css" href="chrome://messenger/skin/themeableDialog.css"?>
+ <?xml-stylesheet type="text/css" href="chrome://calendar/skin/shared/publishDialog.css"?>
+ 
+-<!DOCTYPE html [ <!ENTITY % dtd1 SYSTEM "chrome://calendar/locale/global.dtd"> %dtd1;
+-<!ENTITY % dtd2 SYSTEM "chrome://calendar/locale/calendar.dtd" >
+-%dtd2; ]>
++<!DOCTYPE html [
++<!ENTITY % dtd1 SYSTEM "chrome://calendar/locale/global.dtd"> %dtd1;
++<!ENTITY % dtd2 SYSTEM "chrome://calendar/locale/calendar.dtd"> %dtd2;
++]>
+ <html
+   id="calendar-publishwindow"
+   xmlns="http://www.w3.org/1999/xhtml"
+   xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+   xmlns:html="http://www.w3.org/1999/xhtml"
+   windowtype="Calendar:PublishDialog"
+   persist="screenX screenY"
+   lightweightthemes="true"
+@@ -27,23 +28,23 @@
+     <script defer="defer" src="chrome://calendar/content/publishDialog.js"></script>
+   </head>
+   <html:body xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+     <dialog
+       buttons="accept,cancel"
+       buttonlabelaccept="&calendar.publish.publish.button;"
+       buttonlabelaccept2="&calendar.publish.close.button;"
+     >
+-      <hbox>
++      <html:div>
+         <html:label for="publish-remotePath-textbox">&calendar.publish.url.label;</html:label>
+         <html:input
+           id="publish-remotePath-textbox"
+           type="url"
+           size="64"
+           required="required"
+           placeholder="https://www.example.com/webdav/calendar.ics"
+           oninput="checkURLField()"
+         />
+-      </hbox>
++      </html:div>
+       <html:progress id="publish-progressmeter" value="0" max="100"></html:progress>
+     </dialog>
+   </html:body>
+ </html>
+diff --git a/calendar/base/content/publish.js b/calendar/base/content/publish.js
+--- a/calendar/base/content/publish.js
++++ b/calendar/base/content/publish.js
+@@ -76,31 +76,30 @@ function publishEntireCalendar(aCalendar
+   let publishObject = {};
+ 
+   args.onOk = self.publishEntireCalendarDialogResponse;
+ 
+   publishObject.calendar = aCalendar;
+ 
+   // restore the remote ics path preference from the calendar passed in
+   let remotePath = aCalendar.getProperty("remote-ics-path");
+-  if (remotePath && remotePath.length && remotePath.length > 0) {
++  if (remotePath) {
+     publishObject.remotePath = remotePath;
+   }
+ 
+   args.publishObject = publishObject;
+   openDialog(
+     "chrome://calendar/content/publishDialog.xhtml",
+     "caPublishEvents",
+     "chrome,titlebar,modal,resizable",
+     args
+   );
+ }
+ 
+ /**
+- * publishEntireCalendarDialogResponse
+  * Callback method for publishEntireCalendar() that is called when the user
+  * presses the OK button in the publish dialog.
+  */
+ async function publishEntireCalendarDialogResponse(CalendarPublishObject, aProgressDialog) {
+   // store the selected remote ics path as a calendar preference
+   CalendarPublishObject.calendar.setProperty("remote-ics-path", CalendarPublishObject.remotePath);
+ 
+   aProgressDialog.onStartUpload();
+@@ -179,61 +178,68 @@ function publishItemArray(aItemArray, aP
+       cal.l10n.getCalString("otherPutError", [e.message])
+     );
+   }
+ }
+ 
+ var notificationCallbacks = {
+   // nsIInterfaceRequestor interface
+   getInterface(iid, instance) {
++    if (iid.equals(Ci.nsIAuthPrompt2)) {
++      if (!this.calAuthPrompt) {
++        return new cal.auth.Prompt();
++      }
++    }
+     if (iid.equals(Ci.nsIAuthPrompt)) {
+       // use the window watcher service to get a nsIAuthPrompt impl
+       return Cc["@mozilla.org/messenger/msgAuthPrompt;1"].getService(
+         Ci.nsIAuthPrompt
+       );
+     }
+ 
+-    throw Components.Exception("", Cr.NS_ERROR_NO_INTERFACE);
++    throw Components.Exception(`${iid} not implemented`, Cr.NS_ERROR_NO_INTERFACE);
+   },
+ };
+ 
+ /**
+  * Listener object to pass to `channel.asyncOpen()`. A reference to the current dialog window
+  * passed to the constructor provides access to the dialog once the request is done.
+  *
+  * @implements {nsIStreamListener}
+  */
+ class PublishingListener {
++  QueryInterface = ChromeUtils.generateQI(["nsIStreamListener"]);
++
+   constructor(progressDialog) {
+     this.progressDialog = progressDialog;
+   }
+ 
+-  QueryInterface = ChromeUtils.generateQI(["nsIStreamListener"]);
+-
+   onStartRequest(request) {}
+ 
+   onStopRequest(request, status) {
+-    this.progressDialog.wrappedJSObject.onStopUpload();
+-
+     let channel;
+     let requestSucceeded;
+     try {
+       channel = request.QueryInterface(Ci.nsIHttpChannel);
+       requestSucceeded = channel.requestSucceeded;
+     } catch (e) {
+       // Don't fail if it is not an http channel, will be handled below.
+     }
+ 
+     if (channel && !requestSucceeded) {
++      this.progressDialog.wrappedJSObject.onStopUpload(0);
+       let body = cal.l10n.getCalString("httpPutError", [
+         channel.responseStatus,
+         channel.responseStatusText,
+       ]);
+       Services.prompt.alert(null, cal.l10n.getCalString("genericErrorTitle"), body);
+     } else if (!channel && !Components.isSuccessCode(request.status)) {
++      this.progressDialog.wrappedJSObject.onStopUpload(0);
+       // XXX this should be made human-readable.
+       let body = cal.l10n.getCalString("otherPutError", [request.status.toString(16)]);
+       Services.prompt.alert(null, cal.l10n.getCalString("genericErrorTitle"), body);
++    } else {
++      this.progressDialog.wrappedJSObject.onStopUpload(100);
+     }
+   }
+ 
+   onDataAvailable(request, inStream, sourceOffset, count) {}
+ }
