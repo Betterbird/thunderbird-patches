@@ -1,5 +1,5 @@
-:: "Standard" lessecho in Windows gets confused by non-ASCII characters, hence we use Mozilla's version.
-set lecho=C:\mozilla-build\msys\bin\lessecho.exe
+:: "Standard" lessecho in Windows gets confused by non-ASCII characters, hence we use Git's version.
+set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Script will only work if Windows system locale is set to UTF-8 !!
 
 :: Original strings:
@@ -39,8 +39,8 @@ set lecho=C:\mozilla-build\msys\bin\lessecho.exe
 :: Original strings:
 :: menu-multi-line-all-folders =
 ::     .label = Multi-line View On All Folders
-%lecho% "menu-multi-line-all-folders ="                                       >> localization\sq\messenger\menubar.ftl
-%lecho% "    .label = Shfaqje Me Shumë Rreshta Në Krejt Dosjet"               >> localization\sq\messenger\menubar.ftl
+%lecho% "menu-multi-line-all-folders ="                         >> localization\sq\messenger\menubar.ftl
+%lecho% "    .label = Shfaqje Me Shumë Rreshta Në Krejt Dosjet" >> localization\sq\messenger\menubar.ftl
 
 :: Original strings:
 :: compose-send-plain-or-html-option =
