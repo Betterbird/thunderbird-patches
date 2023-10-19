@@ -1,0 +1,315 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1697746252 -7200
+# Parent  cec9e0e0458f4199d4c3a96c7deac8ae126c2c2e
+Bug 1807063 - Restore thread state when selecting folder.
+
+Restore the collapsed or expanded state of threaded or grouped by sort views when selecting
+a folder. Threads or groups containing previously selected messages are opened in any case if
+possible.
+
+Some ideas taken from https://github.com/Betterbird/thunderbird-patches/blob/main/115/bugs/1807063-restore-thread-state.patch
+Including https://github.com/Betterbird/thunderbird-patches/blob/main/115/bugs/1807063-fix-saving-selection.patch
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -2567,17 +2567,16 @@ var folderPane = {
+ 
+       // At this point `dbViewWrapperListener.onCreatedView` gets called,
+       // setting up gDBView and scrolling threadTree to the right end.
+ 
+       threadPane.updateListRole(
+         !gViewWrapper?.showThreaded && !gViewWrapper?.showGroupedBySort
+       );
+       threadPane.restoreSortIndicator();
+-      threadPane.restoreSelection();
+       threadPaneHeader.onFolderSelected();
+     }
+ 
+     this._updateStatusQuota();
+ 
+     window.dispatchEvent(
+       new CustomEvent("folderURIChanged", { bubbles: true, detail: uri })
+     );
+@@ -4596,17 +4595,17 @@ var threadPane = {
+     threadTree._selection.select(index);
+   },
+ 
+   /**
+    * Clear the selection suppression and restore the previous selection.
+    */
+   releaseSelection() {
+     threadTree._selection.selectEventsSuppressed = true;
+-    this.restoreSelection(undefined, false);
++    this.restoreSelection({ notify: false });
+     threadTree._selection.selectEventsSuppressed = false;
+   },
+ 
+   _onDoubleClick(event) {
+     if (event.target.closest("button") || event.target.closest("menupopup")) {
+       // Prevent item activation if double click happens on a button inside the
+       // row. E.g.: Thread toggle, spam, favorite, etc. or in a menupopup like
+       // the column picker.
+@@ -5053,20 +5052,27 @@ var threadPane = {
+         break;
+     }
+   },
+ 
+   /**
+    * Store the current thread tree selection.
+    */
+   saveSelection() {
+-    if (gFolder && gDBView) {
++    // Identifying messages by key doesn't reliably work on on cross-folder views since
++    // the msgKey may not be unique.
++    if (gFolder && gDBView && !gViewWrapper?.isMultiFolder) {
+       this._savedSelections.set(gFolder.URI, {
+         currentKey: gDBView.getKeyAt(threadTree.currentIndex),
+-        selectedKeys: threadTree.selectedIndices.map(gDBView.getKeyAt),
++        // In views which are "grouped by sort", getting the key for collapsed dummy rows
++        // returns the key of the first group member, so we would restore something that
++        // wasn't selected. So filter them out.
++        selectedKeys: threadTree.selectedIndices
++          .filter(i => !gViewWrapper.isGroupedByHeaderAtIndex(i))
++          .map(gDBView.getKeyAt),
+       });
+     }
+   },
+ 
+   /**
+    * Forget any saved selection of the given folder. This is useful if you're
+    * going to set the selection after switching to the folder.
+    *
+@@ -5074,65 +5080,83 @@ var threadPane = {
+    */
+   forgetSelection(folderURI) {
+     this._savedSelections.delete(folderURI);
+   },
+ 
+   /**
+    * Restore the previously saved thread tree selection.
+    *
+-   * @param {boolean} [discard=true] - If false, the selection data should be
+-   *   kept after restoring the selection, otherwise it is forgotten.
++   * @param {boolean} [discard=true] - If false, the selection data is kept for
++   *   another call of this function, unless all selections could already be
++   *   restored in this run.
+    * @param {boolean} [notify=true] - Whether a change in "select" event
+    *   should be fired.
+-   */
+-  restoreSelection(discard = true, notify = true) {
++   * @param {boolean} [expand=true] - Try to expand threads containing selected
++   *   messages.
++   */
++  restoreSelection({ discard = true, notify = true, expand = true } = {}) {
+     if (!this._savedSelections.has(gFolder?.URI) || !threadTree.view) {
+       return;
+     }
+ 
+     let { currentKey, selectedKeys } = this._savedSelections.get(gFolder.URI);
+     let currentIndex = nsMsgViewIndex_None;
+     let indices = new Set();
+     for (let key of selectedKeys) {
+-      let index = gDBView.findIndexFromKey(key, false);
+-      if (index != nsMsgViewIndex_None) {
++      let index = gDBView.findIndexFromKey(key, expand);
++      // While the first message in a collapsed group returns the index of the
++      // dummy row, other messages return none. To be consistent, we don't
++      // select the dummy row in any case.
++      if (
++        index != nsMsgViewIndex_None &&
++        !gViewWrapper.isGroupedByHeaderAtIndex(index)
++      ) {
+         indices.add(index);
+         if (key == currentKey) {
+           currentIndex = index;
+         }
+         continue;
+       }
+-
++      // Since it does not seem to be possible to reliably find the dummy row
++      // for a message in a group, we continue.
++      if (gViewWrapper.showGroupedBySort) {
++        continue;
++      }
+       // The message for this key can't be found. Perhaps the thread it's in
+       // has been collapsed? Select the root message in that case.
+       try {
+-        let msgHdr = gFolder.GetMessageHeader(key);
++        let folder =
++          gViewWrapper.isVirtual && gViewWrapper.isSingleFolder
++            ? gViewWrapper._underlyingFolders[0]
++            : gFolder;
++        let msgHdr = folder.GetMessageHeader(key);
+         let thread = gDBView.getThreadContainingMsgHdr(msgHdr);
+         let rootMsgHdr = thread.getRootHdr();
+         index = gDBView.findIndexOfMsgHdr(rootMsgHdr, false);
+         if (index != nsMsgViewIndex_None) {
+           indices.add(index);
+           if (key == currentKey) {
+             currentIndex = index;
+           }
+         }
+       } catch (ex) {
+         console.error(ex);
+       }
+     }
+     threadTree.setSelectedIndices(indices.values(), !notify);
+ 
+     if (currentIndex != nsMsgViewIndex_None) {
+-      // Do an instant scroll before setting the index to avoid animation.
+-      threadTree.scrollToIndex(currentIndex, true);
++      threadTree.style.scrollBehavior = "auto"; // Avoid smooth scroll.
+       threadTree.currentIndex = currentIndex;
+-    }
+-
+-    if (discard) {
++      threadTree.style.scrollBehavior = null;
++    }
++
++    // If all selections have already been restored, discard them as well.
++    if (discard || gDBView.selection.count == selectedKeys.length) {
+       this._savedSelections.delete(gFolder.URI);
+     }
+   },
+ 
+   /**
+    * Restore the collapsed or expanded state of threads.
+    */
+   restoreThreadState() {
+@@ -6792,16 +6816,18 @@ var sortController = {
+ 
+     // Restore Grouped By state post sort direction change.
+     if (grouped) {
+       if (gViewWrapper.isVirtual && gViewWrapper.isSingleFolder) {
+         this.groupBySort();
+       }
+       // Restore Grouped By selection post sort direction change.
+       threadPane.restoreSelection();
++      // Refresh dummy rows in case of collapseAll.
++      threadTree.invalidate();
+     }
+     threadPane.restoreThreadState();
+   },
+   toggleThreaded() {
+     if (gViewWrapper.showThreaded) {
+       threadPane.updateListRole(true);
+       gViewWrapper.showUnthreaded = true;
+     } else {
+@@ -6951,17 +6977,17 @@ commandController.registerCallback(
+   },
+   () => !!gViewWrapper?.dbView
+ );
+ commandController.registerCallback(
+   "cmd_collapseAllThreads",
+   () => {
+     threadPane.saveSelection();
+     gViewWrapper.dbView.doCommand(Ci.nsMsgViewCommandType.collapseAll);
+-    threadPane.restoreSelection();
++    threadPane.restoreSelection({ expand: false });
+   },
+   () => !!gViewWrapper?.dbView
+ );
+ 
+ function SwitchView(command) {
+   // when switching thread views, we might be coming out of quick search
+   // or a message view.
+   // first set view picker to all
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -973,16 +973,17 @@ var dbViewWrapperListener = {
+       if (
+         gViewWrapper.sortImpliesTemporalOrdering &&
+         gViewWrapper.isSortedAscending
+       ) {
+         window.threadTree.scrollToIndex(gDBView.rowCount - 1, true);
+       } else {
+         window.threadTree.scrollToIndex(0, true);
+       }
++      window.threadPane.restoreThreadState();
+     }
+   },
+   onDestroyingView(folderIsComingBack) {
+     if (!window.threadTree) {
+       return;
+     }
+ 
+     if (folderIsComingBack) {
+@@ -997,31 +998,49 @@ var dbViewWrapperListener = {
+     }
+   },
+   onLoadingFolder(dbFolderInfo) {
+     window.quickFilterBar?.onFolderChanged();
+   },
+   onDisplayingFolder() {},
+   onLeavingFolder() {},
+   onMessagesLoaded(all) {
++    let threadPane = window.threadPane;
++    if (!threadPane) {
++      return;
++    }
+     // Try to restore what was selected. Keep the saved selection (if there is
+-    // one) until we have all of the messages.
+-    window.threadPane?.restoreSelection(all);
++    // one) until we have all of the messages. This will also reveal selected
++    // messages in collapsed threads-
++    threadPane.restoreSelection({ discard: all });
+ 
+     if (all) {
+-      if (window.threadPane?.scrollToNewMessage) {
++      // Since nsMsgQuickSearchDBView::SortThreads leaves the thread state
++      // expanded in any case, restore it again, except for transient quick
++      // search views.
++      if (
++        gViewWrapper?.isVirtual &&
++        gViewWrapper.isSingleFolder &&
++        gViewWrapper.search.hasOnlyVirtualTerms &&
++        !gViewWrapper._threadExpandAll
++      ) {
++        threadPane.saveSelection();
++        threadPane.restoreThreadState();
++        threadPane.restoreSelection();
++      }
++      if (threadPane.scrollToNewMessage) {
+         try {
+           let index = gDBView.findIndexOfMsgHdr(gFolder.firstNewMessage, true);
+           if (index != nsMsgViewIndex_None) {
+             window.threadTree.scrollToIndex(index, true);
+           }
+         } catch (ex) {
+           console.error(ex);
+         }
+-        window.threadPane.scrollToNewMessage = false;
++        threadPane.scrollToNewMessage = false;
+       }
+       window.threadTree?.invalidate();
+     }
+     window.quickFilterBar?.onMessagesChanged();
+ 
+     let tabmail = top.document.getElementById("tabmail");
+     let tab = tabmail?.currentTabInfo;
+     if (tab) {
+diff --git a/mail/base/content/mailContext.js b/mail/base/content/mailContext.js
+--- a/mail/base/content/mailContext.js
++++ b/mail/base/content/mailContext.js
+@@ -209,17 +209,17 @@ var mailContextMenu = {
+    * Clear the overriding selection, and go back to the previous selection.
+    */
+   clearOverrideSelection() {
+     if (!window.threadTree) {
+       return;
+     }
+     if (this._selectionIsOverridden) {
+       window.threadTree._selection.selectEventsSuppressed = true;
+-      window.threadPane.restoreSelection(undefined, false);
++      window.threadPane.restoreSelection({ notify: false });
+       this._selectionIsOverridden = false;
+       window.threadTree.invalidate();
+     }
+     window.threadTree
+       .querySelector(".context-menu-target")
+       ?.classList.remove("context-menu-target");
+     window.threadTree._selection.selectEventsSuppressed = false;
+     window.threadTree.table.body.focus();
