@@ -95,3 +95,6 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "toolbar-get-all-messages-menuitem =" >> localization\ja\messenger\unifiedToolbar.ftl
 %lecho% "  .label = 新着メッセージをすべて受信"     >> localization\ja\messenger\unifiedToolbar.ftl
 %lecho% "  .accesskey = G"                    >> localization\ja\messenger\unifiedToolbar.ftl
+
+:: String from bug 1854801, negligently not refreshed by the TB folks.
+%lecho% "message-header-followup-to-list-name = Followup-To =" >> localization\ja\messenger\messageheader\headerFields.ftl
