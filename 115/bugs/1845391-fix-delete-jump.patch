@@ -1,0 +1,547 @@
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1698440780 -7200
+# Node ID 388b0ec45e22e80297678008a026360b2d26afe1
+# Parent  bef7725ef5703a53577d9f54ccbdbd53371c88e5
+Bug 1845391 - Refresh the thread tree without rebuilding it where possible. r=leftmostcat
+
+Differential Revision: https://phabricator.services.mozilla.com/D191508
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -4360,17 +4360,17 @@ var threadPane = {
+       "mailnews.threadpane_select_delay",
+       null,
+       (name, oldValue, newValue) => (threadTree.dataset.selectDelay = newValue)
+     );
+     threadTree.dataset.selectDelay = this.selectDelay;
+ 
+     window.addEventListener("uidensitychange", () => {
+       this.densityChange();
+-      threadTree.invalidate();
++      threadTree.reset();
+     });
+     this.densityChange();
+ 
+     XPCOMUtils.defineLazyGetter(this, "notificationBox", () => {
+       let container = document.getElementById("threadPaneNotificationBox");
+       return new MozElements.NotificationBox(element =>
+         container.append(element)
+       );
+@@ -4869,17 +4869,17 @@ var threadPane = {
+     },
+     ensureRowIsVisible(index) {
+       if (!this._inBatch) {
+         threadTree.scrollToIndex(index, true);
+       }
+     },
+     invalidate() {
+       if (!this._inBatch) {
+-        threadTree.invalidate();
++        threadTree.reset();
+       }
+     },
+     invalidateRange(startIndex, endIndex) {
+       if (!this._inBatch) {
+         threadTree.invalidateRange(startIndex, endIndex);
+       }
+     },
+     rowCountChanged(index, count) {
+@@ -5158,17 +5158,17 @@ var threadPane = {
+   /**
+    * Restore the default columns visibility and order and save the change.
+    */
+   restoreDefaultColumns() {
+     this.columns = getDefaultColumns(gFolder, gViewWrapper?.isSynthetic);
+     this.cardColumns = getDefaultColumnsForCardsView(gFolder);
+     this.updateClassList();
+     this.updateColumns();
+-    threadTree.invalidate();
++    threadTree.reset();
+     this.persistColumnStates();
+   },
+ 
+   /**
+    * Shift the ordinal of a column by one based on the visible columns.
+    *
+    * @param {object} data - The detail object of the bubbled event.
+    */
+@@ -5199,17 +5199,17 @@ var threadPane = {
+ 
+     // Update the ordinal of the columns to reflect the new positions.
+     this.columns.forEach((column, index) => {
+       column.ordinal = index;
+     });
+ 
+     this.persistColumnStates();
+     this.updateColumns(true);
+-    threadTree.invalidate();
++    threadTree.reset();
+ 
+     // Swap the DOM elements.
+     const originalTH = document.getElementById(column);
+     if (forward) {
+       destinationTH.after(originalTH);
+     } else {
+       destinationTH.before(originalTH);
+     }
+@@ -5217,34 +5217,34 @@ var threadPane = {
+     document.getElementById(`${column}Button`).focus();
+   },
+ 
+   onColumnsReordered(data) {
+     this.columns = data.columns;
+ 
+     this.persistColumnStates();
+     this.updateColumns(true);
+-    threadTree.invalidate();
++    threadTree.reset();
+   },
+ 
+   /**
+    * Update the list of visible columns based on the users' selection.
+    *
+    * @param {object} data - The detail object of the bubbled event.
+    */
+   onColumnsVisibilityChanged(data) {
+     let column = data.value;
+     let checked = data.target.hasAttribute("checked");
+ 
+     let changedColumn = this.columns.find(c => c.id == column);
+     changedColumn.hidden = !checked;
+ 
+     this.persistColumnStates();
+     this.updateColumns(true);
+-    threadTree.invalidate();
++    threadTree.reset();
+   },
+ 
+   /**
+    * Save the current visibility of the columns in the folder database.
+    */
+   persistColumnStates() {
+     let newState = {};
+     for (const column of this.columns) {
+@@ -5551,17 +5551,17 @@ var threadPane = {
+                 false,
+                 null
+               );
+               threadIds.delete(msg.threadId);
+             }
+           });
+           // Invalidation should be unnecessary but the back end doesn't
+           // notify us properly and resists attempts to fix this.
+-          threadTree.invalidate();
++          threadTree.reset();
+           threadTree.table.body.focus();
+           return false; // Close notification.
+         },
+       },
+     ];
+ 
+     if (threadIds.size == 1) {
+       let ignoredThreadText = messengerBundle.GetStringFromName(
+@@ -6952,34 +6952,34 @@ commandController.registerCallback(
+       threadPane.showIgnoredMessageNotification(
+         gDBView.getSelectedMsgHdrs(),
+         false
+       );
+     }
+     commandController._navigate(Ci.nsMsgNavigationType.toggleThreadKilled);
+     // Invalidation should be unnecessary but the back end doesn't notify us
+     // properly and resists attempts to fix this.
+-    threadTree.invalidate();
++    threadTree.reset();
+   },
+   () => gDBView?.numSelected >= 1 && (gFolder || gViewWrapper.isSynthetic)
+ );
+ commandController.registerCallback(
+   "cmd_killSubthread",
+   () => {
+     threadPane.hideIgnoredMessageNotification();
+     if (!gDBView.hdrForFirstSelectedMessage.isKilled) {
+       threadPane.showIgnoredMessageNotification(
+         gDBView.getSelectedMsgHdrs(),
+         true
+       );
+     }
+     commandController._navigate(Ci.nsMsgNavigationType.toggleSubthreadKilled);
+     // Invalidation should be unnecessary but the back end doesn't notify us
+     // properly and resists attempts to fix this.
+-    threadTree.invalidate();
++    threadTree.reset();
+   },
+   () => gDBView?.numSelected >= 1 && (gFolder || gViewWrapper.isSynthetic)
+ );
+ 
+ // Forward these commands directly to about:message.
+ commandController.registerCallback(
+   "cmd_find",
+   () =>
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -969,17 +969,17 @@ var dbViewWrapperListener = {
+           if (index != nsMsgViewIndex_None) {
+             window.threadTree.scrollToIndex(index, true);
+           }
+         } catch (ex) {
+           console.error(ex);
+         }
+         window.threadPane.scrollToNewMessage = false;
+       }
+-      window.threadTree?.invalidate();
++      window.threadTree?.reset();
+     }
+     window.quickFilterBar?.onMessagesChanged();
+   },
+   onMailViewChanged() {
+     window.dispatchEvent(new CustomEvent("MailViewChanged"));
+   },
+   onSortChanged() {
+     if (window.threadTree && gDBView.selection.count == 0) {
+diff --git a/mail/base/content/widgets/tree-view.mjs b/mail/base/content/widgets/tree-view.mjs
+--- a/mail/base/content/widgets/tree-view.mjs
++++ b/mail/base/content/widgets/tree-view.mjs
+@@ -223,17 +223,17 @@ class TreeView extends HTMLElement {
+ 
+   attributeChangedCallback(attrName, oldValue, newValue) {
+     this._rowElementName = newValue || "tree-view-table-row";
+     this._rowElementClass = customElements.get(this._rowElementName);
+ 
+     this.#calculateToleranceBufferSize();
+ 
+     if (this._view) {
+-      this.invalidate();
++      this.reset();
+     }
+   }
+ 
+   handleEvent(event) {
+     switch (event.type) {
+       case "keyup": {
+         if (
+           ["Tab", "F6"].includes(event.key) &&
+@@ -528,17 +528,17 @@ class TreeView extends HTMLElement {
+           throw ex;
+         }
+       }
+     }
+ 
+     // Clear the height of the top spacer to avoid confusing
+     // `_ensureVisibleRowsAreDisplayed`.
+     this.table.spacerTop.setHeight(0);
+-    this.invalidate();
++    this.reset();
+ 
+     this.dispatchEvent(new CustomEvent("viewchange"));
+   }
+ 
+   /**
+    * Set the colspan of the spacer row cells.
+    *
+    * @param {int} count - The amount of visible columns.
+@@ -573,41 +573,50 @@ class TreeView extends HTMLElement {
+     this.table.spacerBottom.setHeight(
+       rowCount * this._rowElementClass.ROW_HEIGHT
+     );
+   }
+ 
+   /**
+    * Clear all rows from the list and create them again.
+    */
+-  invalidate() {
++  reset() {
+     this.#resetRowBuffer();
+     this._ensureVisibleRowsAreDisplayed();
+   }
+ 
+   /**
++   * Updates all existing rows in place, without removing all the rows and
++   * starting again. This can be used if the row element class hasn't changed
++   * and its `index` setter is capable of handling any modifications required.
++   */
++  invalidate() {
++    this.invalidateRange(this.#firstBufferRowIndex, this.#lastBufferRowIndex);
++  }
++
++  /**
+    * Perform the actions necessary to invalidate the specified row. Implemented
+    * separately to allow {@link invalidateRange} to handle testing event fires
+    * on its own.
+    *
+    * @param {integer} index
+    */
+   #doInvalidateRow(index) {
++    const rowCount = this._view?.rowCount ?? 0;
+     let row = this.getRowAtIndex(index);
+     if (row) {
+-      if (index >= this._view.rowCount) {
+-        row.remove();
+-        this._rows.delete(index);
++      if (index >= rowCount) {
++        this._removeRowAtIndex(index);
+       } else {
+         row.index = index;
+         row.selected = this._selection.isSelected(index);
+       }
+     } else if (
+       index >= this.#firstBufferRowIndex &&
+-      index <= this.#lastBufferRowIndex
++      index <= Math.min(rowCount - 1, this.#lastBufferRowIndex)
+     ) {
+       this._addRowAtIndex(index);
+     }
+   }
+ 
+   /**
+    * Invalidate the rows between `startIndex` and `endIndex`.
+    *
+@@ -665,19 +674,22 @@ class TreeView extends HTMLElement {
+       lastVisibleRow + this._toleranceSize,
+       dataRowCount - 1
+     );
+ 
+     return desiredRowRange;
+   }
+ 
+   #createToleranceFillCallback() {
+-    this.#bufferFillIdleCallbackHandle = requestIdleCallback(deadline =>
+-      this.#fillToleranceBuffer(deadline)
+-    );
++    // Don't schedule a new buffer fill callback if we already have one.
++    if (!this.#bufferFillIdleCallbackHandle) {
++      this.#bufferFillIdleCallbackHandle = requestIdleCallback(deadline =>
++        this.#fillToleranceBuffer(deadline)
++      );
++    }
+   }
+ 
+   #cancelToleranceFillCallback() {
+     cancelIdleCallback(this.#bufferFillIdleCallbackHandle);
+     this.#bufferFillIdleCallbackHandle = null;
+   }
+ 
+   /**
+@@ -879,16 +891,18 @@ class TreeView extends HTMLElement {
+     return ranges;
+   }
+ 
+   /**
+    * Display the table rows which should be shown in the visible area and
+    * request filling of the tolerance buffer when idle.
+    */
+   _ensureVisibleRowsAreDisplayed() {
++    this.#cancelToleranceFillCallback();
++
+     let rowCount = this._view?.rowCount ?? 0;
+     this.placeholder?.classList.toggle("show", !rowCount);
+ 
+     if (!rowCount || this.#calculateVisibleRowCount() == 0) {
+       return;
+     }
+ 
+     if (this.scrollTop > rowCount * this._rowElementClass.ROW_HEIGHT) {
+@@ -945,28 +959,26 @@ class TreeView extends HTMLElement {
+       this._addRowAtIndex(i, this.table.body.firstElementChild);
+     }
+ 
+     // Prune the buffer of any rows outside of our desired buffer range.
+     if (ranges.pruneBefore !== null) {
+       const pruneBeforeRow = this.getRowAtIndex(ranges.pruneBefore);
+       let rowToPrune = pruneBeforeRow.previousElementSibling;
+       while (rowToPrune) {
+-        rowToPrune.remove();
+-        this._rows.delete(rowToPrune.index);
++        this._removeRowAtIndex(rowToPrune.index);
+         rowToPrune = pruneBeforeRow.previousElementSibling;
+       }
+     }
+ 
+     if (ranges.pruneAfter !== null) {
+       const pruneAfterRow = this.getRowAtIndex(ranges.pruneAfter);
+       let rowToPrune = pruneAfterRow.nextElementSibling;
+       while (rowToPrune) {
+-        rowToPrune.remove();
+-        this._rows.delete(rowToPrune.index);
++        this._removeRowAtIndex(rowToPrune.index);
+         rowToPrune = pruneAfterRow.nextElementSibling;
+       }
+     }
+ 
+     // Set the indices of the new first and last rows in the DOM. They may come
+     // from the tolerance buffer if we haven't exhausted it.
+     this.#firstBufferRowIndex = ranges.finalizedRows.first;
+     this.#lastBufferRowIndex = ranges.finalizedRows.last;
+@@ -986,20 +998,17 @@ class TreeView extends HTMLElement {
+     );
+ 
+     // The row buffer ideally contains some tolerance on either end to avoid
+     // creating rows and fetching data for them during short scrolls. However,
+     // actually creating those rows can be expensive, and during a long scroll
+     // we may throw them away very quickly. To save the expense, only fill the
+     // buffer while idle.
+ 
+-    // Don't schedule a new buffer fill callback if we already have one.
+-    if (!this.#bufferFillIdleCallbackHandle) {
+-      this.#createToleranceFillCallback();
+-    }
++    this.#createToleranceFillCallback();
+   }
+ 
+   /**
+    * Index of the first visible or partly visible row.
+    *
+    * @returns {integer}
+    */
+   getFirstVisibleIndex() {
+@@ -1113,16 +1122,27 @@ class TreeView extends HTMLElement {
+     if (this.currentIndex === index) {
+       row.classList.add("current");
+       this.table.body.setAttribute("aria-activedescendant", row.id);
+     }
+     this._rows.set(index, row);
+   }
+ 
+   /**
++   * Removes the row element at `index` from the DOM and map of rows.
++   *
++   * @param {integer} index
++   */
++  _removeRowAtIndex(index) {
++    const row = this._rows.get(index);
++    row?.remove();
++    this._rows.delete(index);
++  }
++
++  /**
+    * Returns the row element at `index` or null if `index` is out of range.
+    *
+    * @param {integer} index
+    * @returns {HTMLTableRowElement}
+    */
+   getRowAtIndex(index) {
+     return this._rows.get(index) ?? null;
+   }
+@@ -1265,17 +1285,17 @@ class TreeView extends HTMLElement {
+    * Select and focus the given index.
+    *
+    * @param {integer} index - The index to select.
+    * @param {boolean} [delaySelect=false] - If the selection should be delayed.
+    */
+   _selectSingle(index, delaySelect = false) {
+     let changeSelection =
+       this._selection.count != 1 || !this._selection.isSelected(index);
+-    // Update the TreeSelection selection to trigger a tree invalidate().
++    // Update the TreeSelection selection to trigger a tree reset().
+     if (changeSelection) {
+       this._selection.select(index);
+     }
+     this.currentIndex = index;
+     if (changeSelection) {
+       this.onSelectionChanged(delaySelect);
+     }
+   }
+@@ -2460,16 +2480,19 @@ class TreeViewTableRow extends HTMLTable
+     this.setAttribute("aria-selected", !!this.selected);
+   }
+ 
+   /**
+    * The 0-based position of this row in the list. Override this setter to
+    * fill layout based on values from the list's view. Always call back to
+    * this class's getter/setter when inheriting.
+    *
++   * @note Don't short-circuit the setter if the given index is equal to the
++   * existing index. Rows can be reused to display new data at the same index.
++   *
+    * @type {integer}
+    */
+   get index() {
+     return this._index;
+   }
+ 
+   set index(index) {
+     this.setAttribute(
+diff --git a/mail/components/addrbook/content/abView-new.js b/mail/components/addrbook/content/abView-new.js
+--- a/mail/components/addrbook/content/abView-new.js
++++ b/mail/components/addrbook/content/abView-new.js
+@@ -131,17 +131,17 @@ ABView.prototype = {
+           return this.collator.compare(bText, aText);
+         }
+         return this.collator.compare(aText, bText);
+       });
+     }
+ 
+     // Restore what was selected.
+     if (this._tree) {
+-      this._tree.invalidate();
++      this._tree.reset();
+       if (selectionExists) {
+         for (let i = 0; i < this._rowMap.length; i++) {
+           this._tree.toggleSelectionAtIndex(
+             i,
+             this._rowMap[i].wasSelected,
+             true
+           );
+         }
+@@ -244,17 +244,17 @@ ABView.prototype = {
+         } else {
+           // Remember what was selected.
+           let { selectedIndices, currentIndex } = this._tree;
+           for (let i = 0; i < this._rowMap.length; i++) {
+             this._rowMap[i].wasSelected = selectedIndices.includes(i);
+             this._rowMap[i].wasCurrent = currentIndex == i;
+           }
+ 
+-          this._tree.invalidate();
++          this._tree.reset();
+           for (let i = 0; i < this._rowMap.length; i++) {
+             this._tree.toggleSelectionAtIndex(
+               i,
+               this._rowMap[i].wasSelected,
+               true
+             );
+           }
+           // Can't do this until updating the selection is finished.
+diff --git a/mail/components/addrbook/content/aboutAddressBook.js b/mail/components/addrbook/content/aboutAddressBook.js
+--- a/mail/components/addrbook/content/aboutAddressBook.js
++++ b/mail/components/addrbook/content/aboutAddressBook.js
+@@ -1483,17 +1483,17 @@ var cardsPane = {
+         rowClass.ROW_HEIGHT = 60;
+         tableRowClass.ROW_HEIGHT = 32;
+         break;
+       default:
+         rowClass.ROW_HEIGHT = 46;
+         tableRowClass.ROW_HEIGHT = 22;
+         break;
+     }
+-    this.cardsList.invalidate();
++    this.cardsList.reset();
+   },
+ 
+   searchInput: null,
+ 
+   cardsList: null,
+ 
+   init() {
+     this.searchInput = document.getElementById("searchInput");
+@@ -1651,17 +1651,17 @@ var cardsPane = {
+     for (let columnDef of cardsPane.COLUMNS) {
+       if (columnDef.id == column) {
+         columnDef.hidden = !checked;
+         break;
+       }
+     }
+ 
+     this.table.updateColumns(cardsPane.COLUMNS);
+-    this.cardsList.invalidate();
++    this.cardsList.reset();
+ 
+     Services.xulStore.setValue(
+       cardsPane.URL,
+       "cards",
+       "columns",
+       cardsPane.COLUMNS.filter(c => !c.hidden)
+         .map(c => c.id)
+         .join(",")
