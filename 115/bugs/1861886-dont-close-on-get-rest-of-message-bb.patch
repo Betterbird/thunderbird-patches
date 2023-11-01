@@ -1,0 +1,98 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1698874319 -3600
+# Parent  f5b27b9ca981330e9d250ac53b6156b9679afc61
+Bug 1861886 - Don't close window/tab when incorporating (rest of) POP3 messages.
+
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1060,16 +1060,24 @@ var dbViewWrapperListener = {
+   onMailViewChanged() {
+     window.dispatchEvent(new CustomEvent("MailViewChanged"));
+   },
+   onSortChanged() {
+     // If there is no selection, scroll to the most relevant end.
+     window.threadPane?.scrollToLatestRowIfNoSelection();
+   },
+   onMessagesRemoved() {
++    // Clear the pref "later".
++    setTimeout(() => {
++      Services.prefs.setBoolPref(
++        "mail.close_message_window.on_delete.disabled",
++        false
++      );
++    }, 500);
++
+     window.quickFilterBar?.onMessagesChanged();
+ 
+     if (!gDBView || !gFolder) {
+       // This can't be a notification about the message currently displayed.
+       return;
+     }
+ 
+     let rowCount = gDBView.rowCount;
+@@ -1118,17 +1126,21 @@ var dbViewWrapperListener = {
+           window.threadTree.selectedIndex = this._nextViewIndexAfterDelete;
+           window.threadTree.removeEventListener("select", onSelect);
+ 
+           if (!eventFired) {
+             window.threadTree.dispatchEvent(new CustomEvent("select"));
+           }
+         } else if (parent?.location != "about:3pane") {
+           if (
+-            Services.prefs.getBoolPref("mail.close_message_window.on_delete")
++            Services.prefs.getBoolPref("mail.close_message_window.on_delete") &&
++            !Services.prefs.getBoolPref(
++              "mail.close_message_window.on_delete.disabled",
++              false
++            )
+           ) {
+             // Close the tab or window if the displayed message is deleted.
+             let tabmail = top.document.getElementById("tabmail");
+             if (tabmail) {
+               tabmail.closeTab(window.tabOrWindow);
+             } else {
+               top.close();
+             }
+diff --git a/mailnews/local/src/nsPop3Sink.cpp b/mailnews/local/src/nsPop3Sink.cpp
+--- a/mailnews/local/src/nsPop3Sink.cpp
++++ b/mailnews/local/src/nsPop3Sink.cpp
+@@ -30,16 +30,17 @@
+ #include "mozIDOMWindow.h"
+ #include "nsEmbedCID.h"
+ #include "nsMsgUtils.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsISupportsPrimitives.h"
+ #include "nsIObserverService.h"
+ #include "nsIPop3Service.h"
+ #include "mozilla/Logging.h"
++#include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+ 
+ /* for logging to Error Console */
+ #include "nsIScriptError.h"
+ 
+ mozilla::LazyLogModule POP3LOGMODULE("POP3");
+ #define POP3LOG(str) "sink: [this=%p] " str, this
+ 
+@@ -625,16 +626,19 @@ nsPop3Sink::IncorporateComplete(nsIMsgWi
+       nsCString newURI;
+       rv = newMsgFolder->GetUriForMsg(hdr, newURI);
+       NS_ENSURE_SUCCESS(rv, rv);
+ 
+       // Delete old header before notifying.
+       nsCOMPtr<nsIMsgDatabase> db;
+       rv = m_folder->GetMsgDatabase(getter_AddRefs(db));
+       NS_ENSURE_SUCCESS(rv, rv);
++      // Switch off closing window/tab.
++      mozilla::Preferences::SetBool(
++          "mail.close_message_window.on_delete.disabled", true);
+       rv = db->DeleteHeader(oldMsgHdr, nullptr, false, true);
+       NS_ENSURE_SUCCESS(rv, rv);
+ 
+       nsCOMPtr<nsIObserverService> obsServ =
+           mozilla::services::GetObserverService();
+       nsCOMPtr<nsISupportsString> origUri =
+           do_CreateInstance(NS_SUPPORTS_STRING_CONTRACTID, &rv);
+       if (NS_SUCCEEDED(rv)) {
