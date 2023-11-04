@@ -1,0 +1,211 @@
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1699128880 -3600
+# Node ID 71121f7df9c69736ff5a16316b6fe8d5b33ce03b
+# Parent  84cb3501f38f11285cddcff625ebeecf8c47553a
+Bug 1842420 - Fix "mark as read" context menu item for virtual folders. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D192291
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -403,16 +403,17 @@ var folderPaneContextMenu = {
+ 
+     let folder = this.activeFolder;
+     let { canCreateSubfolders, flags, isServer, isSpecialFolder, server } =
+       folder;
+     let isJunk = flags & Ci.nsMsgFolderFlags.Junk;
+     let isTrash = isSpecialFolder(Ci.nsMsgFolderFlags.Trash, true);
+     let isVirtual = flags & Ci.nsMsgFolderFlags.Virtual;
+     let isRealFolder = !isServer && !isVirtual;
++    let isSmartVirtualFolder = FolderUtils.isSmartVirtualFolder(folder);
+     let isSmartTagsFolder = FolderUtils.isSmartTagsFolder(folder);
+     let serverType = server.type;
+ 
+     showItem(
+       "folderPaneContext-getMessages",
+       (isServer && serverType != "none") ||
+         (["nntp", "rss"].includes(serverType) && !isTrash && !isVirtual)
+     );
+@@ -461,17 +462,17 @@ var folderPaneContextMenu = {
+               ? "newFolder"
+               : "newSubfolder"
+           )
+         );
+     }
+ 
+     showItem(
+       "folderPaneContext-markMailFolderAllRead",
+-      isRealFolder && serverType != "nntp"
++      !isServer && !isSmartTagsFolder && serverType != "nntp"
+     );
+     showItem(
+       "folderPaneContext-markNewsgroupAllRead",
+       isRealFolder && serverType == "nntp"
+     );
+     showItem(
+       "folderPaneContext-emptyTrash",
+       isSpecialFolder(Ci.nsMsgFolderFlags.Trash, true)
+@@ -506,23 +507,18 @@ var folderPaneContextMenu = {
+ 
+     // If source folder is virtual, allow only "move" within its own server.
+     // Don't show "copy" and "again" and don't show "recent" and "favorite".
+     // Also, check if this is a top-level smart folder, e.g., virtual "Inbox"
+     // in unified folder view or a Tags folder. If so, don't show "move".
+     let movePopup = document.getElementById("folderContext-movePopup");
+     if (isVirtual) {
+       showItem("folderPaneContext-copyMenu", false);
+-      let folder = this.activeFolder;
+       let showMove = true;
+-      if (
+-        (folder.server.hostName == "smart mailboxes" &&
+-          folder.parent.isServer) ||
+-        isSmartTagsFolder
+-      ) {
++      if (isSmartVirtualFolder || isSmartTagsFolder) {
+         showMove = false;
+       }
+       showItem("folderPaneContext-moveMenu", showMove);
+       if (showMove) {
+         let rootURI = MailUtils.getOrCreateFolder(
+           this.activeFolder.rootFolder.URI
+         );
+         movePopup.parentFolder = rootURI;
+@@ -635,17 +631,23 @@ var folderPaneContextMenu = {
+       case "folderPaneContext-subscribe":
+         topChromeWindow.MsgSubscribe(folder);
+         break;
+       case "folderPaneContext-newsUnsubscribe":
+         topChromeWindow.MsgUnsubscribe([folder]);
+         break;
+       case "folderPaneContext-markMailFolderAllRead":
+       case "folderPaneContext-markNewsgroupAllRead":
+-        topChromeWindow.MsgMarkAllRead([folder]);
++        if (folder.flags & Ci.nsMsgFolderFlags.Virtual) {
++          topChromeWindow.MsgMarkAllRead(
++            VirtualFolderHelper.wrapVirtualFolder(folder).searchFolders
++          );
++        } else {
++          topChromeWindow.MsgMarkAllRead([folder]);
++        }
+         break;
+       case "folderPaneContext-emptyTrash":
+         folderPane.emptyTrash(folder);
+         break;
+       case "folderPaneContext-emptyJunk":
+         folderPane.emptyJunk(folder);
+         break;
+       case "folderPaneContext-sendUnsentMessages":
+@@ -3289,17 +3291,17 @@ var folderPane = {
+     }
+ 
+     if (!this._checkConfirmationPrompt("emptyTrash", folder)) {
+       return;
+     }
+ 
+     // Check if this is a top-level smart folder. If so, we're going
+     // to empty all the trash folders.
+-    if (folder.server.hostName == "smart mailboxes" && folder.parent.isServer) {
++    if (FolderUtils.isSmartVirtualFolder(folder)) {
+       for (let server of MailServices.accounts.allServers) {
+         for (let trash of server.rootFolder.getFoldersWithFlags(
+           Ci.nsMsgFolderFlags.Trash
+         )) {
+           trash.emptyTrash(null);
+         }
+       }
+     } else {
+@@ -3318,17 +3320,17 @@ var folderPane = {
+     if (!folder || !folder.getFlag(Ci.nsMsgFolderFlags.Junk)) {
+       return;
+     }
+ 
+     if (prompt && !this._checkConfirmationPrompt("emptyJunk", folder)) {
+       return;
+     }
+ 
+-    if (folder.getFlag(Ci.nsMsgFolderFlags.Virtual)) {
++    if (FolderUtils.isSmartVirtualFolder(folder)) {
+       // This is the unified junk folder.
+       let wrappedFolder = VirtualFolderHelper.wrapVirtualFolder(folder);
+       for (let searchFolder of wrappedFolder.searchFolders) {
+         this.emptyJunk(searchFolder, false);
+       }
+       return;
+     }
+ 
+diff --git a/mail/base/test/browser/browser_folderPaneContext.js b/mail/base/test/browser/browser_folderPaneContext.js
+--- a/mail/base/test/browser/browser_folderPaneContext.js
++++ b/mail/base/test/browser/browser_folderPaneContext.js
+@@ -15,17 +15,17 @@ const folderPaneContextData = {
+   "folderPaneContext-openNewWindow": true,
+   "folderPaneContext-searchMessages": [...servers, ...realFolders],
+   "folderPaneContext-subscribe": ["rssRoot", "rssFeed"],
+   "folderPaneContext-newsUnsubscribe": [],
+   "folderPaneContext-new": [...servers, ...realFolders],
+   "folderPaneContext-remove": ["plain", "junk", "virtual", "rssFeed"],
+   "folderPaneContext-rename": ["plain", "junk", "virtual", "rssFeed"],
+   "folderPaneContext-compact": [...servers, ...realFolders],
+-  "folderPaneContext-markMailFolderAllRead": [...realFolders],
++  "folderPaneContext-markMailFolderAllRead": [...realFolders, "virtual"],
+   "folderPaneContext-markNewsgroupAllRead": [],
+   "folderPaneContext-emptyTrash": ["trash"],
+   "folderPaneContext-emptyJunk": ["junk"],
+   "folderPaneContext-sendUnsentMessages": [],
+   "folderPaneContext-favoriteFolder": [...realFolders, "virtual"],
+   "folderPaneContext-properties": [...realFolders, "virtual"],
+   "folderPaneContext-markAllFoldersRead": [...servers],
+   "folderPaneContext-settings": [...servers],
+diff --git a/mailnews/base/src/FolderUtils.jsm b/mailnews/base/src/FolderUtils.jsm
+--- a/mailnews/base/src/FolderUtils.jsm
++++ b/mailnews/base/src/FolderUtils.jsm
+@@ -13,16 +13,17 @@ var FolderUtils = {
+   compareAccounts,
+   folderNameCompare,
+   getFolderIcon,
+   getFolderProperties,
+   getMostRecentFolders,
+   getSpecialFolderString,
+   canRenameDeleteJunkMail,
+   isSmartTagsFolder,
++  isSmartVirtualFolder,
+ };
+ 
+ const { MailServices } = ChromeUtils.import(
+   "resource:///modules/MailServices.jsm"
+ );
+ 
+ /**
+  * Returns a string representation of a folder's "special" type.
+@@ -311,16 +312,30 @@ function getFolderIcon(folder) {
+         break;
+     }
+   }
+ 
+   return `chrome://messenger/skin/icons/new/compact/${iconName}`;
+ }
+ 
+ /**
++ * Checks if `folder` is a virtual folder for the Unified Folders pane mode.
++ *
++ * @param {nsIMsgFolder} folder
++ * @returns {boolean}
++ */
++function isSmartVirtualFolder(folder) {
++  return (
++    folder.isSpecialFolder(Ci.nsMsgFolderFlags.Virtual) &&
++    folder.server.hostName == "smart mailboxes" &&
++    folder.parent?.isServer
++  );
++}
++
++/**
+  * Checks if `folder` is a virtual folder for the Tags folder pane mode.
+  *
+  * @param {nsIMsgFolder} folder
+  * @returns {boolean}
+  */
+ function isSmartTagsFolder(folder) {
+   return (
+     folder.isSpecialFolder(Ci.nsMsgFolderFlags.Virtual) &&
