@@ -1,0 +1,396 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1699827118 -3600
+# Parent  1dc096353d24b10a6bf29a6b77717f4811133982
+Bug 1554188 - modify algorithm that closes databases during search. Allow for 100 open ones, keep simple LRU cache.
+
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -543,16 +543,18 @@ interface nsIMsgFolder : nsISupports {
+    *
+    * @exception NS_MSG_ERROR_FOLDER_SUMMARY_MISSING If the database does not
+    *                         exist.
+    * @exception NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE If the database contains
+    *                         out of date information.
+    * @see nsIMsgFolder::getDBFolderInfoAndDB.
+    */
+   attribute nsIMsgDatabase msgDatabase;
++  /// Get database via API that keeps a LRU cache.
++  readonly attribute nsIMsgDatabase msgDatabaseLRU;
+ 
+   /// Close the database if not open in folder.
+   void closeDBIfFolderNotOpen(in boolean forceClosed);
+ 
+   /// Does the folder have a local reference to the msgDatabase?
+   readonly attribute boolean databaseOpen;
+ 
+   /**
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -168,19 +168,16 @@ nsString nsMsgDBFolder::kLocalizedDrafts
+ nsString nsMsgDBFolder::kLocalizedTemplatesName;
+ nsString nsMsgDBFolder::kLocalizedUnsentName;
+ nsString nsMsgDBFolder::kLocalizedJunkName;
+ nsString nsMsgDBFolder::kLocalizedArchivesName;
+ 
+ nsString nsMsgDBFolder::kLocalizedBrandShortName;
+ 
+ nsrefcnt nsMsgDBFolder::mInstanceCount = 0;
+-nsWeakPtr nsMsgDBFolder::m_lastFolder1 = nullptr;
+-nsWeakPtr nsMsgDBFolder::m_lastFolder2 = nullptr;
+-nsWeakPtr nsMsgDBFolder::m_lastFolder3 = nullptr;
+ bool nsMsgDBFolder::gInitializeStringsDone = false;
+ // This is used in `nonEnglishApp()` to determine localised
+ // folders strings.
+ // -1: not retrieved yet, 1: English, 0: non-English.
+ int nsMsgDBFolder::gIsEnglishApp;
+ 
+ // We define strings for folder properties and events.
+ // Properties:
+@@ -4743,77 +4740,96 @@ NS_IMETHODIMP nsMsgDBFolder::EnableNotif
+     if (enable) {
+       UpdateSummaryTotals(true);
+     }
+     return NS_OK;
+   }
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
++// Cleap implementation of LRU cache.
++#define MAXLRUCACHE 100
++size_t dbLRUcacheCount = 0;
++nsWeakPtr dbLRUcache[MAXLRUCACHE];
++
++static void insertIntoLRUcache(nsMsgDBFolder* folder) {
++// #define FOLDER_DEBUG 1
++#ifdef FOLDER_DEBUG
++  nsAutoCString n;
++  folder->GetURI(n);
++#endif
++
++  // Let's keep track of the last folders and close a folder database
++  // if necessary.
++  // Let's see whether our folder is in the cache.
++  bool found = false;
++  for (size_t i = 0; i < dbLRUcacheCount; i++) {
++    nsCOMPtr<nsIMsgFolder> f = do_QueryReferent(dbLRUcache[i]);
++    if (f == folder) {
++      found = true;
++      // Move elements down to i and insert at [0].
++      if (i > 0) {
++        memmove((void*)&dbLRUcache[1], (void*)&dbLRUcache[0], i * sizeof(nsWeakPtr));
++        dbLRUcache[0] = do_GetWeakReference(folder);
++      }
++      break;
++    }
++  }
++#ifdef FOLDER_DEBUG
++  fprintf(stderr, "LRU insert: %s, found: %d, %zu\n", n.get(), found, dbLRUcacheCount);
++#endif
++  if (!found) {
++    if (dbLRUcacheCount == MAXLRUCACHE) {
++      // Expunge last element.
++      nsCOMPtr<nsIMsgFolder> last = do_QueryReferent(dbLRUcache[MAXLRUCACHE - 1]);
++      if (last) {
++        bool dbOpen = false;
++        last->GetDatabaseOpen(&dbOpen);
++        if (dbOpen) last->CloseDBIfFolderNotOpen(false);
++#ifdef FOLDER_DEBUG
++        last->GetURI(n);
++        fprintf(stderr, "LRU cache closed: %s\n", n.get());
++#endif
++      }
++      dbLRUcacheCount--;
++    }
++    // Move elements down and insert at [0].
++    if (dbLRUcacheCount > 0) {
++      memmove((void*)&dbLRUcache[1], (void*)&dbLRUcache[0], dbLRUcacheCount * sizeof(nsWeakPtr));
++    }
++    dbLRUcacheCount++;
++    dbLRUcache[0] = do_GetWeakReference(folder);
++  }
++}
++
+ NS_IMETHODIMP nsMsgDBFolder::GetMessageHeader(nsMsgKey msgKey,
+                                               nsIMsgDBHdr** aMsgHdr) {
+   NS_ENSURE_ARG_POINTER(aMsgHdr);
+   bool weOpenedDB = !mDatabase;
+   nsCOMPtr<nsIMsgDatabase> database;
+   nsresult rv = GetMsgDatabase(getter_AddRefs(database));
+   NS_ENSURE_SUCCESS(rv, rv);
+   if (!database) return NS_ERROR_FAILURE;
+   rv = database->GetMsgHdrForKey(msgKey, aMsgHdr);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (weOpenedDB) {
+-    // Let's keep track of the last folders and close a folder database
+-    // if necessary.
+-    nsCOMPtr<nsIMsgFolder> f1 = do_QueryReferent(nsMsgDBFolder::m_lastFolder1);
+-    nsCOMPtr<nsIMsgFolder> f2 = do_QueryReferent(nsMsgDBFolder::m_lastFolder2);
+-    nsCOMPtr<nsIMsgFolder> f3 = do_QueryReferent(nsMsgDBFolder::m_lastFolder3);
+-    if (f1 == this) {
+-      nsMsgDBFolder::m_lastFolder1 = nsMsgDBFolder::m_lastFolder2;
+-      nsMsgDBFolder::m_lastFolder2 = nsMsgDBFolder::m_lastFolder3;
+-      nsMsgDBFolder::m_lastFolder3 = do_GetWeakReference(this);
+-    } else if (f2 == this) {
+-      nsMsgDBFolder::m_lastFolder2 = nsMsgDBFolder::m_lastFolder3;
+-      nsMsgDBFolder::m_lastFolder3 = do_GetWeakReference(this);
+-    } else if (f3 == this) {
+-      ; // Skip, last folder is this one.
+-    } else {
+-      // The new folder isn't in our cache of three. Close the first
+-      // one instead.
+-// #define FOLDER_DEBUG 1
+-#ifdef FOLDER_DEBUG
+-      nsAutoCString n;
+-      nsAutoCString n1;
+-      nsAutoCString n2;
+-      nsAutoCString n3;
+-      GetURI(n);
+-      if (f1) f1->GetURI(n1);
+-      if (f2) f2->GetURI(n2);
+-      if (f3) f3->GetURI(n3);
+-      fprintf(stderr, "nsMsgDBFolder::GetMessageHeader: Folders:\n");
+-      fprintf(stderr, "  Current: %s\n", n.get());
+-      fprintf(stderr, "  Before: %s\n", n3.get());
+-      fprintf(stderr, "  Before: %s\n", n2.get());
+-      fprintf(stderr, "  Before: %s\n", n1.get());
+-#endif
+-      if (f1) {
+-        bool dbOpen = false;
+-        f1->GetDatabaseOpen(&dbOpen);
+-        if (dbOpen) f1->CloseDBIfFolderNotOpen(false);
+-#ifdef FOLDER_DEBUG
+-        fprintf(stderr, "  Closed: %s\n", n1.get());
+-#endif
+-      }
+-      nsMsgDBFolder::m_lastFolder1 = nsMsgDBFolder::m_lastFolder2;
+-      nsMsgDBFolder::m_lastFolder2 = nsMsgDBFolder::m_lastFolder3;
+-      nsMsgDBFolder::m_lastFolder3 = do_GetWeakReference(this);
+-    }
++    insertIntoLRUcache(this);
+   }
+   return rv;
+ }
+ 
++NS_IMETHODIMP
++nsMsgDBFolder::GetMsgDatabaseLRU(nsIMsgDatabase** aMsgDatabase) {
++  if (!mDatabase) {
++    insertIntoLRUcache(this);
++  }
++  return GetMsgDatabase(aMsgDatabase);
++}
++
+ NS_IMETHODIMP nsMsgDBFolder::GetDescendants(
+     nsTArray<RefPtr<nsIMsgFolder>>& aDescendants) {
+   aDescendants.Clear();
+   for (nsIMsgFolder* child : mSubFolders) {
+     aDescendants.AppendElement(child);
+     nsTArray<RefPtr<nsIMsgFolder>> grandchildren;
+     child->GetDescendants(grandchildren);
+     aDescendants.AppendElements(grandchildren);
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -16,46 +16,28 @@
+ #include "nsMsgMessageFlags.h"
+ #include "nsServiceManagerUtils.h"
+ 
+ nsMsgXFVirtualFolderDBView::nsMsgXFVirtualFolderDBView() {
+   mSuppressMsgDisplay = false;
+   m_doingSearch = false;
+   m_doingQuickSearch = false;
+   m_totalMessagesInView = 0;
+-  m_numFoldersSearched = 0;
+   m_curFolderHasCachedHits = false;
+ }
+ 
+ nsMsgXFVirtualFolderDBView::~nsMsgXFVirtualFolderDBView() {}
+ 
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::Open(nsIMsgFolder* folder,
+                                  nsMsgViewSortTypeValue sortType,
+                                  nsMsgViewSortOrderValue sortOrder,
+                                  nsMsgViewFlagsTypeValue viewFlags,
+                                  int32_t* pCount) {
+   m_viewFolder = folder;
+-  m_numFoldersSearched = 0;
+-  if (folder) {
+-    nsCOMPtr<nsIMsgDatabase> db;
+-    nsCOMPtr<nsIDBFolderInfo> folderInfo;
+-    folder->GetDBFolderInfoAndDB(getter_AddRefs(folderInfo),
+-                                 getter_AddRefs(db));
+-    if (folderInfo) {
+-      nsCString searchUri;
+-      folderInfo->GetCharProperty("searchFolderUri", searchUri);
+-      if (!searchUri.IsEmpty()) {
+-        m_numFoldersSearched = 1;
+-        for (const char* c = searchUri.BeginReading(); *c; c++) {
+-          if (*c == '|') m_numFoldersSearched++;
+-        }
+-      }
+-    }
+-  }
+   return nsMsgSearchDBView::Open(folder, sortType, sortOrder, viewFlags,
+                                  pCount);
+ }
+ 
+ void nsMsgXFVirtualFolderDBView::RemovePendingDBListeners() {
+   nsresult rv;
+   nsCOMPtr<nsIMsgDBService> msgDBService =
+       do_GetService("@mozilla.org/msgDatabase/msgDBService;1", &rv);
+@@ -194,34 +176,33 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+     NoteChange(index, 1, nsMsgViewNotificationCode::changed);
+ 
+   return NS_OK;
+ }
+ 
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForFolder(
+     nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits) {
+   nsCOMPtr<nsIMsgDatabase> db;
+-  nsresult rv = folder->GetMsgDatabase(getter_AddRefs(db));
++  nsresult rv = folder->GetMsgDatabaseLRU(getter_AddRefs(db));
+   if (NS_SUCCEEDED(rv) && db) {
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     nsTArray<nsMsgKey> badHits;
+     rv = db->RefreshCache(searchUri, newHits, badHits);
+     if (NS_SUCCEEDED(rv)) {
+       nsCOMPtr<nsIMsgDBHdr> badHdr;
+       for (nsMsgKey badKey : badHits) {
+         // ### of course, this isn't quite right, since we should be
+         // using FindHdr, and we shouldn't be expanding the threads.
+-        db->GetMsgHdrForKey(badKey, getter_AddRefs(badHdr));
++        folder->GetMessageHeader(badKey, getter_AddRefs(badHdr));
+         // Let nsMsgSearchDBView decide what to do about this header
+         // getting removed.
+         if (badHdr) OnHdrDeleted(badHdr, nsMsgKey_None, 0, this);
+       }
+     }
+-    if (m_numFoldersSearched > 200) folder->CloseDBIfFolderNotOpen(false);
+   }
+ }
+ 
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForPrevSearchedFolders(
+     nsIMsgFolder* curSearchFolder) {
+   // Handle the most recent folder with hits, if any.
+   if (m_curFolderGettingHits) {
+     uint32_t count = m_hdrHits.Count();
+@@ -266,17 +247,17 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+     m_curFolderGettingHits = aFolder;
+     m_hdrHits.Clear();
+     m_curFolderStartKeyIndex = m_keys.Length();
+   }
+ 
+   bool hdrInCache = false;
+   if (!m_doingQuickSearch) {
+     nsCOMPtr<nsIMsgDatabase> dbToUse;
+-    nsresult rv = aFolder->GetMsgDatabase(getter_AddRefs(dbToUse));
++    nsresult rv = aFolder->GetMsgDatabaseLRU(getter_AddRefs(dbToUse));
+     if (NS_SUCCEEDED(rv)) {
+       nsCString searchUri;
+       m_viewFolder->GetURI(searchUri);
+       dbToUse->HdrIsInCache(searchUri, aMsgHdr, &hdrInCache);
+     }
+   }
+ 
+   if (!m_doingSearch || !m_curFolderHasCachedHits || !hdrInCache) {
+@@ -285,17 +266,16 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+     else if (m_sortValid)
+       InsertHdrFromFolder(aMsgHdr, aFolder);
+     else
+       AddHdrFromFolder(aMsgHdr, aFolder);
+   }
+ 
+   m_hdrHits.AppendObject(aMsgHdr);
+   m_totalMessagesInView++;
+-  if (m_numFoldersSearched > 200) aFolder->CloseDBIfFolderNotOpen(false);
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::OnSearchDone(nsresult status) {
+   // This batch began in OnNewSearch.
+   if (mJSTree) mJSTree->EndUpdateBatch();
+@@ -426,17 +406,17 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+   for (int32_t i = 0; i < scopeCount; i++) {
+     nsMsgSearchScopeValue scopeId;
+     nsCOMPtr<nsIMsgFolder> searchFolder;
+     searchSession->GetNthSearchScope(i, &scopeId, getter_AddRefs(searchFolder));
+     if (searchFolder) {
+       nsCOMPtr<nsIMsgDatabase> searchDB;
+       nsCString searchUri;
+       m_viewFolder->GetURI(searchUri);
+-      nsresult rv = searchFolder->GetMsgDatabase(getter_AddRefs(searchDB));
++      nsresult rv = searchFolder->GetMsgDatabaseLRU(getter_AddRefs(searchDB));
+       if (NS_SUCCEEDED(rv) && searchDB) {
+         if (msgDBService)
+           msgDBService->RegisterPendingListener(searchFolder, this);
+ 
+         m_foldersSearchingOver.AppendObject(searchFolder);
+         // Ignore cached hits in quick search case.
+         if (m_doingQuickSearch) continue;
+ 
+@@ -462,17 +442,16 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+               } else {
+                 break;
+               }
+ 
+               cachedHits->HasMoreElements(&hasMore);
+             }
+           }
+         }
+-        if (m_numFoldersSearched > 200) searchFolder->CloseDBIfFolderNotOpen(false);
+       }
+     }
+   }
+ 
+   if (!m_doingQuickSearch) {
+     if (mTree) mTree->EndUpdateBatch();
+     if (mJSTree) mJSTree->EndUpdateBatch();
+   }
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+@@ -56,16 +56,15 @@ class nsMsgXFVirtualFolderDBView : publi
+  protected:
+   virtual nsresult GetMessageEnumerator(nsIMsgEnumerator** enumerator) override;
+ 
+   nsCOMArray<nsIMsgFolder> m_foldersSearchingOver;
+   nsCOMArray<nsIMsgDBHdr> m_hdrHits;
+   nsCOMPtr<nsIMsgFolder> m_curFolderGettingHits;
+   // keeps track of the index of the first hit from the cur folder
+   uint32_t m_curFolderStartKeyIndex;
+-  uint32_t m_numFoldersSearched;
+   bool m_curFolderHasCachedHits;
+   bool m_doingSearch;
+   // Are we doing a quick search on top of the virtual folder search?
+   bool m_doingQuickSearch;
+ };
+ 
+ #endif
+diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
+--- a/mailnews/search/src/nsMsgSearchSession.cpp
++++ b/mailnews/search/src/nsMsgSearchSession.cpp
+@@ -494,17 +494,17 @@ nsresult nsMsgSearchSession::TimeSlice(b
+ void nsMsgSearchSession::ReleaseFolderDBRef() {
+   nsMsgSearchScopeTerm* scope = GetRunningScope();
+   if (!scope) return;
+ 
+   nsCOMPtr<nsIMsgFolder> folder;
+   scope->GetFolder(getter_AddRefs(folder));
+   // The call parameter needs to be `true` when dealing with more than one
+   // folder. Tested via trial and error.
+-  folder->CloseDBIfFolderNotOpen(m_scopeList.Length() > 200);
++  folder->CloseDBIfFolderNotOpen(m_scopeList.Length() > 1);
+ }
+ nsresult nsMsgSearchSession::TimeSliceSerial(bool* aDone) {
+   // This version of TimeSlice runs each scope term one at a time, and waits
+   // until one scope term is finished before starting another one. When we're
+   // searching the local disk, this is the fastest way to do it.
+ 
+   NS_ENSURE_ARG_POINTER(aDone);
+ 
