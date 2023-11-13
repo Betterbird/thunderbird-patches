@@ -1,0 +1,872 @@
+# HG changeset patch
+# User Itagaki Fumihiko <itagagaki@gmail.com>
+# Date 1699890587 -3600
+# Node ID 1e6c184038ca14cdf96c63dab46d76d5c9a09921
+# Parent  7c60058f3b2c02c1f814a3cae3f8b5383f094ff2
+Bug 1846550 - add ability to manually sort (order) folders in folder pane r=darktrojan,freaktechnik
+
+Differential Revision: https://phabricator.services.mozilla.com/D191372
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -570,16 +570,17 @@ var folderPaneContextMenu = {
+    * @param {nsIMsgFolder} targetFolder
+    */
+   transferFolder(isMove, sourceFolder, targetFolder) {
+     if (!isMove && sourceFolder.server == targetFolder.server) {
+       // Don't allow folder copy within the same server; only move allowed.
+       // Can't copy folder intra-server, change to move.
+       isMove = true;
+     }
++    folderPane.setSortOrderOnNewFolder(sourceFolder, targetFolder);
+     // Do the transfer. A slight delay in calling copyFolder() helps the
+     // folder-menupopup chain of items get properly closed so the next folder
+     // context popup can occur.
+     setTimeout(() =>
+       MailServices.copy.copyFolder(
+         sourceFolder,
+         targetFolder,
+         isMove,
+@@ -2852,48 +2853,97 @@ var folderPane = {
+         );
+         // Don't allow drop onto original folder.
+         if (msgHdr.folder == targetFolder) {
+           return;
+         }
+       }
+       event.dataTransfer.dropEffect = copyKey ? "copy" : "move";
+     } else if (types.includes("text/x-moz-folder")) {
++      const sourceFolder = event.dataTransfer
++        .mozGetDataAt("text/x-moz-folder", 0)
++        .QueryInterface(Ci.nsIMsgFolder);
++
++      // Don't allow dragging of virtual folders across accounts.
++      if (
++        sourceFolder.getFlag(Ci.nsMsgFolderFlags.Virtual) &&
++        sourceFolder.server != targetFolder.server
++      ) {
++        return;
++      }
++      // Don't allow parent to be dropped on its ancestors.
++      if (sourceFolder.isAncestorOf(targetFolder)) {
++        return;
++      }
++
++      // For the ability to move anywhere (i.e. reorder)
++      const dragIndicator = document.getElementById("folder-drag-indicator");
++      if (dragIndicator) {
++        if (
++          !copyKey &&
++          sourceFolder.server == targetFolder.server &&
++          !targetFolder.isServer &&
++          // Except in "all" mode, it would be impossible to insert
++          // unambiguously.
++          row.modeName == "all"
++        ) {
++          const targetElement = row.querySelector(".container") ?? row;
++          const targetRect = targetElement.getBoundingClientRect();
++          const iconElement =
++            targetElement.querySelector(".icon") ?? targetElement;
++          const iconRect = iconElement.getBoundingClientRect();
++          const isRTL = document.dir == "rtl";
++          const left = isRTL ? targetRect.left : iconRect.left - 6;
++          const right = isRTL ? iconRect.right + 6 : targetRect.right;
++          dragIndicator.style.left = left + "px";
++          dragIndicator.style.width = right - left + "px";
++          const center =
++            targetRect.top +
++            targetElement.clientTop +
++            targetElement.clientHeight / 2;
++          const quarterOfHeight = targetElement.clientHeight / 4;
++          if (event.clientY < center - quarterOfHeight) {
++            // Insert before the target.
++            this._clearDropTarget();
++            dragIndicator.style.top = targetRect.top - 4 + "px";
++            dragIndicator.style.display = "flex";
++            event.dataTransfer.dropEffect = "move";
++            return;
++          } else if (
++            event.clientY > center + quarterOfHeight &&
++            (!row.classList.contains("children") ||
++              row.classList.contains("collapsed"))
++          ) {
++            // Insert after the target.
++            this._clearDropTarget();
++            dragIndicator.style.top = targetRect.bottom - 4 + "px";
++            dragIndicator.style.display = "flex";
++            event.dataTransfer.dropEffect = "move";
++            return;
++          }
++        }
++        dragIndicator.style.display = "none";
++      }
++
+       // If cannot create subfolders then don't allow drop here.
+       if (!targetFolder.canCreateSubfolders) {
+         return;
+       }
+-
+-      let sourceFolder = event.dataTransfer
+-        .mozGetDataAt("text/x-moz-folder", 0)
+-        .QueryInterface(Ci.nsIMsgFolder);
+-
+       // Don't allow to drop on itself.
+       if (targetFolder == sourceFolder) {
+         return;
+       }
+       // Don't copy within same server.
+       if (sourceFolder.server == targetFolder.server && copyKey) {
+         return;
+       }
+       // Don't allow immediate child to be dropped onto its parent.
+       if (targetFolder == sourceFolder.parent) {
+         return;
+       }
+-      // Don't allow dragging of virtual folders across accounts.
+-      if (
+-        sourceFolder.getFlag(Ci.nsMsgFolderFlags.Virtual) &&
+-        sourceFolder.server != targetFolder.server
+-      ) {
+-        return;
+-      }
+-      // Don't allow parent to be dropped on its ancestors.
+-      if (sourceFolder.isAncestorOf(targetFolder)) {
+-        return;
+-      }
+       // If there is a folder that can't be renamed, don't allow it to be
+       // dropped if it is not to "Local Folders" or is to the same account.
+       if (
+         !sourceFolder.canRename &&
+         (targetFolder.server.type != "none" ||
+           sourceFolder.server == targetFolder.server)
+       ) {
+         return;
+@@ -2969,16 +3019,20 @@ var folderPane = {
+       folderTree.expandRow(this._expandRow);
+       delete this._expandRow;
+       delete this._expandTimer;
+     }, 500);
+   },
+ 
+   _clearDropTarget() {
+     folderTree.querySelector(".drop-target")?.classList.remove("drop-target");
++    const dragIndicator = document.getElementById("folder-drag-indicator");
++    if (dragIndicator) {
++      dragIndicator.style.display = "none";
++    }
+   },
+ 
+   _onDrop(event) {
+     this._timedExpand();
+     this._clearDropTarget();
+     if (event.dataTransfer.dropEffect == "none") {
+       // Somehow this is possible. It should not be possible.
+       return;
+@@ -3029,28 +3083,86 @@ var folderPane = {
+         top.msgWindow,
+         true
+       );
+     } else if (types.includes("text/x-moz-folder")) {
+       let sourceFolder = event.dataTransfer
+         .mozGetDataAt("text/x-moz-folder", 0)
+         .QueryInterface(Ci.nsIMsgFolder);
+       let isMove = event.dataTransfer.dropEffect == "move";
+-      isMove = folderPaneContextMenu.transferFolder(
+-        isMove,
+-        sourceFolder,
+-        targetFolder
+-      );
+-      // Save in prefs the target folder URI and if this was a move or copy.
+-      // This is to fill in the next folder or message context menu item
+-      // "Move|Copy to <TargetFolderName> Again".
+-      Services.prefs.setStringPref(
+-        "mail.last_msg_movecopy_target_uri",
+-        targetFolder.URI
+-      );
++      let destinationFolder = targetFolder;
++      const parentFolder = targetFolder.parent;
++      // Insertion?
++      let reorder = 0;
++      const dragIndicator = document.getElementById("folder-drag-indicator");
++      if (
++        dragIndicator &&
++        isMove &&
++        parentFolder &&
++        sourceFolder.server == targetFolder.server &&
++        !targetFolder.isServer &&
++        row.modeName == "all" // Except in "all" mode, it would be impossible
++        // to insert unambiguously.
++      ) {
++        const targetElement = row.querySelector(".container") ?? row;
++        const targetRect = targetElement.getBoundingClientRect();
++        const center =
++          targetRect.top +
++          targetElement.clientTop +
++          targetElement.clientHeight / 2;
++        const quarterOfHeight = targetElement.clientHeight / 4;
++        if (event.clientY < center - quarterOfHeight) {
++          reorder = -1; // Insert before targetFolder.
++        } else if (
++          event.clientY > center + quarterOfHeight &&
++          (!row.classList.contains("children") ||
++            row.classList.contains("collapsed"))
++        ) {
++          reorder = 1; // Insert after targetFolder.
++        }
++        if (reorder != 0) {
++          destinationFolder =
++            parentFolder != sourceFolder.parent ? parentFolder : null;
++        }
++      }
++      if (destinationFolder) {
++        if (reorder == 0) {
++          this.setSortOrderOnNewFolder(sourceFolder, destinationFolder);
++        }
++        isMove = folderPaneContextMenu.transferFolder(
++          isMove,
++          sourceFolder,
++          destinationFolder
++        );
++        // Save in prefs the destination folder URI and if this was a move or
++        // copy.
++        // This is to fill in the next folder or message context menu item
++        // "Move|Copy to <DestinationFolderName> Again".
++        Services.prefs.setStringPref(
++          "mail.last_msg_movecopy_target_uri",
++          destinationFolder.URI
++        );
++      }
++      if (reorder) {
++        // Move the folder.
++        this.insertFolder(sourceFolder, targetFolder, reorder > 0);
++        // Update folder pane UI.
++        const movedFolderURI = sourceFolder.URI;
++        const modeNames = this.activeModes;
++        for (const name of modeNames) {
++          const rowToMove = this.getRowForFolder(sourceFolder, name);
++          const id = FolderTreeRow.makeRowID(name, movedFolderURI);
++          const listRow = this._modes[name].containerList.querySelector(
++            `li[is="folder-tree-row"]:has(>ul>li#${CSS.escape(id)})`
++          );
++          if (listRow) {
++            listRow.insertChildInOrder(rowToMove);
++          }
++        }
++      }
+       Services.prefs.setBoolPref("mail.last_msg_movecopy_was_move", isMove);
+     } else if (types.includes("application/x-moz-file")) {
+       for (let i = 0; i < event.dataTransfer.mozItemCount; i++) {
+         let extFile = event.dataTransfer
+           .mozGetDataAt("application/x-moz-file", i)
+           .QueryInterface(Ci.nsIFile);
+         if (extFile.isFile() && /\.eml$/i.test(extFile.leafName)) {
+           MailServices.copy.copyFileMessage(
+@@ -3123,18 +3235,18 @@ var folderPane = {
+       // createSubfolder can throw an exception, causing the newFolder dialog
+       // to not close and wait for another input.
+       // TODO: Rewrite this logic and also move the opening of alert dialogs from
+       // nsMsgLocalMailFolder::CreateSubfolderInternal to here (bug 831190#c16).
+       if (!aName) {
+         return;
+       }
+       aFolder.createSubfolder(aName, top.msgWindow);
+-      // Don't call the rebuildAfterChange() here as we'll need to wait for the
+-      // new folder to be properly created before rebuilding the tree.
++      // onFolderAdded() is called when the new folder has been created
++      // properly. Until then, we cannot add it to the tree.
+     }
+ 
+     window.openDialog(
+       "chrome://messenger/content/newFolderDialog.xhtml",
+       "",
+       "chrome,modal,resizable=no,centerscreen",
+       { folder, dualUseFolders, okCallback: newFolderCallback }
+     );
+@@ -3700,16 +3812,101 @@ var folderPane = {
+       menuitem.dataset.serverSecure = server.isSecure;
+       menuitem.label = server.prettyName;
+       menuitem.addEventListener("command", () =>
+         top.MsgGetMessagesForAccount(server.rootFolder)
+       );
+       menupopup.appendChild(menuitem);
+     }
+   },
++
++  /**
++   * Set folder sort order to rows for the folder.
++   *
++   * @param {nsIMsgFolder} folder
++   * @param {integer} order
++   */
++  setOrderToRowInAllModes(folder, order) {
++    const modeNames = this.activeModes;
++    for (const name of modeNames) {
++      const row = folderPane.getRowForFolder(folder, name);
++      if (row) {
++        row.folderSortOrder = order;
++      }
++    }
++  },
++
++  /**
++   * Set the sort order for the new folder to be added to the folder group.
++   *
++   * @param {nsIMsgFolder} folder
++   * @param {nsIMsgFolder} destination
++   */
++  setSortOrderOnNewFolder(folder, destination) {
++    const subFolders = destination?.subFolders ?? [];
++    let maxOrderValue = -1;
++    for (const sf of subFolders) {
++      const order = sf.userSortOrder;
++      if (order != Ci.nsIMsgFolder.NO_SORT_VALUE && order > maxOrderValue) {
++        maxOrderValue = order;
++      }
++    }
++    // If maxOrderValue is still negative, then none of the sibling folders
++    // have a sort order value (i.e. this group of folders has never been
++    // manually sorted). In this case, the natural order should still be used.
++    // Otherwise the new folder will be at the bottom of the group.
++    const newOrder =
++      maxOrderValue < 0 ? Ci.nsIMsgFolder.NO_SORT_VALUE : maxOrderValue + 1;
++    folder.userSortOrder = newOrder; // Update DB
++    this.setOrderToRowInAllModes(folder, newOrder); // Update row info.
++  },
++
++  /**
++   * Insert a folder before/after the target and reorder siblings.
++   * Note: Valid only in "all" mode.
++   *
++   * @param {nsIMsgFolder} folder
++   * @param {nsIMsgFolder} target
++   * @param {bool} insertAfter
++   */
++  insertFolder(folder, target, insertAfter) {
++    let subFolders;
++    try {
++      subFolders = target.parent.subFolders;
++    } catch (ex) {
++      console.error(
++        new Error(`Unable to access the subfolders of ${target.parent.URI}`, {
++          cause: ex,
++        })
++      );
++    }
++    const targetOrder = target.sortOrder;
++    const insertedFolderOrder = targetOrder + 1;
++    for (const sf of subFolders) {
++      if (sf == folder || (insertAfter && sf == target)) {
++        continue;
++      }
++      let order = sf.sortOrder;
++      if (
++        (!insertAfter && sf == target) ||
++        order > targetOrder ||
++        (order == targetOrder &&
++          FolderTreeRow.nameCollator.compare(sf.name, target.name) > 0)
++      ) {
++        // newOrder for sf must be greater than insertedFolderOrder.
++        // Since there is a possibility that order == targetOrder,
++        // increase by 2.
++        order += 2;
++        sf.sortOrder = order; // Update DB
++        this.setOrderToRowInAllModes(sf, order); // Update row info.
++      }
++    }
++    folder.sortOrder = insertedFolderOrder; // Update DB
++    this.setOrderToRowInAllModes(folder, insertedFolderOrder); // Update row info.
++  },
+ };
+ 
+ /**
+  * Represents a single row in the folder tree. The row can be for a server or
+  * a folder. Use `folderPane._createServerRow` or `folderPane._createFolderRow`
+  * to create rows.
+  */
+ class FolderTreeRow extends HTMLLIElement {
+@@ -6176,16 +6373,20 @@ function selectMessage(msgHdr) {
+     threadTree.scrollToIndex(index, true);
+   }
+   threadTree.selectedIndex = index;
+ }
+ 
+ var folderListener = {
+   QueryInterface: ChromeUtils.generateQI(["nsIFolderListener"]),
+   onFolderAdded(parentFolder, childFolder) {
++    if (childFolder.userSortOrder == Ci.nsIMsgFolder.NO_SORT_VALUE) {
++      // This folder is new.
++      folderPane.setSortOrderOnNewFolder(childFolder, parentFolder);
++    }
+     folderPane.addFolder(parentFolder, childFolder);
+     folderPane.updateFolderRowUIElements();
+   },
+   onMessageAdded(parentFolder, msg) {},
+   onFolderRemoved(parentFolder, childFolder) {
+     folderPane.removeFolder(parentFolder, childFolder);
+     if (childFolder == gFolder) {
+       gFolder = null;
+diff --git a/mail/base/content/about3Pane.xhtml b/mail/base/content/about3Pane.xhtml
+--- a/mail/base/content/about3Pane.xhtml
++++ b/mail/base/content/about3Pane.xhtml
+@@ -97,16 +97,21 @@
+         <div class="icon"></div>
+         <span class="name" tabindex="-1"></span>
+         <span class="folder-count-badge unread-count"></span>
+         <span class="folder-count-badge total-count" hidden="hidden"></span>
+         <span class="folder-size" hidden="hidden"></span>
+       </div>
+       <ul></ul>
+     </template>
++    <div id="folder-drag-indicator">
++      <div class="folder-drag-indicator-left"></div>
++      <div class="folder-drag-indicator-body"></div>
++      <div class="folder-drag-indicator-right"></div>
++    </div>
+   </div>
+   <hr is="pane-splitter" id="folderPaneSplitter"
+       resize-direction="horizontal"
+       resize-id="folderPane"
+       collapse-width="100" />
+   <div id="threadPane">
+     <div id="threadPaneHeaderBar" class="list-header-bar">
+       <div class="list-header-bar-container-start"
+diff --git a/mail/themes/shared/jar.inc.mn b/mail/themes/shared/jar.inc.mn
+--- a/mail/themes/shared/jar.inc.mn
++++ b/mail/themes/shared/jar.inc.mn
+@@ -183,16 +183,19 @@
+   skin/classic/messenger/icons/center-align.svg               (../shared/mail/icons/center-align.svg)
+   skin/classic/messenger/icons/cut.svg                        (../shared/mail/icons/cut.svg)
+   skin/classic/messenger/icons/correspondents.svg             (../shared/mail/icons/correspondents.svg)
+   skin/classic/messenger/icons/correspondents-rtl.svg         (../shared/mail/icons/correspondents-rtl.svg)
+   skin/classic/messenger/icons/compact.svg                    (../shared/mail/icons/compact.svg)
+   skin/classic/messenger/icons/connection-insecure.svg        (../shared/mail/icons/connection-insecure.svg)
+   skin/classic/messenger/icons/connection-mixed.svg           (../shared/mail/icons/connection-mixed.svg)
+   skin/classic/messenger/icons/connection-secure.svg          (../shared/mail/icons/connection-secure.svg)
++  skin/classic/messenger/icons/folder-drag-indicator-body.svg (../shared/mail/icons/folder-drag-indicator-body.svg)
++  skin/classic/messenger/icons/folder-drag-indicator-left.svg (../shared/mail/icons/folder-drag-indicator-left.svg)
++  skin/classic/messenger/icons/folder-drag-indicator-right.svg (../shared/mail/icons/folder-drag-indicator-right.svg)
+   skin/classic/messenger/icons/folder-new-indicator.svg       (../shared/mail/icons/folder-new-indicator.svg)
+   skin/classic/messenger/icons/message-encrypted-ok.svg       (../shared/mail/icons/message-encrypted-ok.svg)
+   skin/classic/messenger/icons/message-encrypted-notok.svg    (../shared/mail/icons/message-encrypted-notok.svg)
+   skin/classic/messenger/icons/contact.svg                    (../shared/mail/icons/contact.svg)
+   skin/classic/messenger/icons/conversation.svg               (../shared/mail/icons/conversation.svg)
+   skin/classic/messenger/icons/decrease.svg                   (../shared/mail/icons/decrease.svg)
+   skin/classic/messenger/icons/delete.svg                     (../shared/mail/icons/delete.svg)
+   skin/classic/messenger/icons/delete-col.svg                 (../shared/mail/icons/delete-col.svg)
+diff --git a/mail/themes/shared/mail/about3Pane.css b/mail/themes/shared/mail/about3Pane.css
+--- a/mail/themes/shared/mail/about3Pane.css
++++ b/mail/themes/shared/mail/about3Pane.css
+@@ -11,16 +11,20 @@
+   --folder-mode-name-padding: 6px;
+   --folder-tree-header-gap: 9px;
+   --folder-tree-header-padding: 9px;
+   --folder-pane-icon-size: 16px;
+   --folder-pane-icon-new: var(--icon-add);
+   --folder-pane-icon-more: var(--icon-more);
+   --folder-pane-icon-download: var(--icon-cloud-download);
+   --folder-pane-icon-kebab: var(--icon-kebab);
++  --folder-drag-indicator-body: url(chrome://messenger/skin/icons/folder-drag-indicator-body.svg);
++  --folder-drag-indicator-left: url(chrome://messenger/skin/icons/folder-drag-indicator-left.svg);
++  --folder-drag-indicator-right: url(chrome://messenger/skin/icons/folder-drag-indicator-right.svg);
++  --folder-drag-indicator-color: var(--color-blue-50);
+ }
+ 
+ @media not (prefers-contrast) {
+   :root {
+     --foldertree-background: var(--color-gray-05);
+     --folderpane-unread-count-background: var(--color-gray-50);
+     --folderpane-unread-count-text: var(--color-white);
+     --folderpane-total-count-background: var(--color-gray-20);
+@@ -340,16 +344,60 @@ li:not(.selected) > .container:hover {
+ 
+ li.context-menu-target:not(.selected) > .container,
+ li.context-menu-target:not(.selected) > .container:hover {
+   background-color: color-mix(in srgb, var(--treeitem-background-active) 10%, transparent);
+   outline: 1px var(--listbox-border-type) var(--listbox-focused-selected-bg);
+   outline-offset: -1px;
+ }
+ 
++#folder-drag-indicator {
++  position: absolute;
++  height: 8px;
++  z-index: 1;
++  display: none;
++  justify-content: stretch;
++  pointer-events: none;
++
++  & > .folder-drag-indicator-body {
++    display: inline flex;
++    flex-grow: 1;
++    height: 8px;
++    mask-image: var(--folder-drag-indicator-body);
++    mask-repeat: repeat-x;
++    background-color: var(--folder-drag-indicator-color);
++  }
++
++  & > .folder-drag-indicator-left {
++    display: inline flex;
++    width: 8px;
++    height: 8px;
++    mask-image: var(--folder-drag-indicator-left);
++    mask-repeat: no-repeat;
++    background-color: var(--folder-drag-indicator-color);
++
++    &:dir(rtl) {
++      mask-image: var(--folder-drag-indicator-right);
++    }
++  }
++
++  & > .folder-drag-indicator-right {
++    display: inline flex;
++    width: 8px;
++    height: 8px;
++    mask-image: var(--folder-drag-indicator-right);
++    mask-repeat: no-repeat;
++    background-color: var(--folder-drag-indicator-color);
++
++    &:dir(rtl) {
++      mask-image: var(--folder-drag-indicator-left);
++    }
++  }
++}
++
+ #folderTree:focus-within li.selected > .container,
+ #folderTree li.drop-target > .container {
+   background-color: var(--treeitem-background-active);
+   color: var(--treeitem-text-active);
+ }
+ 
+ #folderTree li .twisty {
+   display: inline-flex;
+diff --git a/mail/themes/shared/mail/icons/folder-drag-indicator-body.svg b/mail/themes/shared/mail/icons/folder-drag-indicator-body.svg
+new file mode 100644
+--- /dev/null
++++ b/mail/themes/shared/mail/icons/folder-drag-indicator-body.svg
+@@ -0,0 +1,6 @@
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<svg xmlns="http://www.w3.org/2000/svg" height="8" width="100" stroke-width="0" fill="context-color">
++  <rect y="3" x="0" height="2" width="100"/>
++</svg>
+diff --git a/mail/themes/shared/mail/icons/folder-drag-indicator-left.svg b/mail/themes/shared/mail/icons/folder-drag-indicator-left.svg
+new file mode 100644
+--- /dev/null
++++ b/mail/themes/shared/mail/icons/folder-drag-indicator-left.svg
+@@ -0,0 +1,6 @@
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<svg xmlns="http://www.w3.org/2000/svg" height="8" width="8" stroke-width="0" fill="context-color">
++  <polygon points="0,0 8,3 8,5 0,8"/>
++</svg>
+diff --git a/mail/themes/shared/mail/icons/folder-drag-indicator-right.svg b/mail/themes/shared/mail/icons/folder-drag-indicator-right.svg
+new file mode 100644
+--- /dev/null
++++ b/mail/themes/shared/mail/icons/folder-drag-indicator-right.svg
+@@ -0,0 +1,6 @@
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<svg xmlns="http://www.w3.org/2000/svg" height="8" width="8" stroke-width="0" fill="context-color">
++  <polygon points="8,0 0,3 0,5 8,8"/>
++</svg>
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -634,21 +634,31 @@ interface nsIMsgFolder : nsISupports {
+   /**
+    * Calculate ordering of this folder against another.
+    */
+   long compareSortKeys(in nsIMsgFolder msgFolder);
+ 
+   attribute nsIMsgRetentionSettings retentionSettings;
+   attribute nsIMsgDownloadSettings downloadSettings;
+   boolean callFilterPlugins(in nsIMsgWindow aMsgWindow);
++
+   /**
+-   * used for order in the folder pane, folder pickers, etc.
++   * The order of the folder (relative to its siblings) in the folder pane,
++   * folder pickers, etc.
+    */
+   attribute long sortOrder;
+ 
++  const unsigned long NO_SORT_VALUE = 0xffffffff;
++  /**
++   * The order of the folder as assigned by the user. The default value is
++   * NO_SORT_VALUE if no value has been assigned, and the folder's sortOrder
++   * property will used for ordering.
++   */
++  attribute unsigned long userSortOrder;
++
+   attribute nsIDBFolderInfo dBTransferInfo;
+ 
+   /**
+    * Set a string property on the folder.
+    */
+   void setStringProperty(in string propertyName, in AUTF8String propertyValue);
+ 
+   /**
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -225,16 +225,17 @@ nsMsgDBFolder::nsMsgDBFolder(void)
+     : mAddListener(true),
+       mNewMessages(false),
+       mGettingNewMessages(false),
+       mLastMessageLoaded(nsMsgKey_None),
+       m_numOfflineMsgLines(0),
+       m_bytesAddedToLocalMsg(0),
+       m_tempMessageStreamBytesWritten(0),
+       mFlags(0),
++      mSortOrder(nsIMsgFolder::NO_SORT_VALUE),
+       mNumUnreadMessages(-1),
+       mNumTotalMessages(-1),
+       mNotifyCountChanges(true),
+       mExpungedBytes(0),
+       mInitializedFromCache(false),
+       mSemaphoreHolder(nullptr),
+       mNumPendingUnreadMessages(0),
+       mNumPendingTotalMessages(0),
+@@ -664,16 +665,18 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
+         folderInfo->GetNumMessages(&mNumTotalMessages);
+         folderInfo->GetNumUnreadMessages(&mNumUnreadMessages);
+         folderInfo->GetExpungedBytes(&mExpungedBytes);
+ 
+         nsCString utf8Name;
+         folderInfo->GetFolderName(utf8Name);
+         if (!utf8Name.IsEmpty()) CopyUTF8toUTF16(utf8Name, mName);
+ 
++        folderInfo->GetFolderSortOrder(&mSortOrder);
++
+         // These should be put in IMAP folder only.
+         // folderInfo->GetImapTotalPendingMessages(&mNumPendingTotalMessages);
+         // folderInfo->GetImapUnreadPendingMessages(&mNumPendingUnreadMessages);
+ 
+         if (db) {
+           bool hasnew;
+           nsresult rv;
+           rv = db->HasNew(&hasnew);
+@@ -5044,85 +5047,115 @@ NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFo
+       !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox |
+                   nsMsgFolderFlags::Queue))) {
+     if (aForceClosed && mDatabase) mDatabase->ForceClosed();
+     SetMsgDatabase(nullptr);
+   }
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgDBFolder::SetUserSortOrder(uint32_t order) {
++  if (order != mSortOrder) {
++    nsCOMPtr<nsIMsgDatabase> db;
++    nsCOMPtr<nsIDBFolderInfo> folderInfo;
++    nsresult rv =
++        GetDBFolderInfoAndDB(getter_AddRefs(folderInfo), getter_AddRefs(db));
++    if (NS_SUCCEEDED(rv) && folderInfo) {
++      folderInfo->SetFolderSortOrder(mSortOrder = order);
++      if (db) db->Commit(nsMsgDBCommitType::kLargeCommit);
++    }
++  }
++  return NS_OK;
++}
++
++NS_IMETHODIMP nsMsgDBFolder::GetUserSortOrder(uint32_t* order) {
++  NS_ENSURE_ARG_POINTER(order);
++  ReadDBFolderInfo(true);
++  *order = mSortOrder;
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgDBFolder::SetSortOrder(int32_t order) {
+-  NS_ASSERTION(false, "not implemented");
+-  return NS_ERROR_NOT_IMPLEMENTED;
++  return SetUserSortOrder(static_cast<uint32_t>(order));
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetSortOrder(int32_t* order) {
+   NS_ENSURE_ARG_POINTER(order);
+-
+-  uint32_t flags;
+-  nsresult rv = GetFlags(&flags);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  if (flags & nsMsgFolderFlags::Inbox)
+-    *order = 0;
+-  else if (flags & nsMsgFolderFlags::Drafts)
+-    *order = 1;
+-  else if (flags & nsMsgFolderFlags::Templates)
+-    *order = 2;
+-  else if (flags & nsMsgFolderFlags::SentMail)
+-    *order = 3;
+-  else if (flags & nsMsgFolderFlags::Archive)
+-    *order = 4;
+-  else if (flags & nsMsgFolderFlags::Junk)
+-    *order = 5;
+-  else if (flags & nsMsgFolderFlags::Trash)
+-    *order = 6;
+-  else if (flags & nsMsgFolderFlags::Virtual)
+-    *order = 7;
+-  else if (flags & nsMsgFolderFlags::Queue)
+-    *order = 8;
+-  else
+-    *order = 9;
+-
++  uint32_t userSortOrder;
++  GetUserSortOrder(&userSortOrder);
++  /*
++    NO_SORT_VALUE is defined in interface nsIMsgFolder as unsigned long.
++    But XPIDL-generated enum is interpreted as signed.
++    So we have to cast explicitly in the following comparison.
++    This problem is filed on:
++    - https://bugzilla.mozilla.org/show_bug.cgi?id=239460
++    - https://bugzilla.mozilla.org/show_bug.cgi?id=1648346
++  */
++  if (userSortOrder == static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE)) {
++    // Returns the past static order if this folder does not yet have
++    // the FolderSortOrder property in the DB.
++    if (mFlags & nsMsgFolderFlags::Inbox)
++      *order = 0;
++    else if (mFlags & nsMsgFolderFlags::Drafts)
++      *order = 1;
++    else if (mFlags & nsMsgFolderFlags::Templates)
++      *order = 2;
++    else if (mFlags & nsMsgFolderFlags::SentMail)
++      *order = 3;
++    else if (mFlags & nsMsgFolderFlags::Archive)
++      *order = 4;
++    else if (mFlags & nsMsgFolderFlags::Junk)
++      *order = 5;
++    else if (mFlags & nsMsgFolderFlags::Trash)
++      *order = 6;
++    else if (mFlags & nsMsgFolderFlags::Virtual)
++      *order = 7;
++    else if (mFlags & nsMsgFolderFlags::Queue)
++      *order = 8;
++    else
++      *order = 9;
++  } else {
++    *order = static_cast<int32_t>(userSortOrder);
++  }
+   return NS_OK;
+ }
+ 
+ // static Helper function for CompareSortKeys().
+ // Builds a collation key for a given folder based on "{sortOrder}{name}"
+ nsresult nsMsgDBFolder::BuildFolderSortKey(nsIMsgFolder* aFolder,
+                                            nsTArray<uint8_t>& aKey) {
+   aKey.Clear();
+   int32_t order;
+   nsresult rv = aFolder->GetSortOrder(&order);
+   NS_ENSURE_SUCCESS(rv, rv);
+   nsAutoString orderString;
+-  orderString.AppendInt(order);
++  orderString.AppendPrintf("%.10d", order);
+   nsString folderName;
+   rv = aFolder->GetName(folderName);
+   NS_ENSURE_SUCCESS(rv, rv);
+   orderString.Append(folderName);
+   NS_ENSURE_TRUE(gCollationKeyGenerator, NS_ERROR_NULL_POINTER);
+ 
+   nsTArrayU8Buffer buffer(aKey);
+ 
+   auto result = gCollationKeyGenerator->GetSortKey(orderString, buffer);
+   NS_ENSURE_TRUE(result.isOk(), NS_ERROR_FAILURE);
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::CompareSortKeys(nsIMsgFolder* aFolder,
+-                                             int32_t* sortOrder) {
++                                             int32_t* compareResult) {
+   nsTArray<uint8_t> sortKey1;
+   nsTArray<uint8_t> sortKey2;
+   nsresult rv = BuildFolderSortKey(this, sortKey1);
+   NS_ENSURE_SUCCESS(rv, rv);
+   rv = BuildFolderSortKey(aFolder, sortKey2);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  *sortOrder = gCollationKeyGenerator->CompareSortKeys(sortKey1, sortKey2);
++  *compareResult = gCollationKeyGenerator->CompareSortKeys(sortKey1, sortKey2);
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::FetchMsgPreviewText(
+     nsTArray<nsMsgKey> const& aKeysToFetch, nsIUrlListener* aUrlListener,
+     bool* aAsyncResults) {
+   NS_ENSURE_ARG_POINTER(aAsyncResults);
+   return NS_ERROR_NOT_IMPLEMENTED;
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -244,16 +244,17 @@ class nsMsgDBFolder : public nsSupportsW
+    * End of offline message tracking vars
+    */
+ 
+   nsCOMPtr<nsIMsgRetentionSettings> m_retentionSettings;
+   nsCOMPtr<nsIMsgDownloadSettings> m_downloadSettings;
+   static nsrefcnt mInstanceCount;
+ 
+   uint32_t mFlags;
++  uint32_t mSortOrder;        // Sort order among sibling folders.
+   nsWeakPtr mParent;          // This won't be refcounted for ownership reasons.
+   int32_t mNumUnreadMessages; /* count of unread messages (-1 means unknown; -2
+                                  means unknown but we already tried to find
+                                  out.) */
+   int32_t mNumTotalMessages;  /* count of existing messages. */
+   bool mNotifyCountChanges;
+   int64_t mExpungedBytes;
+   nsCOMArray<nsIMsgFolder> mSubFolders;
+diff --git a/mailnews/db/msgdb/public/nsIDBFolderInfo.idl b/mailnews/db/msgdb/public/nsIDBFolderInfo.idl
+--- a/mailnews/db/msgdb/public/nsIDBFolderInfo.idl
++++ b/mailnews/db/msgdb/public/nsIDBFolderInfo.idl
+@@ -37,16 +37,20 @@ interface  nsIDBFolderInfo : nsISupports
+ 
+   attribute nsMsgKey highWater;
+   attribute nsMsgKey expiredMark;
+   attribute long long folderSize;
+   attribute unsigned long folderDate;
+   void changeNumUnreadMessages(in long aDelta);
+   void changeNumMessages(in long aDelta);
+ 
++  // Key value that is used to determine the order among sibling folders.
++  // nsIMsgFolder::NO_SORT_VALUE means not specified.
++  attribute unsigned long folderSortOrder;
++
+   // numUnreadMessages and numMessages will never return negative numbers. 0 means 'no msgs'.
+   attribute long numUnreadMessages;
+   attribute long numMessages;
+ 
+   attribute long long expungedBytes;
+   attribute long imapUidValidity;
+   attribute unsigned long version;
+   attribute long imapTotalPendingMessages;
+diff --git a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp b/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
+--- a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
++++ b/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
+@@ -282,16 +282,26 @@ nsDBFolderInfo::GetFolderDate(uint32_t* 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsDBFolderInfo::SetFolderDate(uint32_t folderDate) {
+   m_folderDate = folderDate;
+   return SetUint32PropertyWithToken(m_folderDateColumnToken, folderDate);
+ }
+ 
++NS_IMETHODIMP nsDBFolderInfo::GetFolderSortOrder(uint32_t* folderSortOrder) {
++  NS_ENSURE_ARG_POINTER(folderSortOrder);
++  return GetUint32Property("folderSortOrder", nsIMsgFolder::NO_SORT_VALUE,
++                           folderSortOrder);
++}
++
++NS_IMETHODIMP nsDBFolderInfo::SetFolderSortOrder(uint32_t order) {
++  return SetUint32Property("folderSortOrder", order);
++}
++
+ NS_IMETHODIMP nsDBFolderInfo::GetHighWater(nsMsgKey* result) {
+   // Sanity check highwater - if it gets too big, other code
+   // can fail. Look through last 100 messages to recalculate
+   // the highwater mark.
+   *result = m_highWaterMessageKey;
+   if (m_highWaterMessageKey > 0xFFFFFF00 && m_mdb) {
+     nsCOMPtr<nsIMsgEnumerator> hdrs;
+     nsresult rv = m_mdb->ReverseEnumerateMessages(getter_AddRefs(hdrs));
