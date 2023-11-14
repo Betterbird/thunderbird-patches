@@ -1,0 +1,112 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1699961121 -3600
+# Parent  e74d08ba6b59907a7f450f8f27d2ab73f33ae6f3
+Bug 1864510 - rework nsMsgDBFolder::{Get|Set}UserSortOrder() to fix performance regression from bug 1846550.
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -666,18 +666,16 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
+         folderInfo->GetNumMessages(&mNumTotalMessages);
+         folderInfo->GetNumUnreadMessages(&mNumUnreadMessages);
+         folderInfo->GetExpungedBytes(&mExpungedBytes);
+ 
+         nsCString utf8Name;
+         folderInfo->GetFolderName(utf8Name);
+         if (!utf8Name.IsEmpty()) CopyUTF8toUTF16(utf8Name, mName);
+ 
+-        folderInfo->GetFolderSortOrder(&mSortOrder);
+-
+         // These should be put in IMAP folder only.
+         // folderInfo->GetImapTotalPendingMessages(&mNumPendingTotalMessages);
+         // folderInfo->GetImapUnreadPendingMessages(&mNumPendingUnreadMessages);
+ 
+         if (db) {
+           bool hasnew;
+           nsresult rv;
+           rv = db->HasNew(&hasnew);
+@@ -5000,33 +4998,52 @@ NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFo
+     if (aForceClosed && mDatabase) mDatabase->ForceClosed();
+     SetMsgDatabase(nullptr);
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetUserSortOrder(uint32_t order) {
+   if (order != mSortOrder) {
++    nsCOMPtr<nsIFile> dbPath;
++    GetFolderCacheKey(getter_AddRefs(dbPath));
++    if (dbPath) {
++      nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
++      GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement));
++      if (cacheElement) cacheElement->SetCachedUInt32("folderSortOrder", order);
++    }
+     nsCOMPtr<nsIMsgDatabase> db;
+     nsCOMPtr<nsIDBFolderInfo> folderInfo;
+     nsresult rv =
+         GetDBFolderInfoAndDB(getter_AddRefs(folderInfo), getter_AddRefs(db));
+-    if (NS_SUCCEEDED(rv) && folderInfo) {
++    if (NS_SUCCEEDED(rv)) {
+       folderInfo->SetFolderSortOrder(mSortOrder = order);
+-      if (db) db->Commit(nsMsgDBCommitType::kLargeCommit);
++      // Committing the db also commits the cache.
++      db->Commit(nsMsgDBCommitType::kLargeCommit);
+     }
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetUserSortOrder(uint32_t* order) {
+-  NS_ENSURE_ARG_POINTER(order);
+-  ReadDBFolderInfo(true);
+-  *order = mSortOrder;
+-  return NS_OK;
++  nsCOMPtr<nsIFile> dbPath;
++  nsresult rv = GetFolderCacheKey(getter_AddRefs(dbPath));
++  if (dbPath) {
++    nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
++    rv = GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement));
++    if (cacheElement)  // try to get from cache
++      rv = cacheElement->GetCachedUInt32("folderSortOrder", order);
++    if (NS_FAILED(rv)) {
++      // Don't open DB for missing order property, if it's not there,
++      // it was never set.
++      *order = static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE);
++      return NS_OK;
++    }
++  }
++  return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetSortOrder(int32_t order) {
+   return SetUserSortOrder(static_cast<uint32_t>(order));
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetSortOrder(int32_t* order) {
+   NS_ENSURE_ARG_POINTER(order);
+diff --git a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp b/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
+--- a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
++++ b/mailnews/db/msgdb/src/nsDBFolderInfo.cpp
+@@ -283,19 +283,18 @@ nsDBFolderInfo::GetFolderDate(uint32_t* 
+ }
+ 
+ NS_IMETHODIMP nsDBFolderInfo::SetFolderDate(uint32_t folderDate) {
+   m_folderDate = folderDate;
+   return SetUint32PropertyWithToken(m_folderDateColumnToken, folderDate);
+ }
+ 
+ NS_IMETHODIMP nsDBFolderInfo::GetFolderSortOrder(uint32_t* folderSortOrder) {
+-  NS_ENSURE_ARG_POINTER(folderSortOrder);
+-  return GetUint32Property("folderSortOrder", nsIMsgFolder::NO_SORT_VALUE,
+-                           folderSortOrder);
++  MOZ_ASSERT(false, "GetFolderSortOrder() must not be called directly");
++  return NS_ERROR_UNEXPECTED;
+ }
+ 
+ NS_IMETHODIMP nsDBFolderInfo::SetFolderSortOrder(uint32_t order) {
+   return SetUint32Property("folderSortOrder", order);
+ }
+ 
+ NS_IMETHODIMP nsDBFolderInfo::GetHighWater(nsMsgKey* result) {
+   // Sanity check highwater - if it gets too big, other code
