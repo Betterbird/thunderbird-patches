@@ -1,28 +1,58 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1699961121 -3600
-# Parent  e74d08ba6b59907a7f450f8f27d2ab73f33ae6f3
+# Date 1700045577 -3600
+# Parent  19961275df91ec95db5edfeca852ff413149a8e5
 Bug 1864510 - rework nsMsgDBFolder::{Get|Set}UserSortOrder() to fix performance regression from bug 1846550.
 
 diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
 --- a/mailnews/base/src/nsMsgDBFolder.cpp
 +++ b/mailnews/base/src/nsMsgDBFolder.cpp
-@@ -5000,33 +4998,52 @@ NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFo
+@@ -665,17 +665,23 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
+         folderInfo->GetNumMessages(&mNumTotalMessages);
+         folderInfo->GetNumUnreadMessages(&mNumUnreadMessages);
+         folderInfo->GetExpungedBytes(&mExpungedBytes);
+ 
+         nsCString utf8Name;
+         folderInfo->GetFolderName(utf8Name);
+         if (!utf8Name.IsEmpty()) CopyUTF8toUTF16(utf8Name, mName);
+ 
++        // We should only ever get the sort order from the folder cache.
++        // If we're opening the database anyway, possibly because
++        // folderCache.json was deleted, we read the sort order "just in case".
+         folderInfo->GetFolderSortOrder(&mSortOrder);
++        if (mSortOrder != static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE)) {
++          SetUserSortOrderInCache(mSortOrder);
++        }
+ 
+         // These should be put in IMAP folder only.
+         // folderInfo->GetImapTotalPendingMessages(&mNumPendingTotalMessages);
+         // folderInfo->GetImapUnreadPendingMessages(&mNumPendingUnreadMessages);
+ 
+         if (db) {
+           bool hasnew;
+           nsresult rv;
+@@ -5047,35 +5053,58 @@ NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFo
+       !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox |
+                   nsMsgFolderFlags::Queue))) {
      if (aForceClosed && mDatabase) mDatabase->ForceClosed();
      SetMsgDatabase(nullptr);
    }
    return NS_OK;
  }
  
++void nsMsgDBFolder::SetUserSortOrderInCache(uint32_t order) {
++  nsCOMPtr<nsIFile> dbPath;
++  GetFolderCacheKey(getter_AddRefs(dbPath));
++  if (dbPath) {
++    nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
++    GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement));
++    if (cacheElement) cacheElement->SetCachedUInt32("folderSortOrder", order);
++  }
++}
++
  NS_IMETHODIMP nsMsgDBFolder::SetUserSortOrder(uint32_t order) {
    if (order != mSortOrder) {
-+    nsCOMPtr<nsIFile> dbPath;
-+    GetFolderCacheKey(getter_AddRefs(dbPath));
-+    if (dbPath) {
-+      nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
-+      GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement));
-+      if (cacheElement) cacheElement->SetCachedUInt32("folderSortOrder", order);
-+    }
++    SetUserSortOrderInCache(order);
      nsCOMPtr<nsIMsgDatabase> db;
      nsCOMPtr<nsIDBFolderInfo> folderInfo;
      nsresult rv =
@@ -66,3 +96,24 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
  
  NS_IMETHODIMP nsMsgDBFolder::GetSortOrder(int32_t* order) {
    NS_ENSURE_ARG_POINTER(order);
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -120,16 +120,17 @@ class nsMsgDBFolder : public nsSupportsW
+   virtual ~nsMsgDBFolder();
+ 
+   virtual nsresult CreateBaseMessageURI(const nsACString& aURI);
+ 
+   void compressQuotesInMsgSnippet(const nsString& aMessageText,
+                                   nsAString& aCompressedQuotesStr);
+   void decodeMsgSnippet(const nsACString& aEncodingType, bool aIsComplete,
+                         nsCString& aMsgSnippet);
++  void SetUserSortOrderInCache(uint32_t order);
+ 
+   // helper routine to parse the URI and update member variables
+   nsresult parseURI(bool needServer = false);
+   nsresult GetBaseStringBundle(nsIStringBundle** aBundle);
+   nsresult GetStringFromBundle(const char* msgName, nsString& aResult);
+   nsresult ThrowConfirmationPrompt(nsIMsgWindow* msgWindow,
+                                    const nsAString& confirmString,
+                                    bool* confirmed);
