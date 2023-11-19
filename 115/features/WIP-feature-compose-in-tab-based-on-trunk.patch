@@ -1,0 +1,925 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1700418811 -3600
+# Parent  1d5950bb84d257a497e505226d36ac17b50cb068
+Feature: Compose in tab (see https://bugzilla.mozilla.org/show_bug.cgi?id=449299)
+
+diff --git a/mail/actors/ContextMenuParent.sys.mjs b/mail/actors/ContextMenuParent.sys.mjs
+--- a/mail/actors/ContextMenuParent.sys.mjs
++++ b/mail/actors/ContextMenuParent.sys.mjs
+@@ -4,17 +4,20 @@
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ export class ContextMenuParent extends JSWindowActorParent {
+   receiveMessage(message) {
+     if (message.name != "contextmenu") {
+       return;
+     }
+ 
+-    const browser = this.manager.rootFrameLoader.ownerElement;
++    let browser = this.browsingContext.embedderElement;
++    if (browser.id != "messageEditor") {
++      browser = this.manager.rootFrameLoader.ownerElement;
++    }
+     const win = browser.ownerGlobal.top;
+ 
+     // Send events from a message display browser to about:3pane or
+     // about:message if possible.
+     const tabmail = win.document.getElementById("tabmail");
+     if (tabmail) {
+       const chromeBrowser = tabmail.currentTabInfo.chromeBrowser;
+       if (
+diff --git a/mail/base/content/specialTabs.js b/mail/base/content/specialTabs.js
+--- a/mail/base/content/specialTabs.js
++++ b/mail/base/content/specialTabs.js
+@@ -949,16 +949,24 @@ var specialTabs = {
+     tryCloseTab(aTab) {
+       return aTab.browser.permitUnload();
+     },
+     persistTab(aTab) {
+       if (aTab.browser.currentURI.spec == "about:blank") {
+         return null;
+       }
+ 
++      if (
++        aTab.browser.currentURI.spec.startsWith(
++          "chrome://messenger/content/messengercompose/messengercompose.xhtml"
++        )
++      ) {
++        return null;
++      }
++
+       // Extension pages of temporarily installed extensions cannot be restored.
+       if (
+         aTab.browser.currentURI.scheme == "moz-extension" &&
+         WebExtensionPolicy.getByHostname(aTab.browser.currentURI.host)
+           ?.temporarilyInstalled
+       ) {
+         return null;
+       }
+diff --git a/mail/components/compose/content/ComposerCommands.js b/mail/components/compose/content/ComposerCommands.js
+--- a/mail/components/compose/content/ComposerCommands.js
++++ b/mail/components/compose/content/ComposerCommands.js
+@@ -1290,17 +1290,17 @@ var nsFindReplaceCommand = {
+   isCommandEnabled(aCommand, editorElement) {
+     return editorElement.getEditor(editorElement.contentWindow) != null;
+   },
+ 
+   getCommandStateParams(aCommand, aParams, editorElement) {},
+   doCommandParams(aCommand, aParams, editorElement) {},
+ 
+   doCommand(aCommand, editorElement) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdReplace.xhtml",
+       "_blank",
+       "chrome,modal,titlebar",
+       editorElement
+     );
+   },
+ };
+ 
+@@ -1361,17 +1361,17 @@ var nsSpellingCommand = {
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+     window.cancelSendMessage = false;
+     try {
+       var skipBlockQuotes =
+         window.document.documentElement.getAttribute("windowtype") ==
+         "msgcompose";
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdSpellCheck.xhtml",
+         "_blank",
+         "dialog,close,titlebar,modal,resizable",
+         false,
+         skipBlockQuotes,
+         true
+       );
+     } catch (ex) {}
+@@ -1382,17 +1382,17 @@ var nsImageCommand = {
+   isCommandEnabled(aCommand, dummy) {
+     return IsDocumentEditable() && IsEditingRenderedHTML();
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdImageProps.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal"
+     );
+   },
+ };
+ 
+ var nsHLineCommand = {
+@@ -1415,17 +1415,17 @@ var nsHLineCommand = {
+     try {
+       hLine = editor.getSelectedElement(tagName);
+     } catch (e) {
+       return;
+     }
+ 
+     if (hLine) {
+       // We only open the dialog for an existing HRule
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdHLineProps.xhtml",
+         "_blank",
+         "chrome,close,titlebar,modal"
+       );
+     } else {
+       try {
+         hLine = editor.createElementWithDefaults(tagName);
+ 
+@@ -1469,25 +1469,25 @@ var nsLinkCommand = {
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+     // If selected element is an image, launch that dialog instead
+     // since last tab panel handles link around an image
+     var element = GetObjectForProperties();
+     if (element && element.nodeName.toLowerCase() == "img") {
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdImageProps.xhtml",
+         "_blank",
+         "chrome,close,titlebar,modal",
+         null,
+         true
+       );
+     } else {
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdLinkProps.xhtml",
+         "_blank",
+         "chrome,close,titlebar,modal"
+       );
+     }
+   },
+ };
+ 
+@@ -1495,17 +1495,17 @@ var nsAnchorCommand = {
+   isCommandEnabled(aCommand, dummy) {
+     return IsDocumentEditable() && IsEditingRenderedHTML();
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdNamedAnchorProps.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal",
+       ""
+     );
+   },
+ };
+ 
+@@ -1514,17 +1514,17 @@ var nsInsertHTMLWithDialogCommand = {
+     return IsDocumentEditable() && IsEditingRenderedHTML();
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+     gMsgCompose.allowRemoteContent = true;
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdInsSrc.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal,resizable",
+       ""
+     );
+   },
+ };
+ 
+@@ -1532,17 +1532,17 @@ var nsInsertMathWithDialogCommand = {
+   isCommandEnabled(aCommand, dummy) {
+     return IsDocumentEditable() && IsEditingRenderedHTML();
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdInsertMath.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal,resizable",
+       ""
+     );
+   },
+ };
+ 
+@@ -1578,17 +1578,17 @@ var nsListPropertiesCommand = {
+   isCommandEnabled(aCommand, dummy) {
+     return IsDocumentEditable() && IsEditingRenderedHTML();
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdListProps.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal"
+     );
+   },
+ };
+ 
+ var nsObjectPropertiesCommand = {
+@@ -1674,17 +1674,17 @@ var nsSetSmiley = {
+     }
+   },
+   // This is now deprecated in favor of "doCommandParams"
+   doCommand(aCommand) {},
+ };
+ 
+ function doAdvancedProperties(element) {
+   if (element) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdAdvancedEdit.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal,resizable=yes",
+       "",
+       element
+     );
+   }
+ }
+@@ -1693,17 +1693,17 @@ var nsColorPropertiesCommand = {
+   isCommandEnabled(aCommand, dummy) {
+     return IsDocumentEditable() && IsEditingRenderedHTML();
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdColorProps.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal",
+       ""
+     );
+     UpdateDefaultColors();
+   },
+ };
+@@ -2246,16 +2246,16 @@ var nsConvertToTable = {
+     return false;
+   },
+ 
+   getCommandStateParams(aCommand, aParams, aRefCon) {},
+   doCommandParams(aCommand, aParams, aRefCon) {},
+ 
+   doCommand(aCommand) {
+     if (this.isCommandEnabled()) {
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdConvertToTable.xhtml",
+         "_blank",
+         "chrome,close,titlebar,modal"
+       );
+     }
+   },
+ };
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -4554,16 +4554,20 @@ async function ComposeStartup() {
+       dump("ERROR with parameters: " + ex + "\n");
+     }
+ 
+     // if still no dice, try and see if the params is an old fashioned list of string attributes
+     // XXX can we get rid of this yet?
+     if (!params) {
+       args = GetArgs(window.arguments[0]);
+     }
++  } else {
++    // Likely opened in a tab.
++    let tm = Cc["@mozilla.org/mail/tabmail;1"].getService(Ci.nsITabmail);
++    params = tm.tabParams(window.location.href);
+   }
+ 
+   // Set a sane starting width/height for all resolutions on new profiles.
+   // Do this before the window loads.
+   if (!document.documentElement.hasAttribute("width")) {
+     // Prefer 860x800.
+     const defaultHeight = Math.min(screen.availHeight, 800);
+     const defaultWidth = Math.min(screen.availWidth, 860);
+@@ -7875,17 +7879,22 @@ function SetContentAndBodyAsUnmodified()
+   gMsgCompose.bodyModified = false;
+   gContentChanged = false;
+ }
+ 
+ function MsgComposeCloseWindow() {
+   if (gMsgCompose) {
+     gMsgCompose.CloseWindow();
+   } else {
+-    window.close();
++    let tm = Cc["@mozilla.org/mail/tabmail;1"].getService(Ci.nsITabmail);
++    if (tm.isTab(window.location.href)) {
++      tm.removeCurrentTab();
++    } else {
++      window.close();
++    }
+   }
+ }
+ 
+ function GetLastAttachDirectory() {
+   var lastDirectory;
+ 
+   try {
+     lastDirectory = Services.prefs.getComplexValue(
+diff --git a/mail/components/compose/content/editor.js b/mail/components/compose/content/editor.js
+--- a/mail/components/compose/content/editor.js
++++ b/mail/components/compose/content/editor.js
+@@ -1114,17 +1114,17 @@ function EditorSelectColor(colorType, mo
+   colorType = gColorObj.Type;
+ 
+   if (!useLastColor) {
+     // Avoid the JS warning
+     gColorObj.NoDefault = false;
+ 
+     // Launch the ColorPicker dialog
+     // TODO: Figure out how to position this under the color buttons on the toolbar
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdColorPicker.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal",
+       "",
+       gColorObj
+     );
+ 
+     // User canceled the dialog
+@@ -2124,17 +2124,17 @@ function IsSelectionInOneCell() {
+   return false;
+ }
+ 
+ // Call this with insertAllowed = true to allow inserting if not in existing table,
+ //   else use false to do nothing if not in a table
+ function EditorInsertOrEditTable(insertAllowed) {
+   if (IsInTable()) {
+     // Edit properties of existing table
+-    window.openDialog(
++    GetWindow().openDialog(
+       "chrome://messenger/content/messengercompose/EdTableProps.xhtml",
+       "_blank",
+       "chrome,close,titlebar,modal",
+       "",
+       "TablePanel"
+     );
+     gContentWindow.focus();
+   } else if (insertAllowed) {
+@@ -2147,17 +2147,17 @@ function EditorInsertOrEditTable(insertA
+         goDoCommand("cmd_ConvertToTable");
+       }
+     } catch (e) {}
+   }
+ }
+ 
+ function EditorInsertTable() {
+   // Insert a new table
+-  window.openDialog(
++  GetWindow().openDialog(
+     "chrome://messenger/content/messengercompose/EdInsertTable.xhtml",
+     "_blank",
+     "chrome,close,titlebar,modal",
+     ""
+   );
+   gContentWindow.focus();
+ }
+ 
+@@ -2165,17 +2165,17 @@ function EditorTableCellProperties() {
+   if (!IsHTMLEditor()) {
+     return;
+   }
+ 
+   try {
+     var cell = GetCurrentEditor().getElementOrParentByTagName("td", null);
+     if (cell) {
+       // Start Table Properties dialog on the "Cell" panel
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdTableProps.xhtml",
+         "_blank",
+         "chrome,close,titlebar,modal",
+         "",
+         "CellPanel"
+       );
+       gContentWindow.focus();
+     }
+@@ -2304,17 +2304,17 @@ function EditorFindOrCreateInsertCharWin
+   } else {
+     // Since we switch the dialog during EditorOnFocus(),
+     //   this should really never be found, but it's good to be sure
+     var windowWithDialog = FindEditorWithInsertCharDialog();
+     if (windowWithDialog) {
+       SwitchInsertCharToThisWindow(windowWithDialog);
+     } else {
+       // The dialog will set window.InsertCharWindow to itself
+-      window.openDialog(
++      GetWindow().openDialog(
+         "chrome://messenger/content/messengercompose/EdInsertChars.xhtml",
+         "_blank",
+         "chrome,close,titlebar",
+         ""
+       );
+     }
+   }
+ }
+@@ -2348,17 +2348,17 @@ function SwitchInsertCharToAnotherEditor
+       }
+     }
+     // Didn't find another editor - close the dialog
+     window.InsertCharWindow.close();
+   }
+ }
+ 
+ function UpdateTOC() {
+-  window.openDialog(
++  GetWindow().openDialog(
+     "chrome://messenger/content/messengercompose/EdInsertTOC.xhtml",
+     "_blank",
+     "chrome,close,modal,titlebar"
+   );
+   window.content.focus();
+ }
+ 
+ function InitTOCMenu() {
+diff --git a/mail/components/compose/content/editorUtilities.js b/mail/components/compose/content/editorUtilities.js
+--- a/mail/components/compose/content/editorUtilities.js
++++ b/mail/components/compose/content/editorUtilities.js
+@@ -3,16 +3,26 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ /* import-globals-from editor.js */
+ 
+ var { AppConstants } = ChromeUtils.importESModule(
+   "resource://gre/modules/AppConstants.sys.mjs"
+ );
+ 
++function GetWindow() {
++  let tm = Cc["@mozilla.org/mail/tabmail;1"].getService(Ci.nsITabmail);
++  if (tm.isTab(window.location.href)) {
++    let w = Services.wm.getMostRecentWindow("mail:3pane");
++    w.lastComposeWindow = window;
++    return w;
++  }
++  return window;
++}
++
+ // Each editor window must include this file
+ // Variables  shared by all dialogs:
+ 
+ // Object to attach commonly-used widgets (all dialogs should use this)
+ var gDialog = {};
+ 
+ var kOutputEncodeBasicEntities =
+   Ci.nsIDocumentEncoder.OutputEncodeBasicEntities;
+@@ -178,31 +188,38 @@ function GetCurrentEditor() {
+   try {
+     var editorElement = GetCurrentEditorElement();
+     editor = editorElement.getEditor(editorElement.contentWindow);
+ 
+     // Do QIs now so editor users won't have to figure out which interface to use
+     // Using "instanceof" does the QI for us.
+     editor instanceof Ci.nsIHTMLEditor;
+   } catch (e) {
+-    dump(e) + "\n";
++    Cu.reportError(e);
+   }
+ 
+   return editor;
+ }
+ 
+ function GetCurrentTableEditor() {
+   var editor = GetCurrentEditor();
+   return editor && editor instanceof Ci.nsITableEditor ? editor : null;
+ }
+ 
+ function GetCurrentEditorElement() {
+   var tmpWindow = window;
+ 
+   do {
++    // Compose window opened it tab, let's use last registered
++    // compose window instead.
++    if (
++      tmpWindow.location.href == "chrome://messenger/content/messenger.xhtml"
++    ) {
++      tmpWindow = tmpWindow.lastComposeWindow;
++    }
+     // Get the <editor> element(s)
+     const editorItem = tmpWindow.document.querySelector("editor");
+ 
+     // This will change if we support > 1 editor element
+     if (editorItem) {
+       return editorItem;
+     }
+ 
+@@ -211,27 +228,27 @@ function GetCurrentEditorElement() {
+ 
+   return null;
+ }
+ 
+ function GetCurrentCommandManager() {
+   try {
+     return GetCurrentEditorElement().commandManager;
+   } catch (e) {
+-    dump(e) + "\n";
++    Cu.reportError(e);
+   }
+ 
+   return null;
+ }
+ 
+ function GetCurrentEditorType() {
+   try {
+     return GetCurrentEditorElement().editortype;
+   } catch (e) {
+-    dump(e) + "\n";
++    Cu.reportError(e);
+   }
+ 
+   return "";
+ }
+ 
+ /**
+  * Gets the editor's spell checker. Could return null if there are no
+  * dictionaries installed.
+diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/mail/messengercompose.css
+--- a/mail/themes/shared/mail/messengercompose.css
++++ b/mail/themes/shared/mail/messengercompose.css
+@@ -491,16 +491,17 @@
+ #headersSplitter {
+   grid-area: headers-splitter;
+ }
+ 
+ #messageArea {
+   grid-area: message;
+   display: flex;
+   flex-direction: column;
++  background-color: Window;
+ 
+   @media (prefers-color-scheme: dark) {
+     background-color: #2a2a2e;
+   }
+ }
+ 
+ #messageEditor {
+   flex: 1 1 0;
+@@ -1366,16 +1367,19 @@ button:is(
+   margin-block: -0.2em 0.2em;
+   margin-inline: 0.2em -0.2em;
+ }
+ 
+ .statusbar:not([hidden="true"]) {
+   display: flex;
+   align-items: center;
+   min-width: 0;
++  background-color: var(--toolbar-non-lwt-bgcolor);
++  color: var(--toolbar-non-lwt-textcolor);
++  border-top: 1px solid ThreeDLightShadow;
+ }
+ 
+ .statusbar > :not(#statusText) {
+   flex: 0 0 auto;
+ }
+ 
+ .statusbar > #statusText {
+   flex: 1 1 auto;
+diff --git a/mailnews/base/public/moz.build b/mailnews/base/public/moz.build
+--- a/mailnews/base/public/moz.build
++++ b/mailnews/base/public/moz.build
+@@ -54,16 +54,17 @@ XPIDL_SOURCES += [
+     "nsIMsgTagService.idl",
+     "nsIMsgThread.idl",
+     "nsIMsgUserFeedbackListener.idl",
+     "nsIMsgWindow.idl",
+     "nsISpamSettings.idl",
+     "nsIStatusBarBiffManager.idl",
+     "nsIStopwatch.idl",
+     "nsISubscribableServer.idl",
++    "nsITabmail.idl",
+     "nsIUrlListener.idl",
+     "nsIUserInfo.idl",
+     "nsMsgFolderFlags.idl",
+     "nsMsgMessageFlags.idl",
+ ]
+ 
+ if CONFIG["OS_ARCH"] == "WINNT":
+     XPIDL_SOURCES += [
+diff --git a/mailnews/base/public/nsITabmail.idl b/mailnews/base/public/nsITabmail.idl
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/public/nsITabmail.idl
+@@ -0,0 +1,24 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++interface nsIMsgComposeParams;
++
++/**
++ * This service provides any interface to tabmail.
++ * The contractid for this service is "@mozilla.org/mail/tabmail;1".
++ */
++[scriptable,uuid(d581cb0d-d24c-4cc0-b74a-9690178073d1)]
++interface nsITabmail : nsISupports
++{
++  void openInTab(in ACString url, in boolean hideNav, in nsIMsgComposeParams params);
++  void removeCurrentTab();
++  boolean isTab(in ACString url);
++  nsIMsgComposeParams tabParams(in ACString url);
++};
++
++%{C++
++#define NSITABMAIL_CONTRACTID "@mozilla.org/mail/tabmail;1"
++%}
+diff --git a/mailnews/base/src/Tabmail.jsm b/mailnews/base/src/Tabmail.jsm
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/src/Tabmail.jsm
+@@ -0,0 +1,64 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++var EXPORTED_SYMBOLS = ["Tabmail"];
++
++// This ensures that the service is only created once.
++var gCreated = false;
++var count = 0;
++
++function Tabmail() {
++  if (gCreated) {
++    throw Components.Exception("", Cr.NS_ERROR_ALREADY_INITIALIZED);
++  }
++  gCreated = true;
++  this._map = new Map();
++}
++
++Tabmail.prototype = {
++  QueryInterface: ChromeUtils.generateQI(["nsITabmail"]),
++
++  openInTab(url, hideNav, params) {
++    let w = Services.wm.getMostRecentWindow("mail:3pane");
++    if (w) {
++      let tabmail = w.document.getElementById("tabmail");
++      if (tabmail) {
++        // XXX TODO: Consider different tab type here, like composeTab
++        let newUrl = `${url}?count=${++count}`;
++        tabmail.openTab("contentTab", { url: newUrl });
++        // Dumping that out takes ages in a debug build since it
++        // dumps the whole world to the console.
++        // console.log("=== current tab", tabmail.currentTabInfo);
++        // XXX TODO: Consider a weak reference so the tab can be closed.
++        this._map.set(newUrl, params);
++        if (hideNav) {
++          let nav = tabmail.currentTabInfo.toolbar?.parentElement;
++          if (nav) {
++            nav.style = "display: none;";
++          }
++        }
++      }
++    }
++  },
++
++  isTab(url) {
++    return this._map.has(url);
++  },
++
++  tabParams(url) {
++    return this._map.get(url);
++  },
++
++  removeCurrentTab() {
++    let w = Services.wm.getMostRecentWindow("mail:3pane");
++    if (w) {
++      let tabmail = w.document.getElementById("tabmail");
++      if (tabmail) {
++        tabmail.removeCurrentTab();
++      }
++    }
++  },
++};
+diff --git a/mailnews/base/src/components.conf b/mailnews/base/src/components.conf
+--- a/mailnews/base/src/components.conf
++++ b/mailnews/base/src/components.conf
+@@ -1,16 +1,22 @@
+ # -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
+ # vim: set filetype=python:
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ Classes = [
+     {
++        "cid": "{d581cb0d-d24c-4cc0-b74a-9690178073d1}",
++        "contract_ids": ["@mozilla.org/mail/tabmail;1"],
++        "jsm": "resource:///modules/Tabmail.jsm",
++        "constructor": "Tabmail",
++    },
++    {
+         "cid": "{a30be08c-afc8-4fed-9af7-79778a23db23}",
+         "contract_ids": ["@mozilla.org/mail/folder-lookup;1"],
+         "jsm": "resource:///modules/FolderLookupService.jsm",
+         "constructor": "FolderLookupService",
+     },
+     {
+         "cid": "{49b04761-23dd-45d7-903d-619418a4d319}",
+         "contract_ids": ["@mozilla.org/messenger/msgAsyncPrompter;1"],
+diff --git a/mailnews/base/src/moz.build b/mailnews/base/src/moz.build
+--- a/mailnews/base/src/moz.build
++++ b/mailnews/base/src/moz.build
+@@ -125,16 +125,17 @@ EXTRA_JS_MODULES += [
+     "MsgAsyncPrompter.jsm",
+     "MsgDBCacheManager.jsm",
+     "MsgIncomingServer.jsm",
+     "MsgKeySet.jsm",
+     "MsgProtocolInfo.sys.mjs",
+     "OAuth2.jsm",
+     "OAuth2Module.jsm",
+     "OAuth2Providers.jsm",
++    "Tabmail.jsm",
+     "TemplateUtils.jsm",
+     "VirtualFolderWrapper.jsm",
+     "WinUnreadBadge.jsm",
+ ]
+ 
+ USE_LIBS += [
+     "jsoncpp",
+ ]
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -61,26 +61,28 @@
+ #include "mozilla/mailnews/MimeHeaderParser.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/ErrorResult.h"
+ #include "mozilla/Telemetry.h"
+ #include "mozilla/dom/HTMLAnchorElement.h"
+ #include "mozilla/dom/HTMLImageElement.h"
+ #include "mozilla/dom/Selection.h"
+ #include "mozilla/dom/Promise-inl.h"
++#include "mozilla/dom/Location.h"
+ #include "mozilla/Utf8.h"
+ #include "nsStreamConverter.h"
+ #include "nsIObserverService.h"
+ #include "nsIProtocolHandler.h"
+ #include "nsContentUtils.h"
+ #include "nsStreamUtils.h"
+ #include "nsIFileURL.h"
+ #include "nsTextNode.h"  // from dom/base
+ #include "nsIParserUtils.h"
+ #include "nsIStringBundle.h"
++#include "nsITabmail.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::mailnews;
+ 
+ LazyLogModule Compose("Compose");
+ 
+ static nsresult GetReplyHeaderInfo(int32_t* reply_header_type,
+@@ -1305,25 +1307,39 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+   rv = composeService->UnregisterComposeDocShell(mDocShell);
+   NS_ENSURE_SUCCESS(rv, rv);
+   mDocShell = nullptr;
+ 
+   // ensure that the destructor of nsMsgSend is invoked to remove
+   // temporary files.
+   mMsgSend = nullptr;
+ 
++  nsCOMPtr<nsPIDOMWindowOuter> window = nsPIDOMWindowOuter::From(m_window);
++  Location* location = window->GetLocation();
++  nsAutoString href;
++  location->GetHref(href);
++  nsCOMPtr<nsITabmail> tabmail(do_GetService(NSITABMAIL_CONTRACTID, &rv));
++  NS_ENSURE_SUCCESS(rv, rv);
++  bool isTab;
++  rv = tabmail->IsTab(NS_ConvertUTF16toUTF8(href), &isTab);
++  NS_ENSURE_SUCCESS(rv, rv);
++
+   // We are going away for real, we need to do some clean up first
+   if (m_baseWindow) {
+     if (m_editor) {
+       // The editor will be destroyed during the close window.
+       // Set it to null to be sure we won't use it anymore.
+       m_editor = nullptr;
+     }
+     nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
+-    rv = window->Destroy();
++    if (isTab) {
++      rv = tabmail->RemoveCurrentTab();
++    } else {
++      rv = window->Destroy();
++    }
+   }
+ 
+   m_window = nullptr;
+   return rv;
+ }
+ 
+ nsresult nsMsgCompose::Abort() {
+   if (mMsgSend) mMsgSend->Abort();
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -56,16 +56,17 @@
+ #  include "nsMsgUtils.h"
+ #endif
+ 
+ #include "nsICommandLine.h"
+ #include "nsIAppStartup.h"
+ #include "nsMsgUtils.h"
+ #include "nsIPrincipal.h"
+ #include "nsIMutableArray.h"
++#include "nsITabmail.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ 
+ #ifdef XP_WIN
+ #  include <windows.h>
+ #  include <shellapi.h>
+ #  include "nsIWidget.h"
+@@ -173,26 +174,33 @@ nsMsgComposeService::OpenComposeWindowWi
+ 
+   nsCOMPtr<nsISupportsInterfacePointer> msgParamsWrapper =
+       do_CreateInstance(NS_SUPPORTS_INTERFACE_POINTER_CONTRACTID, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   msgParamsWrapper->SetData(params);
+   msgParamsWrapper->SetDataIID(&NS_GET_IID(nsIMsgComposeParams));
+ 
+-  nsCOMPtr<mozIDOMWindowProxy> newWindow;
++  bool inTab = mozilla::Preferences::GetBool("mail.compose.compose_in_tab", false);
+   nsAutoCString chromeURL;
+   if (chrome && *chrome) {
+     chromeURL = nsDependentCString(chrome);
+   } else {
+     chromeURL = DEFAULT_CHROME;
+   }
+-  rv = wwatch->OpenWindow(0, chromeURL, "_blank"_ns,
+-                          "all,chrome,dialog=no,status,toolbar"_ns,
+-                          msgParamsWrapper, getter_AddRefs(newWindow));
++  if (inTab) {
++    nsCOMPtr<nsITabmail> tabmail(do_GetService(NSITABMAIL_CONTRACTID, &rv));
++    NS_ENSURE_SUCCESS(rv, rv);
++    rv = tabmail->OpenInTab(chromeURL, true, params);
++  } else {
++    nsCOMPtr<mozIDOMWindowProxy> newWindow;
++    rv = wwatch->OpenWindow(0, chromeURL, "_blank"_ns,
++                            "all,chrome,dialog=no,status,toolbar"_ns,
++                            msgParamsWrapper, getter_AddRefs(newWindow));
++  }
+ 
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgComposeService::DetermineComposeHTML(nsIMsgIdentity* aIdentity,
+                                           MSG_ComposeFormat aFormat,
+                                           bool* aComposeHTML) {
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -967,16 +967,19 @@ pref("mail.compose.add_undisclosed_recip
+ pref("mail.compose.dontWarnMail2Newsgroup", false);
+ 
+ // Attach http image resources to composed messages.
+ pref("mail.compose.attach_http_images", false);
+ 
+ // Headers to check to find the right from identity to use when catchAll is active.
+ pref("mail.compose.catchAllHeaders", "delivered-to, envelope-to, x-original-to, to, cc");
+ 
++// Open compose window in tab?
++pref("mail.compose.compose_in_tab", false);
++
+ // these prefs (in minutes) are here to help QA test this feature
+ // "mail.purge.min_delay", never purge a junk folder more than once every 480 minutes (60 mins/hour * 8 hours)
+ // "mail.purge.timer_interval", fire the purge timer every 5 minutes, starting 5 minutes after we load accounts
+ pref("mail.purge.min_delay", 480);
+ pref("mail.purge.timer_interval", 5);
+ 
+ // Set to false if opening a message in the standalone message window or viewing
+ // it in the message pane should never mark it as read.
