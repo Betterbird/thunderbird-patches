@@ -90,11 +90,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="        >> localization\ja\messenger\preferences\preferences.ftl
 %lecho% "    .label = メッセージの上部に添付ファイルリストを表示する" >> localization\ja\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"                     >> localization\ja\messenger\preferences\preferences.ftl
-
-:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
-%lecho% "toolbar-get-all-messages-menuitem =" >> localization\ja\messenger\unifiedToolbar.ftl
-%lecho% "  .label = 新着メッセージをすべて受信"     >> localization\ja\messenger\unifiedToolbar.ftl
-%lecho% "  .accesskey = G"                    >> localization\ja\messenger\unifiedToolbar.ftl
-
-:: String from bug 1854801, negligently not refreshed by the TB folks.
-%lecho% "message-header-followup-to-list-name = Followup-To =" >> localization\ja\messenger\messageheader\headerFields.ftl

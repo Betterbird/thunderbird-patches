@@ -90,8 +90,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="                     >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .label = Mostra gli allegati sopra il messaggio" >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = o"                                  >> localization\it\messenger\preferences\preferences.ftl
-
-:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
-%lecho% "toolbar-get-all-messages-menuitem ="       >> localization\it\messenger\unifiedToolbar.ftl
-%lecho% "  .label = Scarica tutti i nuovi messaggi" >> localization\it\messenger\unifiedToolbar.ftl
-%lecho% "  .accesskey = u"                          >> localization\it\messenger\unifiedToolbar.ftl

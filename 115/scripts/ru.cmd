@@ -76,8 +76,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "unreadMsgStatus=Непрочитанных: %%S" >> chrome\ru\locale\ru\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Выбранных: %%S"   >> chrome\ru\locale\ru\messenger\messenger.properties
 %lecho% "totalMsgStatus=Всего: %%S"          >> chrome\ru\locale\ru\messenger\messenger.properties
-
-:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
-%lecho% "toolbar-get-all-messages-menuitem =" >> localization\ru\messenger\unifiedToolbar.ftl
-%lecho% "  .label = Все новые сообщения"      >> localization\ru\messenger\unifiedToolbar.ftl
-%lecho% "  .accesskey = с"                    >> localization\ru\messenger\unifiedToolbar.ftl

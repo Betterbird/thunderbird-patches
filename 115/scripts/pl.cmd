@@ -90,11 +90,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="             >> localization\pl\messenger\preferences\preferences.ftl
 %lecho% "    .label = Wyświetlaj listę załączników nad wiadomością" >> localization\pl\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = n"                          >> localization\pl\messenger\preferences\preferences.ftl
-
-:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
-%lecho% "toolbar-get-all-messages-menuitem ="          >> localization\pl\messenger\unifiedToolbar.ftl
-%lecho% "  .label = Pobierz wszystkie nowe wiadomości" >> localization\pl\messenger\unifiedToolbar.ftl
-%lecho% "  .accesskey = P"                             >> localization\pl\messenger\unifiedToolbar.ftl
-
-:: String from bug 1854801, negligently not refreshed by the TB folks.
-%lecho% "message-header-followup-to-list-name = Kontynuacja na" >> localization\pl\messenger\messageheader\headerFields.ftl

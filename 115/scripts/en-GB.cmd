@@ -57,8 +57,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="       >> localization\en-GB\messenger\preferences\preferences.ftl
 %lecho% "    .label = Display attachment list above message" >> localization\en-GB\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"                    >> localization\en-GB\messenger\preferences\preferences.ftl
-
-:: New string from bug 1837152. Taken from about3Pane.ftl: folder-pane-get-all-messages-menuitem.label and folder-pane-get-all-messages-menuitem.accesskey
-%lecho% "toolbar-get-all-messages-menuitem =" >> localization\en-GB\messenger\unifiedToolbar.ftl
-%lecho% "  .label = Get All New Messages"     >> localization\en-GB\messenger\unifiedToolbar.ftl
-%lecho% "  .accesskey = G"                    >> localization\en-GB\messenger\unifiedToolbar.ftl
