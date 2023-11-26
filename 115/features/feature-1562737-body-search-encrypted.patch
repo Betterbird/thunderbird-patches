@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1684838816 -7200
-# Parent  caa48016650e70bb99b2c77e3678a90ff50d485b
+# Parent  0f8faed662fbe7cd0184dfbec25ffb0cab1caff9
 Bug 1562737 - Body search in PGP encrypted messages.
 
 Short history of this patch (in the 91 version):
@@ -15,6 +15,8 @@ suggested: https://github.com/Betterbird/thunderbird-patches/commit/dc36bb5a2744
 That destroyed search in encrypted messages altogether :-(
 In the latest version, turning `m_listContext` into a local variable is reverted and the code is left in its
 original state with no re-entrancy protection. At time of writing (13th Nov. 2022) no crashes are observed.
+* * *
+Bug 1562737 - Body search in S/MIME encrypted messages.
 
 diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm b/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm
 --- a/mail/extensions/openpgp/content/modules/mimeDecrypt.jsm
@@ -102,7 +104,7 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
    // filtering...we need the list of headers and the header size as well
    // if we are doing filtering...if ForFilters is false, headers and
    // headersSize is ignored!!!
-@@ -90,21 +93,29 @@ class nsMsgBodyHandler {
+@@ -90,21 +93,34 @@ class nsMsgBodyHandler {
    bool m_pastPartHeaders;  // true if we've already skipped over the part
                             // headers
    bool m_partIsQP;     // true if the Content-Transfer-Encoding header claims
@@ -115,10 +117,13 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
 +                       // protocol="application/pgp-encrypted"; header
 +  bool m_partIsPGP;    // true if the current part is the PGP payload in
 +                       // application/octet-stream
++  bool m_partIsSMIME;  // true if the current part is an S/MIME part
    bool m_inMessageAttachment;  // true if current part is message/*
  
    nsTArray<nsCString> m_boundaries;  // The boundary strings to look for
    nsCString m_partCharset;           // The charset found in the part
++  // String to hold the decrypted result.
++  nsCString mDecrypted;
  
    // See implementation for comments
    int32_t ApplyTransformations(const nsCString& line, int32_t length,
@@ -126,16 +131,18 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
    void SniffPossibleMIMEHeader(const nsCString& line);
    static void StripHtml(nsCString& buf);
    static void Base64Decode(nsCString& buf);
-+  static void Decrypt(const nsCString& aEncrypted, nsCString& aDecrypted);
-+  static int OutputFunction(const char* buf, int32_t buf_size,
-+                            void* output_closure);
++  void DecryptPGP(const nsCString& aEncrypted, nsCString& aDecrypted);
++  void DecryptSMIME(const nsCString& aEncrypted, nsCString& aDecrypted);
++  static int OutputFunctionPGP(const char* buf, int32_t buf_size, void* arg);
++  static void OutputFunctionSMIME(void* arg, const char* buf,
++                                  unsigned long length);
 +  void GetRelevantTextParts(const nsCString& aInput, nsCString& aOutput);
  };
  #endif
 diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMsgBodyHandler.cpp
 --- a/mailnews/search/src/nsMsgBodyHandler.cpp
 +++ b/mailnews/search/src/nsMsgBodyHandler.cpp
-@@ -7,20 +7,25 @@
+@@ -7,20 +7,27 @@
  #include "nsMsgSearchCore.h"
  #include "nsMsgUtils.h"
  #include "nsMsgBodyHandler.h"
@@ -145,6 +152,8 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
  #include "nsISeekableStream.h"
  #include "nsIInputStream.h"
 +#include "nsIPgpMimeProxy.h"
++#include "nsICMSMessage.h"
++#include "nsICMSDecoder.h"
  #include "nsIFile.h"
  #include "plbase64.h"
  #include "prmem.h"
@@ -161,7 +170,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
    m_numLocalLines = numLines;
    uint32_t flags;
    m_lineCountInBodyLines = NS_SUCCEEDED(msg->GetFlags(&flags))
-@@ -75,16 +80,18 @@ void nsMsgBodyHandler::Initialize()
+@@ -75,16 +82,19 @@ void nsMsgBodyHandler::Initialize()
  {
    // Default transformations for local message search and MAPI access
    m_stripHeaders = true;
@@ -172,6 +181,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
    m_partIsText = true;  // Default is text/plain, maybe proven otherwise later.
 +  m_seenMpPGP = false;
 +  m_partIsPGP = false;
++  m_partIsSMIME = false;
    m_pastMsgHeaders = false;
    m_pastPartHeaders = false;
    m_inMessageAttachment = false;
@@ -180,7 +190,34 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
  
  nsMsgBodyHandler::~nsMsgBodyHandler() {}
  
-@@ -276,59 +283,74 @@ int32_t nsMsgBodyHandler::ApplyTransform
+@@ -121,16 +131,26 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
+   }
+ 
+   // Process aggregated HTML.
+   if (!m_isMultipart && m_partIsHtml) {
+     StripHtml(buf);
+     outLength = buf.Length();
+   }
+ 
++  if (m_partIsSMIME) {
++    nsCString decrypted;
++    // printf("=== Decrypt this!\n|%s|\n", buf.get());
++    DecryptSMIME(buf, decrypted);
++    // printf("=== Here we go!\n|%s|\n", decrypted.get());
++    GetRelevantTextParts(decrypted, buf);
++    // printf("=== Text parts are\n|%s|\n", buf.get());
++    outLength = decrypted.Length();
++  }
++
+   charset = m_partCharset;
+   return outLength;
+ }
+ 
+ void nsMsgBodyHandler::OpenLocalFolder() {
+   nsCOMPtr<nsIInputStream> inputStream;
+   nsresult rv = m_scope->GetInputStream(m_msgHdr, getter_AddRefs(inputStream));
+   // Warn and return if GetInputStream fails
+@@ -273,59 +293,75 @@ int32_t nsMsgBodyHandler::ApplyTransform
          eatThisLine = true;
        } else {
          // It is wrong to call ApplyTransformations() here since this will
@@ -202,7 +239,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 +    if (m_partIsPGP) {
 +      nsCString decrypted;
 +      // printf("=== Decrypt this!\n|%s|\n", buf.get());
-+      Decrypt(buf, decrypted);
++      DecryptPGP(buf, decrypted);
 +      // printf("=== Here we go!\n|%s|\n", decrypted.get());
 +      GetRelevantTextParts(decrypted, buf);
 +      // printf("=== Text parts are\n|%s|\n", buf.get());
@@ -220,6 +257,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
  
 +    if (m_partIsPGP) m_seenMpPGP = false;
 +    m_partIsPGP = false;
++    m_partIsSMIME = false;
 +
      // Note: we cannot reset 'm_partIsQP' yet since we still need it to process
      // the last buffer returned here. Parsing the next part will set a new
@@ -228,7 +266,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
    }
  
 -  if (!m_partIsText) {
-+  if (!m_partIsText && !m_partIsPGP) {
++  if (!m_partIsText && !m_partIsPGP && !m_partIsSMIME) {
      // Ignore non-text parts
      buf.Truncate();
      eatThisLine = true;
@@ -239,7 +277,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 -  if (m_base64part || m_partIsHtml) {
 +  // Accumulate base64 parts, HTML parts and encrypted parts for later decoding
 +  // or tag stripping.
-+  if (m_base64part || m_partIsHtml || m_partIsPGP) {
++  if (m_base64part || m_partIsHtml || m_partIsPGP || m_partIsSMIME) {
      if (m_partIsHtml && !m_base64part) {
        size_t bufLength = buf.Length();
        if (!m_partIsQP || bufLength == 0 || !StringEndsWith(buf, "="_ns)) {
@@ -259,7 +297,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
  
    buf.Assign(line);
    return buf.Length();
-@@ -354,16 +376,101 @@ void nsMsgBodyHandler::StripHtml(nsCStri
+@@ -351,16 +387,133 @@ void nsMsgBodyHandler::StripHtml(nsCStri
        pWalkInOut++;
      }
      *pWalk = 0;  // null terminator
@@ -268,21 +306,25 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
    }
  }
  
-+// String to hold the decrypted result.
-+nsCString sDecrypted;  // When will `static` bite us? :-(
-+
-+/* static, needs to be static since `SetMimeCallback()` requires it. */
-+int nsMsgBodyHandler::OutputFunction(const char* buf, int32_t buf_size,
-+                                     void* output_closure) {
-+  sDecrypted.Assign(buf, buf_size);
++/* static */
++int nsMsgBodyHandler::OutputFunctionPGP(const char* buf, int32_t buf_size,
++                                        void* arg) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++  self->mDecrypted.Assign(buf, buf_size);
 +  return 0;
 +}
 +
 +/* static */
-+void nsMsgBodyHandler::Decrypt(const nsCString& aEncrypted,
-+                               nsCString& aDecrypted) {
++void nsMsgBodyHandler::OutputFunctionSMIME(void* arg, const char* buf,
++                                           unsigned long length) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++  self->mDecrypted.Append(buf, length);
++}
++
++void nsMsgBodyHandler::DecryptPGP(const nsCString& aEncrypted,
++                                  nsCString& aDecrypted) {
 +  aDecrypted.Truncate();
-+  sDecrypted.Truncate();
++  mDecrypted.Truncate();
 +  nsCOMPtr<nsIPgpMimeProxy> decryptor;
 +  nsresult rv;
 +  decryptor = do_CreateInstance("@mozilla.org/mime/pgp-mime-decrypt;1", &rv);
@@ -294,12 +336,40 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 +  // Use a boundary which won't be found 100%.
 +  decryptor->SetContentType(
 +      "multipart/encrypted; boundary=$$none$$none$$none$$none$$none"_ns);
-+  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunction, (void*)1,
++  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunctionPGP, this,
 +                             nullptr);
 +  decryptor->Write(aEncrypted.get(), aEncrypted.Length());
 +  decryptor->Finish();
 +  decryptor->RemoveMimeCallback();
-+  aDecrypted.Assign(sDecrypted.get());  // Make a copy.
++  aDecrypted.Assign(mDecrypted.get());  // Make a copy.
++}
++
++void nsMsgBodyHandler::DecryptSMIME(const nsCString& aEncrypted,
++                                    nsCString& aDecrypted) {
++  aDecrypted.Truncate();
++  mDecrypted.Truncate();
++
++  // base64-decode the buffer. We need to determine the output length.
++  int32_t inLen = aEncrypted.Length();
++  int32_t maxOutLen = (inLen * 3) / 4;
++  int32_t outLen =
++      (inLen / 4) * 3 + ((inLen % 4 == 3) ? 2 : 0) + ((inLen % 4 == 2) ? 1 : 0);
++  char* decoded = (char*)moz_xmalloc(maxOutLen);
++  if (!decoded) return;
++  PL_Base64Decode(aEncrypted.get(), inLen, decoded);
++
++  nsresult rv;
++  nsCOMPtr<nsICMSDecoder> decryptor =
++      do_CreateInstance(NS_CMSDECODER_CONTRACTID, &rv);
++  rv = decryptor->Start(nsMsgBodyHandler::OutputFunctionSMIME, this);
++  NS_ENSURE_SUCCESS_VOID(rv);
++  rv = decryptor->Update(decoded, outLen);
++  free(decoded);
++  NS_ENSURE_SUCCESS_VOID(rv);
++  nsCOMPtr<nsICMSMessage> cinfo;
++  rv = decryptor->Finish(getter_AddRefs(cinfo));
++  NS_ENSURE_SUCCESS_VOID(rv);
++  aDecrypted.Assign(mDecrypted.get());  // Make a copy.
 +}
 +
 +void nsMsgBodyHandler::GetRelevantTextParts(const nsCString& aInput,
@@ -361,7 +431,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
   *
   * @param line        (in)    a header line that may contain a MIME header
   */
-@@ -385,34 +492,55 @@ void nsMsgBodyHandler::SniffPossibleMIME
+@@ -382,34 +535,68 @@ void nsMsgBodyHandler::SniffPossibleMIME
      } else if (lowerCaseLine.Find("multipart/") != kNotFound) {
        if (m_isMultipart) {
          // Nested multipart, get ready for new headers.
@@ -372,6 +442,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
          m_partIsText = false;
 +        m_seenMpPGP = false;
 +        m_partIsPGP = false;
++        m_partIsSMIME = false;
        }
        m_isMultipart = true;
        m_partCharset.Truncate();
@@ -386,6 +457,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
            true;  // Default is text/plain, maybe proven otherwise later.
 +      m_seenMpPGP = false;
 +      m_partIsPGP = false;
++      m_partIsSMIME = false;
        m_inMessageAttachment = true;
 +    } else if (lowerCaseLine.Find("application/octet-stream") != kNotFound &&
 +               m_seenMpPGP) {
@@ -396,14 +468,25 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 +      m_partIsText = false;
 +      m_seenMpPGP = false;
 +      m_partIsPGP = true;
++      m_partIsSMIME = false;
++    } else if (lowerCaseLine.Find("application/pkcs7-mime") != kNotFound ||
++               lowerCaseLine.Find("application/x-pkcs7-mime") != kNotFound) {
++      m_base64part = false;
++      m_partIsQP = false;
++      m_pastPartHeaders = false;
++      m_partIsHtml = false;
++      m_partIsText = false;
++      m_seenMpPGP = false;
++      m_partIsPGP = false;
++      // S/MIME is one monolithic base64-encoded blob with no boundaries.
++      m_partIsSMIME = true;
      } else if (lowerCaseLine.Find("text/") != kNotFound)
        m_partIsText = true;
      else if (lowerCaseLine.Find("text/") == kNotFound)
        m_partIsText = false;  // We have disproven our assumption.
    }
  
-+  if (m_isMultipart &&
-+      lowerCaseLine.Find("protocol") != kNotFound &&
++  if (m_isMultipart && lowerCaseLine.Find("protocol") != kNotFound &&
 +      lowerCaseLine.Find("application/pgp-encrypted") != kNotFound) {
 +    m_seenMpPGP = true;
 +    m_partCharset.AssignLiteral(
