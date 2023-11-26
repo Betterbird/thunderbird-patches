@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1700990026 -3600
+# Date 1701001769 -3600
 # Parent  834ea006f86a2ea7bad6ebbb02d90a1ead84e186
 Bug 1562737 - Body search in S/MIME encrypted messages.
 
 diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/nsMsgBodyHandler.h
 --- a/mailnews/search/public/nsMsgBodyHandler.h
 +++ b/mailnews/search/public/nsMsgBodyHandler.h
-@@ -97,25 +97,27 @@ class nsMsgBodyHandler {
+@@ -97,25 +97,30 @@ class nsMsgBodyHandler {
    bool m_partIsHtml;   // true if the Content-type header claims text/html
    bool m_base64part;   // true if the current part is in base64
    bool m_isMultipart;  // true if the message is a multipart/* message
@@ -21,6 +21,8 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
  
    nsTArray<nsCString> m_boundaries;  // The boundary strings to look for
    nsCString m_partCharset;           // The charset found in the part
++  // String to hold the decrypted result.
++  nsCString mDecrypted;
  
    // See implementation for comments
    int32_t ApplyTransformations(const nsCString& line, int32_t length,
@@ -29,10 +31,13 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
    static void StripHtml(nsCString& buf);
    static void Base64Decode(nsCString& buf);
 -  static void Decrypt(const nsCString& aEncrypted, nsCString& aDecrypted);
-+  static void DecryptPGP(const nsCString& aEncrypted, nsCString& aDecrypted);
-+  static void DecryptSMIME(const nsCString& aEncrypted, nsCString& aDecrypted);
-   static int OutputFunction(const char* buf, int32_t buf_size,
-                             void* output_closure);
+-  static int OutputFunction(const char* buf, int32_t buf_size,
+-                            void* output_closure);
++  void DecryptPGP(const nsCString& aEncrypted, nsCString& aDecrypted);
++  void DecryptSMIME(const nsCString& aEncrypted, nsCString& aDecrypted);
++  static int OutputFunctionPGP(const char* buf, int32_t buf_size, void* arg);
++  static void OutputFunctionSMIME(void* arg, const char* buf,
++                                  unsigned long length);
    void GetRelevantTextParts(const nsCString& aInput, nsCString& aOutput);
  };
  #endif
@@ -159,47 +164,69 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
        } else {
          // Strip the soft line break.
          buf.SetLength(bufLength - 1);
-@@ -383,19 +397,24 @@ nsCString sDecrypted;  // When will `sta
+@@ -373,48 +387,80 @@ void nsMsgBodyHandler::StripHtml(nsCStri
+       pWalkInOut++;
+     }
+     *pWalk = 0;  // null terminator
  
- /* static, needs to be static since `SetMimeCallback()` requires it. */
- int nsMsgBodyHandler::OutputFunction(const char* buf, int32_t buf_size,
-                                      void* output_closure) {
-   sDecrypted.Assign(buf, buf_size);
+     pBufInOut.Adopt(pBuf);
+   }
+ }
+ 
+-// String to hold the decrypted result.
+-nsCString sDecrypted;  // When will `static` bite us? :-(
+-
+-/* static, needs to be static since `SetMimeCallback()` requires it. */
+-int nsMsgBodyHandler::OutputFunction(const char* buf, int32_t buf_size,
+-                                     void* output_closure) {
+-  sDecrypted.Assign(buf, buf_size);
++/* static */
++int nsMsgBodyHandler::OutputFunctionPGP(const char* buf, int32_t buf_size,
++                                        void* arg) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++  self->mDecrypted.Assign(buf, buf_size);
    return 0;
  }
  
-+static void MimeCMS_content_callback(void* arg, const char* buf,
-+                                     unsigned long length) {
-+  sDecrypted.Append(buf, length);
-+}
-+
  /* static */
 -void nsMsgBodyHandler::Decrypt(const nsCString& aEncrypted,
 -                               nsCString& aDecrypted) {
++void nsMsgBodyHandler::OutputFunctionSMIME(void* arg, const char* buf,
++                                           unsigned long length) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++  self->mDecrypted.Append(buf, length);
++}
++
 +void nsMsgBodyHandler::DecryptPGP(const nsCString& aEncrypted,
 +                                  nsCString& aDecrypted) {
    aDecrypted.Truncate();
-   sDecrypted.Truncate();
+-  sDecrypted.Truncate();
++  mDecrypted.Truncate();
    nsCOMPtr<nsIPgpMimeProxy> decryptor;
    nsresult rv;
    decryptor = do_CreateInstance("@mozilla.org/mime/pgp-mime-decrypt;1", &rv);
    NS_ENSURE_SUCCESS_VOID(rv);
  
    decryptor->Init();
-@@ -407,16 +426,48 @@ void nsMsgBodyHandler::Decrypt(const nsC
-   decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunction, (void*)1,
+   // If we pass a boundary, code in mimeDecrypt.jsm will look for a
+   // two part multipart/encrypted structure. We just pass the net data.
+   // Use a boundary which won't be found 100%.
+   decryptor->SetContentType(
+       "multipart/encrypted; boundary=$$none$$none$$none$$none$$none"_ns);
+-  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunction, (void*)1,
++  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunctionPGP, this,
                               nullptr);
    decryptor->Write(aEncrypted.get(), aEncrypted.Length());
    decryptor->Finish();
    decryptor->RemoveMimeCallback();
-   aDecrypted.Assign(sDecrypted.get());  // Make a copy.
- }
- 
-+/* static */
+-  aDecrypted.Assign(sDecrypted.get());  // Make a copy.
++  aDecrypted.Assign(mDecrypted.get());  // Make a copy.
++}
++
 +void nsMsgBodyHandler::DecryptSMIME(const nsCString& aEncrypted,
 +                                    nsCString& aDecrypted) {
 +  aDecrypted.Truncate();
-+  sDecrypted.Truncate();
++  mDecrypted.Truncate();
 +
 +  // base64-decode the buffer. We need to determine the output length.
 +  int32_t inLen = aEncrypted.Length();
@@ -213,29 +240,24 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 +  nsresult rv;
 +  nsCOMPtr<nsICMSDecoder> decryptor =
 +      do_CreateInstance(NS_CMSDECODER_CONTRACTID, &rv);
-+  rv = decryptor->Start(MimeCMS_content_callback, nullptr);
-+  // printf("=== decryptor->Start() failed %x\n", static_cast<unsigned int>(rv));
++  rv = decryptor->Start(nsMsgBodyHandler::OutputFunctionSMIME, this);
 +  NS_ENSURE_SUCCESS_VOID(rv);
 +  rv = decryptor->Update(decoded, outLen);
 +  free(decoded);
-+  // printf("=== decryptor->Update() failed %x\n", static_cast<unsigned int>(rv));
 +  NS_ENSURE_SUCCESS_VOID(rv);
 +  nsCOMPtr<nsICMSMessage> cinfo;
 +  rv = decryptor->Finish(getter_AddRefs(cinfo));
-+  // printf("=== decryptor->Finish() failed %x\n", static_cast<unsigned int>(rv));
 +  NS_ENSURE_SUCCESS_VOID(rv);
-+  aDecrypted.Assign(sDecrypted.get());  // Make a copy.
-+}
-+
++  aDecrypted.Assign(mDecrypted.get());  // Make a copy.
+ }
+ 
  void nsMsgBodyHandler::GetRelevantTextParts(const nsCString& aInput,
                                              nsCString& aOutput) {
    aOutput.Truncate();
  
    // Code copied from nsMsgSearchTerm::MatchBody().
    nsMsgBodyHandler2* bodyHan2 = new nsMsgBodyHandler2(aInput);
- 
-   bool endOfFile = false;
-@@ -491,40 +542,54 @@ void nsMsgBodyHandler::SniffPossibleMIME
+@@ -491,48 +537,61 @@ void nsMsgBodyHandler::SniffPossibleMIME
          // Nested multipart, get ready for new headers.
          m_base64part = false;
          m_partIsQP = false;
@@ -288,5 +310,14 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
        m_partIsText = false;  // We have disproven our assumption.
    }
  
-   if (m_isMultipart &&
-       lowerCaseLine.Find("protocol") != kNotFound &&
+-  if (m_isMultipart &&
+-      lowerCaseLine.Find("protocol") != kNotFound &&
++  if (m_isMultipart && lowerCaseLine.Find("protocol") != kNotFound &&
+       lowerCaseLine.Find("application/pgp-encrypted") != kNotFound) {
+     m_seenMpPGP = true;
+     m_partCharset.AssignLiteral(
+         "UTF-8");  // We return decrypted content as UTF-8.
+   }
+   int32_t start;
+   if (m_isMultipart && (start = lowerCaseLine.Find("boundary=")) != kNotFound) {
+     start += 9;  // strlen("boundary=")
