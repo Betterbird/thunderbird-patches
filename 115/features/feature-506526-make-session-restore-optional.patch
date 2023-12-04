@@ -1,0 +1,161 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1701724949 -3600
+# Parent  31aeb002f9e2828488c338df3df67081dd4d22e8
+Bug 506526 - there should be a pref to turn off session restore
+Make tabs session restore optional.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -572,16 +572,19 @@ pref("mail.tabs.autoHide", true);
+ pref("mail.tabs.closeWindowWithLastTab", true);
+ pref("mail.tabs.firstTab.startupURI", "");
+ pref("mail.tabs.vertical", false);
+ pref("mail.tabs.alwaysShowCloseButton", true);
+ 
+ // Allow the tabs to be in the titlebar on supported systems
+ pref("mail.tabs.drawInTitlebar", true);
+ 
++// Save and restore the tabs session on startup.
++pref("mail.tabs.restoreSession", true);
++
+ // The breakpad report server to link to in about:crashes
+ pref("breakpad.reportURL", "https://crash-stats.mozilla.com/report/index/");
+ 
+ // OS Integrated Search and Indexing
+ #ifdef XP_WIN
+ pref("mail.winsearch.enable", false);
+ pref("mail.winsearch.firstRunDone", false);
+ #else
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -730,19 +730,28 @@ function HandleAppCommandEvent(evt) {
+     default:
+       break;
+   }
+ }
+ 
+ /**
+  * Called by the session store manager periodically and at shutdown to get
+  * the state of this window for persistence.
++ *
++ * @param {boolean} shutdown - If true, called from the unload handler and the
++ *   last 3pane window is being closed.
+  */
+-function getWindowStateForSessionPersistence() {
++function getWindowStateForSessionPersistence(shutdown = false) {
+   let tabmail = document.getElementById("tabmail");
++  if (shutdown && !Services.prefs.getBoolPref("mail.tabs.restoreSession")) {
++    // Only restore the special firstTab, always at 0.
++    let firstTab = tabmail.tabInfo.find(t => t.first);
++    tabmail.tabInfo = firstTab ? [firstTab] : [];
++  }
++
+   let tabsState = tabmail.persistTabs();
+   return { type: "3pane", tabs: tabsState };
+ }
+ 
+ /**
+  * Attempt to restore the previous tab states.
+  *
+  * @param {boolean} aDontRestoreFirstTab - If this is true, the first tab will
+diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
+--- a/mail/components/preferences/general.inc.xhtml
++++ b/mail/components/preferences/general.inc.xhtml
+@@ -135,16 +135,23 @@
+       <hbox>
+         <checkbox id="drawInTitlebar"
+                   data-l10n-id="draw-in-titlebar-label"
+                   preference="mail.tabs.drawInTitlebar"/>
+         <spacer flex="1"/>
+       </hbox>
+       <hbox>
+         <vbox>
++          <checkbox id="restoreTabs"
++                    data-l10n-id="restore-tabs-session-label"
++                    preference="mail.tabs.restoreSession"/>
++        </vbox>
++        <spacer flex="1"/>
++      </hbox>      <hbox>
++        <vbox>
+           <checkbox id="autoHideTabbar"
+                     data-l10n-id="auto-hide-tabbar-label"
+                     preference="mail.tabs.autoHide"/>
+           <description data-l10n-id="auto-hide-tabbar-description"
+                        class="tip-caption indent"/>
+         </vbox>
+         <spacer flex="1"/>
+       </hbox>
+diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
+--- a/mail/components/preferences/general.js
++++ b/mail/components/preferences/general.js
+@@ -89,16 +89,17 @@ Preferences.addAll([
+   { id: "browser.cache.disk.capacity", type: "int" },
+   { id: "browser.cache.disk.smart_size.enabled", inverted: true, type: "bool" },
+   { id: "privacy.clearOnShutdown.cache", type: "bool" },
+   { id: "layers.acceleration.disabled", type: "bool", inverted: true },
+   { id: "searchintegration.enable", type: "bool" },
+   { id: "mail.tabs.drawInTitlebar", type: "bool" },
+   { id: "mail.tabs.autoHide", type: "bool" },
+   { id: "mail.tabs.vertical", type: "bool" },
++  { id: "mail.tabs.restoreSession", type: "bool" },
+   { id: "mailnews.attachments.display.top", type: "bool" },
+ ]);
+ if (AppConstants.platform == "win" || AppConstants.platform == "linux") {
+   Preferences.add({ id: "mail.minimizeToTray", type: "bool" });
+ }
+ if (AppConstants.platform != "macosx") {
+   Preferences.add({ id: "mail.biff.show_alert", type: "bool" });
+ }
+diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
+--- a/mail/locales/en-US/messenger/preferences/preferences.ftl
++++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
+@@ -267,16 +267,20 @@ browsing-gtk-use-non-overlay-scrollbars 
+     .accesskey = c
+ 
+ window-layout-legend = Window Layout
+ 
+ draw-in-titlebar-label =
+     .label = Hide system window titlebar
+     .accesskey = H
+ 
++restore-tabs-session-label =
++    .label = Open previous tabs
++    .accesskey = b
++
+ auto-hide-tabbar-label =
+     .label = Auto hide tab bar
+     .accesskey = A
+ auto-hide-tabbar-description = Hide the tab bar when only a single tab is open
+ 
+ vertical-tabs-label =
+     .label = Show tab bar vertically
+     .accesskey = v
+diff --git a/mail/modules/SessionStoreManager.jsm b/mail/modules/SessionStoreManager.jsm
+--- a/mail/modules/SessionStoreManager.jsm
++++ b/mail/modules/SessionStoreManager.jsm
+@@ -256,17 +256,17 @@ var SessionStoreManager = {
+ 
+       if (lastWindow) {
+         // last chance to save any state for the current session since
+         // aWindow is the last 3pane window and the "quit-application-granted"
+         // event is observed AFTER this.
+         this.stopPeriodicSave();
+ 
+         let state = this._createStateObject();
+-        state.windows.push(aWindow.getWindowStateForSessionPersistence());
++        state.windows.push(aWindow.getWindowStateForSessionPersistence(true));
+         this._saveStateObject(state);
+ 
+         // XXX this is to ensure we don't clobber the saved state when we
+         // observe the "quit-application-granted" event.
+         this._shutdownStateSaved = true;
+       }
+     }
+   },
