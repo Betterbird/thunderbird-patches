@@ -90,3 +90,41 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="        >> localization\ja\messenger\preferences\preferences.ftl
 %lecho% "    .label = メッセージの上部に添付ファイルリストを表示する" >> localization\ja\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"                     >> localization\ja\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: restore-tabs-session-label =
+::     .value = Restore tabs on startup:
+:: restore-all-tabs =
+::     .label = All tabs
+::     .accesskey = t
+:: restore-system-tabs =
+::     .label = System tabs
+::     .accesskey = s
+:: restore-no-tabs =
+::     .label = None
+::     .accesskey = n
+%lecho% "restore-tabs-session-label ="  >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .value = 起動時のタブの復元:" >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "restore-all-tabs ="            >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .label = すべてのタブ"        >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = t"            >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "restore-system-tabs ="         >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .label = システムタブ"         >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = s"            >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "restore-no-tabs ="             >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .label = なし"              >> localization\ja\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = n"            >> localization\ja\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: menu-view-layout-widethread =
+::     .label = Wide Thread View
+::     .accesskey = T
+:: menu-view-layout-stacked =
+::     .label = Stacked View
+::     .accesskey = S
+%lecho% "menu-view-layout-widethread =" >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = ワイドスレッドビュー"   >> localization\ja\messenger\menubar.ftl
+%lecho% "    .accesskey = T"            >> localization\ja\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="    >> localization\ja\messenger\menubar.ftl
+%lecho% "    .label = スタックビュー"        >> localization\ja\messenger\menubar.ftl
+%lecho% "    .accesskey = S"            >> localization\ja\messenger\menubar.ftl

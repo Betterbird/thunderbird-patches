@@ -57,3 +57,22 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="       >> localization\en-GB\messenger\preferences\preferences.ftl
 %lecho% "    .label = Display attachment list above message" >> localization\en-GB\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = p"                    >> localization\en-GB\messenger\preferences\preferences.ftl
+
+%lecho% "restore-tabs-session-label ="          >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .value = Restore tabs on startup:" >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "restore-all-tabs ="                    >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .label = All tabs"                 >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = t"                    >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "restore-system-tabs ="                 >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .label = System tabs"              >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = s"                    >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "restore-no-tabs ="                     >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .label = None"                     >> localization\en-GB\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = n"                    >> localization\en-GB\messenger\preferences\preferences.ftl
+
+%lecho% "menu-view-layout-widethread =" >> localization\en-GB\messenger\menubar.ftl
+%lecho% "    .label = Wide Thread View" >> localization\en-GB\messenger\menubar.ftl
+%lecho% "    .accesskey = T"            >> localization\en-GB\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="    >> localization\en-GB\messenger\menubar.ftl
+%lecho% "    .label = Stacked View"     >> localization\en-GB\messenger\menubar.ftl
+%lecho% "    .accesskey = S"            >> localization\en-GB\messenger\menubar.ftl

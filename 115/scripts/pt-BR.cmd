@@ -76,6 +76,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "unreadMsgStatus=Não lidas: %%S"      >> chrome\pt-BR\locale\pt-BR\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Selecionadas: %%S" >> chrome\pt-BR\locale\pt-BR\messenger\messenger.properties
 %lecho% "totalMsgStatus=Total: %%S"           >> chrome\pt-BR\locale\pt-BR\messenger\messenger.properties
+
 :: Original strings:
 :: vertical-tabs-label =
 ::     .label = Enable vertical tabs
@@ -89,3 +90,41 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="          >> localization\pt-BR\messenger\preferences\preferences.ftl
 %lecho% "    .label = Mostrar anexos acima da mensagem" >> localization\pt-BR\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = i"                       >> localization\pt-BR\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: restore-tabs-session-label =
+::     .value = Restore tabs on startup:
+:: restore-all-tabs =
+::     .label = All tabs
+::     .accesskey = t
+:: restore-system-tabs =
+::     .label = System tabs
+::     .accesskey = s
+:: restore-no-tabs =
+::     .label = None
+::     .accesskey = n
+%lecho% "restore-tabs-session-label ="             >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .value = Restaurar guias ao iniciar:" >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "restore-all-tabs ="                       >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .label = Todas as guias"              >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = T"                       >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "restore-system-tabs ="                    >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .label = Guias do sistema"            >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = s"                       >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "restore-no-tabs ="                        >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .label = Nenhuma"                     >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = N"                       >> localization\pt-BR\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: menu-view-layout-widethread =
+::     .label = Wide Thread View
+::     .accesskey = T
+:: menu-view-layout-stacked =
+::     .label = Stacked View
+::     .accesskey = S
+%lecho% "menu-view-layout-widethread ="         >> localization\pt-BR\messenger\menubar.ftl
+%lecho% "    .label = Lista ampla de mensagens" >> localization\pt-BR\messenger\menubar.ftl
+%lecho% "    .accesskey = a"                    >> localization\pt-BR\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="            >> localization\pt-BR\messenger\menubar.ftl
+%lecho% "    .label = Empilhado"                >> localization\pt-BR\messenger\menubar.ftl
+%lecho% "    .accesskey = E"                    >> localization\pt-BR\messenger\menubar.ftl
