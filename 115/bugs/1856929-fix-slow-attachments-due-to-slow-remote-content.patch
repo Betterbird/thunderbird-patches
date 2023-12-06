@@ -1,0 +1,241 @@
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1701863624 -3600
+# Node ID 47d9fa4780d5ebbde80e0c4442e8b2f46f19f49d
+# Parent  85fbb3a1a6eab1c11abaae719310595459a5ebfc
+Bug 1856929 - Stop using STATE_STOP to trigger message display functions. r=mkmelin
+This isn't ever going to work the way I'd originally intended, so instead I've added a new
+nsIMailProgressListener callback for handling attachments as soon as they're available, and will
+do everything else on the DOMContentLoaded event.
+
+Differential Revision: https://phabricator.services.mozilla.com/D192665
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -524,88 +524,124 @@ var MsgHdrViewObserver = {
+ var messageProgressListener = {
+   QueryInterface: ChromeUtils.generateQI([
+     "nsIMailProgressListener",
+     "nsIWebProgressListener",
+     "nsISupportsWeakReference",
+   ]),
+ 
+   /**
++   * Step 1: A message has started loading (if the flags include STATE_START).
++   *
++   * @param {nsIWebProgress} webProgress
++   * @param {nsIRequest} request
++   * @param {integer} stateFlags
++   * @param {nsresult} status
++   * @see {nsIWebProgressListener}
++   */
++  onStateChange(webProgress, request, stateFlags, status) {
++    if (
++      !(request instanceof Ci.nsIMailChannel) ||
++      !(stateFlags & Ci.nsIWebProgressListener.STATE_START)
++    ) {
++      return;
++    }
++
++    // Clear the previously displayed message.
++    const previousDocElement =
++      getMessagePaneBrowser().contentDocument?.documentElement;
++    if (previousDocElement) {
++      previousDocElement.style.display = "none";
++    }
++    ClearAttachmentList();
++    gMessageNotificationBar.clearMsgNotifications();
++
++    request.listener = this;
++    request.smimeHeaderSink = smimeHeaderSink;
++    this.onStartHeaders();
++  },
++
++  /**
++   * Step 2: The message headers are available on the channel.
++   *
+    * @param {nsIMailChannel} mailChannel
+    * @see {nsIMailProgressListener}
+    */
+   onHeadersComplete(mailChannel) {
++    const domWindow = getMessagePaneBrowser().docShell.DOMWindow;
++    domWindow.addEventListener(
++      "DOMContentLoaded",
++      event => this.onDOMContentLoaded(event),
++      { once: true }
++    );
+     this.processHeaders(mailChannel.headerNames, mailChannel.headerValues);
+   },
+ 
+   /**
++   * Step 3: The parser has finished reading the body of the message.
++   *
+    * @param {nsIMailChannel} mailChannel
+    * @see {nsIMailProgressListener}
+    */
+   onBodyComplete(mailChannel) {
+     autoMarkAsRead();
+   },
+ 
+   /**
+-   * @param {nsIWebProgress} webProgress
+-   * @param {nsIRequest} request
+-   * @param {integer} stateFlags
+-   * @param {nsresult} status
+-   * @see {nsIWebProgressListener}
++   * Step 4: The attachment information is available on the channel.
++   *
++   * @param {nsIMailChannel} mailChannel
++   * @see {nsIMailProgressListener}
+    */
+-  onStateChange(webProgress, request, stateFlags, status) {
+-    if (!(request instanceof Ci.nsIMailChannel)) {
++  onAttachmentsComplete(mailChannel) {
++    for (const attachment of mailChannel.attachments) {
++      this.handleAttachment(
++        attachment.getProperty("contentType"),
++        attachment.getProperty("url"),
++        attachment.getProperty("displayName"),
++        attachment.getProperty("uri"),
++        attachment.getProperty("notDownloaded")
++      );
++      for (const key of [
++        "X-Mozilla-PartURL",
++        "X-Mozilla-PartSize",
++        "X-Mozilla-PartDownloaded",
++        "Content-Description",
++        "Content-Type",
++        "Content-Encoding",
++      ]) {
++        if (attachment.hasKey(key)) {
++          this.addAttachmentField(key, attachment.getProperty(key));
++        }
++      }
++    }
++  },
++
++  /**
++   * Step 5: The message HTML is complete, but external resources such as may
++   * not have loaded yet. The docShell will handle them – for our purposes,
++   * message loading has finished.
++   */
++  onDOMContentLoaded(event) {
++    const { docShell } = event.target.ownerGlobal;
++    if (!docShell.isTopLevelContentDocShell) {
+       return;
+     }
+-    if (stateFlags & Ci.nsIWebProgressListener.STATE_START) {
+-      // Clear the previously displayed message.
+-      const previousDocElement =
+-        getMessagePaneBrowser().contentDocument?.documentElement;
+-      if (previousDocElement) {
+-        previousDocElement.style.display = "none";
+-      }
+-      ClearAttachmentList();
+-      gMessageNotificationBar.clearMsgNotifications();
+-
+-      request.listener = this;
+-      request.smimeHeaderSink = smimeHeaderSink;
+-      this.onStartHeaders();
+-    } else if (stateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
+-      currentCharacterSet = request.mailCharacterSet;
+-      request.smimeHeaderSink = null;
+-      if (request.imipItem) {
+-        calImipBar.showImipBar(request.imipItem, request.imipMethod);
+-      }
+-      for (let attachment of request.attachments) {
+-        this.handleAttachment(
+-          attachment.getProperty("contentType"),
+-          attachment.getProperty("url"),
+-          attachment.getProperty("displayName"),
+-          attachment.getProperty("uri"),
+-          attachment.getProperty("notDownloaded")
+-        );
+-        for (let key of [
+-          "X-Mozilla-PartURL",
+-          "X-Mozilla-PartSize",
+-          "X-Mozilla-PartDownloaded",
+-          "Content-Description",
+-          "Content-Type",
+-          "Content-Encoding",
+-        ]) {
+-          if (attachment.hasKey(key)) {
+-            this.addAttachmentField(key, attachment.getProperty(key));
+-          }
+-        }
+-      }
+-      this.onEndAllAttachments();
+-      request.QueryInterface(Ci.nsIChannel);
+-      let uri = request.URI.QueryInterface(Ci.nsIMsgMailNewsUrl);
+-      this.onEndMsgHeaders(uri);
+-      this.onEndMsgDownload(uri);
++
++    const channel = docShell.currentDocumentChannel;
++    channel.QueryInterface(Ci.nsIMailChannel);
++    currentCharacterSet = channel.mailCharacterSet;
++    channel.smimeHeaderSink = null;
++    if (channel.imipItem) {
++      calImipBar.showImipBar(channel.imipItem, channel.imipMethod);
+     }
++    this.onEndAllAttachments();
++    const uri = channel.URI.QueryInterface(Ci.nsIMsgMailNewsUrl);
++    this.onEndMsgHeaders(uri);
++    this.onEndMsgDownload(uri);
+   },
+ 
+   onStartHeaders() {
+     // Every time we start to redisplay a message, check the view all headers
+     // pref...
+     let showAllHeadersPref = Services.prefs.getIntPref("mail.show_headers");
+     if (showAllHeadersPref == 2) {
+       // eslint-disable-next-line no-global-assign
+diff --git a/mailnews/base/public/nsIMailChannel.idl b/mailnews/base/public/nsIMailChannel.idl
+--- a/mailnews/base/public/nsIMailChannel.idl
++++ b/mailnews/base/public/nsIMailChannel.idl
+@@ -95,9 +95,15 @@ interface nsIMailProgressListener : nsIS
+    */
+   void onHeadersComplete(in nsIMailChannel mailChannel);
+ 
+   /**
+    * Receive a notification from the parser that it has finished outputting
+    * the message body to the channel.
+    */
+   void onBodyComplete(in nsIMailChannel mailChannel);
++
++  /**
++   * Receive a notification from the parser that it has finished outputting
++   * the attachment information to the channel.
++   */
++  void onAttachmentsComplete(in nsIMailChannel mailChannel);
+ };
+diff --git a/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp b/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp
+--- a/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp
++++ b/mailnews/mime/emitters/nsMimeHtmlEmitter.cpp
+@@ -472,16 +472,26 @@ nsresult nsMimeHtmlDisplayEmitter::EndAt
+   mSkipAttachment = false;  // reset it for next attachment round
+   return NS_OK;
+ }
+ 
+ nsresult nsMimeHtmlDisplayEmitter::EndAllAttachments() {
+   UtilityWrite("</table>");
+   UtilityWrite("</div>");
+ 
++  // Notify the front end that we've finished reading the body.
++  nsresult rv;
++  nsCOMPtr<nsIMailChannel> mailChannel = do_QueryInterface(mChannel, &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++  nsCOMPtr<nsIMailProgressListener> listener;
++  mailChannel->GetListener(getter_AddRefs(listener));
++  if (listener) {
++    listener->OnAttachmentsComplete(mailChannel);
++  }
++
+   return NS_OK;
+ }
+ 
+ nsresult nsMimeHtmlDisplayEmitter::WriteBody(const nsACString& buf,
+                                              uint32_t* amountWritten) {
+   Write(buf, amountWritten);
+   return NS_OK;
+ }

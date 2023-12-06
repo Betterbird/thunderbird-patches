@@ -1,0 +1,434 @@
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1701862282 -3600
+# Node ID 87df5e8375243b6d2668989487bcd14527676c32
+# Parent  bceafb305be421b62083812030a3de51c2f135f2
+Bug 1862822 - Don't mark messages in background tabs as read. r=mkmelin
+
+This changes uses the page visibility API to avoid marking messages as read until the tab is
+switched to. First I had to mark background browsers as inactive for the API to work.
+
+In order to test the behaviour with an IMAP server, I had to modify the IMAP fakeserver to send
+message flags in the response to a FETCH command, as real servers do. Then I discovered the \Seen
+flag isn't propagated if it's the only flag, which seems like a real problem that should be fixed.
+
+Differential Revision: https://phabricator.services.mozilla.com/D192654
+
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -432,16 +432,19 @@ function displayMessage(uri, viewWrapper
+   if (gMessage.flags & Ci.nsMsgMessageFlags.HasRe) {
+     document.title = `Re: ${gMessage.mime2DecodedSubject || ""}`;
+   } else {
+     document.title = gMessage.mime2DecodedSubject;
+   }
+ 
+   let browser = getMessagePaneBrowser();
+   const browserChanged = MailE10SUtils.changeRemoteness(browser, null);
++  // The message pane browser should inherit `docShellIsActive` from the
++  // about:message browser, but changing remoteness causes that to not happen.
++  browser.docShellIsActive = !document.hidden;
+   browser.docShell.allowAuth = false;
+   browser.docShell.allowDNSPrefetch = false;
+ 
+   if (browserChanged) {
+     browser.docShell
+       ?.QueryInterface(Ci.nsIWebProgress)
+       .addProgressListener(
+         top.msgWindow.statusFeedback,
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -4263,16 +4263,25 @@ function OnMsgLoaded(aUrl) {
+  * we should do so.
+  */
+ function autoMarkAsRead() {
+   if (!gMessage?.folder) {
+     // The message can't be marked read or unread.
+     return;
+   }
+ 
++  if (document.hidden) {
++    // We're in an inactive docShell (probably a background tab). Wait until
++    // it becomes active before marking the message as read.
++    document.addEventListener("visibilitychange", () => autoMarkAsRead(), {
++      once: true,
++    });
++    return;
++  }
++
+   let markReadAutoMode = Services.prefs.getBoolPref(
+     "mailnews.mark_message_read.auto"
+   );
+ 
+   // We just finished loading a message. If messages are to be marked as read
+   // automatically, set a timer to mark the message is read after n seconds
+   // where n can be configured by the user.
+   if (!gMessage.isRead && markReadAutoMode) {
+diff --git a/mail/base/content/tabmail.js b/mail/base/content/tabmail.js
+--- a/mail/base/content/tabmail.js
++++ b/mail/base/content/tabmail.js
+@@ -869,21 +869,27 @@ var { UIFontSize } = ChromeUtils.import(
+         let oldPanel = [...this.panelContainer.children].find(p =>
+           p.hasAttribute("selected")
+         );
+         // Blur the currently focused element only if we're actually switching
+         // to the newly opened tab.
+         if (oldPanel && !background) {
+           this.rememberLastActiveElement(oldTab);
+           oldPanel.removeAttribute("selected");
++          if (oldTab.chromeBrowser) {
++            oldTab.chromeBrowser.docShellIsActive = false;
++          }
+         }
+ 
+         this.panelContainer.selectedPanel.setAttribute("selected", "true");
+         let tabOpenFunc = tab.mode.openTab || tab.mode.tabType.openTab;
+         tabOpenFunc.apply(tab.mode.tabType, [tab, aArgs]);
++        if (tab.chromeBrowser) {
++          tab.chromeBrowser.docShellIsActive = !background;
++        }
+ 
+         if (!t.linkedPanel) {
+           if (!tab.panel.id) {
+             // No id set. Create our own.
+             tab.panel.id = "unnamedTab" + Math.random().toString().substring(2);
+             console.warn(`Tab mode ${aTabModeName} should set an id
+             on the first argument of openTab.`);
+           }
+@@ -1703,21 +1709,27 @@ var { UIFontSize } = ChromeUtils.import(
+           p.hasAttribute("selected")
+         );
+         let tab = (this.currentTabInfo =
+           this.tabInfo[this.tabContainer.selectedIndex]);
+         // Update the selected attribute on the current and old tab panel.
+         if (oldPanel) {
+           this.rememberLastActiveElement(oldTab);
+           oldPanel.removeAttribute("selected");
++          if (oldTab.chromeBrowser) {
++            oldTab.chromeBrowser.docShellIsActive = false;
++          }
+         }
+ 
+         this.panelContainer.selectedPanel.setAttribute("selected", "true");
+         let showTabFunc = tab.mode.showTab || tab.mode.tabType.showTab;
+         showTabFunc.call(tab.mode.tabType, tab);
++        if (tab.chromeBrowser) {
++          tab.chromeBrowser.docShellIsActive = true;
++        }
+ 
+         let browser = this.getBrowserForTab(tab);
+         if (browser && !tab.browser) {
+           tab.browser = browser;
+           if (!tab.linkedBrowser) {
+             tab.linkedBrowser = browser;
+           }
+         }
+diff --git a/mail/base/test/browser/browser.ini b/mail/base/test/browser/browser.ini
+--- a/mail/base/test/browser/browser.ini
++++ b/mail/base/test/browser/browser.ini
+@@ -29,16 +29,17 @@ tags = contextmenu
+ tags = webextensions
+ [browser_goMenu.js]
+ skip-if = os == 'mac'
+ [browser_interactionTelemetry.js]
+ [browser_linkHandler.js]
+ [browser_mailContext.js]
+ tags = contextmenu
+ [browser_mailTabsAndWindows.js]
++[browser_markAsRead.js]
+ [browser_menulist.js]
+ skip-if = os == 'mac'
+ [browser_messageMenu.js]
+ skip-if = os == 'mac'
+ [browser_navigation.js]
+ [browser_orderableTreeListbox.js]
+ [browser_paneFocus.js]
+ [browser_paneSplitter.js]
+diff --git a/mail/base/test/browser/browser_markAsRead.js b/mail/base/test/browser/browser_markAsRead.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/browser/browser_markAsRead.js
+@@ -0,0 +1,226 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that a message does not get marked as read if it is opened in a
++ * background tab.
++ */
++
++const { IMAPServer } = ChromeUtils.importESModule(
++  "resource://testing-common/IMAPServer.sys.mjs"
++);
++const { MessageGenerator } = ChromeUtils.import(
++  "resource://testing-common/mailnews/MessageGenerator.jsm"
++);
++
++let localTestFolder, imapTestFolder;
++
++add_setup(async function () {
++  // We need to get messages directly from the server when displaying them,
++  // or this test isn't really testing what it should.
++  Services.prefs.setBoolPref("mail.server.default.offline_download", false);
++
++  const generator = new MessageGenerator();
++
++  MailServices.accounts.createLocalMailAccount();
++  const account = MailServices.accounts.accounts[0];
++  const rootFolder = account.incomingServer.rootFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  localTestFolder = rootFolder
++    .createLocalSubfolder("markAsRead")
++    .QueryInterface(Ci.nsIMsgLocalMailFolder);
++
++  localTestFolder.addMessageBatch(
++    generator.makeMessages({}).map(message => message.toMboxString())
++  );
++
++  const imapServer = new IMAPServer(this);
++  const imapAccount = MailServices.accounts.createAccount();
++  imapAccount.addIdentity(MailServices.accounts.createIdentity());
++  imapAccount.incomingServer = MailServices.accounts.createIncomingServer(
++    `${imapAccount.key}user`,
++    "localhost",
++    "imap"
++  );
++  imapAccount.incomingServer.port = imapServer.port;
++  imapAccount.incomingServer.username = "user";
++  imapAccount.incomingServer.password = "password";
++  const imapRootFolder = imapAccount.incomingServer.rootFolder;
++  imapTestFolder = imapRootFolder.getFolderWithFlags(Ci.nsMsgFolderFlags.Inbox);
++  await imapServer.addMessages(imapTestFolder, generator.makeMessages({}));
++
++  registerCleanupFunction(() => {
++    MailServices.accounts.removeAccount(account, false);
++    MailServices.accounts.removeAccount(imapAccount, false);
++    Services.prefs.clearUserPref("mail.server.default.offline_download");
++    Services.prefs.clearUserPref("mailnews.mark_message_read.auto");
++    Services.prefs.clearUserPref("mailnews.mark_message_read.delay");
++    Services.prefs.clearUserPref("mailnews.mark_message_read.delay.interval");
++  });
++});
++
++add_task(async function testLocal() {
++  await subtest(localTestFolder);
++});
++
++add_task(async function testIMAP() {
++  // Our IMAP code marks a message as read if we have to fetch it from the
++  // server for display, unless we tell it not to. Check we didn't break that.
++  await subtest(imapTestFolder);
++});
++
++async function subtest(testFolder) {
++  const tabmail = document.getElementById("tabmail");
++  const firstAbout3Pane = tabmail.currentAbout3Pane;
++  firstAbout3Pane.displayFolder(testFolder);
++  const testMessages = testFolder.messages;
++
++  // Open a message in the first tab. It should get marked as read immediately.
++
++  let message = testMessages.getNext();
++  Assert.ok(!message.isRead, "message 0 should not be read before load");
++  firstAbout3Pane.threadTree.selectedIndex =
++    firstAbout3Pane.gDBView.findIndexOfMsgHdr(message, false);
++  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
++  await TestUtils.waitForCondition(
++    () => message.isRead,
++    "waiting for message 0 to be marked as read"
++  );
++
++  firstAbout3Pane.threadTree.selectedIndex = -1; // Unload the message.
++
++  // Open a message in a background tab. It should not get marked as read.
++
++  message = testMessages.getNext();
++  Assert.ok(!message.isRead, "message 1 should not be read before load");
++  window.OpenMessageInNewTab(message, { background: true });
++  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
++  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++  await new Promise(resolve => setTimeout(resolve, 1000));
++  Assert.ok(
++    !message.isRead,
++    "message 1 should not be read after opening in a background tab"
++  );
++
++  // Switch to the tab. The message should get marked as read immediately.
++
++  tabmail.switchToTab(1);
++  await TestUtils.waitForTick();
++  Assert.ok(
++    message.isRead,
++    "message 1 should be read after switching to the background tab"
++  );
++  tabmail.closeTab(1);
++
++  // With the marking delayed by preferences, open a message in a background tab.
++  // It should not get marked as read.
++
++  Services.prefs.setBoolPref("mailnews.mark_message_read.delay", true);
++  Services.prefs.setIntPref("mailnews.mark_message_read.delay.interval", 2);
++
++  message = testMessages.getNext();
++  Assert.ok(!message.isRead, "message 2 should not be read before load");
++  window.OpenMessageInNewTab(message, { background: true });
++  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
++  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++  await new Promise(resolve => setTimeout(resolve, 3000));
++  Assert.ok(
++    !message.isRead,
++    "message 2 should not be read after opening in a background tab"
++  );
++
++  // Switch to the tab. The message should get marked as read after the delay.
++
++  const timeBeforeSwitchingTab = Date.now();
++  tabmail.switchToTab(1);
++  Assert.ok(
++    !message.isRead,
++    "message 2 should not be read immediately after switching to the background tab"
++  );
++  await TestUtils.waitForCondition(
++    () => message.isRead,
++    "waiting for message 2 to be marked as read"
++  );
++  Assert.greaterOrEqual(
++    Date.now() - timeBeforeSwitchingTab,
++    2000,
++    "message 2 should be read after switching to the background tab and the 2s delay"
++  );
++  tabmail.closeTab(1);
++
++  Services.prefs.setBoolPref("mailnews.mark_message_read.delay", false);
++
++  // With the marking disabled by preferences, open a message in a background
++  // tab. It should not get marked as read.
++
++  Services.prefs.setBoolPref("mailnews.mark_message_read.auto", false);
++
++  message = testMessages.getNext();
++  Assert.ok(!message.isRead, "message 3 should not be read before load");
++  window.OpenMessageInNewTab(message, { background: true });
++  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
++  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++  await new Promise(resolve => setTimeout(resolve, 1000));
++  Assert.ok(
++    !message.isRead,
++    "message 3 should not be read after opening in a background tab"
++  );
++
++  // Switch to the tab. The message should not get marked as read.
++
++  tabmail.switchToTab(1);
++  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++  await new Promise(resolve => setTimeout(resolve, 1000));
++  Assert.ok(
++    !message.isRead,
++    "message 3 should not be read after switching to the background tab"
++  );
++  tabmail.closeTab(1);
++
++  Services.prefs.setBoolPref("mailnews.mark_message_read.auto", true);
++
++  // Open a new 3-pane tab in the background and load a message in it. The
++  // message should not get marked as read.
++
++  window.MsgOpenNewTabForFolders([testFolder], {
++    background: true,
++    messagePaneVisible: true,
++  });
++  const secondAbout3Pane = tabmail.tabInfo[1].chromeBrowser.contentWindow;
++  await BrowserTestUtils.waitForEvent(secondAbout3Pane, "aboutMessageLoaded");
++
++  message = testMessages.getNext();
++  Assert.ok(!message.isRead, "message 4 should not be read before load");
++  secondAbout3Pane.threadTree.selectedIndex =
++    secondAbout3Pane.gDBView.findIndexOfMsgHdr(message, false);
++  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
++  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++  await new Promise(resolve => setTimeout(resolve, 1000));
++  Assert.ok(
++    !message.isRead,
++    "message 4 should not be read after opening in a background tab"
++  );
++
++  tabmail.switchToTab(1);
++  await TestUtils.waitForTick();
++  Assert.ok(
++    message.isRead,
++    "message 4 should be read after switching to the background tab"
++  );
++  tabmail.closeTab(1);
++
++  // Open a message in a new foreground tab. It should get marked as read
++  // immediately.
++
++  message = testMessages.getNext();
++  Assert.ok(!message.isRead, "message 5 should not be read before load");
++  window.OpenMessageInNewTab(message, { background: false });
++  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
++  Assert.ok(
++    message.isRead,
++    "message 5 should be read after opening the foreground tab"
++  );
++  tabmail.closeTab(1);
++}
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -4889,19 +4889,17 @@ void nsImapProtocol::SetConnectionStatus
+ }
+ 
+ void nsImapProtocol::NotifyMessageFlags(imapMessageFlagsType flags,
+                                         const nsACString& keywords,
+                                         nsMsgKey key, uint64_t highestModSeq) {
+   if (m_imapMessageSink) {
+     // if we're selecting the folder, don't need to report the flags; we've
+     // already fetched them.
+-    if (m_imapAction != nsIImapUrl::nsImapSelectFolder &&
+-        (m_imapAction != nsIImapUrl::nsImapMsgFetch ||
+-         (flags & ~kImapMsgRecentFlag) != kImapMsgSeenFlag))
++    if (m_imapAction != nsIImapUrl::nsImapSelectFolder)
+       m_imapMessageSink->NotifyMessageFlags(flags, keywords, key,
+                                             highestModSeq);
+   }
+ }
+ 
+ void nsImapProtocol::NotifySearchHit(const char* hitLine) {
+   nsresult rv;
+   nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl =
+diff --git a/mailnews/imap/src/nsImapService.cpp b/mailnews/imap/src/nsImapService.cpp
+--- a/mailnews/imap/src/nsImapService.cpp
++++ b/mailnews/imap/src/nsImapService.cpp
+@@ -413,16 +413,27 @@ NS_IMETHODIMP nsImapService::LoadMessage
+                                 &markReadAuto);
+         bool markReadDelay = false;
+         prefBranch->GetBoolPref("mailnews.mark_message_read.delay",
+                                 &markReadDelay);
+         forcePeek = (!markReadAuto || markReadDelay ||
+                      (dontMarkAsReadPos != kNotFound));
+       }
+ 
++      if (!forcePeek) {
++        // If we're loading a message in an inactive docShell, don't let it
++        // be marked as read immediately.
++        nsCOMPtr<nsIDocShell> docShell =
++            do_QueryInterface(aDisplayConsumer, &rv);
++        if (NS_SUCCEEDED(rv) && docShell) {
++          auto* bc = docShell->GetBrowsingContext();
++          forcePeek = !bc->IsActive();
++        }
++      }
++
+       nsCOMPtr<nsIURI> dummyURI;
+       rv = FetchMessage(imapUrl,
+                         forcePeek ? nsIImapUrl::nsImapMsgFetchPeek
+                                   : nsIImapUrl::nsImapMsgFetch,
+                         folder, imapMessageSink, aMsgWindow, aDisplayConsumer,
+                         msgKey, false, getter_AddRefs(dummyURI));
+     }
+   }
