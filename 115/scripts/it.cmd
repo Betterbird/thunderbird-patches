@@ -90,3 +90,41 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "attachments-display-top-label ="                     >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .label = Mostra gli allegati sopra il messaggio" >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = o"                                  >> localization\it\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: restore-tabs-session-label =
+::     .value = Restore tabs on startup:
+:: restore-all-tabs =
+::     .label = All tabs
+::     .accesskey = t
+:: restore-system-tabs =
+::     .label = System tabs
+::     .accesskey = s
+:: restore-no-tabs =
+::     .label = None
+::     .accesskey = n
+%lecho% "restore-tabs-session-label ="                    >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .value = Ripristino delle schede all’avvio:" >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "restore-all-tabs ="                              >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .label = Tutte le schede"                    >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = T"                              >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "restore-system-tabs ="                           >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .label = Schede di sistema"                  >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = S"                              >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "restore-no-tabs ="                               >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .label = Nessuno"                            >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = N"                              >> localization\it\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: menu-view-layout-widethread =
+::     .label = Wide Thread View
+::     .accesskey = T
+:: menu-view-layout-stacked =
+::     .label = Stacked View
+::     .accesskey = S
+%lecho% "menu-view-layout-widethread ="         >> localization\it\messenger\menubar.ftl
+%lecho% "    .label = Ampio elenco di messaggi" >> localization\it\messenger\menubar.ftl
+%lecho% "    .accesskey = A"                    >> localization\it\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="            >> localization\it\messenger\menubar.ftl
+%lecho% "    .label = Vista impilata"           >> localization\it\messenger\menubar.ftl
+%lecho% "    .accesskey = i"                    >> localization\it\messenger\menubar.ftl

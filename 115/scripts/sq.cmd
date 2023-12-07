@@ -76,3 +76,55 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "unreadMsgStatus=Të palexuar: %%S"      >> chrome\sq\locale\sq\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Të përzgjedhur: %%S" >> chrome\sq\locale\sq\messenger\messenger.properties
 %lecho% "totalMsgStatus=Gjithsej: %%S"          >> chrome\sq\locale\sq\messenger\messenger.properties
+
+:: Original strings:
+:: vertical-tabs-label =
+::     .label = Enable vertical tabs
+::     .accesskey = v
+:: attachments-display-top-label =
+::     .label = Display attachment list above message
+::     .accesskey = p
+%lecho% "vertical-tabs-label ="               >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .label = Shfaqe vertikalisht shtyllën e skedave" >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = v"                  >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "attachments-display-top-label ="     >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .label = Shfaqe listën e bashkëngjitjeve mbi mesazhin" >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = m"                  >> localization\sq\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: restore-tabs-session-label =
+::     .value = Restore tabs on startup:
+:: restore-all-tabs =
+::     .label = All tabs
+::     .accesskey = t
+:: restore-system-tabs =
+::     .label = System tabs
+::     .accesskey = s
+:: restore-no-tabs =
+::     .label = None
+::     .accesskey = n
+%lecho% "restore-tabs-session-label ="               >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .value = Riktheji skedat gjatë nisjes:" >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "restore-all-tabs ="                         >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .label = Krejt skedat"                  >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = K"                         >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "restore-system-tabs ="                      >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .label = Skeda sistemi"                 >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = s"                         >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "restore-no-tabs ="                          >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .label = Asnjë"                         >> localization\sq\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = A"                         >> localization\sq\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: menu-view-layout-widethread =
+::     .label = Wide Thread View
+::     .accesskey = T
+:: menu-view-layout-stacked =
+::     .label = Stacked View
+::     .accesskey = S
+%lecho% "menu-view-layout-widethread ="        >> localization\sq\messenger\menubar.ftl
+%lecho% "    .label = Pamje e Gjerë Rrjedhe"   >> localization\sq\messenger\menubar.ftl
+%lecho% "    .accesskey = G"                   >> localization\sq\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="           >> localization\sq\messenger\menubar.ftl
+%lecho% "    .label = Pamje Njëra Mbi Tjetrën" >> localization\sq\messenger\menubar.ftl
+%lecho% "    .accesskey = M"                   >> localization\sq\messenger\menubar.ftl
