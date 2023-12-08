@@ -126,5 +126,5 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .label = Breite Nachrichtenliste" >> localization\de\messenger\menubar.ftl
 %lecho% "    .accesskey = B"                   >> localization\de\messenger\menubar.ftl
 %lecho% "menu-view-layout-stacked ="           >> localization\de\messenger\menubar.ftl
-%lecho% "    .label = Gestapelte Ansicht"      >> localization\de\messenger\menubar.ftl
-%lecho% "    .accesskey = G"                   >> localization\de\messenger\menubar.ftl
+%lecho% "    .label = Übereinander-Ansicht"    >> localization\de\messenger\menubar.ftl
+%lecho% "    .accesskey = Ü"                   >> localization\de\messenger\menubar.ftl
