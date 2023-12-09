@@ -1,0 +1,179 @@
+# HG changeset patch
+# User Alessandro Castellani <alessandro@thunderbird.net>
+# Date 1702159377 -3600
+# Node ID e20d16b790034c824b7f7c14b6ed8a0a7a1e725a
+# Parent  880b88b6ec1bf25e20e2211b7f0f6186135b5873
+Bug 1868718 - [macOS] fix menu bar items not working when all windows are closed. r=micahilbery
+
+Differential Revision: https://phabricator.services.mozilla.com/D195747
+
+diff --git a/mail/base/content/mail3PaneWindowCommands.js b/mail/base/content/mail3PaneWindowCommands.js
+--- a/mail/base/content/mail3PaneWindowCommands.js
++++ b/mail/base/content/mail3PaneWindowCommands.js
+@@ -56,27 +56,29 @@ var DefaultController = {
+         return !!chatHandler;
+ 
+       default:
+         return false;
+     }
+   },
+ 
+   isCommandEnabled(command) {
+-    if (document.getElementById("tabmail").globalOverlay) {
++    if (document.getElementById("tabmail")?.globalOverlay) {
+       return false;
+     }
+     switch (command) {
+       case "cmd_newMessage":
+         return MailServices.accounts.allIdentities.length > 0;
+       case "cmd_viewAllHeader":
+       case "cmd_viewNormalHeader":
+         return true;
+       case "cmd_undoCloseTab":
+-        return document.getElementById("tabmail").recentlyClosedTabs.length > 0;
++        return (
++          document.getElementById("tabmail")?.recentlyClosedTabs.length > 0
++        );
+       case "cmd_stop":
+         return window.MsgStatusFeedback?._meteorsSpinning;
+       case "cmd_undo":
+       case "cmd_redo":
+         return SetupUndoRedoCommand(command);
+       case "cmd_sendUnsentMsgs":
+         return IsSendUnsentMsgsEnabled(null);
+       case "cmd_subscribe":
+diff --git a/mail/base/content/mailCore.js b/mail/base/content/mailCore.js
+--- a/mail/base/content/mailCore.js
++++ b/mail/base/content/mailCore.js
+@@ -566,19 +566,41 @@ function showChatTab() {
+ }
+ 
+ /**
+  * Open about:import or importDialog.xhtml.
+  *
+  * @param {"start"|"app"|"addressBook"|"calendar"|"export"} [tabId] - The tab
+  *  to open in about:import.
+  */
+-function toImport(tabId = "start") {
++async function toImport(tabId = "start") {
+   if (Services.prefs.getBoolPref("mail.import.in_new_tab")) {
+-    let tab = toMessengerWindow().openTab("contentTab", {
++    let messengerWindow = toMessengerWindow();
++
++    if (messengerWindow.document.readyState != "complete") {
++      await new Promise(resolve => {
++        Services.obs.addObserver(
++          {
++            observe(subject) {
++              if (subject == messengerWindow) {
++                Services.obs.removeObserver(this, "mail-tabs-session-restored");
++                resolve();
++              }
++            },
++          },
++          "mail-tabs-session-restored"
++        );
++      });
++    }
++
++    if (messengerWindow.tabmail.globalOverlay) {
++      return;
++    }
++
++    let tab = messengerWindow.openTab("contentTab", {
+       url: "about:import",
+       onLoad(event, browser) {
+         if (tabId) {
+           browser.contentWindow.showTab(`tab-${tabId}`, true);
+         }
+       },
+     });
+     // Somehow DOMContentLoaded is called even when about:import is already
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -323,30 +323,30 @@ function view_init(event) {
+ 
+   let folderPaneMenuItem = document.getElementById("menu_showFolderPane");
+   if (!folderPaneMenuItem.hidden) {
+     // Hidden in the standalone msg window.
+     folderPaneMenuItem.setAttribute("checked", folderPaneVisible);
+   }
+ 
+   let folderPaneAppMenuItem = document.getElementById("appmenu_showFolderPane");
+-  if (!folderPaneAppMenuItem.hidden) {
++  if (folderPaneAppMenuItem && !folderPaneAppMenuItem.hidden) {
+     // Hidden in the standalone msg window.
+     folderPaneAppMenuItem.setAttribute("checked", folderPaneVisible);
+   }
+ 
+   let threadPaneMenuItem = document.getElementById(
+     "menu_toggleThreadPaneHeader"
+   );
+   threadPaneMenuItem.setAttribute("disabled", !threadPaneHeaderVisible);
+ 
+   let threadPaneAppMenuItem = document.getElementById(
+     "appmenu_toggleThreadPaneHeader"
+   );
+-  threadPaneAppMenuItem.toggleAttribute("disabled", !threadPaneHeaderVisible);
++  threadPaneAppMenuItem?.toggleAttribute("disabled", !threadPaneHeaderVisible);
+ 
+   // Disable some menus if account manager is showing
+   document.getElementById("viewSortMenu").disabled = accountCentralVisible;
+ 
+   document.getElementById("viewMessageViewMenu").disabled =
+     accountCentralVisible;
+ 
+   document.getElementById("viewMessagesMenu").disabled = accountCentralVisible;
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -1014,18 +1014,18 @@ function OpenMessageInNewTab(msgHdr, tab
+   let tabmail = document.getElementById("tabmail");
+   tabmail.openTab("mailMessageTab", {
+     ...tabParams,
+     messageURI: msgHdr.folder.getUriForMsg(msgHdr),
+   });
+ }
+ 
+ function GetSelectedMsgFolders() {
+-  let tabInfo = document.getElementById("tabmail").currentTabInfo;
+-  if (tabInfo.mode.name == "mail3PaneTab") {
++  let tabInfo = document.getElementById("tabmail")?.currentTabInfo;
++  if (tabInfo?.mode.name == "mail3PaneTab") {
+     let folder = tabInfo.folder;
+     if (folder) {
+       return [folder];
+     }
+   }
+   return [];
+ }
+ 
+diff --git a/mailnews/import/content/aboutImport.js b/mailnews/import/content/aboutImport.js
+--- a/mailnews/import/content/aboutImport.js
++++ b/mailnews/import/content/aboutImport.js
+@@ -1483,20 +1483,20 @@ function showTab(tabId, reset = false) {
+     }
+   }
+ }
+ 
+ /**
+  * Restart the import wizard. Resets all previous choices.
+  */
+ function restart() {
+-  startController.reset();
+-  profileController.reset();
+-  addrBookController.reset();
+-  calendarController.reset();
++  startController?.reset();
++  profileController?.reset();
++  addrBookController?.reset();
++  calendarController?.reset();
+   Steps.backTo(0);
+ }
+ 
+ let profileController;
+ let addrBookController;
+ let calendarController;
+ let exportController;
+ let startController;
