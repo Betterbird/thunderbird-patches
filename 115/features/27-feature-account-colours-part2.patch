@@ -1,0 +1,197 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1702595444 -3600
+# Parent  950af8a8ff6842de038025649fb5ce74fdf6e2b1
+Feature: Account colours, part 2: Message list.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -6617,16 +6617,38 @@ var folderListener = {
+       // the folder but we are not notified about the descendants.
+       for (let f of folder.descendants) {
+         folderPane.addFolder(f.parent, f);
+       }
+     }
+   },
+ };
+ 
++function getStyleForServerKey(key) {
++  // We only want the sidebars account colors for multi-folder or search views.
++  if (gViewWrapper.isSingleFolder) {
++    return "";
++  }
++
++  let color = Services.prefs.getCharPref(`mail.server.${key}.color`, "");
++  if (
++    !color ||
++    color == "#000000" ||
++    !color.startsWith("#") ||
++    color.length != 7
++  ) {
++    return "";
++  }
++  // Turn #RRGGBB into rgba(rr, gg, bb, tt)
++  let r = parseInt(color.substring(1, 3), 16);
++  let g = parseInt(color.substring(3, 5), 16);
++  let b = parseInt(color.substring(5, 7), 16);
++  return `linear-gradient(to right, rgba(${r}, ${g}, ${b}, 0.2) 0, rgba(${r}, ${g}, ${b}, 0.2) 4px, transparent 4px)`;
++}
++
+ /**
+  * Custom element for rows in the thread tree.
+  */
+ customElements.whenDefined("tree-view-table-row").then(() => {
+   class ThreadRow extends customElements.get("tree-view-table-row") {
+     static ROW_HEIGHT = 0; // Will be set via density.
+     static MULTILINE = false;
+ 
+@@ -6668,24 +6690,27 @@ customElements.whenDefined("tree-view-ta
+       }
+ 
+       // XPCOM calls here must be keep to a minimum. Collect all of the
+       // required data in one go.
+       let properties = {};
+       let threadLevel = {};
+       let numChildren = {};
+       let hasNextSibling = {};
++      let serverKey = {};
+       let cellTexts = this.view.cellDataForColumns(
+         index,
+         textColumns,
+         properties,
+         threadLevel,
+         numChildren,
+-        hasNextSibling
++        hasNextSibling,
++        serverKey
+       );
++      this.style.backgroundImage = getStyleForServerKey(serverKey.value);
+       this.classList.toggle(
+         "singleton",
+         numChildren.value <= 1 ||
+           !(gViewWrapper._viewFlags & Ci.nsMsgViewFlagsType.kThreadedDisplay)
+       );
+       this.classList.toggle("lastchild", !hasNextSibling.value);
+ 
+       // Collect the various strings and fluent IDs to build the full string for
+@@ -6920,26 +6945,30 @@ customElements.whenDefined("tree-view-ta
+       super.index = index;
+ 
+       // XPCOM calls here must be keep to a minimum. Collect all of the
+       // required data in one go.
+       let properties = {};
+       let threadLevel = {};
+       let numChildren = {};
+       let hasNextSibling = {};
++      let serverKey = {};
+ 
+       let cellTexts = this.view.cellDataForColumns(
+         index,
+         threadPane.cardColumns,
+         properties,
+         threadLevel,
+         numChildren,
+-        hasNextSibling
++        hasNextSibling,
++        serverKey
+       );
+ 
++      this.style.backgroundImage = getStyleForServerKey(serverKey.value);
++
+       // Collect the various strings and fluent IDs to build the full string for
+       // the message row aria-label.
+       let ariaLabelPromises = [];
+ 
+       if (threadLevel.value) {
+         properties.value += " thread-children";
+       }
+       const propertiesSet = new Set(properties.value.split(" "));
+diff --git a/mailnews/base/public/nsIMsgDBView.idl b/mailnews/base/public/nsIMsgDBView.idl
+--- a/mailnews/base/public/nsIMsgDBView.idl
++++ b/mailnews/base/public/nsIMsgDBView.idl
+@@ -491,25 +491,27 @@ interface nsIMsgDBView : nsISupports
+    * CellTextForColumn, GetRowProperties and GetLevel, for performance reasons.
+    *
+    * @param aRow - Index of the row we want data for.
+    * @param aColumnNames - The column names we want cell text for.
+    * @param aProperties - The properties of the row.
+    * @param aThreadLevel - The thread level of the row.
+    * @param aNumChildren - The number of children of the row.
+    * @param aThreadLevel - Whether the row has a next sibling.
++   * @param aServerKey   - Key of the server belonging to the folder.
+    *
+    * @returns The cell text for the columns in `aColumnNames`.
+    */
+   Array<AString> cellDataForColumns(in long aRow,
+                                     in Array<AString> aColumnNames,
+                                     out AString aProperties,
+                                     out long aThreadLevel,
+                                     out unsigned long aNumChildren,
+-                                    out boolean aHasNextSibling);
++                                    out boolean aHasNextSibling,
++                                    out ACString aServerKey);
+ };
+ 
+ /* this interface is rapidly morphing from a command updater interface into a more generic
+    FE updater interface to handle changes in the view
+ */
+ 
+ [scriptable, uuid(ce8f52ee-e742-4b31-8bdd-2b3a8168a117)]
+ interface nsIMsgDBViewCommandUpdater : nsISupports
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -2004,16 +2004,17 @@ nsMsgDBView::CellTextForColumn(int32_t a
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBView::CellDataForColumns(int32_t aRow,
+                                 const nsTArray<nsString>& aColumnNames,
+                                 nsAString& aProperties, int32_t* aThreadLevel,
+                                 uint32_t* aNumChildren, bool* aHasNextSibling,
++                                nsACString& aServerKey, 
+                                 nsTArray<nsString>& _retval) {
+   nsresult rv;
+   _retval.Clear();
+ 
+   uint32_t count = aColumnNames.Length();
+   _retval.SetCapacity(count);
+   for (nsString column : aColumnNames) {
+     nsString text;
+@@ -2044,19 +2045,31 @@ nsMsgDBView::CellDataForColumns(int32_t 
+     _retval.Clear();
+     return rv;
+   }
+ 
+   rv = GetLevel(aRow, aThreadLevel);
+   if (NS_FAILED(rv)) {
+     _retval.Clear();
+     aProperties.Truncate();
+-  }
+-
+-  return rv;
++    return rv;
++  }
++
++  aServerKey.Truncate();
++  nsCOMPtr<nsIMsgDBHdr> msgHdr;
++  rv = GetMsgHdrForViewIndex(aRow, getter_AddRefs(msgHdr));
++  NS_ENSURE_SUCCESS(rv, NS_OK);
++  nsCOMPtr<nsIMsgFolder> folder;
++  msgHdr->GetFolder(getter_AddRefs(folder));
++  if (folder) {
++    nsCOMPtr<nsIMsgIncomingServer> server;
++    folder->GetServer(getter_AddRefs(server));
++    if (server) server->GetKey(aServerKey);
++  }
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgDBView::SetTree(mozilla::dom::XULTreeElement* tree) {
+   mTree = tree;
+   return NS_OK;
+ }
+ 
