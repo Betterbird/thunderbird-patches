@@ -1,19 +1,23 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1698444599 -7200
-# Parent  235e2fe041e7f73151c0e66f75f712c644eae37e
+# Date 1702661244 -3600
+# Parent  8b1bb35725b8e2cff725e296b6e4dbc68b163338
 Bug 1829470 - Add thread connecting lines for the rightmost level.
 
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
 +++ b/mail/base/content/about3Pane.js
-@@ -6147,22 +6147,32 @@ customElements.whenDefined("tree-view-ta
+@@ -6297,24 +6297,33 @@ customElements.whenDefined("tree-view-ta
+         if (column.hidden || column.icon || column.select) {
+           continue;
          }
          textColumns.push(column.id);
        }
  
        // XPCOM calls here must be keep to a minimum. Collect all of the
        // required data in one go.
++      let threadedDisplay =
++        gViewWrapper._viewFlags & Ci.nsMsgViewFlagsType.kThreadedDisplay;
        let properties = {};
        let threadLevel = {};
 +      let numChildren = {};
@@ -24,14 +28,11 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
          properties,
 -        threadLevel
 +        threadLevel,
++        threadedDisplay, // no need to get the following two for a non-threaded display
 +        numChildren,
 +        hasNextSibling
        );
-+      this.classList.toggle(
-+        "singleton",
-+        numChildren.value <= 1 ||
-+          !(gViewWrapper._viewFlags & Ci.nsMsgViewFlagsType.kThreadedDisplay)
-+      );
++      this.classList.toggle("singleton", numChildren.value <= 1);
 +      this.classList.toggle("lastchild", !hasNextSibling.value);
  
        // Collect the various strings and fluent IDs to build the full string for
@@ -41,7 +42,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
        const propertiesSet = new Set(properties.value.split(" "));
        const isDummyRow = propertiesSet.has("dummy");
  
-@@ -6377,22 +6387,26 @@ customElements.whenDefined("tree-view-ta
+@@ -6529,22 +6538,27 @@ customElements.whenDefined("tree-view-ta
  
      set index(index) {
        super.index = index;
@@ -59,6 +60,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
          properties,
 -        threadLevel
 +        threadLevel,
++        false,
 +        numChildren,
 +        hasNextSibling
        );
@@ -72,7 +74,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 diff --git a/mail/themes/shared/mail/threadPane.css b/mail/themes/shared/mail/threadPane.css
 --- a/mail/themes/shared/mail/threadPane.css
 +++ b/mail/themes/shared/mail/threadPane.css
-@@ -395,16 +395,29 @@ tr[is="thread-row"] .subject-line {
+@@ -396,16 +396,29 @@ tr[is="thread-row"] .subject-line {
  tr[is="thread-row"] .subject-line img {
    visibility: hidden;
    width: 16px;
@@ -105,7 +107,7 @@ diff --git a/mail/themes/shared/mail/threadPane.css b/mail/themes/shared/mail/th
 diff --git a/mailnews/base/public/nsIMsgDBView.idl b/mailnews/base/public/nsIMsgDBView.idl
 --- a/mailnews/base/public/nsIMsgDBView.idl
 +++ b/mailnews/base/public/nsIMsgDBView.idl
-@@ -489,23 +489,27 @@ interface nsIMsgDBView : nsISupports
+@@ -489,23 +489,29 @@ interface nsIMsgDBView : nsISupports
    /**
     * Get all of the data needed to display a row. Effectively a combination of
     * CellTextForColumn, GetRowProperties and GetLevel, for performance reasons.
@@ -114,8 +116,9 @@ diff --git a/mailnews/base/public/nsIMsgDBView.idl b/mailnews/base/public/nsIMsg
     * @param aColumnNames - The column names we want cell text for.
     * @param aProperties - The properties of the row.
     * @param aThreadLevel - The thread level of the row.
++   * @param aGetChildrenInfo - if false, return dummy values for aNumChildren and aHasNextSibling.
 +   * @param aNumChildren - The number of children of the row.
-+   * @param aThreadLevel - Whether the row has a next sibling.
++   * @param aHasNextSibling - Whether the row has a next sibling.
     *
     * @returns The cell text for the columns in `aColumnNames`.
     */
@@ -124,6 +127,7 @@ diff --git a/mailnews/base/public/nsIMsgDBView.idl b/mailnews/base/public/nsIMsg
                                      out AString aProperties,
 -                                    out long aThreadLevel);
 +                                    out long aThreadLevel,
++                                    in boolean getChildrenInfo,
 +                                    out unsigned long aNumChildren,
 +                                    out boolean aHasNextSibling);
  };
@@ -146,7 +150,8 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  nsMsgDBView::CellDataForColumns(int32_t aRow,
                                  const nsTArray<nsString>& aColumnNames,
                                  nsAString& aProperties, int32_t* aThreadLevel,
-+                                uint32_t* aNumChildren, bool* aHasNextSibling,
++                                bool aGetChildrenInfo, uint32_t* aNumChildren,
++                                bool* aHasNextSibling,
                                  nsTArray<nsString>& _retval) {
    nsresult rv;
    _retval.Clear();
@@ -163,18 +168,17 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
      _retval.AppendElement(text);
    }
  
-+  rv = HasNextSibling(aRow, aRow, aHasNextSibling);
-+  if (NS_FAILED(rv)) {
-+    _retval.Clear();
-+    return rv;
-+  }
++  *aHasNextSibling = false;
++  *aNumChildren = 0;
++  if (aGetChildrenInfo) {
++    // The following call (so far) doesn't fail.
++    HasNextSibling(aRow, aRow, aHasNextSibling);
 +
-+  nsCOMPtr<nsIMsgThread> thread;
-+  rv = GetThreadContainingIndex(aRow, getter_AddRefs(thread));
-+  if (NS_SUCCEEDED(rv) && thread) {
-+    thread->GetNumChildren(aNumChildren);
-+  } else {
-+    *aNumChildren = 0;
++    nsCOMPtr<nsIMsgThread> thread;
++    rv = GetThreadContainingIndex(aRow, getter_AddRefs(thread));
++    if (NS_SUCCEEDED(rv) && thread) {
++      thread->GetNumChildren(aNumChildren);
++    }
 +  }
 +
    rv = GetRowProperties(aRow, aProperties);
