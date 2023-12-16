@@ -1,0 +1,151 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1702759566 -3600
+# Node ID cafd5da660b0d8f6f0f69bf4c41d5c5950e8c783
+# Parent  7e684ccd893664e1cfc1830c95814b6765e6f4c4
+Bug 522768 - Add tooltip displaying full path in location column. r=aleca,darktrojan
+
+Implement displaying the full path (including all parents) of a folder as a tooltip in the
+location column of the thread pane.
+
+This is achieved by providing a new readonly attribute `prettyPath` in `nsIMsgFolder` which is
+returned by `nsMsgDBView::CellTextForColumn` instead of `prettyName`.
+
+Differential Revision: https://phabricator.services.mozilla.com/D188694
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -6875,16 +6875,26 @@ customElements.whenDefined("tree-view-ta
+ 
+         if (column.id == "attachmentCol" && propertiesSet.has("attach")) {
+           ariaLabelPromises.push(
+             document.l10n.formatValue("threadpane-attachments-cell-label")
+           );
+           continue;
+         }
+ 
++        if (column.id == "locationCol") {
++          const prettyPath = cellTexts[textIndex].split("/");
++          cell.textContent = Array.isArray(prettyPath)
++            ? prettyPath.at(-1)
++            : cellTexts[textIndex];
++          cell.title = cellTexts[textIndex];
++          ariaLabelPromises.push(cellTexts[textIndex]);
++          continue;
++        }
++
+         if (textIndex >= 0) {
+           if (isDummyRow) {
+             cell.textContent = "";
+             cell.removeAttribute("alignmentcolumn");
+             cell.style.removeProperty("--thread-level");
+             continue;
+           }
+           cell.textContent = cellTexts[textIndex];
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -48,16 +48,17 @@ interface nsIMsgFolder : nsISupports {
+   const nsMsgBiffState nsMsgBiffState_NoMail =  1; // No new mail is waiting.
+   const nsMsgBiffState nsMsgBiffState_Unknown = 2; // We dunno whether there is new mail.
+ 
+   /* folder name properties */
+   readonly attribute AUTF8String URI;
+   attribute AString name;
+   attribute AString prettyName;
+   readonly attribute AString abbreviatedName;
++  readonly attribute AString prettyPath;
+ 
+   /**
+    * Set pretty name again from original name,
+    * typically used when locale changes.
+    */
+   void setPrettyNameFromOriginal();
+ 
+   attribute nsIMsgFolder parent;
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -3219,16 +3219,37 @@ nsMsgDBFolder::GetCanCompact(bool* canCo
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetPrettyName(nsAString& name) {
+   return GetName(name);
+ }
+ 
++NS_IMETHODIMP nsMsgDBFolder::GetPrettyPath(nsAString& aPath) {
++  nsresult rv;
++  if (mIsServer) {
++    aPath.Truncate();
++    return NS_OK;
++  }
++
++  nsCOMPtr<nsIMsgFolder> parent = do_QueryReferent(mParent);
++  if (parent) {
++    parent->GetPrettyPath(aPath);
++    if (!aPath.IsEmpty()) {
++      aPath.AppendLiteral("/");
++    }
++  }
++  nsString name;
++  rv = GetPrettyName(name);
++  NS_ENSURE_SUCCESS(rv, rv);
++  aPath.Append(name);
++  return NS_OK;
++}
++
+ static bool nonEnglishApp() {
+   if (nsMsgDBFolder::gIsEnglishApp == -1) {
+     nsAutoCString locale;
+     mozilla::intl::LocaleService::GetInstance()->GetAppLocaleAsBCP47(locale);
+     nsMsgDBFolder::gIsEnglishApp =
+         (locale.EqualsLiteral("en") || StringBeginsWith(locale, "en-"_ns)) ? 1
+                                                                            : 0;
+   }
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -1988,17 +1988,17 @@ nsMsgDBView::CellTextForColumn(int32_t a
+       }
+       break;
+     }
+     case 'l': {
+       if (aColumnName.EqualsLiteral("locationCol")) {
+         nsCOMPtr<nsIMsgFolder> folder;
+         nsresult rv = GetFolderForViewIndex(aRow, getter_AddRefs(folder));
+         NS_ENSURE_SUCCESS(rv, rv);
+-        folder->GetPrettyName(aValue);
++        folder->GetPrettyPath(aValue);
+       }
+       break;
+     }
+     default:
+       break;
+   }
+ 
+   return NS_OK;
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -170,17 +170,17 @@ nsresult nsMsgSearchDBView::HashHdr(nsIM
+   return nsMsgGroupView::HashHdr(msgHdr, aHashKey);
+ }
+ 
+ nsresult nsMsgSearchDBView::FetchLocation(int32_t aRow,
+                                           nsAString& aLocationString) {
+   nsCOMPtr<nsIMsgFolder> folder;
+   nsresult rv = GetFolderForViewIndex(aRow, getter_AddRefs(folder));
+   NS_ENSURE_SUCCESS(rv, rv);
+-  return folder->GetPrettyName(aLocationString);
++  return folder->GetPrettyPath(aLocationString);
+ }
+ 
+ nsresult nsMsgSearchDBView::OnNewHeader(nsIMsgDBHdr* newHdr,
+                                         nsMsgKey aParentKey,
+                                         bool /*ensureListed*/) {
+   return NS_OK;
+ }
+ 
