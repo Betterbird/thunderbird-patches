@@ -104,7 +104,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .label = None
 ::     .accesskey = n
 %lecho% "restore-tabs-session-label ="                    >> localization\it\messenger\preferences\preferences.ftl
-%lecho% "    .value = Ripristino delle schede all’avvio:" >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .value = Ripristina le schede all’avvio:"    >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "restore-all-tabs ="                              >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .label = Tutte le schede"                    >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = T"                              >> localization\it\messenger\preferences\preferences.ftl
@@ -112,7 +112,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .label = Schede di sistema"                  >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = S"                              >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "restore-no-tabs ="                               >> localization\it\messenger\preferences\preferences.ftl
-%lecho% "    .label = Nessuno"                            >> localization\it\messenger\preferences\preferences.ftl
+%lecho% "    .label = Nessuna"                            >> localization\it\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = N"                              >> localization\it\messenger\preferences\preferences.ftl
 
 :: Original strings:
