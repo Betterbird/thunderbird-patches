@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1696492842 -7200
-# Parent  8e963395b8714dee7e028731683f09d0129ad173
+# Date 1702750099 -3600
+# Parent  46082e99a160c749586de91339b760bac3f5a7ab
 Bug 1854567 - Optionally limit the number of messages sent per connection.
 
 Some ideas in this patch from Magnus Melin in https://phabricator.services.mozilla.com/D189676
@@ -9,7 +9,7 @@ Some ideas in this patch from Magnus Melin in https://phabricator.services.mozil
 diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClient.jsm
 --- a/mailnews/compose/src/SmtpClient.jsm
 +++ b/mailnews/compose/src/SmtpClient.jsm
-@@ -39,16 +39,21 @@ var { MailStringUtils } = ChromeUtils.im
+@@ -39,16 +39,20 @@ var { MailStringUtils } = ChromeUtils.im
  var { SmtpAuthenticator } = ChromeUtils.import(
    "resource:///modules/MailAuthenticator.jsm"
  );
@@ -18,20 +18,19 @@ diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClie
  );
  
  class SmtpClient {
-+
 +  // Number of messages sent with this client and max. number it can send.
 +  messagesSent = 0;
 +  maxMessagesPerConnection = 0;
 +
    /**
-    * Creates a connection object to a SMTP server and allows to send mail through it.
-    * Call `connect` method to inititate the actual connection, the constructor only
-    * defines the properties but does not actually connect.
-    *
-    * @class
-    *
-    * @param {nsISmtpServer} server - The associated nsISmtpServer instance.
-@@ -125,16 +130,20 @@ class SmtpClient {
+    * The number of RCPT TO commands sent on the connection by this client.
+    * This can count-up over multiple messages.
+    */
+   rcptCount = 0;
+ 
+   /**
+    * Set true only when doing a retry.
+@@ -136,16 +140,20 @@ class SmtpClient {
        this.socket = new TCPSocket(hostname, port, {
          binaryType: "arraybuffer",
          useSecureTransport: this._secureTransport,
@@ -52,7 +51,7 @@ diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClie
     */
    quit() {
      this._authenticating = false;
-@@ -500,16 +509,17 @@ class SmtpClient {
+@@ -544,16 +552,17 @@ class SmtpClient {
    }
  
    /**
@@ -62,6 +61,7 @@ diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClie
      this.logger.debug("Socket closed.");
      this._free();
 +    this.messagesSent = 0;
+     this.rcptCount = 0;
      if (this._authenticating) {
        // In some cases, socket is closed for invalid username/password.
        this._onAuthFailed({ data: "Socket closed." });
@@ -69,16 +69,15 @@ diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClie
    };
  
    /**
-    * This is not a socket data handler but the handler for data emitted by the parser,
 diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
 --- a/mailnews/compose/src/SmtpServer.jsm
 +++ b/mailnews/compose/src/SmtpServer.jsm
-@@ -466,16 +466,20 @@ class SmtpServer {
-       return client;
-     }
+@@ -476,16 +476,20 @@ class SmtpServer {
+       ? this.maximumConnectionsNumber
+       : 1;
      if (
        this._freeConnections.length + this._busyConnections.length <
-       this.maximumConnectionsNumber
+       maxConns
      ) {
        // Create a new client if the pool is not full.
        client = new lazy.SmtpClient(this);
@@ -94,36 +93,33 @@ diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServ
      return this._getNextClient();
    }
    /**
-@@ -483,16 +487,26 @@ class SmtpServer {
-    *
-    * @param {Function} handler - A callback function to take a SmtpClient
-    *   instance, and do some actions.
-    */
-   async withClient(handler) {
-     let client = await this._getNextClient();
-     client.onFree = () => {
+@@ -500,17 +504,25 @@ class SmtpServer {
        this._busyConnections = this._busyConnections.filter(c => c != client);
--      this._freeConnections.push(client);
--      // Resovle the first waiting in queue.
--      this._connectionWaitingQueue.shift()?.();
+       // Per RFC, the minimum total number of recipients that MUST be buffered
+       // is 100 recipients.
+       // @see https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.8
+       // So use a new connection for the next message to avoid running into
+       // recipient limits.
+       // If user has set SMTP pref max_cached_connection to less than 1,
+       // use a new connection for each message.
+-      if (this.maximumConnectionsNumber == 0 || client.rcptCount > 99) {
 +      if (
-+        client.maxMessagesPerConnection <= 0 ||
-+        client.messagesSent < client.maxMessagesPerConnection
++        this.maximumConnectionsNumber == 0 ||
++        client.rcptCount > 99 ||
++        (client.maxMessagesPerConnection > 0 &&
++          client.messagesSent >= client.maxMessagesPerConnection)
 +      ) {
-+        this._freeConnections.push(client);
-+        // Resolve the first waiting in queue.
-+        this._connectionWaitingQueue.shift()?.();
-+      } else {
 +        client.logger.debug(
 +          `Sent #${client.messagesSent} messages (limit: ${client.maxMessagesPerConnection}), quitting.`
 +        );
-+        client.quit();
-+      }
-     };
-     handler(client);
-     client.connect();
-   }
- }
+         // Send QUIT, server will then terminate the connection
+         client.quit();
+       } else {
+         // Keep using this connection
+         this._freeConnections.push(client);
+         // Resolve the first waiting in queue.
+         this._connectionWaitingQueue.shift()?.();
+       }
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
