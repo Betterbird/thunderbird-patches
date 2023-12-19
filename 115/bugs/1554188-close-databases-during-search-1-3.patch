@@ -1,13 +1,39 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1683446544 -7200
-# Parent  92d0baeca9b69c2db66fe0991505cb8e6f337c53
+# Date 1702947162 -3600
+# Parent  a9cc79b23b8d4578eadf0e27f3ad94d35526d9a6
 Bug 1554188 - More aggressively close databases during search.
 * * *
 Bug 1554188 - Only aggressively close folders if many involved in search.
 * * *
 Bug 1554188 - modify algorithm that closes databases during search. Allow for 100 open ones, keep simple LRU cache.
 
+diff --git a/mail/app/nsMailApp.cpp b/mail/app/nsMailApp.cpp
+--- a/mail/app/nsMailApp.cpp
++++ b/mail/app/nsMailApp.cpp
+@@ -378,16 +378,22 @@ int main(int argc, char* argv[], char* e
+   }
+ 
+   gBootstrap->XRE_StartupTimelineRecord(mozilla::StartupTimeline::START, start);
+ 
+ #ifdef MOZ_BROWSER_CAN_BE_CONTENTPROC
+   gBootstrap->XRE_EnableSameExecutableForContentProc();
+ #endif
+ 
++#ifdef WIN32
++  // Allow for 75% of the max number of 8192, see:
++  // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setmaxstdio?view=msvc-170
++  _setmaxstdio(6144);
++#endif
++
+   int result = do_main(argc, argv, envp);
+ 
+   gBootstrap->NS_LogTerm();
+ 
+ #ifdef XP_MACOSX
+   // Allow writes again. While we would like to catch writes from static
+   // destructors to allow early exits to use _exit, we know that there is
+   // at least one such write that we don't control (see bug 826029). For
 diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
 --- a/mailnews/base/public/nsIMsgFolder.idl
 +++ b/mailnews/base/public/nsIMsgFolder.idl
@@ -33,7 +59,7 @@ diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsg
 diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
 --- a/mailnews/base/src/nsMsgDBFolder.cpp
 +++ b/mailnews/base/src/nsMsgDBFolder.cpp
-@@ -4740,24 +4740,94 @@ NS_IMETHODIMP nsMsgDBFolder::EnableNotif
+@@ -4743,24 +4743,94 @@ NS_IMETHODIMP nsMsgDBFolder::EnableNotif
      if (enable) {
        UpdateSummaryTotals(true);
      }
@@ -42,7 +68,7 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
    return NS_ERROR_NOT_IMPLEMENTED;
  }
  
-+// Cleap implementation of LRU cache.
++// Cheap implementation of LRU cache.
 +#define MAXLRUCACHE 100
 +size_t dbLRUcacheCount = 0;
 +nsWeakPtr dbLRUcache[MAXLRUCACHE];
@@ -130,7 +156,7 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
    for (nsIMsgFolder* child : mSubFolders) {
      aDescendants.AppendElement(child);
      nsTArray<RefPtr<nsIMsgFolder>> grandchildren;
-@@ -4966,17 +5036,18 @@ NS_IMETHODIMP nsMsgDBFolder::NotifyCompa
+@@ -4969,17 +5039,18 @@ NS_IMETHODIMP nsMsgDBFolder::NotifyCompa
  NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFolderNotOpen(bool aForceClosed) {
    nsresult rv;
    nsCOMPtr<nsIMsgMailSession> session =
@@ -302,7 +328,7 @@ diff --git a/mailnews/db/mork/morkRowSpace.cpp b/mailnews/db/mork/morkRowSpace.c
 diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
 --- a/mailnews/search/src/nsMsgSearchSession.cpp
 +++ b/mailnews/search/src/nsMsgSearchSession.cpp
-@@ -490,31 +490,21 @@ nsresult nsMsgSearchSession::TimeSlice(b
+@@ -490,31 +490,22 @@ nsresult nsMsgSearchSession::TimeSlice(b
    // we only do serial for now.
    return TimeSliceSerial(aDone);
  }
@@ -326,9 +352,10 @@ diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/ns
 -    "main" folder and performance outweighs footprint */
 -  if (!isOpen && !(nsMsgFolderFlags::Inbox & flags))
 -    folder->SetMsgDatabase(nullptr);
-+  // The call parameter needs to be `true` when dealing with more than one
-+  // folder. Tested via trial and error.
-+  folder->CloseDBIfFolderNotOpen(m_scopeList.Length() > 1);
++  // Calling this with `true` will call `nsMsgDatabase::ForceClosed()`
++  // and that loses the listeners and panels don't update any more
++  // resulting in phantom rows.
++  folder->CloseDBIfFolderNotOpen(false);
  }
  nsresult nsMsgSearchSession::TimeSliceSerial(bool* aDone) {
    // This version of TimeSlice runs each scope term one at a time, and waits
