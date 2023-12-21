@@ -76,3 +76,55 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "unreadMsgStatus=Непрочитанных: %%S" >> chrome\ru\locale\ru\messenger\messenger.properties
 %lecho% "selectedMsgStatus=Выбранных: %%S"   >> chrome\ru\locale\ru\messenger\messenger.properties
 %lecho% "totalMsgStatus=Всего: %%S"          >> chrome\ru\locale\ru\messenger\messenger.properties
+
+:: Original strings:
+:: vertical-tabs-label =
+::     .label = Enable vertical tabs
+::     .accesskey = v
+:: attachments-display-top-label =
+::     .label = Display attachment list above message
+::     .accesskey = p
+%lecho% "vertical-tabs-label ="                              >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .label = Отображать панель вкладок вертикально" >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = v"                                 >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "attachments-display-top-label ="                    >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .label = Показывать вложения над сообщением"    >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = p"                                 >> localization\ru\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: restore-tabs-session-label =
+::     .value = Restore tabs on startup:
+:: restore-all-tabs =
+::     .label = All tabs
+::     .accesskey = t
+:: restore-system-tabs =
+::     .label = System tabs
+::     .accesskey = s
+:: restore-no-tabs =
+::     .label = None
+::     .accesskey = n
+%lecho% "restore-tabs-session-label ="                      >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .value = Восстановливать вкладок при запуске:" >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "restore-all-tabs ="                                >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .label = Все вкладки"                          >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = t"                                >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "restore-system-tabs ="                             >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .label = Системные вкладки"                    >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = s"                                >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "restore-no-tabs ="                                 >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .label = Нет"                                  >> localization\ru\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = n"                                >> localization\ru\messenger\preferences\preferences.ftl
+
+:: Original strings:
+:: menu-view-layout-widethread =
+::     .label = Wide Thread View
+::     .accesskey = T
+:: menu-view-layout-stacked =
+::     .label = Stacked View
+::     .accesskey = S
+%lecho% "menu-view-layout-widethread ="      >> localization\ru\messenger\menubar.ftl
+%lecho% "    .label = Широкий потоковый вид" >> localization\ru\messenger\menubar.ftl
+%lecho% "    .accesskey = T"                 >> localization\ru\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="         >> localization\ru\messenger\menubar.ftl
+%lecho% "    .label = Сложенный вид"         >> localization\ru\messenger\menubar.ftl
+%lecho% "    .accesskey = S"                 >> localization\ru\messenger\menubar.ftl
