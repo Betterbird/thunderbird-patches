@@ -1,12 +1,14 @@
 # HG changeset patch
 # User alta88@fixall.com
 # Date 1701196733 -3600
-# Parent  daadde284aa40884f75076cbe85ba2f24d93ee9e
+# Parent  1ce770120f952204d74f98d1c89a49c33e3448da
 Feature: Attachment List on top option for compose
 
 Authored by Alta88 and contributed to the Betterbird Project.
 See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
 All uses require attribution to the Author.
+* * *
+Keyboard support for compose splitter actions - contacts, headers, attachments. Compatibility with 3pane.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
@@ -125,7 +127,241 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
      .map(h => h.trim())
      .filter(Boolean);
    for (let i = 0; i < otherHeaders.length; i++) {
-@@ -5518,24 +5520,24 @@ async function ComposeLoad() {
+@@ -5265,31 +5267,32 @@ async function ComposeStartup() {
+   let contactsWidth = Services.xulStore.getValue(
+     pageURL,
+     "contactsSplitter",
+     "width"
+   );
+   contactsSplitter.width =
+     contactsWidth == "" ? null : parseFloat(contactsWidth);
+   setContactsSidebarVisibility(contactsShown == "true", false);
+-  contactsSplitter.addEventListener("splitter-resized", () => {
+-    let width = contactsSplitter.width;
+-    Services.xulStore.setValue(
+-      pageURL,
+-      "contactsSplitter",
+-      "width",
+-      width == null ? "" : String(width)
+-    );
+-  });
++
++  contactsSplitter.addEventListener("splitter-resized", event =>
++    onContactsSplitterAction(event)
++  );
+   contactsSplitter.addEventListener("splitter-collapsed", () => {
+     Services.xulStore.setValue(pageURL, "contactsSplitter", "shown", "false");
+   });
+   contactsSplitter.addEventListener("splitter-expanded", () => {
+     Services.xulStore.setValue(pageURL, "contactsSplitter", "shown", "true");
+   });
++  contactsSplitter.addEventListener("keypress", event =>
++    onContactsSplitterAction(event)
++  );
++  contactsSplitter.addEventListener("keyup", event =>
++    onContactsSplitterAction(event)
++  );
+ 
+   // Update the priority button.
+   if (gMsgCompose.compFields.priority) {
+     updatePriorityToolbarButton(gMsgCompose.compFields.priority);
+   }
+ 
+   gAutoSaveInterval = Services.prefs.getBoolPref("mail.compose.autosave")
+     ? Services.prefs.getIntPref("mail.compose.autosaveinterval") * 60000
+@@ -5298,16 +5301,191 @@ async function ComposeStartup() {
+   if (gAutoSaveInterval) {
+     gAutoSaveTimeout = setTimeout(AutoSave, gAutoSaveInterval);
+   }
+ 
+   gAutoSaveKickedIn = false;
+ }
+ /* eslint-enable complexity */
+ 
++function onHeaderSplitterAction(event) {
++  // No headers collapse.
++  if (event.keyCode == KeyEvent.DOM_VK_RETURN) {
++    return;
++  }
++
++  if (!onSplitterAction(event)) {
++    return;
++  }
++
++  if (event.type == "splitter-resized") {
++    let splitter = event.target;
++    let overflowElement = document.getElementById("recipientsContainer");
++    if (overflowElement.clientHeight == overflowElement.scrollHeight) {
++      // Removes height variable for height to be set by css.
++      splitter.height = null;
++      splitter.blur();
++    }
++  }
++}
++function onContactsSplitterAction(event) {
++  if (!onSplitterAction(event)) {
++    return;
++  }
++
++  let splitter = event.target;
++
++  if (splitter.isCollapsed) {
++    setContactsSidebarVisibility(false, true);
++  }
++
++  let isVertical = splitter.resizeDirection == "vertical";
++  let dimension = isVertical ? "height" : "width";
++  let newSize = Math.round(splitter[dimension]);
++  Services.xulStore.setValue(
++    document.URL,
++    splitter.id,
++    dimension,
++    String(newSize) || ""
++  );
++}
++
++function onAttachmentSplitterAction(event) {
++  if (!onSplitterAction(event)) {
++    return;
++  }
++
++  let splitter = event.target;
++  let isVertical = splitter.resizeDirection == "vertical";
++  let dimension = isVertical ? "height" : "width";
++  let collapseSize = splitter.getAttribute(`collapse-${dimension}`) || 0;
++  let newSize = Math.round(splitter[dimension]);
++
++  if (splitter.isCollapsed) {
++    if (newSize <= collapseSize) {
++      // Reset to css size, so toggling the menuitem after drag collapse makes
++      // sense.
++      splitter[dimension] = null;
++      newSize = 0;
++    }
++
++    document.getElementById("attachmentIndicator").focus();
++  }
++
++  if (isVertical && event.type == "splitter-resized") {
++    let overflowElement = splitter.resizeElement;
++    if (overflowElement.clientHeight == overflowElement.scrollHeight) {
++      // Removes height variable for height to be set by css.
++      splitter[dimension] = null;
++      newSize = 0;
++      splitter.blur();
++    }
++  }
++
++  setShowAttachmentPanePref();
++
++  Services.xulStore.setValue(
++    document.URL,
++    splitter.id,
++    dimension,
++    String(newSize) || ""
++  );
++}
++
++/*
++ * Key actions. Collapse splitter with enter; resize with arrow keys.
++ * For <hr> splitters.
++ *
++ * NOTE: mouse events are prevented in splitter core; click/dblclick are
++ * unavailable.
++ *
++ * @return boolean - If true, an action on the splitter has happened that
++ *   requires further action by the caller (persistence, etc.). A false will
++ *   filter out irrelevant key codes as well.
++ */
++function onSplitterAction(event) {
++  if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
++    return false;
++  }
++
++  let splitter = event.target;
++
++  if (event.keyCode == KeyEvent.DOM_VK_RETURN) {
++    splitter.isCollapsed = !splitter.isCollapsed;
++    return true;
++  }
++
++  if (event.type == "splitter-resized") {
++    splitter.blur();
++    return true;
++  }
++
++  if (event.type != "keypress" && event.type != "keyup") {
++    return false;
++  }
++
++  let isUpDownKey = [KeyEvent.DOM_VK_UP, KeyEvent.DOM_VK_DOWN].includes(
++    event.keyCode
++  );
++  let isLeftRightKey = [KeyEvent.DOM_VK_LEFT, KeyEvent.DOM_VK_RIGHT].includes(
++    event.keyCode
++  );
++  let isUpLeftKey = [KeyEvent.DOM_VK_UP, KeyEvent.DOM_VK_LEFT].includes(
++    event.keyCode
++  );
++  let isDownRightKey = [KeyEvent.DOM_VK_DOWN, KeyEvent.DOM_VK_RIGHT].includes(
++    event.keyCode
++  );
++
++  let isVertical = splitter.resizeDirection == "vertical";
++  let isValidKey = isUpDownKey || isLeftRightKey;
++  if (
++    !isValidKey ||
++    (isVertical && !isUpDownKey) ||
++    (!isVertical && !isLeftRightKey)
++  ) {
++    return false;
++  }
++
++  let dimension = isVertical ? "height" : "width";
++  let minDefaultSize = isVertical ? 30 : 100;
++  let collapseSize =
++    Number(splitter.getAttribute(`collapse-${dimension}`)) || minDefaultSize;
++
++  if (event.type == "keyup") {
++    let size = splitter[dimension];
++    splitter._updateSize();
++    let realSize = Math.round(splitter[dimension]);
++    if (realSize != size) {
++      // The size isn't changing, due to a min size or fixed size. Set size to
++      // this limit for horizontal splitters and reset for vertical splitters.
++      splitter[dimension] = isVertical ? null : realSize;
++    }
++
++    return true;
++  }
++
++  if (splitter[dimension] == null) {
++    splitter._updateSize();
++  }
++
++  let beforeElement = splitter._beforeElement;
++  let size = splitter.isCollapsed ? minDefaultSize : splitter[dimension];
++  let newSize =
++    (isUpLeftKey && !beforeElement) || (isDownRightKey && beforeElement)
++      ? size - 1
++      : size + 1;
++  newSize = newSize < 0 ? 0 : Math.round(newSize);
++  if (newSize >= collapseSize) {
++    splitter[dimension] = newSize;
++  }
++
++  return false;
++}
++
+ function splitEmailAddress(aEmail) {
+   let at = aEmail.lastIndexOf("@");
+   return at != -1 ? [aEmail.slice(0, at), aEmail.slice(at + 1)] : [aEmail, ""];
+ }
+ 
+ // Emails are equal ignoring +suffixes (email+suffix@example.com).
+ function emailSimilar(a, b) {
+   if (!a || !b) {
+@@ -5518,24 +5696,34 @@ async function ComposeLoad() {
    let messageHeader = document.getElementById("MsgHeadersToolbar");
    let recipientsContainer = document.getElementById("recipientsContainer");
    // In the unlikely situation where the recipients container is already
@@ -138,6 +374,16 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
 +  messageHeader.parentElement.style.setProperty(
 +    "--MsgHeadersToolbar-minHeight",
 +    `${headerHeight}px`
++  );
++  let headersSplitter = document.getElementById("headersSplitter");
++  headersSplitter.addEventListener("splitter-resized", event =>
++    onHeaderSplitterAction(event)
++  );
++  headersSplitter.addEventListener("keypress", event =>
++    onHeaderSplitterAction(event)
++  );
++  headersSplitter.addEventListener("keyup", event =>
++    onHeaderSplitterAction(event)
 +  );
  
    // Setup the attachment bucket.
@@ -154,7 +400,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
    );
  
    // Set up the drag & drop event listeners.
-@@ -5620,16 +5622,18 @@ async function ComposeLoad() {
+@@ -5620,16 +5808,18 @@ async function ComposeLoad() {
    ToolbarIconColor.init();
  
    // initialize the customizeDone method on the customizeable toolbar
@@ -173,7 +419,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
        addressInputOnBeforeHandleKeyDown(event);
    }
  
-@@ -8506,16 +8510,122 @@ async function RemoveAllAttachments() {
+@@ -8506,16 +8696,135 @@ async function RemoveAllAttachments() {
  
    if (!gAttachmentBucket.itemCount) {
      return;
@@ -182,9 +428,33 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
    await RemoveAttachments(gAttachmentBucket.itemChildren);
  }
  
++var attachmentListConfigMap = {
++  top: {
++    parentId: "MsgHeadersToolbar",
++    resizeId: "attachmentBucket",
++    resizeDirection: "horizontal",
++    collapseSize: 50,
++  },
++  bottom: {
++    parentId: "composeContentBox",
++    resizeId: "attachmentBucket",
++    resizeDirection: "vertical",
++    collapseSize: 30,
++  },
++};
++
 +function InitAttachmentPane() {
++  let location = getAttachmentPaneLocationPref();
 +  let headersParent = document.getElementById("composeContentBox");
 +  let attachmentSplitter = document.getElementById("attachmentSplitter");
++  let attachmentIndicator = document.getElementById("attachmentIndicator");
++
++  let configMap = attachmentListConfigMap[location];
++  let isVertical = configMap.resizeDirection == "vertical";
++  let dimension = isVertical ? "height" : "width";
++  let collapseSize = String(configMap.collapseSize);
++  attachmentSplitter.setAttribute(`collapse-${dimension}`, collapseSize);
++
 +  headersParent.classList.toggle(
 +    "attachment-area-hidden",
 +    attachmentSplitter.isCollapsed
@@ -201,59 +471,73 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
 +      attachmentSplitter.isCollapsed
 +    );
 +  });
++  // Event "splitter-resized" is sent on mouseup.
++  attachmentSplitter.addEventListener("splitter-resized", event =>
++    onAttachmentSplitterAction(event)
++  );
++  attachmentSplitter.addEventListener("keypress", event =>
++    onAttachmentSplitterAction(event)
++  );
++  attachmentSplitter.addEventListener("keyup", event =>
++    onAttachmentSplitterAction(event)
++  );
++
++  // Set up attachments area size and persistence.
++  let pageURL = document.URL;
++  let attachmentsSize = Services.xulStore.getValue(
++    pageURL,
++    attachmentSplitter.id,
++    dimension
++  );
++  attachmentSplitter[dimension] = Number(attachmentsSize) || null;
++
++  function attachmentIndicatorAction(event) {
++    if (event.type == "click" || event.keyCode == KeyEvent.DOM_VK_RETURN) {
++      goDoCommand("cmd_toggleAttachmentPane");
++      moveFocusToAttachmentPane();
++    }
++  }
++  attachmentIndicator.addEventListener("click", event =>
++    attachmentIndicatorAction(event)
++  );
++  attachmentIndicator.addEventListener("keypress", event =>
++    attachmentIndicatorAction(event)
++  );
 +
 +  SetAttachmenPaneLocation();
 +}
 +
 +/**
 + * Set the location of the attachment list pane, per pref.
++ * Currently, changing location is not dynamic, but it could be. Thus, this
++ * function only runs upon window init.
 + */
 +function SetAttachmenPaneLocation() {
 +  let location = getAttachmentPaneLocationPref();
 +  let headersParent = document.getElementById("composeContentBox");
-+  let attachmentSplitter = document.getElementById("attachmentSplitter");
 +  if (headersParent.getAttribute("attachmentpanelocation") == location) {
 +    // Already in the right location.
 +    return;
 +  }
-+  const attachmentListConfigMap = {
-+    top: {
-+      parentId: "MsgHeadersToolbar",
-+      resizeId: "attachmentBucket",
-+      resizeDirection: "horizontal",
-+      resizeDimension: "width",
-+      defaultSize: 200,
-+      collapseSize: 50,
-+    },
-+    bottom: {
-+      parentId: "composeContentBox",
-+      resizeId: "attachmentBucket",
-+      resizeDirection: "vertical",
-+      resizeDimension: "height",
-+      defaultSize: 34,
-+      collapseSize: 50,
-+    },
-+  };
 +
-+  let configMap = attachmentListConfigMap[location];
++  let attachmentSplitter = document.getElementById("attachmentSplitter");
 +  let attachmentArea = document.getElementById("attachmentArea");
 +  let attachmentList = document.getElementById("attachmentBucket");
 +
-+  let parentId = configMap.parentId;
++  let configMap = attachmentListConfigMap[location];
 +  let resizeDirection = configMap.resizeDirection;
 +  let isVertical = resizeDirection == "vertical";
-+  let dimension = configMap.resizeDimension;
 +  let oppositeDimension = isVertical ? "width" : "height";
-+  let defaultSize = configMap.defaultSize;
-+  let collapseSize = String(configMap.collapseSize);
 +
 +  headersParent.setAttribute("attachmentpanelocation", location);
 +
++  let parentId = configMap.parentId;
 +  let desiredParent = document.getElementById(parentId);
 +  desiredParent.appendChild(attachmentSplitter);
 +  desiredParent.appendChild(attachmentArea);
 +  attachmentSplitter.setAttribute("resize-direction", resizeDirection);
-+  attachmentSplitter.setAttribute(`collapse-${dimension}`, collapseSize);
++  // Don't use the setter so persisted width/height isn't forgotten.
++  attachmentSplitter.removeAttribute(oppositeDimension);
 +
 +  attachmentList.setAttribute("orient", isVertical ? "horizontal" : "vertical");
 +  // Required for context menus to be correct; selectedCount is off on dom move.
@@ -261,31 +545,6 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
 +  attachmentList.selectItem(attachmentList.currentItem);
 +  // Need to append again after a dom move.
 +  attachmentList.controllers.appendController(attachmentBucketController);
-+
-+  // Set up attachments area size and persistence.
-+  let pageURL = document.URL;
-+  let attachmentsSize = Services.xulStore.getValue(
-+    pageURL,
-+    "attachmentSplitter",
-+    dimension
-+  );
-+  attachmentSplitter[dimension] = Number(attachmentsSize) || defaultSize;
-+  // Don't use the setter so persisted width/height isn't forgotten.
-+  attachmentSplitter.removeAttribute(oppositeDimension);
-+
-+  attachmentSplitter.addEventListener("splitter-resized", () => {
-+    let newSize = Math.round(attachmentSplitter[dimension]) || 0;
-+    Services.xulStore.setValue(
-+      pageURL,
-+      "attachmentSplitter",
-+      dimension,
-+      String(newSize)
-+    );
-+    if (newSize < collapseSize) {
-+      // When toggling the menuitem after drag collapse, open with default size.
-+      attachmentSplitter[dimension] = defaultSize;
-+    }
-+  });
 +}
 +
  /**
@@ -296,7 +555,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
   *                              false (or omitted): hide the attachment pane
   */
  function UpdateAttachmentBucket(aShowBucket) {
-@@ -8525,41 +8635,47 @@ function UpdateAttachmentBucket(aShowBuc
+@@ -8525,41 +8834,47 @@ function UpdateAttachmentBucket(aShowBuc
  /**
   * Update the header bar information (number and total file size of attachments)
   * and tooltip of attachment pane, then (optionally) show or hide the pane.
@@ -317,7 +576,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
      }
    );
  
-+  document.getElementById("attachment-indicator").tooltipText =
++  document.getElementById("attachmentIndicator").title =
 +    await document.l10n.formatValue("attachment-bucket-count-value", { count });
 +
    let attachmentsSize = 0;
@@ -349,7 +608,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
      return;
    }
  
-@@ -8629,17 +8745,20 @@ async function RemoveAttachments(items) 
+@@ -8629,20 +8944,26 @@ async function RemoveAttachments(items) 
      gAttachmentBucket.clearSelection();
  
      AttachmentsChanged();
@@ -363,15 +622,22 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
 +      toggleAttachmentPane("hide");
 +    }
 +    gAttachmentBucket.style.minHeight = "";
++    // Null out currentItem if there are none, as a select event will restore
++    // selectedCount/selectedItems with it.
++    gAttachmentBucket.currentItem = null;
    } else {
      // Try to restore the original focused item or somewhere close by.
-     gAttachmentBucket.currentIndex =
+-    gAttachmentBucket.currentIndex =
++    gAttachmentBucket.selectedIndex =
        focusIndex < gAttachmentBucket.itemCount
          ? focusIndex
          : gAttachmentBucket.itemCount - 1;
    }
  
-@@ -8935,74 +9054,42 @@ function moveSelectedAttachments(aDirect
+   await Promise.all(promises);
+ }
+ 
+@@ -8935,74 +9256,47 @@ function moveSelectedAttachments(aDirect
   * Toggle attachment pane view state: show or hide it.
   * If aAction parameter is omitted, toggle current view state.
   *
@@ -398,11 +664,14 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
 +      // If the splitter is not collapsed, it's due to there being attachments
 +      // added and not due to the pref. Simulate a "show" to change the pref on
 +      // a "toggle".
-+      aAction = "show";
++      attachmentSplitter.expand();
 +    } else {
-+      aAction = attachmentSplitter.isCollapsed ? "show" : "hide";
++      attachmentSplitter.isCollapsed = !attachmentSplitter.isCollapsed;
 +    }
-+    if (document.activeElement != gAttachmentBucket) {
++    if (
++      !attachmentSplitter.isCollapsed &&
++      document.activeElement != gAttachmentBucket
++    ) {
        // Interrupt and move the focus to the attachment pane if it's already
        // visible but not currently focused.
        moveFocusToAttachmentPane();
@@ -452,6 +721,8 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
 -    attachmentArea.open ? "attachment-area-hide" : "attachment-area-show"
 -  );
 +    }
++
++    return;
 +  }
 +
 +  if (aAction == "hide") {
@@ -467,7 +738,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
   */
  function moveFocusToAttachmentPane() {
    gAttachmentBucket.focus();
-@@ -9130,31 +9217,32 @@ function reorderAttachmentsPanelOnPopupS
+@@ -9130,31 +9424,32 @@ function reorderAttachmentsPanelOnPopupS
    // required for updating the reorder commands.
    gAttachmentBucket.focus();
    // We're updating commands before showing the panel so that button states
@@ -513,7 +784,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
   * reorderAttachmentsPanel.
   */
  function attachmentBucketOnBlur() {
-@@ -9195,33 +9283,38 @@ function attachmentBucketOnKeyPress(even
+@@ -9195,33 +9490,38 @@ function attachmentBucketOnKeyPress(even
        if (reorderAttachmentsPanel.state == "open") {
          reorderAttachmentsPanel.hidePopup();
          return;
@@ -556,7 +827,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
        gAttachmentBucket.moveByOffset(-1, !event.ctrlKey, event.shiftKey);
        event.preventDefault();
        break;
-@@ -9249,27 +9342,34 @@ function attachmentBucketOnKeyPress(even
+@@ -9249,27 +9549,34 @@ function attachmentBucketOnKeyPress(even
  
        event.preventDefault();
        break;
@@ -593,7 +864,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
    // Attachment pane whitespace tooltip
    if (gAttachmentBucket.selectedCount) {
      gAttachmentBucket.tooltipText = getComposeBundle().getString(
-@@ -10351,16 +10451,42 @@ var envelopeDragObserver = {
+@@ -10351,16 +10658,42 @@ var envelopeDragObserver = {
        let attachments = this.getValidAttachments(event);
        if (attachments.length) {
          // We're dragging files that can potentially be attached or added
@@ -636,7 +907,7 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
            document.getElementById("addAsAttachmentLabel"),
            "drop-file-label-attachment",
            {
-@@ -10380,19 +10506,19 @@ var envelopeDragObserver = {
+@@ -10380,19 +10713,19 @@ var envelopeDragObserver = {
          // want to allow adding as text, as well as dragging only images, and
          // if this is not a plain text message.
          // NOTE: We're using event.dataTransfer.files.length instead of
@@ -658,6 +929,27 @@ diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/compon
        } else {
          DragAddressOverTargetControl(event);
        }
+@@ -10802,17 +11135,19 @@ function setContactsSidebarVisibility(sh
+       contactsBrowser.setAttribute("src", url);
+     } else if (focus) {
+       // Url already set, so we can focus immediately if applicable.
+       focusContactsSidebarSearchInput();
+     }
+   } else {
+     let contactsSidebar = document.getElementById("contactsSidebar");
+     // Before closing, check if the focus was within the contacts sidebar.
+-    let sidebarFocussed = contactsSidebar.contains(document.activeElement);
++    let sidebarFocussed =
++      contactsSidebar.contains(document.activeElement) ||
++      document.activeElement.id == "contactsSplitter";
+ 
+     contactsSplitter.collapse();
+     sidebarAddrMenu.removeAttribute("checked");
+     if (contactsButton) {
+       contactsButton.removeAttribute("checked");
+     }
+ 
+     // Don't change the focus unless it was within the contacts sidebar.
 diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/components/compose/content/messengercompose.xhtml
 --- a/mail/components/compose/content/messengercompose.xhtml
 +++ b/mail/components/compose/content/messengercompose.xhtml
@@ -687,7 +979,7 @@ diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/compo
    <menuitem oncommand="ToolbarContextMenu.removeExtensionForContextAction(this.parentElement)"
              data-l10n-id="toolbar-context-menu-remove-extension"
              class="customize-context-removeExtension"/>
-@@ -2070,17 +2061,19 @@
+@@ -2070,28 +2061,32 @@
  #ifdef XP_MACOSX
             iconsize="small"
  #endif
@@ -708,7 +1000,20 @@ diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/compo
                         oncommand="toggleContactsSidebar();"/>
        </box>
        <browser id="contactsBrowser" src="" disablehistory="true"/>
-@@ -2427,16 +2420,20 @@
+     </html:div>
+ 
+     <html:hr is="pane-splitter" id="contactsSplitter"
++             tabindex="0"
++             collapse-width="100"
+              resize-direction="horizontal"
+              resize-id="contactsSidebar" />
+ 
+     <toolbar is="customizable-toolbar" id="MsgHeadersToolbar"
+              class="themeable-full"
+              customizable="true" nowindowdrag="true"
+              ondragover="envelopeDragObserver.onDragOver(event);"
+              ondrop="envelopeDragObserver.onDrop(event);"
+@@ -2427,29 +2422,34 @@
                          disableonsend="true"
                          oninput="msgSubjectOnInput(event);"
                          onkeypress="subjectKeyPress(event);"
@@ -717,10 +1022,10 @@ diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/compo
            </moz-input-box>
          </hbox>
        </hbox>
-+      <toolbarbutton id="attachment-indicator"
-+                     class="toolbarbutton-1"
-+                     oncommand="goDoCommand('cmd_toggleAttachmentPane')">
-+      </toolbarbutton>
++      <html:button id="attachmentIndicator"
++                   class="toolbarbutton-1"
++                   tabindex="0">
++      </html:button>
      </toolbar>
  
      <toolbox id="FormatToolbox" mode="icons">
@@ -729,13 +1034,30 @@ diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/compo
                 persist="collapsed"
                 nowindowdrag="true">
  #include editFormatButtons.inc.xhtml
-@@ -2496,18 +2493,18 @@
+         <spacer flex="1"/>
+       </toolbar>
+     </toolbox>
+ 
+     <html:hr is="pane-splitter" id="headersSplitter"
++             tabindex="0"
+              resize-direction="vertical"
+              resize-id="MsgHeadersToolbar" />
+     <html:div id="messageArea">
+       <html:div id="dropAttachmentOverlay" class="drop-attachment-overlay">
+         <html:aside id="addInline" class="drop-attachment-box">
+           <html:span id="addInlineLabel"
+                      data-l10n-id="drop-file-label-inline"
+                      data-l10n-args='{"count": 1}'
+@@ -2494,20 +2494,21 @@
+         </p>
+       </html:div>
  
        <findbar id="FindToolbar" browserid="messageEditor"/>
      </html:div>
  
      <!-- NOTE: The splitter controls #attachmentBucket's size directly. -->
      <html:hr is="pane-splitter" id="attachmentSplitter"
++             tabindex="0"
               resize-direction="vertical"
               resize-id="attachmentBucket" />
 -    <html:details id="attachmentArea">
@@ -911,7 +1233,7 @@ diff --git a/mail/themes/osx/mail/compose/messengercompose.css b/mail/themes/osx
 diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/mail/messengercompose.css
 --- a/mail/themes/shared/mail/messengercompose.css
 +++ b/mail/themes/shared/mail/messengercompose.css
-@@ -80,33 +80,39 @@
+@@ -80,37 +80,44 @@
  
  .autocomplete-richlistitem {
    padding: var(--autocomplete-item-padding);
@@ -948,12 +1270,18 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
  }
  
  #attachmentArea > summary > * {
-   flex: 0 0 auto;
+-  flex: 0 0 auto;
++  /* Shrink to avoid focus-visible ring on #attachmentArea on overflow */
++  flex: 0 1 auto;
  }
  
  #attachmentArea > summary:focus-visible {
    outline-style: auto;
-@@ -152,16 +158,19 @@
+   outline-offset: -1px;
+ }
+ 
+ #newAttachmentIndicator {
+@@ -152,16 +159,19 @@
  }
  
  #attachmentToggle {
@@ -973,13 +1301,19 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
  
  #attachmentArea:-moz-locale-dir(rtl):not([open]) #attachmentToggle {
    transform: rotate(90deg);
-@@ -172,21 +181,18 @@
+@@ -170,23 +180,24 @@
+ #attachmentBucketCount {
+   text-overflow: ellipsis;
    /* Required for text-overflow to do anything */
    white-space: nowrap;
    overflow: hidden;
  }
  
  #attachmentBucketSize {
++  text-overflow: ellipsis;
++  /* Required for text-overflow to do anything */
++  white-space: nowrap;
++  overflow: hidden;
    color: var(--selected-item-text-color);
    background-color: var(--selected-item-color);
 -  font-size: 0.85em;
@@ -996,7 +1330,7 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
    --drop-attachment-box-color: #222;
    --drop-attachment-box-border-color: rgba(255, 255, 255, 0.85);
    --drop-attachment-box-background-hover: rgba(255, 255, 255, 0.5);
-@@ -204,19 +210,39 @@
+@@ -204,19 +215,39 @@
  
  .drop-attachment-overlay {
    pointer-events: none;
@@ -1037,7 +1371,7 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
      100% { opacity: 0; }
    }
    @keyframes showing-animation {
-@@ -248,41 +274,57 @@
+@@ -248,41 +279,57 @@
    }
  }
  
@@ -1101,7 +1435,7 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
    border-radius: 3px;
    background-color: var(--drop-attachment-title-background);
    background-position: 6px center;
-@@ -359,27 +401,23 @@
+@@ -359,27 +406,24 @@
    padding-inline: 3px;
    display: grid;
    grid-template: "contacts contacts-splitter headers" minmax(auto, var(--headersSplitter-height))
@@ -1117,6 +1451,7 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
     * grow to their content size. */
    --headersSplitter-height: min-content;
    --attachmentSplitter-height: min-content;
++  --attachmentSplitter-width: 200px;
    --contactsSplitter-width: 200px;
 -  /* NOTE: We specify the sizing of the attachment list using a variable because
 -   * when the attachment area is hidden or the attachment list is closed, we
@@ -1130,7 +1465,7 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
    min-height: 0;
    flex: 1;
    overflow: clip;
-@@ -412,16 +450,26 @@
+@@ -412,27 +456,50 @@
  
  #contactsSplitter.splitter-collapsed {
    /* The splitter cannot be un-collapsed using a mouse drag. */
@@ -1157,7 +1492,31 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
  }
  
  #headersSplitter {
-@@ -451,45 +499,97 @@
+   grid-area: headers-splitter;
+ }
+ 
++@media (prefers-reduced-motion: no-preference) {
++  hr[is="pane-splitter"] {
++    transition: background-color 200ms;
++  }
++}
++
++hr[is="pane-splitter"]:hover,
++hr[is="pane-splitter"]:focus-visible,
++hr[is="pane-splitter"].splitter-resizing {
++  background-color: var(--selected-item-color);
++  outline: none;
++}
++
+ #messageArea {
+   grid-area: message;
+   display: flex;
+   flex-direction: column;
+ }
+ 
+ #messageEditor {
+   flex: 1 1 0;
+@@ -451,45 +518,97 @@
  
  #attachmentSplitter {
    grid-area: attachment-splitter;
@@ -1176,34 +1535,31 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
 -  /* We adjust the track sizing so it no longer takes up any grid space. */
 -  --attachment-list-track-size: 0;
 +#attachmentArea[open] > #attachmentBucket {
-+  min-height: 30px;
- }
- 
--#composeContentBox.attachment-bucket-closed #attachmentSplitter {
-+#composeContentBox[attachmentpanelocation="bottom"] #attachmentSplitter {
-   /* NOTE: When the bucket is closed, we do not consider it "collapsed" by the
-    * splitter. It was closed by the attachmentArea's summary, not the splitter.
-    * Moreover, it cannot be un-collapsed by the splitter either.
-    * Instead, we want to simply stop the splitter from resizing by making it
-    * non-interactive. We keep the splitter visible though as it still acts as a
-    * barrier between the message body and the attachment area. */
-   pointer-events: none;
- }
- 
--#composeContentBox.attachment-area-hidden #attachmentSplitter {
--  /* We completely hide the splitter when the attachment area is hidden. */
++  min-height: var(--attachment-summary-height);
++}
++
 +#composeContentBox[attachmentpanelocation="top"] #MsgHeadersToolbar {
 +  grid-template: "from-row attachment-indicator attachment-splitter attachment-area" auto
 +                 "recipients-row attachment-indicator attachment-splitter attachment-area" minmax(0, 1fr)
 +                 "subject-row attachment-indicator attachment-splitter attachment-area" auto
 +                 / minmax(auto, 1fr) min-content min-content minmax(auto, var(--attachmentSplitter-width));
-+}
-+
+ }
+ 
+-#composeContentBox.attachment-bucket-closed #attachmentSplitter {
+-  /* NOTE: When the bucket is closed, we do not consider it "collapsed" by the
+-   * splitter. It was closed by the attachmentArea's summary, not the splitter.
+-   * Moreover, it cannot be un-collapsed by the splitter either.
+-   * Instead, we want to simply stop the splitter from resizing by making it
+-   * non-interactive. We keep the splitter visible though as it still acts as a
+-   * barrier between the message body and the attachment area. */
+-  pointer-events: none;
 +#top-gradient-box {
 +  grid-area: from-row;
 +  height: max-content;
-+}
-+
+ }
+ 
+-#composeContentBox.attachment-area-hidden #attachmentSplitter {
+-  /* We completely hide the splitter when the attachment area is hidden. */
 +#recipientsContainer {
 +  grid-area: recipients-row;
 +}
@@ -1213,21 +1569,32 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
 +  align-self: end;
 +}
 +
-+#composeContentBox #attachment-indicator {
++#composeContentBox #attachmentIndicator {
    display: none;
  }
  
 -#composeContentBox.attachment-area-hidden #attachmentArea {
 -  display: none;
-+#composeContentBox.attachment-area-hidden.has-attachment #attachment-indicator {
++#composeContentBox #attachmentIndicator:focus {
++  outline: 2px solid var(--focus-outline-color);
++}
++
++#composeContentBox #attachmentIndicator:not(:hover) {
++  background-color: unset;
++}
++
++#composeContentBox.attachment-area-hidden.has-attachment #attachmentIndicator {
 +  display: block;
 +  grid-area: attachment-indicator;
 +  background-image: var(--icon-attachment);
 +  background-position: center;
 +  background-repeat: no-repeat;
 +  background-size: 32px;
-+}
-+
++  margin: 2px;
++  margin-inline-end: 4px;
+ }
+ 
+-#composeContentBox.attachment-bucket-closed #attachmentBucket {
 +#composeContentBox[attachmentpanelocation="top"] #attachmentArea {
 +  display: block;
 +  grid-area: attachment-area;
@@ -1235,9 +1602,8 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
 +  border-bottom: 1px solid var(--splitter-color);
 +  overflow-x: hidden;
 +  overflow-y: auto;
- }
- 
--#composeContentBox.attachment-bucket-closed #attachmentBucket {
++}
++
 +#composeContentBox[attachmentpanelocation="top"] #attachmentArea > summary {
 +  padding-bottom: 9px;
 +}
@@ -1266,7 +1632,7 @@ diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/m
  #button-send {
    list-style-image: var(--icon-sent);
  }
-@@ -1085,22 +1185,16 @@ toolbarbutton.formatting-button[disabled
+@@ -1085,22 +1204,16 @@ toolbarbutton.formatting-button[disabled
    color: var(--selected-item-text-color);
    background-color: var(--selected-item-color);
  }
