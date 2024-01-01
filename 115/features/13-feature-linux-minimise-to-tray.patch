@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1699648426 -3600
-# Parent  b4888f9161aafe4a020fca2f4af164bf2b964358
+# Parent  8cb0c7349e860b1cb97b79ac5ea4c17f975bf0f7
 Feature: Minimise to tray for Linux.
 
 Adapted from
@@ -14,11 +14,13 @@ Feature: Minimise to tray for Linux: Use native Gtk calls to restore windows to 
 Feature: Minimise to tray for Linux: Fix activation of window.
 * * *
 Feature: Minimise to tray for Linux: Change GTK call from gtk_window_present() to gtk_window_present_with_time().
+* * *
+Feature: Linux system tray, add Mate to supported desktops.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
 +++ b/mail/app/profile/all-thunderbird.js
-@@ -1335,19 +1335,22 @@ pref("toolkit.telemetry.updatePing.enabl
+@@ -1337,19 +1337,23 @@ pref("toolkit.telemetry.updatePing.enabl
  pref("toolkit.telemetry.bhrPing.enabled", true);
  // Whether to enable Ecosystem Telemetry, requires a restart.
  #ifdef NIGHTLY_BUILD
@@ -32,7 +34,8 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
  pref("mail.minimizeToTray", false);
  #endif
 +#ifdef UNIX_BUT_NOT_MAC
-+pref("mail.minimizeToTray.supportedDesktops", "kde,gnome,xfce");
++pref("mail.minimizeToTray.supportedDesktops", "kde,gnome,xfce,mate");
++pref("mail.minimizeToTray.desktopsGtkWindowPresentWithTime", "mate");
 +#endif
  
  pref("prompts.defaultModalType", 3);
@@ -246,7 +249,7 @@ new file mode 100644
 diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
 --- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
 +++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
-@@ -1,66 +1,302 @@
+@@ -1,66 +1,333 @@
  /* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
  /* This Source Code Form is subject to the terms of the Mozilla Public
   * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -284,6 +287,8 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +static nsAutoString sLastUnreadTooltip;
 +static AppIndicator *ci = NULL;
 +static struct timespec sTimeActivated;
++static nsCString desktop;
++static bool useWithTime;
 +
 +using namespace mozilla;
  
@@ -321,7 +326,13 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +  // Raise the window, no good if it appears in the background.
 +  // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
 +  void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
-+  if (gtkWidget) gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++  if (gtkWidget) {
++    if (useWithTime) {
++      gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++    } else {
++      gtk_window_present(GTK_WINDOW(gtkWidget));
++    }
++  }
 +  widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
 +
 +  // Now move the window to where it was. We need to find it first in the
@@ -405,7 +416,13 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +    // Raise the window, no good if it appears in the background.
 +    // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
 +    void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
-+    if (gtkWidget) gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++    if (gtkWidget) {
++      if (useWithTime) {
++        gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
++      } else {
++        gtk_window_present(GTK_WINDOW(gtkWidget));
++      }
++    }
 +    widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
 +
 +    WinDims dims = sHiddenWindowsDims[i];
@@ -448,6 +465,20 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
    static char icon_pathN[PATH_MAX + 100];
  
    if (!ci) {
++    // Get the desktop.
++    if (desktop.IsEmpty()) {
++      desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
++      if (desktop.IsEmpty()) desktop = "no-DE";
++    }
++
++    // Work out which activation call we should use.
++    nsAutoCString prefValue;
++    mozilla::Preferences::GetCString("mail.minimizeToTray.desktopsGtkWindowPresentWithTime", prefValue);
++    useWithTime = FindInReadable(desktop, prefValue);
++#ifdef DEBUG_RESTORE
++    fprintf(stderr, "=== Desktop is %s, %susing GtkWindowPresentWithTime\n", desktop.get(), useWithTime ? "" : "not ");
++#endif
++
      // Find icon absolute path.
      size_t len = readlink("/proc/self/exe", icon_path0, PATH_MAX);
      char* q = icon_path0 + len - 1;
@@ -513,7 +544,10 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +
 +  nsAutoCString prefValue;
 +  mozilla::Preferences::GetCString("mail.minimizeToTray.supportedDesktops", prefValue);
-+  const nsCString& desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
++  if (desktop.IsEmpty()) {
++    desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
++    if (desktop.IsEmpty()) desktop = "no-DE";
++  }
 +  if (!FindInReadable(desktop, prefValue)) {
 +    fprintf(stderr, "Betterbird: Window NOT minimized to system tray!\n");
 +    fprintf(stderr, "            You are using desktop environment %s.\n", desktop.get());
