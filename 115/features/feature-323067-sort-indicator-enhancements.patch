@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
 # Date 1703274480 -3600
-# Parent  df58e19c81cb1323ccacd7b70fcc35c5c73fca4d
+# Parent  b15a23da75a4d151154057f9109a0f2e99374d1f
 Bug 323067 - No indicator of currently sorted column when column header is icon only
 
 Add a sort indicator to icon columns and add a secondary sort indicator to all columns.
@@ -10,10 +10,67 @@ Authored by Alta88 and contributed to the Betterbird Project.
 See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
 All uses require attribution to the Author.
 
+* * *
+Group-by-sort fixes to show date as secondary sort.
+
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
 +++ b/mail/base/content/about3Pane.js
-@@ -5622,16 +5622,40 @@ var threadPane = {
+@@ -4294,16 +4294,33 @@ var threadPaneHeader = {
+     if (event.target.id != "menu_threadPaneSortPopup") {
+       return;
+     }
+ 
+     const hiddenColumns = threadPane.columns
+       .filter(c => c.hidden)
+       .map(c => c.sortKey);
+ 
++    const isSortTypeValidForGrouping = [
++      Ci.nsMsgViewSortType.byAccount,
++      Ci.nsMsgViewSortType.byAttachments,
++      Ci.nsMsgViewSortType.byAuthor,
++      Ci.nsMsgViewSortType.byCorrespondent,
++      Ci.nsMsgViewSortType.byDate,
++      Ci.nsMsgViewSortType.byFlagged,
++      Ci.nsMsgViewSortType.byLocation,
++      Ci.nsMsgViewSortType.byPriority,
++      Ci.nsMsgViewSortType.byReceived,
++      Ci.nsMsgViewSortType.byRecipient,
++      Ci.nsMsgViewSortType.byStatus,
++      Ci.nsMsgViewSortType.bySubject,
++      Ci.nsMsgViewSortType.byTags,
++      Ci.nsMsgViewSortType.byCustom,
++    ].includes(gViewWrapper.primarySortType);
++
+     // Update menuitem to reflect sort key.
+     for (const menuitem of event.target.querySelectorAll(`[name="sortby"]`)) {
+       const sortKey = menuitem.getAttribute("value");
+       menuitem.setAttribute(
+         "checked",
+         gViewWrapper.primarySortType == Ci.nsMsgViewSortType[sortKey]
+       );
+       if (hiddenColumns.includes(sortKey)) {
+@@ -4325,16 +4342,19 @@ var threadPaneHeader = {
+     event.target
+       .querySelector(`[value="threaded"]`)
+       .setAttribute("checked", gViewWrapper.showThreaded);
+     event.target
+       .querySelector(`[value="unthreaded"]`)
+       .setAttribute("checked", gViewWrapper.showUnthreaded);
+     event.target
+       .querySelector(`[value="group"]`)
++      .setAttribute("disabled", !isSortTypeValidForGrouping);
++    event.target
++      .querySelector(`[value="group"]`)
+       .setAttribute("checked", gViewWrapper.showGroupedBySort);
+   },
+ 
+   /**
+    * Change the display view of the message list pane.
+    *
+    * @param {DOMEvent} event - The click event.
+    */
+@@ -5622,16 +5642,48 @@ var threadPane = {
        .querySelector(".sorting")
        ?.classList.remove("sorting", "ascending", "descending");
      this.treeTable
@@ -26,9 +83,23 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 +    let secondaryColumn = sortController.convertSortTypeToColumnID(
 +      gViewWrapper.dbView.secondarySortType
 +    );
++    let secondarySortOrder =
++      gViewWrapper.dbView.secondarySortOrder == Ci.nsMsgViewSortOrder.ascending
++        ? "ascending"
++        : "descending";
++
 +    this.treeTable
 +      .querySelector(".sortingSecondary")
 +      ?.classList.remove("sortingSecondary", "ascending", "descending");
++
++    if (gViewWrapper.showGroupedBySort) {
++      // No secondary sorts within grouped view. Rather, it is always
++      // byDate ascending.
++      secondaryColumn = sortController.convertSortTypeToColumnID(
++        Ci.nsMsgViewSortType.byDate
++      );
++      secondarySortOrder = "ascending";
++    }
 +
 +    // Don't add secondary sort indicator in these cases:
 +    // "Order received" is unique, dates will be "mostly" unique,
@@ -39,13 +110,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 +
 +    this.treeTable
 +      .querySelector(`#${secondaryColumn} button`)
-+      ?.classList.add(
-+        "sortingSecondary",
-+        gViewWrapper.dbView.secondarySortOrder ==
-+          Ci.nsMsgViewSortOrder.ascending
-+          ? "ascending"
-+          : "descending"
-+      );
++      ?.classList.add("sortingSecondary", secondarySortOrder);
    },
  
    /**
@@ -54,6 +119,27 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
     *
     * @param {nsIMsgFolder} folder - The chosen message folder.
     * @param {boolean} [useChildren=false] - If the requested action should be
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1004,16 +1004,17 @@ var dbViewWrapperListener = {
+       window.threadPane.setTreeView(gViewWrapper.dbView);
+       // There is no persisted thread last expanded state for synthetic views.
+       if (!gViewWrapper.isSynthetic) {
+         window.threadPane.restoreThreadState();
+       }
+       window.threadPane.isFirstScroll = true;
+       window.threadPane.scrollDetected = false;
+       window.threadPane.scrollToLatestRowIfNoSelection();
++      window.threadPane.restoreSortIndicator();
+     }
+   },
+   onDestroyingView(folderIsComingBack) {
+     if (!window.threadTree) {
+       return;
+     }
+ 
+     if (folderIsComingBack) {
 diff --git a/mail/themes/shared/mail/tree-listbox.css b/mail/themes/shared/mail/tree-listbox.css
 --- a/mail/themes/shared/mail/tree-listbox.css
 +++ b/mail/themes/shared/mail/tree-listbox.css
