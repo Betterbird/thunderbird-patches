@@ -1,0 +1,137 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1704319349 -3600
+# Parent  6284d5c6ca164d4a177b6bac42b2d4d1b4ef9b5a
+Bug 1846550 - Manually sort folders: Carry over sort order to replacement trash folder.
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -5073,18 +5073,18 @@ void nsMsgDBFolder::SetUserSortOrderInCa
+           NS_FAILED(cacheElement->GetCachedUInt32("folderSortOrder", &dummy))) {
+         cacheElement->SetCachedUInt32("folderSortOrder", order);
+       }
+     }
+   }
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetUserSortOrder(uint32_t order) {
++  SetUserSortOrderInCache(order, true);
+   if (order != mSortOrder) {
+-    SetUserSortOrderInCache(order, true);
+     nsCOMPtr<nsIMsgDatabase> db;
+     nsCOMPtr<nsIDBFolderInfo> folderInfo;
+     nsresult rv =
+         GetDBFolderInfoAndDB(getter_AddRefs(folderInfo), getter_AddRefs(db));
+     if (NS_SUCCEEDED(rv)) {
+       folderInfo->SetFolderSortOrder(mSortOrder = order);
+       // Committing the db also commits the cache.
+       db->Commit(nsMsgDBCommitType::kLargeCommit);
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -444,33 +444,50 @@ nsMsgLocalMailFolder::CreateSubfolder(co
+ 
+   nsCOMPtr<nsIMsgFolderNotificationService> notifier(
+       do_GetService("@mozilla.org/messenger/msgnotificationservice;1"));
+   if (notifier) notifier->NotifyFolderAdded(newFolder);
+ 
+   return NS_OK;
+ }
+ 
++nsresult nsMsgLocalMailFolder::CreateSubfolderWithOrder(
++    const nsAString& folderName, uint32_t order) {
++  nsCOMPtr<nsIMsgFolder> newFolder;
++  nsresult rv = CreateSubfolderInternal(folderName, nullptr,
++                                        getter_AddRefs(newFolder), order);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsCOMPtr<nsIMsgFolderNotificationService> notifier(
++      do_GetService("@mozilla.org/messenger/msgnotificationservice;1"));
++  if (notifier) notifier->NotifyFolderAdded(newFolder);
++
++  return NS_OK;
++}
++
+ nsresult nsMsgLocalMailFolder::CreateSubfolderInternal(
+     const nsAString& folderName, nsIMsgWindow* msgWindow,
+-    nsIMsgFolder** aNewFolder) {
++    nsIMsgFolder** aNewFolder, uint32_t order) {
+   nsresult rv = CheckIfFolderExists(folderName, this, msgWindow);
+   // No need for an assertion: we already throw an alert.
+   if (NS_FAILED(rv)) return rv;
+   nsCOMPtr<nsIMsgPluggableStore> msgStore;
+   rv = GetMsgStore(getter_AddRefs(msgStore));
+   NS_ENSURE_SUCCESS(rv, rv);
+   rv = msgStore->CreateFolder(this, folderName, aNewFolder);
+   if (rv == NS_MSG_ERROR_INVALID_FOLDER_NAME) {
+     ThrowAlertMsg("folderCreationFailed", msgWindow);
+   } else if (rv == NS_MSG_FOLDER_EXISTS) {
+     ThrowAlertMsg("folderExists", msgWindow);
+   }
+ 
+   if (NS_SUCCEEDED(rv)) {
++    if (order != static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE)) {
++      (*aNewFolder)->SetUserSortOrder(order);
++    }
+     // we need to notify explicitly the flag change because it failed when we
+     // did AddSubfolder
+     (*aNewFolder)->OnFlagChange(mFlags);
+     (*aNewFolder)
+         ->SetPrettyName(
+             folderName);  // because empty trash will create a new trash folder
+     NotifyFolderAdded(*aNewFolder);
+   }
+@@ -559,19 +576,22 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Empt
+         return NS_OK;
+       }
+     }
+     nsCOMPtr<nsIMsgFolder> parentFolder;
+     rv = trashFolder->GetParent(getter_AddRefs(parentFolder));
+     if (NS_SUCCEEDED(rv) && parentFolder) {
+       nsCOMPtr<nsIDBFolderInfo> transferInfo;
+       trashFolder->GetDBTransferInfo(getter_AddRefs(transferInfo));
++      uint32_t order;
++      trashFolder->GetUserSortOrder(&order);
+       trashFolder->SetParent(nullptr);
+       parentFolder->PropagateDelete(trashFolder, true);
+-      parentFolder->CreateSubfolder(u"Trash"_ns, nullptr);
++      static_cast<nsMsgLocalMailFolder*>(parentFolder.get())
++          ->CreateSubfolderWithOrder(u"Trash"_ns, order);
+       nsCOMPtr<nsIMsgFolder> newTrashFolder;
+       rv = GetTrashFolder(getter_AddRefs(newTrashFolder));
+       if (NS_SUCCEEDED(rv) && newTrashFolder) {
+         nsCOMPtr<nsIMsgLocalMailFolder> localTrash =
+             do_QueryInterface(newTrashFolder);
+         if (transferInfo) newTrashFolder->SetDBTransferInfo(transferInfo);
+         if (localTrash) localTrash->RefreshSizeOnDisk();
+         // update the summary totals so the front end will
+diff --git a/mailnews/local/src/nsLocalMailFolder.h b/mailnews/local/src/nsLocalMailFolder.h
+--- a/mailnews/local/src/nsLocalMailFolder.h
++++ b/mailnews/local/src/nsLocalMailFolder.h
+@@ -201,19 +201,22 @@ class nsMsgLocalMailFolder : public nsMs
+                                   nsIMsgCopyServiceListener* listener,
+                                   bool moveMsgs);
+ 
+   nsresult CreateSubFolders(nsIFile* path);
+   nsresult GetTrashFolder(nsIMsgFolder** trashFolder);
+   nsresult WriteStartOfNewMessage();
+ 
+   // CreateSubfolder, but without the nsIMsgFolderListener notification
+-  nsresult CreateSubfolderInternal(const nsAString& folderName,
+-                                   nsIMsgWindow* msgWindow,
+-                                   nsIMsgFolder** aNewFolder);
++  nsresult CreateSubfolderInternal(
++      const nsAString& folderName, nsIMsgWindow* msgWindow,
++      nsIMsgFolder** aNewFolder,
++      uint32_t order = static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE));
++  nsresult CreateSubfolderWithOrder(const nsAString& folderName,
++                                    uint32_t order);
+ 
+   nsresult IsChildOfTrash(bool* result);
+   nsresult RecursiveSetDeleteIsMoveTrash(bool bVal);
+   nsresult ConfirmFolderDeletion(nsIMsgWindow* aMsgWindow,
+                                  nsIMsgFolder* aFolder, bool* aResult);
+ 
+   nsresult GetDatabase() override;
+   // this will set mDatabase, if successful. It will also create a .msf file
