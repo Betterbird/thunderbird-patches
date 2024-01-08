@@ -2,7 +2,7 @@ mkdir langpacks
 cd langpacks
 
 :: Get language pack
-wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2/linux-x86_64/xpi/%~1.xpi
+wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.1-candidates/build1/linux-x86_64/xpi/%~1.xpi
 
 :: Remove stuff we don't want from the language pack
 7z d %~1.xpi chrome\%~1\locale\branding
