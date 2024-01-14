@@ -1,0 +1,279 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1705263759 -3600
+# Parent  8951401eb21c563883c93d6d368e63dbad8b7a80
+Feature: Rework MailNotificationService.jsm to improve Windows systray tooltip: Additional debugging.
+
+diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
+--- a/mailnews/base/src/MailNotificationService.jsm
++++ b/mailnews/base/src/MailNotificationService.jsm
+@@ -157,30 +157,30 @@ class NewMailNotificationService {
+       shouldCount,
+       "before-count-unread-for-folder",
+       aFolder.URI
+     );
+     return shouldCount.data;
+   }
+ 
+   onFolderBoolPropertyChanged(folder, property, oldValue, newValue) {
+-    this.#log.trace(
++    this.#log.debug(
+       `Changed bool ${property} of ${folder.folderURL}: ${oldValue} -> ${newValue}`
+     );
+     if (property == "NewMessages") {
+       this._newMessagesChanged(folder, oldValue, newValue);
+     }
+   }
+ 
+   onFolderIntPropertyChanged(folder, property, oldValue, newValue) {
+     try {
+       if (property == "FolderSize") {
+         return;
+       }
+-      this.#log.trace(
++      this.#log.debug(
+         `Changed int ${property} of ${folder.folderURL}: ${oldValue} -> ${newValue}`
+       );
+       if (property == "TotalUnreadMessages") {
+         this.#totalUnreadMessagesChanged(folder, oldValue, newValue);
+         // For new folders, there is a call with old == -1 and new == 0.
+         this._updateNewCount(folder, newValue - Math.max(oldValue, 0));
+       }
+     } catch (error) {
+@@ -191,25 +191,31 @@ class NewMailNotificationService {
+   _updateNewCount(folder, newCount, isCompensation = false) {
+     if (!this.confirmShouldCount(folder)) {
+       return;
+     }
+ 
+     this.#log.debug(`_updateNewCount: ${folder.URI} new messages: ${newCount}`);
+     let folderCount = this.folderCountMap.get(folder.URI) || 0;
+     if (isCompensation) {
++      this.#log.debug(
++        `_updateNewCount: Compensation for ${folder.URI}, setting ${folderCount} + ${newCount}`
++      );
+       this.folderCountMap.set(folder.URI, folderCount + newCount);
+       this.#newCount += newCount;
+       this.#log.debug(
+         `_updateNewCount: Compensation for ${
+           folder.URI
+         }, returning with count ${this.#newCount}`
+       );
+       return;
+     }
++    this.#log.debug(
++      `_updateNewCount: ${folder.URI}, setting ${folderCount} + ${newCount}`
++    );
+     this.folderCountMap.set(folder.URI, Math.max(folderCount + newCount, 0));
+     this.#newCount = Math.max(this.#newCount + newCount, 0);
+     this.#log.debug(
+       `_updateNewCount: ${folder.URI} new mail count: ${this.#newCount}`
+     );
+ 
+     let folderNew = this.folderNewMap.get(folder.URI);
+     if (!folderNew) {
+@@ -235,16 +241,19 @@ class NewMailNotificationService {
+     if (newValue) {
+       // We have new messages.
+       // `getNumNewMessages()` doesn't work until after the biff
+       // notification (BiffState or NumNewBiffMessages changed)
+       // and it doesn't work on local folders at all.
+       // We use a change of TotalUnreadMessages.
+       let folderNew = this.folderNewMap.get(folder.URI);
+       if (!folderNew) {
++        this.#log.debug(
++          `_newMessagesChanged: Created map entry for ${folder.URI}`
++        );
+         this.folderNewMap.set(folder.URI, {
+           name: folder.name,
+           isInbox: folder.flags & Ci.nsMsgFolderFlags.Inbox,
+         });
+         let folderCount = this.folderCountMap.get(folder.URI);
+         if (folderCount) {
+           // The count arrived before the "NewMessages" notification.
+           // This was already added in `_updateNewCount()`.
+@@ -265,16 +274,21 @@ class NewMailNotificationService {
+         }
+       }
+     } else {
+       // New messages went away.
+       let folderCount = this.folderCountMap.get(folder.URI);
+       this.folderCountMap.delete(folder.URI);
+       this.folderNewMap.delete(folder.URI);
+       if (folderCount) {
++        this.#log.debug(
++          `_newMessagesChanged: ${folder.URI} new mail count: ${
++            this.#newCount
++          }, will reduce by ${folderCount}`
++        );
+         this.#newCount = Math.max(this.#newCount - folderCount, 0);
+         this.#log.debug(
+           `_newMessagesChanged: ${folder.URI} new mail count: ${this.#newCount}`
+         );
+         if (this.useNewCountInBadge) {
+           this._notifyListeners(
+             Ci.mozINewMailNotificationService.count,
+             "onCountChanged",
+@@ -282,50 +296,60 @@ class NewMailNotificationService {
+             this._folderInfo()
+           );
+         }
+       }
+     }
+   }
+ 
+   _folderInfo() {
++    let DEBUGTOTAL = 0;
+     let totalInbox = 0;
+     let countInbox = 0;
+     let inboxName = "";
+     let folders = [];
+     for (const [key, value] of this.folderNewMap) {
+       if (!this.folderNewMap.get(key)) {
+         continue;
+       }
+       let count = this.folderCountMap.get(key);
+       if (!count) {
+         continue;
+       }
++      DEBUGTOTAL += count;
+       if (value.isInbox) {
+         totalInbox += count;
+         countInbox++;
+         inboxName = value.name; // Could be localised.
+         continue;
+       }
+       folders.push({ count, name: value.name });
+     }
++    this.#log.debug(`_folderInfo: ${DEBUGTOTAL} vs. ${this.#newCount}`);
++    if (DEBUGTOTAL != this.#newCount) {
++      this.#log.debug(
++        "_folderInfo: Warning: newCount and folder sum don't match"
++      );
++    }
++
+     if (totalInbox == 0 && folders.length == 0) {
+       return "";
+     }
+     let output = "\n";
+     let folderAddsComma = false;
+     if (totalInbox > 0) {
+       output += inboxName;
+       if (countInbox > 1) {
+         output += "(Σ)";
+       }
+       output += ": " + totalInbox.toString(10);
+       folderAddsComma = true;
+     }
+     if (folders.length == 0) {
++      this.#log.debug(`_folderInfo: ${output}`);
+       return output;
+     }
+     let lineLength = output.length - 1; // Don't count the initial newline.
+     folders.sort((el1, el2) => el2.count - el1.count);
+     for (let i = 0; i < folders.length; i++) {
+       let folder = folders[i].name + ": " + folders[i].count.toString(10);
+       // The total length of the tooltip must no exceed 127 characters, or it's truncated.
+       // There are already around 27 characters in "9999 unread messages" or
+@@ -353,16 +377,17 @@ class NewMailNotificationService {
+         output += ", " + folder;
+       } else {
+         // No comma, so this is the first thing we add.
+         output += folder;
+         folderAddsComma = true;
+       }
+       lineLength += folder.length;
+     }
++    this.#log.debug(`_folderInfo: ${output}`);
+     return output;
+   }
+ 
+   #totalUnreadMessagesChanged(folder, oldValue, newValue) {
+     if (!this.confirmShouldCount(folder)) {
+       return;
+     }
+ 
+@@ -381,46 +406,46 @@ class NewMailNotificationService {
+         "onCountChanged",
+         this.#unreadCount
+       );
+     }
+   }
+ 
+   onFolderAdded(parentFolder, child) {
+     if (child.rootFolder == child) {
+-      this.#log.trace(`Added root folder ${child.folderURL}`);
++      this.#log.debug(`Added root folder ${child.folderURL}`);
+     } else {
+-      this.#log.trace(
++      this.#log.debug(
+         `Added child folder ${child.folderURL} to ${parentFolder.folderURL}`
+       );
+     }
+   }
+ 
+   onMessageAdded(parentFolder, msg) {
+     if (this.confirmShouldCount(msg.folder)) {
+-      this.#log.trace(`Added <${msg.messageId}> to ${msg.folder.folderURL}`);
++      this.#log.debug(`Added <${msg.messageId}> to ${msg.folder.folderURL}`);
+     }
+   }
+ 
+   onFolderPropertyFlagChanged(msg, property, oldFlag, newFlag) {
+     if (property != "Status") {
+       return;
+     }
+-    this.#log.trace(
++    this.#log.debug(
+       `Changed flag ${property} of ${msg.folder.folderURL}: ${oldFlag} -> ${newFlag}`
+     );
+     if (
+       oldFlag & Ci.nsMsgMessageFlags.New &&
+       !(newFlag & Ci.nsMsgMessageFlags.New)
+     ) {
+-      this.#log.trace(
++      this.#log.debug(
+         `<${msg.messageId}> marked read in ${msg.folder.folderURL}`
+       );
+     } else if (newFlag & Ci.nsMsgMessageFlags.New) {
+-      this.#log.trace(
++      this.#log.debug(
+         `<${msg.messageId}> marked unread in ${msg.folder.folderURL}`
+       );
+     }
+ 
+     if (!(oldFlag & Ci.nsMsgMessageFlags.New)) {
+       // Changing read status of non-new message. We need to
+       // compensate since this will change the (new) unread
+       // message count which we might be tracking on the folder.
+@@ -436,27 +461,27 @@ class NewMailNotificationService {
+       ) {
+         this._updateNewCount(msg.folder, 1, true);
+       }
+     }
+   }
+ 
+   onFolderRemoved(parentFolder, child) {
+     if (child.rootFolder == child) {
+-      this.#log.trace(`Removed root folder ${child.folderURL}`);
++      this.#log.debug(`Removed root folder ${child.folderURL}`);
+     } else {
+-      this.#log.trace(
++      this.#log.debug(
+         `Removed child folder ${child.folderURL} from ${parentFolder?.folderURL}`
+       );
+     }
+   }
+ 
+   onMessageRemoved(parentFolder, msg) {
+     if (!msg.isRead) {
+-      this.#log.trace(
++      this.#log.debug(
+         `Removed unread <${msg.messageId}> from ${msg.folder.folderURL}`
+       );
+     }
+   }
+ 
+   // Implement mozINewMailNotificationService
+ 
+   get messageCount() {
