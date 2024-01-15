@@ -1,0 +1,74 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1705279642 -3600
+# Parent  7af3da071dd4dfc5e07757ee1722f52acf35ff27
+Bug 1831500 - Reinstate feedback during search: Take 2: Re-instate batching, introduce batch size of 50.
+
+diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+@@ -272,28 +272,41 @@ nsMsgQuickSearchDBView::SetSearchSession
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::OnSearchHit(nsIMsgDBHdr* aMsgHdr,
+                                     nsIMsgFolder* folder) {
+   NS_ENSURE_ARG(aMsgHdr);
+   if (!m_db) return NS_ERROR_NULL_POINTER;
+   // remember search hit and when search is done, reconcile cache
+   // with new hits;
+   m_hdrHits.AppendObject(aMsgHdr);
++  bool switchedOffBatching = false;
++  // Establish a batch size of 50 so the user sees what's going on.
++  if (mJSTree && m_hdrHits.Length() > 0 && (m_hdrHits.Length() % 50 == 0)) {
++    switchedOffBatching = true;
++    mJSTree->EndUpdateBatch();
++  }
++
+   nsMsgKey key;
+   aMsgHdr->GetMessageKey(&key);
+   // Is FindKey going to be expensive here? A lot of hits could make
+   // it a little bit slow to search through the view for every hit.
++  nsresult rv;
+   if (m_cacheEmpty || FindKey(key, false) == nsMsgViewIndex_None)
+-    return AddHdr(aMsgHdr);
++    rv = AddHdr(aMsgHdr);
+   else
+-    return NS_OK;
++    rv = NS_OK;
++
++  if (switchedOffBatching) mJSTree->BeginUpdateBatch();
++  return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::OnSearchDone(nsresult status) {
++  // This batch began in OnNewSearch.
++  if (mJSTree) mJSTree->EndUpdateBatch();
+   // We're a single-folder virtual folder if viewFolder != folder, and that is
+   // the only case in which we want to be messing about with a results cache
+   // or unread counts.
+   if (m_db && m_viewFolder && m_viewFolder != m_folder) {
+     nsTArray<nsMsgKey> keyArray;
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     uint32_t count = m_hdrHits.Count();
+@@ -380,16 +393,20 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+         else
+           break;
+         cachedHits->HasMoreElements(&hasMore);
+       }
+       if (mTree) mTree->EndUpdateBatch();
+       if (mJSTree) mJSTree->EndUpdateBatch();
+     }
+   }
++
++  // Prevent updates for every message found. This batch ends in OnSearchDone.
++  if (mJSTree) mJSTree->BeginUpdateBatch();
++
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgQuickSearchDBView::GetFirstMessageHdrToDisplayInThread(
+     nsIMsgThread* threadHdr, nsIMsgDBHdr** result) {
+   uint32_t numChildren;
+   nsresult rv = NS_OK;
+   uint8_t minLevel = 0xff;
