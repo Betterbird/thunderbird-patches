@@ -1,13 +1,16 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1705279642 -3600
-# Parent  7af3da071dd4dfc5e07757ee1722f52acf35ff27
-Bug 1831500 - Reinstate feedback during search: Take 2: Re-instate batching, introduce batch size of 50.
+# Date 1705606498 -3600
+# Parent  839e37a697125ad5c824ccdb7f19cc764cf23048
+Bug 1831500 - Reinstate feedback during search: Take 2: Re-instate batching, introduce variable batch size of 5, 10 and 20.
+
+In the end, the patch will be pulled out since it gave no performance benefit and despite ending batches,
+rows in the view aren't updated, so this is bad for feedback.
 
 diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 --- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 +++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
-@@ -272,28 +272,41 @@ nsMsgQuickSearchDBView::SetSearchSession
+@@ -272,28 +272,47 @@ nsMsgQuickSearchDBView::SetSearchSession
  NS_IMETHODIMP
  nsMsgQuickSearchDBView::OnSearchHit(nsIMsgDBHdr* aMsgHdr,
                                      nsIMsgFolder* folder) {
@@ -17,10 +20,16 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
    // with new hits;
    m_hdrHits.AppendObject(aMsgHdr);
 +  bool switchedOffBatching = false;
-+  // Establish a batch size of 50 so the user sees what's going on.
-+  if (mJSTree && m_hdrHits.Length() > 0 && (m_hdrHits.Length() % 50 == 0)) {
++  if (mJSTree && m_hdrHits.Length() > 0 &&
++      (m_hdrHits.Length() % m_batchSize == 0)) {
 +    switchedOffBatching = true;
 +    mJSTree->EndUpdateBatch();
++    // Slowly increase batch size, so first results come quickly.
++    if (m_hdrHits.Length() >= 20) {
++      m_batchSize = 10;
++    } else if (m_hdrHits.Length() >= 40) {
++      m_batchSize = 20;
++    }
 +  }
 +
    nsMsgKey key;
@@ -51,7 +60,25 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
      nsCString searchUri;
      m_viewFolder->GetURI(searchUri);
      uint32_t count = m_hdrHits.Count();
-@@ -380,16 +393,20 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+@@ -346,16 +365,17 @@ nsMsgQuickSearchDBView::OnSearchDone(nsr
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::OnNewSearch() {
+   int32_t oldSize = GetSize();
+ 
+   m_keys.Clear();
+   m_levels.Clear();
+   m_flags.Clear();
+   m_hdrHits.Clear();
++  m_batchSize = 5;  // Give the user the first results quickly.
+   // this needs to happen after we remove all the keys, since RowCountChanged()
+   // will call our GetRowCount()
+   if (mTree) mTree->RowCountChanged(0, -oldSize);
+   if (mJSTree) mJSTree->RowCountChanged(0, -oldSize);
+   uint32_t folderFlags = 0;
+   if (m_viewFolder) m_viewFolder->GetFlags(&folderFlags);
+   // check if it's a virtual folder - if so, we should get the cached hits
+   // from the db, and set a flag saying that we're using cached values.
+@@ -380,16 +400,20 @@ nsMsgQuickSearchDBView::OnNewSearch() {
          else
            break;
          cachedHits->HasMoreElements(&hasMore);
@@ -72,3 +99,24 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
    uint32_t numChildren;
    nsresult rv = NS_OK;
    uint8_t minLevel = 0xff;
+diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.h b/mailnews/base/src/nsMsgQuickSearchDBView.h
+--- a/mailnews/base/src/nsMsgQuickSearchDBView.h
++++ b/mailnews/base/src/nsMsgQuickSearchDBView.h
+@@ -58,16 +58,17 @@ class nsMsgQuickSearchDBView : public ns
+ 
+  protected:
+   virtual ~nsMsgQuickSearchDBView();
+   nsWeakPtr m_searchSession;
+   nsTArray<nsMsgKey> m_origKeys;
+   bool m_usingCachedHits;
+   bool m_cacheEmpty;
+   nsCOMArray<nsIMsgDBHdr> m_hdrHits;
++  int m_batchSize;
+   virtual nsresult AddHdr(nsIMsgDBHdr* msgHdr,
+                           nsMsgViewIndex* resultIndex = nullptr) override;
+   virtual nsresult OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
+                                bool ensureListed) override;
+   virtual nsresult DeleteMessages(nsIMsgWindow* window,
+                                   nsTArray<nsMsgViewIndex> const& selection,
+                                   bool deleteStorage) override;
+   virtual nsresult SortThreads(nsMsgViewSortTypeValue sortType,
