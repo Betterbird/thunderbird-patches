@@ -1,0 +1,116 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1705862566 -3600
+# Parent  accc805b05149db48f04b4f9b2d589cd1c23ce3f
+Bug 1875577 - Improve performance when opening a cross-folder view grouped by sort in expand-all state.
+
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1002,20 +1002,16 @@ var dbViewWrapperListener = {
+         tab,
+         isSearching && searchBundle.GetStringFromName("searchingMessage")
+       );
+     }
+   },
+   onCreatedView() {
+     if (window.threadTree) {
+       window.threadPane.setTreeView(gViewWrapper.dbView);
+-      // There is no persisted thread last expanded state for synthetic views.
+-      if (!gViewWrapper.isSynthetic) {
+-        window.threadPane.restoreThreadState();
+-      }
+       window.threadPane.isFirstScroll = true;
+       window.threadPane.scrollDetected = false;
+       window.threadPane.scrollToLatestRowIfNoSelection();
+       window.threadPane.restoreSortIndicator();
+     }
+   },
+   onDestroyingView(folderIsComingBack) {
+     if (!window.threadTree) {
+@@ -1038,26 +1034,19 @@ var dbViewWrapperListener = {
+   },
+   onDisplayingFolder() {},
+   onLeavingFolder() {},
+   onMessagesLoaded(all) {
+     if (!window.threadPane) {
+       return;
+     }
+ 
+-    // nsMsgQuickSearchDBView::SortThreads leaves all threads expanded in any
+-    // case.
+-    if (
+-      all &&
+-      gViewWrapper.isSingleFolder &&
+-      gViewWrapper.search.hasSearchTerms &&
+-      gViewWrapper.showThreaded &&
+-      !gViewWrapper._threadExpandAll
+-    ) {
+-      gViewWrapper.dbView.doCommand(Ci.nsMsgViewCommandType.collapseAll);
++    // There is no persisted thread last expanded state for synthetic views.
++    if (all && !gViewWrapper.isSynthetic) {
++      window.threadPane.restoreThreadState();
+     }
+ 
+     // Try to restore what was selected. Keep the saved selection (if there is
+     // one) until we have all of the messages. This will also reveal selected
+     // messages in collapsed threads.
+     window.threadPane.restoreSelection({ discard: all });
+ 
+     if (all || gViewWrapper.search.hasSearchTerms) {
+diff --git a/mail/modules/DBViewWrapper.jsm b/mail/modules/DBViewWrapper.jsm
+--- a/mail/modules/DBViewWrapper.jsm
++++ b/mail/modules/DBViewWrapper.jsm
+@@ -967,22 +967,18 @@ DBViewWrapper.prototype = {
+     // - retrieve persisted thread last expanded state.
+     this._threadExpandAll = Boolean(
+       this.__viewFlags & Ci.nsMsgViewFlagsType.kExpandAll
+     );
+ 
+     // Make sure the threaded bit is set if group-by-sort is set.  The views
+     //  encode 3 states in 2-bits, and we want to avoid that odd-man-out
+     //  state.
+-    // The expand flag must be set when opening a single virtual folder
+-    //  (quicksearch) in grouped view. The user's last set expand/collapse state
+-    //  for grouped/threaded in this use case is restored later.
+     if (this.__viewFlags & Ci.nsMsgViewFlagsType.kGroupBySort) {
+       this.__viewFlags |= Ci.nsMsgViewFlagsType.kThreadedDisplay;
+-      this.__viewFlags |= Ci.nsMsgViewFlagsType.kExpandAll;
+       this._ensureValidSort();
+     }
+ 
+     // See if the last-used view was one of the special views.  If so, put us in
+     //  that special view mode.  We intentionally do this after restoring the
+     //  view flags because _setSpecialView enforces threading.
+     // The nsMsgDBView is the one who persists this information for us.  In this
+     //  case the nsMsgThreadedDBView superclass of the special views triggers it
+@@ -1094,16 +1090,29 @@ DBViewWrapper.prototype = {
+   _createView() {
+     let dbviewContractId = "@mozilla.org/messenger/msgdbview;1?type=";
+ 
+     // we will have saved these off when closing our view
+     let viewFlags =
+       this.__viewFlags ??
+       Services.prefs.getIntPref("mailnews.default_view_flags", 1);
+ 
++    if (this.showGroupedBySort && this.isVirtual) {
++      if (this.isSingleFolder) {
++        // The expand flag must be set when opening a single virtual folder
++        // (quicksearch) in grouped view. The user's last set expand/collapse
++        // state for grouped/threaded in this use case is restored later.
++        viewFlags |= Ci.nsMsgViewFlagsType.kExpandAll;
++      } else {
++        // For performance reasons, cross-folder views should be opened with
++        // all groups collapsed.
++        viewFlags &= ~Ci.nsMsgViewFlagsType.kExpandAll;
++      }
++    }
++
+     // real folders are subject to the most interest set of possibilities...
+     if (this._underlyingData == this.kUnderlyingRealFolder) {
+       // quick-search inherits from threaded which inherits from group, so this
+       //  is right to choose it first.
+       if (this.search.hasSearchTerms) {
+         dbviewContractId += "quicksearch";
+       } else if (this.showGroupedBySort) {
+         dbviewContractId += "group";
