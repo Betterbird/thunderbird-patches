@@ -1,0 +1,214 @@
+# HG changeset patch
+# User Masayuki Nakano <masayuki@d-toybox.com>
+# Date 1706475214 -3600
+# Node ID 13548863a72404d66676b9729d9f57f196d2a062
+# Parent  0a9169486318b6a2dab740bac65fad363a5217af
+Bug 1868641 - Make `AutoDeleteRangesHandler::ExtendOrShrinkRangeToDelete` not cross flex-item and grid-item boundary r=m_kato
+
+The text input of the multi-select combobox of Slack has the following
+structure:
+```
+<div contenteditable style="display:flex">
+  <span class="c-multi_select_input__space">&nbsp;</span>
+  <span class="c-multi_select_input__filter_query">text which you typed</span>
+  <span class="c-multi_select_input__space" contenteditable="false">&nbsp;<span>
+</div>
+```
+
+When you do "Select All", they adjust selection to start from start of the
+text container `<span>` (i.e., `.c-multi_select_input__filter_query`).
+Then, typing new character deletes selection first.  At this time, in the
+legacy mode, `AutoDeleteRangesHandler::ExtendOrShrinkRangeToDelete` does not
+extend the deleting range because `<span>` is an inline element.  However,
+in the new mode, it extends the range because the `<span>` is a block since
+it's a flex-item, and selection starts from current block boundary.  Then,
+deleting range starts before the text container.  Finally, Gecko removes the
+text container and the following non-editable `<span>`. Therefore, typing text
+will be inserted as a child of the flex container which is the editing host.
+Finally, Slack restores the previous structure and collapse selection to end
+of the text.
+
+Currently, Chrome does same thing for normal blocks without flex/gird container.
+However, doing i in `AutoDeleteRangesHandler::ExtendOrShrinkRangeToDelete`
+causes a lot of regressions. Therefore, this patch tries to avoid only the bug
+in Slack. (I think that we need to redesign the deletion handler to fix it.)
+
+Differential Revision: https://phabricator.services.mozilla.com/D195955
+
+diff --git a/editor/libeditor/AutoRangeArray.cpp b/editor/libeditor/AutoRangeArray.cpp
+--- a/editor/libeditor/AutoRangeArray.cpp
++++ b/editor/libeditor/AutoRangeArray.cpp
+@@ -876,18 +876,25 @@ nsresult AutoRangeArray::ExtendRangeToWr
+   MOZ_DIAGNOSTIC_ASSERT(
+       !EditorRawDOMPoint(aRange.EndRef()).IsInNativeAnonymousSubtree());
+ 
+   if (NS_WARN_IF(!aRange.IsPositioned())) {
+     return NS_ERROR_INVALID_ARG;
+   }
+ 
+   EditorDOMPoint startPoint(aRange.StartRef()), endPoint(aRange.EndRef());
+-  AutoRangeArray::UpdatePointsToSelectAllChildrenIfCollapsedInEmptyBlockElement(
+-      startPoint, endPoint, aEditingHost);
++
++  // If we're joining blocks, we call this for selecting a line to move.
++  // Therefore, we don't want to select the ancestor blocks in this case
++  // even if they are empty.
++  if (aEditSubAction != EditSubAction::eMergeBlockContents) {
++    AutoRangeArray::
++        UpdatePointsToSelectAllChildrenIfCollapsedInEmptyBlockElement(
++            startPoint, endPoint, aEditingHost);
++  }
+ 
+   // Make a new adjusted range to represent the appropriate block content.
+   // This is tricky.  The basic idea is to push out the range endpoints to
+   // truly enclose the blocks that we will affect.
+ 
+   // Make sure that the new range ends up to be in the editable section.
+   // XXX Looks like that this check wastes the time.  Perhaps, we should
+   //     implement a method which checks both two DOM points in the editor
+diff --git a/editor/libeditor/HTMLEditUtils.cpp b/editor/libeditor/HTMLEditUtils.cpp
+--- a/editor/libeditor/HTMLEditUtils.cpp
++++ b/editor/libeditor/HTMLEditUtils.cpp
+@@ -35,16 +35,17 @@
+ #include "nsCaseTreatment.h"
+ #include "nsCOMPtr.h"            // for nsCOMPtr, operator==, etc.
+ #include "nsComputedDOMStyle.h"  // for nsComputedDOMStyle
+ #include "nsDebug.h"             // for NS_ASSERTION, etc.
+ #include "nsElementTable.h"      // for nsHTMLElement
+ #include "nsError.h"             // for NS_SUCCEEDED
+ #include "nsGkAtoms.h"           // for nsGkAtoms, nsGkAtoms::a, etc.
+ #include "nsHTMLTags.h"
++#include "nsIFrameInlines.h"     // for nsIFrame::IsFlexOrGridItem()
+ #include "nsLiteralString.h"     // for NS_LITERAL_STRING
+ #include "nsNameSpaceManager.h"  // for kNameSpaceID_None
+ #include "nsPrintfCString.h"     // nsPringfCString
+ #include "nsString.h"            // for nsAutoString
+ #include "nsStyledElement.h"
+ #include "nsStyleStruct.h"   // for StyleDisplay
+ #include "nsStyleUtil.h"     // for nsStyleUtil
+ #include "nsTextFragment.h"  // for nsTextFragment
+@@ -294,16 +295,21 @@ bool HTMLEditUtils::IsInlineContent(cons
+     return !IsHTMLBlockElementByDefault(aContent);
+   }
+   // Different block IsBlockElement, when the display-outside is inline, it's
+   // simply an inline element.
+   return styleDisplay->IsInlineOutsideStyle() ||
+          styleDisplay->IsRubyDisplayType();
+ }
+ 
++bool HTMLEditUtils::IsFlexOrGridItem(const Element& aElement) {
++  nsIFrame* frame = aElement.GetPrimaryFrame();
++  return frame && frame->IsFlexOrGridItem();
++}
++
+ bool HTMLEditUtils::IsInclusiveAncestorCSSDisplayNone(
+     const nsIContent& aContent) {
+   if (NS_WARN_IF(!aContent.IsInComposedDoc())) {
+     return true;
+   }
+   for (const Element* element :
+        aContent.InclusiveFlatTreeAncestorsOfType<Element>()) {
+     RefPtr<const ComputedStyle> elementStyle =
+diff --git a/editor/libeditor/HTMLEditUtils.h b/editor/libeditor/HTMLEditUtils.h
+--- a/editor/libeditor/HTMLEditUtils.h
++++ b/editor/libeditor/HTMLEditUtils.h
+@@ -203,16 +203,22 @@ class HTMLEditUtils final {
+ 
+   /**
+    * IsDisplayInsideFlowRoot() returns true if display-inline value of aElement
+    * is "flow-root".  This does NOT flush the layout.
+    */
+   [[nodiscard]] static bool IsDisplayInsideFlowRoot(const Element& aElement);
+ 
+   /**
++   * Return true if aElement is a flex item or a grid item.  This works only
++   * when aElement has a primary frame.
++   */
++  [[nodiscard]] static bool IsFlexOrGridItem(const Element& aElement);
++
++  /**
+    * IsRemovableInlineStyleElement() returns true if aElement is an inline
+    * element and can be removed or split to in order to modifying inline
+    * styles.
+    */
+   static bool IsRemovableInlineStyleElement(Element& aElement);
+   static bool IsFormatNode(const nsINode* aNode);
+   static bool IsNodeThatCanOutdent(nsINode* aNode);
+   static bool IsHeader(nsINode& aNode);
+diff --git a/editor/libeditor/HTMLEditorDeleteHandler.cpp b/editor/libeditor/HTMLEditorDeleteHandler.cpp
+--- a/editor/libeditor/HTMLEditorDeleteHandler.cpp
++++ b/editor/libeditor/HTMLEditorDeleteHandler.cpp
+@@ -6612,16 +6612,24 @@ HTMLEditor::AutoDeleteRangesHandler::Ext
+       // Don't cross list element boundary because we don't want to delete list
+       // element at start position unless it's empty.
+       if (HTMLEditUtils::IsAnyListElement(
+               backwardScanFromStartResult.GetContent()) &&
+           !HTMLEditUtils::IsEmptyAnyListElement(
+               *backwardScanFromStartResult.ElementPtr())) {
+         break;
+       }
++      // Don't cross flex-item/grid-item boundary to make new content inserted
++      // into it.
++      if (StaticPrefs::editor_block_inline_check_use_computed_style() &&
++          backwardScanFromStartResult.ContentIsElement() &&
++          HTMLEditUtils::IsFlexOrGridItem(
++              *backwardScanFromStartResult.ElementPtr())) {
++        break;
++      }
+       rangeToDelete.SetStart(
+           backwardScanFromStartResult.PointAtContent<EditorRawDOMPoint>());
+     }
+     if (aFrameSelection && !aFrameSelection->IsValidSelectionPoint(
+                                rangeToDelete.StartRef().GetContainer())) {
+       NS_WARNING("Computed start container was out of selection limiter");
+       return Err(NS_ERROR_FAILURE);
+     }
+@@ -6671,16 +6679,24 @@ HTMLEditor::AutoDeleteRangesHandler::Ext
+         // element boundaries, or if we hit the root.
+         if (HTMLEditUtils::IsAnyTableElement(
+                 forwardScanFromEndResult.GetContent()) ||
+             forwardScanFromEndResult.GetContent() ==
+                 maybeNonEditableBlockElement ||
+             forwardScanFromEndResult.GetContent() == editingHost) {
+           break;
+         }
++        // Don't cross flex-item/grid-item boundary to make new content inserted
++        // into it.
++        if (StaticPrefs::editor_block_inline_check_use_computed_style() &&
++            forwardScanFromEndResult.ContentIsElement() &&
++            HTMLEditUtils::IsFlexOrGridItem(
++                *forwardScanFromEndResult.ElementPtr())) {
++          break;
++        }
+         rangeToDelete.SetEnd(
+             forwardScanFromEndResult.PointAfterContent<EditorRawDOMPoint>());
+         continue;
+       }
+ 
+       break;
+     }
+ 
+diff --git a/editor/libeditor/WSRunObject.h b/editor/libeditor/WSRunObject.h
+--- a/editor/libeditor/WSRunObject.h
++++ b/editor/libeditor/WSRunObject.h
+@@ -178,16 +178,20 @@ class MOZ_STACK_CLASS WSScanResult final
+   }
+ 
+   /**
+    * GetContent() returns found visible and editable content/element.
+    * See MOZ_ASSERT_IF()s in AssertIfInvalidData() for the detail.
+    */
+   nsIContent* GetContent() const { return mContent; }
+ 
++  [[nodiscard]] bool ContentIsElement() const {
++    return mContent && mContent->IsElement();
++  }
++
+   /**
+    * The following accessors makes it easier to understand each callers.
+    */
+   MOZ_NEVER_INLINE_DEBUG Element* ElementPtr() const {
+     MOZ_DIAGNOSTIC_ASSERT(mContent->IsElement());
+     return mContent->AsElement();
+   }
+   MOZ_NEVER_INLINE_DEBUG HTMLBRElement* BRElementPtr() const {
