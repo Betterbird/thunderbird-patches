@@ -95,7 +95,7 @@ echo
 echo "======================================================="
 echo "Retrieving external patches for comm repo"
 echo "#!/bin/sh" > external.sh
-grep " # " .hg/patches/series >> external.sh || true
+grep " # " .hg/patches/series | grep -v "^#" >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
 sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1 || true/' external.sh
 chmod 700 external.sh

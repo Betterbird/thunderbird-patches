@@ -126,7 +126,7 @@ echo
 echo "======================================================="
 echo "Retrieving external patches for Mozilla repo"
 echo "#!/bin/sh" > external.sh
-grep " # " patches/series >> external.sh || true
+grep " # " patches/series | grep -v "^#" >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
 sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1 || true/' external.sh
 chmod 700 external.sh
@@ -138,7 +138,7 @@ echo "======================================================="
 echo "Retrieving external patches for comm repo"
 cd comm
 echo "#!/bin/sh" > external.sh
-grep " # " patches/series >> external.sh  || true
+grep " # " patches/series | grep -v "^#" >> external.sh || true
 sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
 sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O patches\/\1 || true/' external.sh
 chmod 700 external.sh
