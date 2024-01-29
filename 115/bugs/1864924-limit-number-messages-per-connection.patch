@@ -1,0 +1,334 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1706556888 -3600
+# Node ID 5b2af0b7af4787ce4b65fe278510334233920d0a
+# Parent  a4673b4222f1aa3ed8bb8f390430ff017aeeade7
+Bug 1864924 - Keep QUIT timer, add msg count limit and at most 1 conn per server. r=mkmelin
+
+This is a modified https://phabricator.services.mozilla.com/D196701
+With this there can only be 1 connection per server, and if the connection
+is reusable, a default limit of 10 messages can be sent before a new
+connection is created for additional messages to be sent. QUIT timer is not
+started if recipient count has reaached >= 100 or if reuse is disabled or if
+number of message on the connection has reached its limit; otherwise, it is.
+This also moves the reset of the QUIT timer earlier in the send and
+makes sure QUIT isn't triggered if a new message occurs right before the
+QUIT would be sent but before the timer is canceled (using new server
+property "sendIsActive").
+
+Differential Revision: https://phabricator.services.mozilla.com/D196942
+
+diff --git a/mailnews/compose/src/SmtpClient.jsm b/mailnews/compose/src/SmtpClient.jsm
+--- a/mailnews/compose/src/SmtpClient.jsm
++++ b/mailnews/compose/src/SmtpClient.jsm
+@@ -25,42 +25,53 @@
+  * THE SOFTWARE.
+  */
+ 
+ const EXPORTED_SYMBOLS = ["SmtpClient"];
+ 
+ var { AppConstants } = ChromeUtils.importESModule(
+   "resource://gre/modules/AppConstants.sys.mjs"
+ );
+-var { setTimeout } = ChromeUtils.importESModule(
++var { setTimeout, clearTimeout } = ChromeUtils.importESModule(
+   "resource://gre/modules/Timer.sys.mjs"
+ );
+ var { MailStringUtils } = ChromeUtils.import(
+   "resource:///modules/MailStringUtils.jsm"
+ );
+ var { SmtpAuthenticator } = ChromeUtils.import(
+   "resource:///modules/MailAuthenticator.jsm"
+ );
+ var { MsgUtils } = ChromeUtils.import(
+   "resource:///modules/MimeMessageUtils.jsm"
+ );
+ 
+ class SmtpClient {
+   /**
+    * The number of RCPT TO commands sent on the connection by this client.
+    * This can count-up over multiple messages.
++   * Per RFC, the minimum total number of recipients that MUST be buffered
++   * is 100 recipients.
++   *
++   * @see https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.8
++   * When 100 or more recipients have been counted on a connection, a new
++   * connection will be established to handle the additional recipients.
+    */
+   rcptCount = 0;
+ 
+   /**
+    * Set true only when doing a retry.
+    */
+   isRetry = false;
+ 
+   /**
++   * Becomes false when either recipient or message count reaches their limit.
++   */
++  reuseConnection = true;
++
++  /**
+    * Creates a connection object to a SMTP server and allows to send mail through it.
+    * Call `connect` method to inititate the actual connection, the constructor only
+    * defines the properties but does not actually connect.
+    *
+    * @class
+    *
+    * @param {nsISmtpServer} server - The associated nsISmtpServer instance.
+    */
+@@ -135,26 +146,36 @@ class SmtpClient {
+       this._secureTransport = this.options.requireTLS;
+       this.socket = new TCPSocket(hostname, port, {
+         binaryType: "arraybuffer",
+         useSecureTransport: this._secureTransport,
+       });
+ 
+       this.socket.onerror = this._onError;
+       this.socket.onopen = this._onOpen;
++
++      // Reset these counters when a new connection is opened. When the number
++      // of messages sent or the number of recipients for the messages reaches
++      // their respective threshold, a new connection will be established.
++      this._numMessages = 0;
++      this.rcptCount = 0;
+     }
+     this._freed = false;
++    const msgsPerConn = this._server._getIntPrefWithDefault(
++      "max_messages_per_connection",
++      10
++    );
++    this._messagesPerConnection = msgsPerConn > 0 ? msgsPerConn : 0;
+   }
+ 
+   /**
+    * Sends QUIT
+    */
+   quit() {
+     this._authenticating = false;
+-    this._freed = true;
+     this._sendCommand("QUIT");
+     this._currentAction = this.close;
+   }
+ 
+   /**
+    * Closes the connection to the server
+    *
+    * @param {boolean} [immediately] - Close the socket without waiting for
+@@ -186,16 +207,23 @@ class SmtpClient {
+    * @param {object} envelope - The envelope object.
+    * @param {string} envelope.from - The from address.
+    * @param {string[]} envelope.to - The to addresses.
+    * @param {number} envelope.size - The file size.
+    * @param {boolean} envelope.requestDSN - Whether to request Delivery Status Notifications.
+    * @param {boolean} envelope.messageId - The message id.
+    */
+   useEnvelope(envelope) {
++    // First on a new message, clear the QUIT timer if it's running.
++    if (this._quitTimer) {
++      this.logger.debug("Clearing QUIT timer");
++      clearTimeout(this._quitTimer);
++      this._quitTimer = null;
++    }
++
+     this._envelope = envelope || {};
+     this._envelope.from = [].concat(
+       this._envelope.from || "anonymous@" + this._getHelloArgument()
+     )[0];
+ 
+     if (!this._capabilities.includes("SMTPUTF8")) {
+       // If server doesn't support SMTPUTF8, check if addresses contain invalid
+       // characters.
+@@ -544,17 +572,16 @@ class SmtpClient {
+   }
+ 
+   /**
+    * Indicates that the socket has been closed
+    */
+   _onClose = () => {
+     this.logger.debug("Socket closed.");
+     this._free();
+-    this.rcptCount = 0;
+     if (this._authenticating) {
+       // In some cases, socket is closed for invalid username/password.
+       this._onAuthFailed({ data: "Socket closed." });
+     }
+   };
+ 
+   /**
+    * This is not a socket data handler but the handler for data emitted by the parser,
+@@ -1324,16 +1351,46 @@ class SmtpClient {
+       // about individual recipients
+ 
+       if (!command.success) {
+         this.logger.error("Message sending failed.");
+       } else {
+         this.logger.debug("Message sent successfully.");
+         this.isRetry = false;
+       }
++      this._numMessages++; // Number of messages sent on current connection.
++
++      // Recipient count has reached the limit or message count per connection
++      // is enabled and has reached the limit, set flag to cause QUIT to be
++      // sent by onFree() called below.
++      if (
++        this.rcptCount > 99 ||
++        (this._messagesPerConnection > 0 &&
++          this._numMessages >= this._messagesPerConnection)
++      ) {
++        this.reuseConnection = false;
++      }
++
++      // If reuseConnection is set false above, don't start the QUIT timer
++      // below since the connection will be closed and a new connection
++      // established.
++      // If reuseConnection is true, the timer will be started. It will only
++      // timeout and send QUIT if another message is NOT sent within the set
++      // time. Also, if another send becomes active right before the timeout
++      // occurs, don't send the QUIT.
++      if (this.reuseConnection) {
++        this._server.sendIsActive = false;
++        this.logger.debug("Start 5 second QUIT timer");
++        this._quitTimer = setTimeout(() => {
++          if (this.socket?.readyState == "open" && !this._server.sendIsActive) {
++            this.quit();
++          }
++          this._quitTimer = null;
++        }, 5000);
++      }
+ 
+       this._currentAction = this._actionIdle;
+       if (command.success) {
+         this.ondone(0);
+       } else {
+         this._onNsError(MsgUtils.NS_ERROR_SENDING_MESSAGE, command.data);
+       }
+     }
+diff --git a/mailnews/compose/src/SmtpServer.jsm b/mailnews/compose/src/SmtpServer.jsm
+--- a/mailnews/compose/src/SmtpServer.jsm
++++ b/mailnews/compose/src/SmtpServer.jsm
+@@ -201,28 +201,30 @@ class SmtpServer {
+     return this._getCharPrefWithDefault("hello_argument");
+   }
+ 
+   get serverURI() {
+     return this._getServerURI(true);
+   }
+ 
+   /**
+-   * If pref max_cached_connection is set to less than 1, allow only one
+-   * connection and one message to be sent on that connection. Otherwise, allow
+-   * up to max_cached_connection (default to 3) with each connection allowed to
+-   * send multiple messages.
++   * Obtain the user configured number of simultaneous SMTP connections per
++   * server that will be allowed. If pref set to 0 or less, allow 1 connection.
++   *
++   * Note: Currently the pref setting is ignored and the number of connections
++   * per server is set to 1 here. The code to allow multiple connections
++   * remains in place if needed in the future.
+    */
+   get maximumConnectionsNumber() {
+     let maxConnections = this._getIntPrefWithDefault(
+       "max_cached_connections",
+-      3
++      1
+     );
+-    // Always return a value >= 0.
+-    return maxConnections > 0 ? maxConnections : 0;
++    // return maxConnections < 1 ? 1 : maxConnections;
++    return maxConnections ? 1 : 1;
+   }
+ 
+   set maximumConnectionsNumber(value) {
+     this._prefs.setIntPref("max_cached_connections", value);
+   }
+ 
+   get password() {
+     if (this._password) {
+@@ -490,28 +492,23 @@ class SmtpServer {
+   }
+   /**
+    * Do some actions with a connection.
+    *
+    * @param {Function} handler - A callback function to take a SmtpClient
+    *   instance, and do some actions.
+    */
+   async withClient(handler) {
++    // Flag that a send is progress. Precludes sending QUIT during the transfer.
++    this.sendIsActive = true;
+     let client = await this._getNextClient();
+     client.onFree = () => {
+       this._busyConnections = this._busyConnections.filter(c => c != client);
+-      // Per RFC, the minimum total number of recipients that MUST be buffered
+-      // is 100 recipients.
+-      // @see https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.8
+-      // So use a new connection for the next message to avoid running into
+-      // recipient limits.
+-      // If user has set SMTP pref max_cached_connection to less than 1,
+-      // use a new connection for each message.
+-      if (this.maximumConnectionsNumber == 0 || client.rcptCount > 99) {
+-        // Send QUIT, server will then terminate the connection
++      // Check if the connection should be terminated by doing smtp QUIT
++      if (!client.reuseConnection) {
+         client.quit();
+       } else {
+         // Keep using this connection
+         this._freeConnections.push(client);
+         // Resolve the first waiting in queue.
+         this._connectionWaitingQueue.shift()?.();
+       }
+     };
+diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
+--- a/mailnews/compose/src/SmtpService.jsm
++++ b/mailnews/compose/src/SmtpService.jsm
+@@ -104,17 +104,17 @@ class SmtpService {
+       server.password = password;
+     }
+     let runningUrl = this._getRunningUri(server);
+     await server.wrappedJSObject.withClient(client => {
+       deliveryListener?.OnStartRunningUrl(runningUrl, 0);
+       let fresh = true;
+       client.onidle = () => {
+         // onidle can occur multiple times, but we should only init sending
+-        // when sending a new message(fresh is true) or when a new connection
++        // when sending a new message (fresh is true) or when a new connection
+         // replaces the original connection due to error 4xx response
+         // (client.isRetry is true).
+         if (!fresh && !client.isRetry) {
+           return;
+         }
+         // Init when fresh==true OR re-init sending when client.isRetry==true.
+         fresh = false;
+         let from = sender;
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -523,17 +523,28 @@ pref("mail.default_sendlater_uri", "mail
+ pref("mail.server.default.clientid", "");
+ pref("mail.smtpserver.default.clientid", "");
+ 
+ // This is not to be enabled by default until the prerequisite
+ // changes are completed. See here for details:
+ //  https://bugzilla.mozilla.org/show_bug.cgi?id=1565379
+ pref("mail.server.default.clientidEnabled", false);
+ pref("mail.smtpserver.default.clientidEnabled", false);
+-pref("mail.smtpserver.default.max_cached_connections", 3);
++
++// This limits the number of simultaneous SMTP connection to a server.
++// Currently if this is set to other than 1, it is changed to 1 internally, so
++// only 1 connection per server can actually occur.
++pref("mail.smtpserver.default.max_cached_connections", 1);
++
++// If set greater than 0, this limits the number of messages that can be sent
++// serially on an SMTP connection before the connection is closed and a new
++// connection is established to handle any additional messages, also subject to
++// this limit. Setting this to zero or less removes any message count per
++// connection limit.
++pref("mail.smtpserver.default.max_messages_per_connection", 10);
+ 
+ pref("mail.smtpservers", "");
+ pref("mail.accountmanager.accounts", "");
+ 
+ // Last used account key value
+ pref("mail.account.lastKey", 0);
+ 
+ pref("mail.server.default.port", -1);
