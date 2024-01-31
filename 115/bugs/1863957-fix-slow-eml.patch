@@ -1,0 +1,176 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1706728833 -3600
+# Parent  9b6119eafd908d1c716b840152db6974e9baa2b3
+Bug 1863957 - Fix slow .eml opening on profiles with many folders.
+
+To open an .eml file, nsMailboxUrl::GetUri() gets called tree times.
+Each time the system compares the filename to all the folder filenames
+in the system. Clearly, no folder filename ever matches.
+Especially on Windows, the operation of filename comparison is expensive.
+
+Looks like the faulty code can just be removed.
+
+diff --git a/mailnews/base/public/nsIMsgAccountManager.idl b/mailnews/base/public/nsIMsgAccountManager.idl
+--- a/mailnews/base/public/nsIMsgAccountManager.idl
++++ b/mailnews/base/public/nsIMsgAccountManager.idl
+@@ -217,26 +217,16 @@ interface nsIMsgAccountManager : nsISupp
+   // force account info out to prefs file
+   void saveAccountInfo();
+ 
+   ACString getChromePackageName(in ACString aExtensionName);
+ 
+   /// Enumerate all incoming servers and their folders and return in an array.
+   readonly attribute Array<nsIMsgFolder> allFolders;
+ 
+-  /**
+-   * Iterates over all folders looking for one with the passed in path,
+-   * and returns the uri for the matching folder. In the future,
+-   * the folder lookup service will provide this functionality.
+-   *
+-   * @param aLocalPath path of the folder whose uri we want.
+-   * @return the URI of the folder that corresponds to aLocalPath
+-   */
+-  AUTF8String folderUriForPath(in nsIFile aLocalPath);
+-
+   // Used to sort servers (accounts) for e.g. the folder pane
+   long getSortOrder(in nsIMsgIncomingServer server);
+ 
+   /**
+    * Sets new order of accounts.
+    *
+    * @param accountKeys - Account keys in the new preferred order.
+    */
+diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsgAccountManager.cpp
+--- a/mailnews/base/src/nsMsgAccountManager.cpp
++++ b/mailnews/base/src/nsMsgAccountManager.cpp
+@@ -3418,49 +3418,16 @@ NS_IMETHODIMP nsMsgAccountManager::OnFol
+ }
+ 
+ NS_IMETHODIMP nsMsgAccountManager::OnFolderEvent(nsIMsgFolder* aFolder,
+                                                  const nsACString& aEvent) {
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
+ NS_IMETHODIMP
+-nsMsgAccountManager::FolderUriForPath(nsIFile* aLocalPath,
+-                                      nsACString& aMailboxUri) {
+-  NS_ENSURE_ARG_POINTER(aLocalPath);
+-  bool equals;
+-  if (m_lastPathLookedUp &&
+-      NS_SUCCEEDED(aLocalPath->Equals(m_lastPathLookedUp, &equals)) && equals) {
+-    aMailboxUri = m_lastFolderURIForPath;
+-    return NS_OK;
+-  }
+-  nsTArray<RefPtr<nsIMsgFolder>> folders;
+-  nsresult rv = GetAllFolders(folders);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  for (auto folder : folders) {
+-    nsCOMPtr<nsIFile> folderPath;
+-    rv = folder->GetFilePath(getter_AddRefs(folderPath));
+-    NS_ENSURE_SUCCESS(rv, rv);
+-
+-    // Check if we're equal
+-    rv = folderPath->Equals(aLocalPath, &equals);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-
+-    if (equals) {
+-      rv = folder->GetURI(aMailboxUri);
+-      m_lastFolderURIForPath = aMailboxUri;
+-      aLocalPath->Clone(getter_AddRefs(m_lastPathLookedUp));
+-      return rv;
+-    }
+-  }
+-  return NS_ERROR_FAILURE;
+-}
+-
+-NS_IMETHODIMP
+ nsMsgAccountManager::GetSortOrder(nsIMsgIncomingServer* aServer,
+                                   int32_t* aSortOrder) {
+   NS_ENSURE_ARG_POINTER(aServer);
+   NS_ENSURE_ARG_POINTER(aSortOrder);
+ 
+   // If the passed in server is the default, return its sort order as 0
+   // regardless of its server sort order.
+ 
+diff --git a/mailnews/base/src/nsMsgAccountManager.h b/mailnews/base/src/nsMsgAccountManager.h
+--- a/mailnews/base/src/nsMsgAccountManager.h
++++ b/mailnews/base/src/nsMsgAccountManager.h
+@@ -116,20 +116,16 @@ class nsMsgAccountManager : public nsIMs
+   int32_t m_lastFindServerPort;
+   nsCString m_lastFindServerType;
+ 
+   void SetLastServerFound(nsIMsgIncomingServer* server,
+                           const nsACString& hostname,
+                           const nsACString& username, const int32_t port,
+                           const nsACString& type);
+ 
+-  // Cache the results of the last call to FolderUriFromDirInProfile
+-  nsCOMPtr<nsIFile> m_lastPathLookedUp;
+-  nsCString m_lastFolderURIForPath;
+-
+   /* internal creation routines - updates m_identities and m_incomingServers */
+   nsresult createKeyedAccount(const nsCString& key, bool forcePositionToEnd,
+                               nsIMsgAccount** _retval);
+   nsresult createKeyedServer(const nsACString& key, const nsACString& username,
+                              const nsACString& password, const nsACString& type,
+                              nsIMsgIncomingServer** _retval);
+ 
+   nsresult createKeyedIdentity(const nsACString& key, nsIMsgIdentity** _retval);
+diff --git a/mailnews/local/src/nsMailboxUrl.cpp b/mailnews/local/src/nsMailboxUrl.cpp
+--- a/mailnews/local/src/nsMailboxUrl.cpp
++++ b/mailnews/local/src/nsMailboxUrl.cpp
+@@ -188,38 +188,32 @@ nsresult nsMailboxUrl::Clone(nsIURI** _r
+   if (clonedUrl) clonedUrl->SetUri(mURI);
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsMailboxUrl::GetUri(nsACString& aURI) {
+   // if we have been given a uri to associate with this url, then use it
+   // otherwise try to reconstruct a URI on the fly....
+ 
+-  if (!mURI.IsEmpty())
++  if (!mURI.IsEmpty()) {
+     aURI = mURI;
+-  else {
+-    if (m_filePath) {
+-      nsAutoCString baseUri;
+-      nsresult rv;
+-      nsCOMPtr<nsIMsgAccountManager> accountManager =
+-          do_GetService("@mozilla.org/messenger/account-manager;1", &rv);
+-      NS_ENSURE_SUCCESS(rv, rv);
++  } else if (m_filePath) {
++    // This code path should only ever run for .eml messages
++    // opened from file.
++    nsAutoCString baseUri;
++    nsresult rv = m_baseURL->GetSpec(baseUri);
++    NS_ENSURE_SUCCESS(rv, rv);
++    nsCString baseMessageURI;
++    nsCreateLocalBaseMessageURI(baseUri, baseMessageURI);
++    nsBuildLocalMessageURI(baseMessageURI, m_messageKey, aURI);
+ 
+-      // we blow off errors here so that we can open attachments
+-      // in .eml files.
+-      (void)accountManager->FolderUriForPath(m_filePath, baseUri);
+-      if (baseUri.IsEmpty()) {
+-        rv = m_baseURL->GetSpec(baseUri);
+-        NS_ENSURE_SUCCESS(rv, rv);
+-      }
+-      nsCString baseMessageURI;
+-      nsCreateLocalBaseMessageURI(baseUri, baseMessageURI);
+-      nsBuildLocalMessageURI(baseMessageURI, m_messageKey, aURI);
+-    } else
+-      aURI = "";
++    // Remember this for the next call.
++    mURI = aURI;
++  } else {
++    aURI = "";
+   }
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsMailboxUrl::GetMsgHdrForKey(nsMsgKey msgKey, nsIMsgDBHdr** aMsgHdr) {
+   nsresult rv = NS_OK;
+   if (aMsgHdr && m_filePath) {
