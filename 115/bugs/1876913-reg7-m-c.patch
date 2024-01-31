@@ -1,0 +1,134 @@
+# HG changeset patch
+# User Masayuki Nakano <masayuki@d-toybox.com>
+# Date 1706706119 -3600
+# Parent  53a3ce6d25a69ebdf59188562beff8e8385a6a10
+Bug 1876913 - part 2: Make `HTMLEditor::FormatBlockContainerWithTransaction` refer the computed style when considering the wrapping part r=m_kato
+
+In bug 1851951, I considered that the method should keep the traditional
+behavior for the backward compatibility because of mainly used by handling
+a block level command, `formatBlock`, but I think that computing the replacing
+part should be considered with the computed style of the elements.  That's
+compatible with the other browsers.
+
+diff --git a/editor/libeditor/HTMLEditSubActionHandler.cpp b/editor/libeditor/HTMLEditSubActionHandler.cpp
+--- a/editor/libeditor/HTMLEditSubActionHandler.cpp
++++ b/editor/libeditor/HTMLEditSubActionHandler.cpp
+@@ -4523,22 +4523,23 @@ HTMLEditor::FormatBlockContainerWithTran
+   MOZ_ALWAYS_TRUE(aSelectionRanges.SaveAndTrackRanges(*this));
+ 
+   // TODO: We don't need AutoTransactionsConserveSelection here in the normal
+   //       cases, but removing this may cause the behavior with the legacy
+   //       mutation event listeners.  We should try to delete this in a bug.
+   AutoTransactionsConserveSelection dontChangeMySelection(*this);
+ 
+   AutoTArray<OwningNonNull<nsIContent>, 64> arrayOfContents;
++  // Changed to ExtendRangesToWrapLines() in bug 1865729.
+   aSelectionRanges.ExtendRangesToWrapLinesToHandleBlockLevelEditAction(
+       EditSubAction::eCreateOrRemoveBlock, aEditingHost);
+   Result<EditorDOMPoint, nsresult> splitResult =
+       aSelectionRanges
+           .SplitTextAtEndBoundariesAndInlineAncestorsAtBothBoundaries(
+-              *this, BlockInlineCheck::UseHTMLDefaultStyle, aEditingHost);
++              *this, BlockInlineCheck::UseComputedDisplayOutsideStyle, aEditingHost);
+   if (MOZ_UNLIKELY(splitResult.isErr())) {
+     NS_WARNING(
+         "AutoRangeArray::"
+         "SplitTextAtEndBoundariesAndInlineAncestorsAtBothBoundaries() failed");
+     return splitResult.propagateErr();
+   }
+   nsresult rv = aSelectionRanges.CollectEditTargetNodes(
+       *this, arrayOfContents, EditSubAction::eCreateOrRemoveBlock,
+@@ -4559,17 +4560,17 @@ HTMLEditor::FormatBlockContainerWithTran
+         "eCreateOrRemoveBlock) failed");
+     return splitAtBRElementsResult.propagateErr();
+   }
+ 
+   // If there is no visible and editable nodes in the edit targets, make an
+   // empty block.
+   // XXX Isn't this odd if there are only non-editable visible nodes?
+   if (HTMLEditUtils::IsEmptyOneHardLine(
+-          arrayOfContents, BlockInlineCheck::UseHTMLDefaultStyle)) {
++          arrayOfContents, BlockInlineCheck::UseComputedDisplayOutsideStyle)) {
+     if (NS_WARN_IF(aSelectionRanges.Ranges().IsEmpty())) {
+       return Err(NS_ERROR_FAILURE);
+     }
+ 
+     auto pointToInsertBlock =
+         aSelectionRanges.GetFirstRangeStartPoint<EditorDOMPoint>();
+     if (&blockType == nsGkAtoms::normal || &blockType == nsGkAtoms::_empty) {
+       if (!pointToInsertBlock.IsInContentNode()) {
+@@ -4578,33 +4579,34 @@ HTMLEditor::FormatBlockContainerWithTran
+             "block parent because container of the point is not content");
+         return Err(NS_ERROR_FAILURE);
+       }
+       // We are removing blocks (going to "body text")
+       const RefPtr<Element> editableBlockElement =
+           HTMLEditUtils::GetInclusiveAncestorElement(
+               *pointToInsertBlock.ContainerAs<nsIContent>(),
+               HTMLEditUtils::ClosestEditableBlockElement,
+-              BlockInlineCheck::UseHTMLDefaultStyle);
++              BlockInlineCheck::UseComputedDisplayOutsideStyle);
+       if (!editableBlockElement) {
+         NS_WARNING(
+             "HTMLEditor::FormatBlockContainerWithTransaction() couldn't find "
+             "block parent");
+         return Err(NS_ERROR_FAILURE);
+       }
+       if (!HTMLEditUtils::IsFormatNode(editableBlockElement)) {
+         return RefPtr<Element>();
+       }
+ 
+       // If the first editable node after selection is a br, consume it.
+       // Otherwise it gets pushed into a following block after the split,
+       // which is visually bad.
+       if (nsCOMPtr<nsIContent> brContent = HTMLEditUtils::GetNextContent(
+               pointToInsertBlock, {WalkTreeOption::IgnoreNonEditableNode},
+-              BlockInlineCheck::UseHTMLDefaultStyle, &aEditingHost)) {
++              BlockInlineCheck::UseComputedDisplayOutsideStyle,
++              &aEditingHost)) {
+         if (brContent && brContent->IsHTMLElement(nsGkAtoms::br)) {
+           AutoEditorDOMPointChildInvalidator lockOffset(pointToInsertBlock);
+           nsresult rv = DeleteNodeWithTransaction(*brContent);
+           if (NS_FAILED(rv)) {
+             NS_WARNING("EditorBase::DeleteNodeWithTransaction() failed");
+             return Err(rv);
+           }
+         }
+@@ -4640,17 +4642,17 @@ HTMLEditor::FormatBlockContainerWithTran
+       return RefPtr<Element>();
+     }
+ 
+     // We are making a block.  Consume a br, if needed.
+     if (nsCOMPtr<nsIContent> maybeBRContent = HTMLEditUtils::GetNextContent(
+             pointToInsertBlock,
+             {WalkTreeOption::IgnoreNonEditableNode,
+              WalkTreeOption::StopAtBlockBoundary},
+-            BlockInlineCheck::UseHTMLDefaultStyle, &aEditingHost)) {
++            BlockInlineCheck::UseComputedDisplayOutsideStyle, &aEditingHost)) {
+       if (maybeBRContent->IsHTMLElement(nsGkAtoms::br)) {
+         AutoEditorDOMPointChildInvalidator lockOffset(pointToInsertBlock);
+         nsresult rv = DeleteNodeWithTransaction(*maybeBRContent);
+         if (NS_FAILED(rv)) {
+           NS_WARNING("EditorBase::DeleteNodeWithTransaction() failed");
+           return Err(rv);
+         }
+         // We don't need to act on this node any more
+@@ -4714,17 +4716,17 @@ HTMLEditor::FormatBlockContainerWithTran
+     }
+     wrapContentsInBlockquoteElementsResult.inspect()
+         .IgnoreCaretPointSuggestion();
+     return wrapContentsInBlockquoteElementsResult.unwrap().UnwrapNewNode();
+   }
+   if (&blockType == nsGkAtoms::normal || &blockType == nsGkAtoms::_empty) {
+     Result<EditorDOMPoint, nsresult> removeBlockContainerElementsResult =
+         RemoveBlockContainerElementsWithTransaction(
+-            arrayOfContents, BlockInlineCheck::UseHTMLDefaultStyle);
++            arrayOfContents, BlockInlineCheck::UseComputedDisplayOutsideStyle);
+     if (MOZ_UNLIKELY(removeBlockContainerElementsResult.isErr())) {
+       NS_WARNING(
+           "HTMLEditor::RemoveBlockContainerElementsWithTransaction() failed");
+       return removeBlockContainerElementsResult.propagateErr();
+     }
+     return RefPtr<Element>();
+   }
+   Result<CreateElementResult, nsresult> wrapContentsInBlockElementResult =
