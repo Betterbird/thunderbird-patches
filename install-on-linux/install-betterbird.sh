@@ -41,7 +41,7 @@ downloadUpdate() {
 
 checkHash() {
   hash=`sha256sum $tmpFile | awk '{print $1}'`
-  rm -r $tmpDir/sha256.txt
+  rm -f $tmpDir/sha256.txt
   wget -q -O $tmpDir/sha256.txt $shaFile
   update=`grep $hash $tmpDir/sha256.txt | awk '{print $2}'`
   if [ "$update" == "" ]; then
