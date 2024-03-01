@@ -76,3 +76,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "menu-view-layout-stacked ="    >> localization\en-GB\messenger\menubar.ftl
 %lecho% "    .label = Stacked View"     >> localization\en-GB\messenger\menubar.ftl
 %lecho% "    .accesskey = S"            >> localization\en-GB\messenger\menubar.ftl
+
+%lecho% "other-action-msg-edit-headers ="      >> localization\en-GB\messenger\messenger.ftl
+%lecho% "    .label = Edit Headers…"           >> localization\en-GB\messenger\messenger.ftl
+%lecho% "    .accesskey = H"                   >> localization\en-GB\messenger\messenger.ftl
+%lecho% "msg-edit-dialog-title = Edit Headers" >> localization\en-GB\messenger\messenger.ftl
+%lecho% "msg-edit-cancel-button = Cancel"      >> localization\en-GB\messenger\messenger.ftl
+%lecho% "msg-edit-restore-button = Restore"    >> localization\en-GB\messenger\messenger.ftl
+%lecho% "    .title = Show the original value" >> localization\en-GB\messenger\messenger.ftl
+%lecho% "msg-edit-update-button = Update"      >> localization\en-GB\messenger\messenger.ftl

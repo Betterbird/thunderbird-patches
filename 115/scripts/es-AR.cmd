@@ -128,3 +128,21 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "menu-view-layout-stacked ="    >> localization\es-AR\messenger\menubar.ftl
 %lecho% "    .label = Vista apilada"    >> localization\es-AR\messenger\menubar.ftl
 %lecho% "    .accesskey = p"            >> localization\es-AR\messenger\menubar.ftl
+
+:: Original strings:
+:: other-action-msg-edit-headers =
+::     .label = Edit Headers…
+::     .accesskey = H
+:: msg-edit-dialog-title = Edit Headers
+:: msg-edit-cancel-button = Cancel
+:: msg-edit-restore-button = Restore
+::     .title = Show the original value
+:: msg-edit-update-button = Update
+%lecho% "other-action-msg-edit-headers ="            >> localization\es-AR\messenger\messenger.ftl
+%lecho% "    .label = Editar encabezados…"           >> localization\es-AR\messenger\messenger.ftl
+%lecho% "    .accesskey = N"                         >> localization\es-AR\messenger\messenger.ftl
+%lecho% "msg-edit-dialog-title = Editar encabezados" >> localization\es-AR\messenger\messenger.ftl
+%lecho% "msg-edit-cancel-button = Cancelar"          >> localization\es-AR\messenger\messenger.ftl
+%lecho% "msg-edit-restore-button = Restablecer"      >> localization\es-AR\messenger\messenger.ftl
+%lecho% "    .title = Mostrar valor original"        >> localization\es-AR\messenger\messenger.ftl
+%lecho% "msg-edit-update-button = Actualizar"        >> localization\es-AR\messenger\messenger.ftl
