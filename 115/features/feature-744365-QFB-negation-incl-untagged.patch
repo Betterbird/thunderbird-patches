@@ -1,0 +1,815 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1709750669 -3600
+# Parent  e3cf9383cee0ac76c8704aac0e8c2ac1833cdbff
+Implement negation for QuickFilterBar filter and textfilter buttons.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+Use right click or ctrl-enter on a filter or textfilter button to negate a search.
+For example: find all NOT Starred messages, or all messages where Subject does
+NOT contain "sometext". For top level filters (Starred, etc.), the operator is AND.
+For textfilters (Sender, Subject, etc.), the operator is OR.
+Negation is indicated with a red strikethrough.
+
+diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
+--- a/mail/base/content/quickFilterBar.inc.xhtml
++++ b/mail/base/content/quickFilterBar.inc.xhtml
+@@ -16,37 +16,37 @@
+                             data-l10n-attrs="placeholder" />
+         <button id="qfd-dropdown"
+                 class="button button-flat icon-button icon-only"
+                 data-l10n-id="quick-filter-bar-dropdown">
+         </button>
+         <div class="roving-group button-group quickFilterButtons">
+           <button is="toggle-button" id="qfb-unread"
+                   class="button collapsible-button icon-button check-button"
+-                  data-l10n-id="quick-filter-bar-unread">
++                  data-l10n-id="quick-filter-bar-unread2">
+             <span data-l10n-id="quick-filter-bar-unread-label"></span>
+           </button>
+           <button is="toggle-button" id="qfb-starred"
+                   class="button collapsible-button icon-button check-button"
+-                  data-l10n-id="quick-filter-bar-starred">
++                  data-l10n-id="quick-filter-bar-starred2">
+             <span data-l10n-id="quick-filter-bar-starred-label"></span>
+           </button>
+           <button is="toggle-button" id="qfb-inaddrbook"
+                   class="button collapsible-button icon-button check-button"
+-                  data-l10n-id="quick-filter-bar-inaddrbook">
++                  data-l10n-id="quick-filter-bar-inaddrbook2">
+             <span data-l10n-id="quick-filter-bar-inaddrbook-label"></span>
+           </button>
+           <button is="toggle-button" id="qfb-tags"
+                   class="button collapsible-button icon-button check-button"
+-                  data-l10n-id="quick-filter-bar-tags">
++                  data-l10n-id="quick-filter-bar-tags2">
+             <span data-l10n-id="quick-filter-bar-tags-label"></span>
+           </button>
+           <button is="toggle-button" id="qfb-attachment"
+                   class="button collapsible-button icon-button check-button"
+-                  data-l10n-id="quick-filter-bar-attachment">
++                  data-l10n-id="quick-filter-bar-attachment2">
+             <span data-l10n-id="quick-filter-bar-attachment-label"></span>
+           </button>
+         </div>
+         <span id="qfb-results-label"></span>
+       </div>
+       <div id="quickFilterBarSecondFilters">
+         <div id="quick-filter-bar-filter-text-bar" hidden="hidden">
+           <span id="qfb-qs-label"
+diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilterBar.js
+--- a/mail/base/content/quickFilterBar.js
++++ b/mail/base/content/quickFilterBar.js
+@@ -16,39 +16,57 @@ XPCOMUtils.defineLazyModuleGetters(this,
+ });
+ 
+ class ToggleButton extends HTMLButtonElement {
+   constructor() {
+     super();
+     this.addEventListener("click", () => {
+       this.pressed = !this.pressed;
+     });
++    this.addEventListener("keypress", event => {
++      this.inverted = event.ctrlKey && !this.inverted;
++      this.pressed = !this.inverted && this.pressed;
++    });
++    this.addEventListener("contextmenu", () => {
++      this.pressed = this.inverted = !this.inverted;
++    });
+   }
+ 
+   connectedCallback() {
+     this.setAttribute("is", "toggle-button");
+     if (!this.hasAttribute("aria-pressed")) {
+       this.pressed = false;
+     }
++    if (!this.hasAttribute("inverted")) {
++      this.inverted = false;
++    }
+   }
+ 
+   get pressed() {
+     return this.getAttribute("aria-pressed") === "true";
+   }
+ 
+   set pressed(value) {
+     this.setAttribute("aria-pressed", value ? "true" : "false");
+   }
++
++  get inverted() {
++    return this.hasAttribute("inverted");
++  }
++
++  set inverted(value) {
++    this.toggleAttribute("inverted", value === true);
++  }
+ }
+ customElements.define("toggle-button", ToggleButton, { extends: "button" });
+ 
+ var quickFilterBar = {
+   _filterer: null,
+-  activeTopLevelFilters: new Set(),
+-  topLevelFilters: ["unread", "starred", "addrBook", "attachment"],
++  activeTopLevelFilters: new Map(),
++  topLevelFilters: ["unread", "starred", "addrBook", "attachment", "tags"],
+ 
+   /**
+    * The UI element that last triggered a search. This can be used to avoid
+    * updating the element when a search returns - in particular the text box,
+    * which the user may still be typing into.
+    *
+    * @type {Element}
+    */
+@@ -238,17 +256,17 @@ var quickFilterBar = {
+       let domNode = document.getElementById(filterDef.domId);
+       let menuItemNode = document.getElementById(filterDef.menuItemID);
+ 
+       let handlerDomId, handlerMenuItems;
+ 
+       if (!("onCommand" in filterDef)) {
+         handlerDomId = event => {
+           try {
+-            let postValue = domNode.pressed ? true : null;
++            let postValue = !domNode.pressed ? null : !domNode.inverted;
+             this.filterer.setFilterValue(filterDef.name, postValue);
+             this.updateFiltersSettings(filterDef.name, postValue);
+             this.deferredUpdateSearch(domNode);
+           } catch (ex) {
+             console.error(ex);
+           }
+         };
+         handlerMenuItems = event => {
+@@ -303,16 +321,17 @@ var quickFilterBar = {
+           if (update) {
+             this.deferredUpdateSearch();
+           }
+         };
+       }
+ 
+       if (domNode.namespaceURI == document.documentElement.namespaceURI) {
+         domNode.addEventListener("click", handlerDomId);
++        domNode.addEventListener("contextmenu", handlerDomId);
+       } else {
+         domNode.addEventListener("command", handlerDomId);
+       }
+       if (menuItemNode !== null) {
+         menuItemNode.addEventListener("command", handlerMenuItems);
+       }
+ 
+       if ("domBindExtra" in filterDef) {
+@@ -350,37 +369,37 @@ var quickFilterBar = {
+       "quickFilter",
+       "enabledTopFilters"
+     );
+     if (!enabledTopFiltersVal) {
+       return;
+     }
+     // Set any enabled filters to enabled in the UI.
+     const enabledTopFilters = JSON.parse(enabledTopFiltersVal);
+-    for (const filterName of enabledTopFilters) {
+-      this.activeTopLevelFilters.add(filterName);
+-      this.filterer.setFilterValue(filterName, true);
++    for (const [filterName, filterValue] of enabledTopFilters) {
++      this.activeTopLevelFilters.set(filterName, filterValue);
++      this.filterer.setFilterValue(filterName, filterValue);
+     }
+   },
+ 
+   /**
+    * Update enabled filters in XULStore.
+    */
+   updateFiltersSettings(filterName, filterValue) {
+     if (this.topLevelFilters.includes(filterName)) {
+       this.updateTopLevelFilters(filterName, filterValue);
+     }
+   },
+ 
+   /**
+    * Update enabled top level filters in XULStore.
+    */
+   updateTopLevelFilters(filterName, filterValue) {
+-    if (filterValue) {
+-      this.activeTopLevelFilters.add(filterName);
++    if (filterValue !== null) {
++      this.activeTopLevelFilters.set(filterName, Boolean(filterValue));
+     } else {
+       this.activeTopLevelFilters.delete(filterName);
+     }
+ 
+     // Save enabled filter settings to XULStore.
+     Services.xulStore.setValue(
+       XULSTORE_URL,
+       "quickFilter",
+@@ -418,17 +437,18 @@ var quickFilterBar = {
+           continue;
+         }
+ 
+         let domNode = document.getElementById(filterDef.domId);
+ 
+         let value =
+           filterDef.name in filterValues ? filterValues[filterDef.name] : null;
+         if (!("reflectInDOM" in filterDef)) {
+-          domNode.pressed = value;
++          domNode.pressed = value === false || value === true;
++          domNode.inverted = value === false;
+         } else {
+           filterDef.reflectInDOM(domNode, value, document, this);
+         }
+       }
+     }
+ 
+     this.reflectFiltererResults();
+ 
+diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/messenger/about3Pane.ftl
+--- a/mail/locales/en-US/messenger/about3Pane.ftl
++++ b/mail/locales/en-US/messenger/about3Pane.ftl
+@@ -62,56 +62,60 @@ quick-filter-bar-dropdown-inaddrbook =
+ quick-filter-bar-dropdown-tags =
+     .label = Tags
+ 
+ quick-filter-bar-dropdown-attachment =
+     .label = Attachment
+ 
+ # The tooltip for the filter button that causes us to filter results to only
+ # include unread messages.
+-quick-filter-bar-unread =
+-    .title = Show only unread messages
++quick-filter-bar-unread2 =
++    .title = Show only unread messages { quick-filter-bar-negate }
+ # The label for the filter button that causes us to filter results to only
+ # include unread messages.
+ quick-filter-bar-unread-label = Unread
+ 
+ # The tooltip for the filter button that causes us to filter results to only
+ # include messages that have been starred/flagged.
+-quick-filter-bar-starred =
+-    .title = Show only starred messages
++quick-filter-bar-starred2 =
++    .title = Show only starred messages { quick-filter-bar-negate }
+ # The label for the filter button that causes us to filter results to only
+ # include messages that have been starred/flagged.
+ quick-filter-bar-starred-label = Starred
+ 
+ # The tooltip for the filter button that causes us to filter results to only
+ # include messages from contacts in one of the user's non-remote address
+ # books.
+-quick-filter-bar-inaddrbook =
+-    .title = Show only messages from people in your address book
++quick-filter-bar-inaddrbook2 =
++    .title = Show only messages from people in your address book { quick-filter-bar-negate }
+ # The label for the filter button that causes us to filter results to only
+ # include messages from contacts in one of the user's non-remote address
+ # books.
+ quick-filter-bar-inaddrbook-label = Contact
+ 
+ # The tooltip for the filter button that causes us to filter results to only
+ # include messages with at least one tag on them.
+-quick-filter-bar-tags =
+-    .title = Show only messages with tags on them
++quick-filter-bar-tags2 =
++    .title = Show only messages with tags on them { quick-filter-bar-negate }
+ # The label for the filter button that causes us to filter results to only
+ # include messages with at least one tag on them.
+ quick-filter-bar-tags-label = Tags
+ 
+ # The tooltip for the filter button that causes us to filter results to only
+ # include messages with attachments.
+-quick-filter-bar-attachment =
+-    .title = Show only messages with attachments
++quick-filter-bar-attachment2 =
++    .title = Show only messages with attachments { quick-filter-bar-negate }
+ # The label for the filter button that causes us to filter results to only
+ # include messages with attachments.
+ quick-filter-bar-attachment-label = Attachment
+ 
++# Explain how to negate a search, meaning find all NOT Starred or all messages
++# with Subject NOT containing "sometext".
++quick-filter-bar-negate = (Use right click or ctrl-enter to negate results)
++
+ # The contents of the results box when there is a filter active but there
+ # are no messages matching the filter.
+ quick-filter-bar-no-results = No results
+ 
+ # This is used to populate the results box; it either displays the
+ # number of messages found using this string, that there are no messages
+ # (using quick-filter-bar-no-results), or the box is hidden.
+ # Variables:
+diff --git a/mail/modules/QuickFilterManager.jsm b/mail/modules/QuickFilterManager.jsm
+--- a/mail/modules/QuickFilterManager.jsm
++++ b/mail/modules/QuickFilterManager.jsm
+@@ -700,82 +700,84 @@ var TagFacetingFilter = {
+       term.value = value;
+       term.op = aFilterValue
+         ? Ci.nsMsgSearchOp.IsntEmpty
+         : Ci.nsMsgSearchOp.IsEmpty;
+       term.booleanAnd = true;
+       aTerms.push(term);
+ 
+       // we need to perform faceting if the value is literally true.
+-      if (aFilterValue === true) {
+-        return this;
+-      }
+-    } else {
+-      let firstIncludeClause = true,
+-        firstExcludeClause = true;
+-      let lastIncludeTerm = null;
+-      term = null;
++      // NOTE: Fix Bug 612800; always return |this| listener if tags are active,
++      // to reflect tag buttons per filtered messages results, sort of obvious.
++      // if (aFilterValue === true)
++      return this;
++    }
+ 
+-      let excludeTerms = [];
++    let firstIncludeClause = true,
++      firstExcludeClause = true;
++    let lastIncludeTerm = null;
++    term = null;
++
++    let excludeTerms = [];
+ 
+-      let mode = aFilterValue.mode;
+-      for (let key in aFilterValue.tags) {
+-        let shouldFilter = aFilterValue.tags[key];
+-        if (shouldFilter !== null) {
+-          term = aTermCreator.createTerm();
+-          term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+-          value = term.value;
+-          value.attrib = term.attrib;
+-          value.str = key;
+-          term.value = value;
+-          if (shouldFilter) {
+-            term.op = Ci.nsMsgSearchOp.Contains;
+-            // AND for the group. Inside the group we also want AND if the
+-            // mode is set to "All of".
+-            term.booleanAnd = firstIncludeClause || mode === "AND";
+-            term.beginsGrouping = firstIncludeClause ? 1 : 0;
+-            aTerms.push(term);
+-            firstIncludeClause = false;
+-            lastIncludeTerm = term;
+-          } else {
+-            term.op = Ci.nsMsgSearchOp.DoesntContain;
+-            // you need to not include all of the tags marked excluded.
+-            term.booleanAnd = true;
+-            term.beginsGrouping = firstExcludeClause ? 1 : 0;
+-            excludeTerms.push(term);
+-            firstExcludeClause = false;
+-          }
++    let mode = aFilterValue.mode;
++    for (let key in aFilterValue.tags) {
++      let shouldFilter = aFilterValue.tags[key];
++      if (shouldFilter !== null) {
++        term = aTermCreator.createTerm();
++        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++        value = term.value;
++        value.attrib = term.attrib;
++        value.str = key;
++        term.value = value;
++        if (shouldFilter) {
++          term.op = Ci.nsMsgSearchOp.Contains;
++          // AND for the group. Inside the group we also want AND if the
++          // mode is set to "All of".
++          term.booleanAnd = firstIncludeClause || mode === "AND";
++          term.beginsGrouping = firstIncludeClause ? 1 : 0;
++          aTerms.push(term);
++          firstIncludeClause = false;
++          lastIncludeTerm = term;
++        } else {
++          term.op = Ci.nsMsgSearchOp.DoesntContain;
++          // you need to not include all of the tags marked excluded.
++          term.booleanAnd = true;
++          term.beginsGrouping = firstExcludeClause ? 1 : 0;
++          excludeTerms.push(term);
++          firstExcludeClause = false;
+         }
+       }
+-      if (lastIncludeTerm) {
+-        lastIncludeTerm.endsGrouping = 1;
++    }
++    if (lastIncludeTerm) {
++      lastIncludeTerm.endsGrouping = 1;
++    }
++
++    // if we have any exclude terms:
++    // - we might need to add a "has a tag" clause if there were no explicit
++    //   inclusions.
++    // - extend the exclusions list in.
++    if (excludeTerms.length) {
++      // (we need to add has a tag)
++      if (!lastIncludeTerm) {
++        term = aTermCreator.createTerm();
++        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++        value = term.value;
++        value.str = "";
++        term.value = value;
++        term.op = Ci.nsMsgSearchOp.IsntEmpty;
++        term.booleanAnd = true;
++        aTerms.push(term);
+       }
+ 
+-      // if we have any exclude terms:
+-      // - we might need to add a "has a tag" clause if there were no explicit
+-      //   inclusions.
+-      // - extend the exclusions list in.
+-      if (excludeTerms.length) {
+-        // (we need to add has a tag)
+-        if (!lastIncludeTerm) {
+-          term = aTermCreator.createTerm();
+-          term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+-          value = term.value;
+-          value.str = "";
+-          term.value = value;
+-          term.op = Ci.nsMsgSearchOp.IsntEmpty;
+-          term.booleanAnd = true;
+-          aTerms.push(term);
+-        }
++      // (extend in the exclusions)
++      excludeTerms[excludeTerms.length - 1].endsGrouping = 1;
++      aTerms.push.apply(aTerms, excludeTerms);
++    }
+ 
+-        // (extend in the exclusions)
+-        excludeTerms[excludeTerms.length - 1].endsGrouping = 1;
+-        aTerms.push.apply(aTerms, excludeTerms);
+-      }
+-    }
+     return null;
+   },
+ 
+   onSearchStart(aCurState) {
+     // this becomes aKeywordMap; we want to start with an empty one
+     return {};
+   },
+   onSearchMessage(aKeywordMap, aMsgHdr, aFolder) {
+@@ -788,16 +790,21 @@ var TagFacetingFilter = {
+   },
+   onSearchDone(aCurState, aKeywordMap, aStatus) {
+     // we are an async operation; if the user turned off the tag facet already,
+     //  then leave that state intact...
+     if (aCurState == null) {
+       return [null, false, false];
+     }
+ 
++    // The simple case of inverted (no) tags.
++    if (aCurState === false) {
++      return [aCurState, true, false];
++    }
++
+     // only propagate things that are actually tags though!
+     let outKeyMap = { tags: {} };
+     let tags = MailServices.tags.getAllTags();
+     let tagCount = tags.length;
+     for (let iTag = 0; iTag < tagCount; iTag++) {
+       let tag = tags[iTag];
+ 
+       if (tag.key in aKeywordMap) {
+@@ -825,17 +832,17 @@ var TagFacetingFilter = {
+   /**
+    * Default behaviour but:
+    * - We collapse our expando if we get unchecked.
+    * - We want to initiate a faceting pass if we just got checked.
+    */
+   onCommand(aState, aNode, aEvent, aDocument) {
+     let checked;
+     if (aNode.tagName == "button") {
+-      checked = aNode.pressed ? true : null;
++      checked = !aNode.pressed ? null : !aNode.inverted;
+     } else {
+       checked = aNode.hasAttribute("checked") ? true : null;
+     }
+ 
+     if (!checked) {
+       aDocument.getElementById("quickFilterBarTagsContainer").hidden = true;
+     }
+ 
+@@ -859,17 +866,18 @@ var TagFacetingFilter = {
+   },
+ 
+   reflectInDOM(aNode, aFilterValue, aDocument, aMuxer, aCallId) {
+     if (aCallId !== null && aCallId == "menuItem") {
+       aFilterValue
+         ? aNode.setAttribute("checked", aFilterValue)
+         : aNode.removeAttribute("checked");
+     } else {
+-      aNode.pressed = aFilterValue;
++      aNode.pressed = aFilterValue !== null;
++      aNode.inverted = aFilterValue === false;
+     }
+     if (aFilterValue != null && typeof aFilterValue == "object") {
+       this._populateTagBar(aFilterValue, aDocument, aMuxer);
+     } else {
+       aDocument.getElementById("quickFilterBarTagsContainer").hidden = true;
+     }
+   },
+ 
+@@ -886,33 +894,25 @@ var TagFacetingFilter = {
+     } else {
+       aState.mode = qbm.value;
+     }
+ 
+     function clickHandler(aEvent) {
+       let tagKey = this.getAttribute("value");
+       let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+       state.tags[tagKey] = this.pressed ? true : null;
+-      this.removeAttribute("inverted");
+       aMuxer.updateSearch();
+     }
+ 
+     function rightClickHandler(aEvent) {
+       if (aEvent.button == 2) {
+-        // Toggle isn't triggered by a contextmenu event, so do it here.
+-        this.pressed = !this.pressed;
+-
++        // A |toggle-button| sets up pressed and inverted in the constructor.
+         let tagKey = this.getAttribute("value");
+         let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-        state.tags[tagKey] = this.pressed ? false : null;
+-        if (this.pressed) {
+-          this.setAttribute("inverted", "true");
+-        } else {
+-          this.removeAttribute("inverted");
+-        }
++        state.tags[tagKey] = !this.pressed ? null : !this.inverted;
+         aMuxer.updateSearch();
+         aEvent.preventDefault();
+       }
+     }
+ 
+     // -- nuke existing exposed tags, but not the mode selector (which is first)
+     while (tagbar.children.length > 1) {
+       tagbar.lastElementChild.remove();
+@@ -934,19 +934,17 @@ var TagFacetingFilter = {
+         //  means not before we append it into the tree.
+         let button = aDocument.createElement("button", { is: "toggle-button" });
+ 
+         button.setAttribute("id", "qfb-tag-" + tag.key);
+         button.addEventListener("click", clickHandler);
+         button.addEventListener("contextmenu", rightClickHandler);
+         if (keywordMap[tag.key] !== null) {
+           button.pressed = true;
+-          if (!keywordMap[tag.key]) {
+-            button.setAttribute("inverted", "true");
+-          }
++          button.inverted = keywordMap[tag.key] === false;
+         }
+         button.textContent = tag.tag;
+         button.setAttribute("value", tag.key);
+         let color = tag.color;
+         let contrast = lazy.TagUtils.isColorContrastEnough(color)
+           ? "black"
+           : "white";
+         // everybody always gets to be an qfb-tag-button.
+@@ -1063,28 +1061,30 @@ var MessageTextFilter = {
+     if (aFilterValue.text) {
+       let phrases = this._parseSearchString(aFilterValue.text);
+       for (let groupedPhrases of phrases) {
+         let firstClause = true;
+         term = null;
+         let splitPhrases = groupedPhrases.split("|");
+         for (let phrase of splitPhrases) {
+           for (let [tfName, tfValue] of Object.entries(aFilterValue.states)) {
+-            if (!tfValue) {
++            if (tfValue !== true && tfValue !== false) {
+               continue;
+             }
+             let tfDef = this.textFilterDefs[tfName];
+ 
+             term = aTermCreator.createTerm();
+             term.attrib = tfDef.attrib;
+             value = term.value;
+             value.attrib = tfDef.attrib;
+             value.str = phrase;
+             term.value = value;
+-            term.op = Ci.nsMsgSearchOp.Contains;
++            term.op = tfValue
++              ? Ci.nsMsgSearchOp.Contains
++              : Ci.nsMsgSearchOp.DoesntContain;
+             // AND for the group, but OR inside the group
+             term.booleanAnd = firstClause;
+             term.beginsGrouping = firstClause ? 1 : 0;
+             aTerms.push(term);
+             firstClause = false;
+           }
+         }
+         if (term) {
+@@ -1149,33 +1149,37 @@ var MessageTextFilter = {
+           panel.hidePopup();
+         }
+       },
+       true
+     );
+ 
+     // -- Expando Buttons!
+     function commandHandler(aEvent) {
++      // There are three possible states: null, true, and false (inverted).
+       let state = aMuxer.getFilterValueForMutation(MessageTextFilter.name);
+       let filterDef = MessageTextFilter.textFilterDefsByDomId[this.id];
+-      state.states[filterDef.name] = this.pressed;
++      state.states[filterDef.name] = !this.pressed ? null : !this.inverted;
+       aMuxer.updateSearch();
+       Services.xulStore.setValue(
+         "chrome://messenger/content/messenger.xhtml",
+         "quickFilter",
+         "textFilters",
+         JSON.stringify(state.states)
+       );
+     }
+ 
+     for (let name in this.textFilterDefs) {
+       let textFilter = this.textFilterDefs[name];
+       aDocument
+         .getElementById(textFilter.domId)
+         .addEventListener("click", commandHandler);
++      aDocument
++        .getElementById(textFilter.domId)
++        .addEventListener("contextmenu", commandHandler);
+     }
+   },
+ 
+   onCommand(aState, aNode, aEvent, aDocument) {
+     let text = aNode.value.length ? aNode.value : null;
+     if (text == aState.text) {
+       let upsell = aDocument.getElementById("qfb-text-search-upsell");
+       if (upsell.state == "open") {
+@@ -1240,18 +1244,20 @@ var MessageTextFilter = {
+     if (aNode.value != desiredValue && aNode != aMuxer.activeElement) {
+       aNode.value = desiredValue;
+     }
+ 
+     // Update our expanded filters buttons.
+     let states = aFilterValue.states;
+     for (let name in this.textFilterDefs) {
+       let textFilter = this.textFilterDefs[name];
+-      aDocument.getElementById(textFilter.domId).pressed =
+-        states[textFilter.name];
++      let button = aDocument.getElementById(textFilter.domId);
++      let state = states[textFilter.name];
++      button.pressed = state === true || state === false;
++      button.inverted = state === false;
+     }
+ 
+     // Toggle the expanded filters visibility.
+     aDocument.getElementById("quick-filter-bar-filter-text-bar").hidden =
+       aFilterValue.text == null;
+   },
+ 
+   /**
+@@ -1314,17 +1320,17 @@ MessageTextFilter.defineTextFilter({
+   domId: "qfb-qs-subject",
+   attrib: Ci.nsMsgSearchAttrib.Subject,
+   defaultState: true,
+ });
+ MessageTextFilter.defineTextFilter({
+   name: "body",
+   domId: "qfb-qs-body",
+   attrib: Ci.nsMsgSearchAttrib.Body,
+-  defaultState: false,
++  defaultState: null,
+ });
+ 
+ /**
+  * The results label says whether there were any matches and, if so, how many.
+  */
+ QuickFilterManager.defineFilter({
+   name: "results",
+   domId: "qfb-results-label",
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -18,39 +18,56 @@
+     var(--sidebar-border-color, var(--tree-view-header-border-color));
+ }
+ 
+ :root[lwt-tree] #quick-filter-bar:-moz-lwtheme {
+   background-color: color-mix(in srgb, var(--toolbar-bgcolor) 50%, transparent);
+   color: var(--lwt-text-color);
+ }
+ 
++.button.check-button {
++  --line-through-image: none;
++}
++
++.button.check-button[inverted],
++.qfb-tag-button[inverted] {
++  --line-through-image: linear-gradient(to bottom,
++                                        transparent 48%,
++                                        var(--line-through-color),
++                                        transparent 64%) !important;
++  --line-through-color: var(--color-red-50);
++  text-decoration: 2px line-through var(--line-through-color);
++}
++
+ #qfb-sticky {
+   background-image: var(--icon-pin);
+-  height: auto;
++}
++
++#qfb-sticky[aria-pressed="false"]:enabled:not(:hover) {
++  border-color: transparent;
+ }
+ 
+ #qfb-unread {
+-  background-image: var(--icon-unread);
++  background-image: var(--line-through-image), var(--icon-unread);
+ }
+ 
+ #qfb-starred {
+-  background-image: var(--icon-star);
++  background-image: var(--line-through-image), var(--icon-star);
+ }
+ 
+ #qfb-inaddrbook {
+-  background-image: var(--icon-address-book);
++  background-image: var(--line-through-image), var(--icon-address-book);
+ }
+ 
+ #qfb-tags {
+-  background-image: var(--icon-tag);
++  background-image: var(--line-through-image), var(--icon-tag);
+ }
+ 
+ #qfb-attachment {
+-  background-image: var(--icon-attachment);
++  background-image: var(--line-through-image), var(--icon-attachment);
+ }
+ 
+ #qfd-dropdown {
+   background-image: var(--icon-filter);
+   display: none;
+ }
+ 
+ #qfb-results-label {
+@@ -100,16 +117,21 @@
+   flex-wrap: wrap;
+ }
+ 
+ #qfb-boolean-mode {
+   line-height: unset;
+   min-height: 0;
+   margin: 3px;
+   padding-block: 3px;
++  background-color: transparent;
++}
++
++#qfb-boolean-mode:not([disabled="true"]):hover {
++  background-color: var(--button-active-background-color);
+ }
+ 
+ .qfb-tag-button {
+   --tag-color: currentColor;
+   --tag-contrast-color: currentColor;
+   --button-padding: 3px;
+   --button-margin: 3px;
+   background-color: transparent;
+@@ -137,38 +159,35 @@
+ .qfb-tag-button[aria-pressed="true"] {
+   --tag-color: currentColor;
+   color: var(--tag-contrast-color);
+   background-color: var(--tag-color);
+   border-color: color-mix(in srgb, var(--tag-color) 60%, black);
+   border-radius: 100px;
+   box-shadow: none;
+ }
++/* Tags with black color (default for user created) need reverse in dark theme */
++.qfb-tag-button:not([aria-pressed="true"])[style^="--tag-color: #000000"] {
++  --tag-color: currentColor !important;
++}
++/* Tags with no color (auto created) need this default */
++.qfb-tag-button[aria-pressed="true"]:not([style^="--tag-color:"]) {
++  --tag-color: black;
++  --tag-contrast-color: white;
++}
+ 
+ .qfb-tag-button:enabled:hover:active {
+   background-color: color-mix(in srgb, var(--tag-color) 80%, black);
+   border-color: color-mix(in srgb, var(--tag-color) 60%, black);
+ }
+ 
+-.qfb-tag-button[inverted] {
+-  background-color: transparent;
+-  color: var(--tag-color);
+-  border-color: var(--tag-color);
+-  text-decoration: line-through;
+-}
+-
+-.qfb-tag-button[inverted]:enabled:hover {
+-  color: var(--tag-color);
+-  background-color: color-mix(in srgb, var(--tag-color) 20%, transparent);
+-  border-color: var(--tag-color);
+-}
+-
+ #quickFilterBarContainer {
+   display: flex;
+   flex-wrap: wrap;
++  align-items: center;
+ }
+ 
+ #quickFilterBarSecondFilters {
+   display: flex;
+   align-items: center;
+   padding-inline-start: var(--button-margin);
+   flex-wrap: wrap;
+   column-gap: 12px;
