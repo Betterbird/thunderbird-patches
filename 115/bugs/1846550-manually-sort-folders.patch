@@ -6,6 +6,10 @@
 Bug 1846550 - add ability to manually sort (order) folders in folder pane r=darktrojan,freaktechnik
 
 Differential Revision: https://phabricator.services.mozilla.com/D191372
+* * *
+Bug 1864582 - Don't set a folder sort order value when no siblings are sorted. r=#thunderbird-reviewers
+* * *
+Bug 1864510 - rework nsMsgDBFolder::{Get|Set}UserSortOrder() to fix performance regression from bug 1846550.
 
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
@@ -240,7 +244,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
  
      window.openDialog(
        "chrome://messenger/content/newFolderDialog.xhtml",
-@@ -3825,8 +3937,93 @@ var folderPane = {
+@@ -3825,8 +3937,95 @@ var folderPane = {
        );
        menupopup.appendChild(menuitem);
      }
@@ -277,12 +281,14 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 +        maxOrderValue = order;
 +      }
 +    }
-+    // If maxOrderValue is still negative, then none of the sibling folders
-+    // have a sort order value (i.e. this group of folders has never been
-+    // manually sorted). In this case, the natural order should still be used.
-+    // Otherwise the new folder will be at the bottom of the group.
-+    const newOrder =
-+      maxOrderValue < 0 ? Ci.nsIMsgFolder.NO_SORT_VALUE : maxOrderValue + 1;
++    if (maxOrderValue == -1) {
++      // If maxOrderValue is still negative, then none of the sibling folders
++      // have a sort order value (i.e. this group of folders has never been
++      // manually sorted). In this case, the natural order should still be used.
++      // Otherwise the new folder will be at the bottom of the group.
++      return;
++    }
++    const newOrder = maxOrderValue + 1;
 +    folder.userSortOrder = newOrder; // Update DB
 +    this.setOrderToRowInAllModes(folder, newOrder); // Update row info.
 +  },
@@ -334,7 +340,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
  
  /**
   * Represents a single row in the folder tree. The row can be for a server or
-@@ -6475,8 +6672,12 @@ function selectMessage(msgHdr) {
+@@ -6475,8 +6674,12 @@ function selectMessage(msgHdr) {
  
  var folderListener = {
    QueryInterface: ChromeUtils.generateQI(["nsIFolderListener"]),
@@ -522,41 +528,98 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
        mNumTotalMessages(-1),
        mNotifyCountChanges(true),
        mExpungedBytes(0),
-@@ -668,8 +669,10 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
+@@ -593,9 +594,9 @@ void nsMsgDBFolder::UpdateNewMessages() 
+ // file spec. This could be static, or could live in another class - it's not
+ // specific to the current nsMsgDBFolder. If it lived at a higher level, we
+ // could cache the account manager and folder cache.
+ nsresult nsMsgDBFolder::GetFolderCacheElemFromFile(
+-    nsIFile* file, nsIMsgFolderCacheElement** cacheElement) {
++    nsIFile* file, nsIMsgFolderCacheElement** cacheElement, bool create) {
+   nsresult result;
+   NS_ENSURE_ARG_POINTER(file);
+   NS_ENSURE_ARG_POINTER(cacheElement);
+   nsCOMPtr<nsIMsgFolderCache> folderCache;
+@@ -612,9 +613,9 @@ nsresult nsMsgDBFolder::GetFolderCacheEl
+       nsCString persistentPath;
+       result = file->GetPersistentDescriptor(persistentPath);
+       NS_ENSURE_SUCCESS(result, result);
+       result =
+-          folderCache->GetCacheElement(persistentPath, false, cacheElement);
++          folderCache->GetCacheElement(persistentPath, create, cacheElement);
+     }
+   }
+   return result;
+ }
+@@ -668,8 +669,16 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
          nsCString utf8Name;
          folderInfo->GetFolderName(utf8Name);
          if (!utf8Name.IsEmpty()) CopyUTF8toUTF16(utf8Name, mName);
  
++        // We should only ever get the sort order from the folder cache.
++        // If we're opening the database anyway, possibly because
++        // folderCache.json was deleted, we read the sort order "just in case".
 +        folderInfo->GetFolderSortOrder(&mSortOrder);
++        if (mSortOrder != static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE)) {
++          SetUserSortOrderInCache(mSortOrder, false);
++        }
 +
          // These should be put in IMAP folder only.
          // folderInfo->GetImapTotalPendingMessages(&mNumPendingTotalMessages);
          // folderInfo->GetImapUnreadPendingMessages(&mNumPendingUnreadMessages);
  
-@@ -5051,41 +5054,71 @@ NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFo
+@@ -5051,41 +5060,100 @@ NS_IMETHODIMP nsMsgDBFolder::CloseDBIfFo
    }
    return NS_OK;
  }
  
++void nsMsgDBFolder::SetUserSortOrderInCache(uint32_t order, bool overwrite) {
++  nsCOMPtr<nsIFile> dbPath;
++  GetFolderCacheKey(getter_AddRefs(dbPath));
++  if (dbPath) {
++    nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
++    GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement), true);
++    if (cacheElement) {
++      uint32_t dummy;
++      if (overwrite ||
++          NS_FAILED(cacheElement->GetCachedUInt32("folderSortOrder", &dummy))) {
++        cacheElement->SetCachedUInt32("folderSortOrder", order);
++      }
++    }
++  }
++}
++
 +NS_IMETHODIMP nsMsgDBFolder::SetUserSortOrder(uint32_t order) {
 +  if (order != mSortOrder) {
++    SetUserSortOrderInCache(order, true);
 +    nsCOMPtr<nsIMsgDatabase> db;
 +    nsCOMPtr<nsIDBFolderInfo> folderInfo;
 +    nsresult rv =
 +        GetDBFolderInfoAndDB(getter_AddRefs(folderInfo), getter_AddRefs(db));
-+    if (NS_SUCCEEDED(rv) && folderInfo) {
++    if (NS_SUCCEEDED(rv)) {
 +      folderInfo->SetFolderSortOrder(mSortOrder = order);
-+      if (db) db->Commit(nsMsgDBCommitType::kLargeCommit);
++      // Committing the db also commits the cache.
++      db->Commit(nsMsgDBCommitType::kLargeCommit);
 +    }
 +  }
 +  return NS_OK;
 +}
 +
 +NS_IMETHODIMP nsMsgDBFolder::GetUserSortOrder(uint32_t* order) {
-+  NS_ENSURE_ARG_POINTER(order);
-+  ReadDBFolderInfo(true);
-+  *order = mSortOrder;
-+  return NS_OK;
++  nsCOMPtr<nsIFile> dbPath;
++  nsresult rv = GetFolderCacheKey(getter_AddRefs(dbPath));
++  if (dbPath) {
++    nsCOMPtr<nsIMsgFolderCacheElement> cacheElement;
++    rv = GetFolderCacheElemFromFile(dbPath, getter_AddRefs(cacheElement));
++    if (cacheElement)  // try to get from cache
++      rv = cacheElement->GetCachedUInt32("folderSortOrder", order);
++    if (NS_FAILED(rv)) {
++      // Don't open DB for missing order property, if it's not there,
++      // it was never set.
++      *order = static_cast<uint32_t>(nsIMsgFolder::NO_SORT_VALUE);
++      return NS_OK;
++    }
++  }
++  return rv;
 +}
 +
  NS_IMETHODIMP nsMsgDBFolder::SetSortOrder(int32_t order) {
@@ -633,7 +696,7 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
  }
  
  // static Helper function for CompareSortKeys().
-@@ -5096,9 +5129,9 @@ nsresult nsMsgDBFolder::BuildFolderSortK
+@@ -5096,9 +5164,9 @@ nsresult nsMsgDBFolder::BuildFolderSortK
    int32_t order;
    nsresult rv = aFolder->GetSortOrder(&order);
    NS_ENSURE_SUCCESS(rv, rv);
@@ -644,7 +707,7 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
    rv = aFolder->GetName(folderName);
    NS_ENSURE_SUCCESS(rv, rv);
    orderString.Append(folderName);
-@@ -5112,16 +5145,16 @@ nsresult nsMsgDBFolder::BuildFolderSortK
+@@ -5112,16 +5180,16 @@ nsresult nsMsgDBFolder::BuildFolderSortK
    return NS_OK;
  }
  
@@ -666,7 +729,29 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
 diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
 --- a/mailnews/base/src/nsMsgDBFolder.h
 +++ b/mailnews/base/src/nsMsgDBFolder.h
-@@ -248,8 +248,9 @@ class nsMsgDBFolder : public nsSupportsW
+@@ -124,8 +124,9 @@ class nsMsgDBFolder : public nsSupportsW
+   void compressQuotesInMsgSnippet(const nsString& aMessageText,
+                                   nsAString& aCompressedQuotesStr);
+   void decodeMsgSnippet(const nsACString& aEncodingType, bool aIsComplete,
+                         nsCString& aMsgSnippet);
++  void SetUserSortOrderInCache(uint32_t order, bool overwrite);
+ 
+   // helper routine to parse the URI and update member variables
+   nsresult parseURI(bool needServer = false);
+   nsresult GetBaseStringBundle(nsIStringBundle** aBundle);
+@@ -159,9 +160,10 @@ class nsMsgDBFolder : public nsSupportsW
+                            nsIFile** dbFile);
+ 
+   nsresult GetFolderCacheKey(nsIFile** aFile);
+   nsresult GetFolderCacheElemFromFile(nsIFile* file,
+-                                      nsIMsgFolderCacheElement** cacheElement);
++                                      nsIMsgFolderCacheElement** cacheElement,
++                                      bool create = false);
+   nsresult AddDirectorySeparator(nsIFile* path);
+   nsresult CheckIfFolderExists(const nsAString& newFolderName,
+                                nsIMsgFolder* parentFolder,
+                                nsIMsgWindow* msgWindow);
+@@ -248,8 +250,9 @@ class nsMsgDBFolder : public nsSupportsW
    nsCOMPtr<nsIMsgDownloadSettings> m_downloadSettings;
    static nsrefcnt mInstanceCount;
  
