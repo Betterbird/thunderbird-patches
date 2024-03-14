@@ -1,0 +1,150 @@
+# HG changeset patch
+# User Yury Ivanovich <Yury.Ivanovich@linuxmail.org>
+# Date 1710447773 -3600
+# Parent  819390ce6012685b2a65b33eb6b9e0b5de252bf4
+Bug 1885285 - Switch some APIs in nsISmtpService to AUTF8String and remove needless decodeURIComponent/encodeURIComponent. r=mkmelin
+
+Nowhere was stated that the string parameters of nsISmtpService.sendMailMessage() had to be URI encoded.
+
+diff --git a/mailnews/compose/public/nsISmtpService.idl b/mailnews/compose/public/nsISmtpService.idl
+--- a/mailnews/compose/public/nsISmtpService.idl
++++ b/mailnews/compose/public/nsISmtpService.idl
+@@ -52,11 +52,11 @@ interface nsISmtpService : nsISupports {
+    *                                null.
+    * @param aRequest                Provides a handle to the running request.
+    *                                This parameter may be null.
+    */
+-  void sendMailMessage(in nsIFile aFilePath, in string aRecipients,
++  void sendMailMessage(in nsIFile aFilePath, in AUTF8String aRecipients,
+                        in nsIMsgIdentity aSenderIdentity,
+-                       in string aSender,
++                       in AUTF8String aSender,
+                        in AString aPassword,
+                        in nsIUrlListener aUrlListener,
+                        in nsIMsgStatusFeedback aStatusListener,
+                        in nsIInterfaceRequestor aNotificationCallbacks,
+@@ -116,9 +116,9 @@ interface nsISmtpService : nsISupports {
+    * @param username  the username for the server
+    * @param hostname  the hostname of the server
+    * @returns         null if no server is found
+    */
+-  nsISmtpServer findServer(in string username, in string hostname);
++  nsISmtpServer findServer(in AUTF8String username, in AUTF8String hostname);
+ 
+   /**
+    * Look up the server with the given key.
+    */
+diff --git a/mailnews/compose/src/MessageSend.jsm b/mailnews/compose/src/MessageSend.jsm
+--- a/mailnews/compose/src/MessageSend.jsm
++++ b/mailnews/compose/src/MessageSend.jsm
+@@ -1136,15 +1136,13 @@ class MessageSend {
+     this._collectAddressesToAddressBook(recipients);
+     let converter = Cc["@mozilla.org/messenger/mimeconverter;1"].getService(
+       Ci.nsIMimeConverter
+     );
+-    let encodedRecipients = encodeURIComponent(
+-      converter.encodeMimePartIIStr_UTF8(
+-        recipients.join(","),
+-        true,
+-        0,
+-        Ci.nsIMimeConverter.MIME_ENCODED_WORD_SIZE
+-      )
++    let encodedRecipients = converter.encodeMimePartIIStr_UTF8(
++      recipients.join(","),
++      true,
++      0,
++      Ci.nsIMimeConverter.MIME_ENCODED_WORD_SIZE
+     );
+     lazy.MsgUtils.sendLogger.debug(
+       `Delivering mail message <${this._compFields.messageId}>`
+     );
+diff --git a/mailnews/compose/src/SmtpService.jsm b/mailnews/compose/src/SmtpService.jsm
+--- a/mailnews/compose/src/SmtpService.jsm
++++ b/mailnews/compose/src/SmtpService.jsm
+@@ -118,9 +118,9 @@ class SmtpService {
+         // Init when fresh==true OR re-init sending when client.isRetry==true.
+         fresh = false;
+         let from = sender;
+         let to = MailServices.headerParser
+-          .parseEncodedHeaderW(decodeURIComponent(recipients))
++          .parseEncodedHeaderW(recipients)
+           .map(rec => rec.email);
+ 
+         if (
+           !Services.prefs.getBoolPref(
+@@ -135,11 +135,9 @@ class SmtpService {
+             .createInstance(Ci.nsIMsgCompUtils)
+             .msgGenerateMessageId(userIdentity, null);
+         }
+         client.useEnvelope({
+-          from: MailServices.headerParser.parseEncodedHeaderW(
+-            decodeURIComponent(from)
+-          )[0].email,
++          from: MailServices.headerParser.parseEncodedHeaderW(from)[0].email,
+           to,
+           size: messageFile.fileSize,
+           requestDSN,
+           messageId,
+diff --git a/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp b/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp
+--- a/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp
++++ b/mailnews/extensions/mdn/nsMsgMdnGenerator.cpp
+@@ -796,12 +796,11 @@ nsresult nsMsgMdnGenerator::SendMdnMsg()
+   nsCOMPtr<nsIURI> aUri;
+   nsCOMPtr<nsIRequest> aRequest;
+   nsCString identEmail;
+   m_identity->GetEmail(identEmail);
+-  smtpService->SendMailMessage(m_file, m_dntRrt.get(), m_identity,
+-                               identEmail.get(), EmptyString(), this, nullptr,
+-                               nullptr, false, ""_ns, getter_AddRefs(aUri),
+-                               getter_AddRefs(aRequest));
++  smtpService->SendMailMessage(
++      m_file, m_dntRrt, m_identity, identEmail, EmptyString(), this, nullptr,
++      nullptr, false, ""_ns, getter_AddRefs(aUri), getter_AddRefs(aRequest));
+ 
+   return NS_OK;
+ }
+ 
+diff --git a/mailnews/import/src/nsBeckySettings.cpp b/mailnews/import/src/nsBeckySettings.cpp
+--- a/mailnews/import/src/nsBeckySettings.cpp
++++ b/mailnews/import/src/nsBeckySettings.cpp
+@@ -85,10 +85,9 @@ nsresult nsBeckySettings::CreateSmtpServ
+       do_GetService("@mozilla.org/messengercompose/smtp;1", &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsISmtpServer> server;
+-  rv = smtpService->FindServer(aUserName.get(), aServerName.get(),
+-                               getter_AddRefs(server));
++  rv = smtpService->FindServer(aUserName, aServerName, getter_AddRefs(server));
+ 
+   if (NS_FAILED(rv) || !server) {
+     rv = smtpService->CreateServer(getter_AddRefs(server));
+     NS_ENSURE_SUCCESS(rv, rv);
+diff --git a/mailnews/import/src/nsOutlookSettings.cpp b/mailnews/import/src/nsOutlookSettings.cpp
+--- a/mailnews/import/src/nsOutlookSettings.cpp
++++ b/mailnews/import/src/nsOutlookSettings.cpp
+@@ -476,9 +476,9 @@ nsresult OutlookSettings::SetSmtpServer(
+   NS_CopyUnicodeToNative(aUser, nativeUserName);
+   nsAutoCString nativeServerName;
+   NS_CopyUnicodeToNative(aServer, nativeServerName);
+   nsCOMPtr<nsISmtpServer> foundServer;
+-  rv = smtpService->FindServer(nativeUserName.get(), nativeServerName.get(),
++  rv = smtpService->FindServer(nativeUserName, nativeServerName,
+                                getter_AddRefs(foundServer));
+   if (NS_SUCCEEDED(rv) && foundServer) {
+     if (aId) SetSmtpServerKey(aId, foundServer);
+     IMPORT_LOG1("SMTP server already exists: %s\n", nativeServerName.get());
+diff --git a/mailnews/import/src/nsWMSettings.cpp b/mailnews/import/src/nsWMSettings.cpp
+--- a/mailnews/import/src/nsWMSettings.cpp
++++ b/mailnews/import/src/nsWMSettings.cpp
+@@ -623,10 +623,9 @@ void WMSettings::SetSmtpServer(mozilla::
+   if (NS_SUCCEEDED(rv) && smtpService) {
+     nsCOMPtr<nsISmtpServer> extgServer;
+     // don't try to make another server
+     // regardless if username doesn't match
+-    rv = smtpService->FindServer(userName.get(),
+-                                 NS_ConvertUTF16toUTF8(smtpName).get(),
++    rv = smtpService->FindServer(userName, NS_ConvertUTF16toUTF8(smtpName),
+                                  getter_AddRefs(extgServer));
+     if (NS_SUCCEEDED(rv) && extgServer) {
+       // set our account keyed to this smptserver key
+       extgServer->GetKey(getter_Copies(smtpServerKey));
