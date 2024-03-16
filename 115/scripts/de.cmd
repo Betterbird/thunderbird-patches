@@ -146,3 +146,23 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "msg-edit-restore-button = Wiederherstellen"   >> localization\de\messenger\messenger.ftl
 %lecho% "    .title = Originalwert anzeigen"           >> localization\de\messenger\messenger.ftl
 %lecho% "msg-edit-update-button = Aktualisieren"       >> localization\de\messenger\messenger.ftl
+
+:: Original strings:
+:: quick-filter-bar-negate =
+::     .title = Right-click or Ctrl+Enter on a button negates results.
+::       For the text and tag filter, any negated button creates an AND condition.
+::       When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages.
+::       Examples:
+::       • 'Starred' and 'Tagged' negated: Show all messages which are Not 'Starred' AND Not 'Tagged'.
+::       • 'Subject' negated and 'Body' selected: Show all messages where 'Subject' Does Not Contain "word" AND 'Body' Contains "word".
+::       • 'Any of' with 'Important' negated and 'Work' and 'Personal' selected:
+::       Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag.
+%lecho% "quick-filter-bar-negate ="                                                                                                                >> localization\de\messenger\about3Pane.ftl
+%lecho% "    .title = Rechts-Klick oder Strg+Eingabetaste auf eine Schaltfläche negiert das Ergebnis."                                             >> localization\de\messenger\about3Pane.ftl
+%lecho% "      Für den Text- und Schlagwort-Filter erstellt jede Negierung eine UND-Bedingung."                                                    >> localization\de\messenger\about3Pane.ftl
+%lecho% "      Wenn der Schlagwort-Filter negiert ist, werden durch Auswahl eines Schlagworts entsprechende Nachrichten zur Liste hinzugefügt."    >> localization\de\messenger\about3Pane.ftl
+%lecho% "      Beispiele:"                                                                                                                         >> localization\de\messenger\about3Pane.ftl
+%lecho% "      • 'Kennzeichnung' und 'Schlagwort' negiert: Zeigt Nachrichten, die Nicht gekennzeichnet sind UND Keine Schlagwörter haben."         >> localization\de\messenger\about3Pane.ftl
+%lecho% "      • 'Betreff' negiert und 'Nachricheninhalt' ausgewählt: Zeigt Nachrichten, bei denen 'Betreff' Nicht \"Wort\" enthält UND 'Nachricheninhalt' \"Wort\" enthält." >> localization\de\messenger\about3Pane.ftl
+%lecho% "      • 'Eins der Ausgewählten' mit 'Wichtig' negiert und 'Dienstlich' und 'Persönlich' ausgewählt:"                                      >> localization\de\messenger\about3Pane.ftl
+%lecho% "      Zeigt Nachrichten mit Schlagwörtern, die Schlagwort 'Wichtig' Nicht haben UND die Schlagwort 'Dienstlich' ODER 'Persönlich' haben." >> localization\de\messenger\about3Pane.ftl
