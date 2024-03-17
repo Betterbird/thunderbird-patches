@@ -163,6 +163,6 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "      Wenn der Schlagwort-Filter negiert ist, werden durch Auswahl eines Schlagworts entsprechende Nachrichten zur Liste hinzugefügt."    >> localization\de\messenger\about3Pane.ftl
 %lecho% "      Beispiele:"                                                                                                                         >> localization\de\messenger\about3Pane.ftl
 %lecho% "      • [Kennzeichnung] und [Schlagwort] negiert: Zeigt Nachrichten, die Nicht gekennzeichnet sind UND Keine Schlagwörter haben."         >> localization\de\messenger\about3Pane.ftl
-%lecho% "      • [Betreff] negiert und [Nachricheninhalt] ausgewählt: Zeigt Nachrichten, bei denen ‚Betreff‘ Nicht „Wort“ enthält UND ‚Nachricheninhalt‘ „Wort“ enthält." >> localization\de\messenger\about3Pane.ftl
+%lecho% "      • [Betreff] negiert und [Nachrichteninhalt] ausgewählt: Zeigt Nachrichten, bei denen ‚Betreff‘ Nicht „Wort“ enthält UND ‚Nachrichteninhalt‘ „Wort“ enthält." >> localization\de\messenger\about3Pane.ftl
 %lecho% "      • [Eins der Ausgewählten] mit [Wichtig] negiert und [Dienstlich] und [Persönlich] ausgewählt:"                                      >> localization\de\messenger\about3Pane.ftl
 %lecho% "      Zeigt Nachrichten mit Schlagwörtern, die Schlagwort ‚Wichtig‘ Nicht haben UND die Schlagwort ‚Dienstlich‘ ODER ‚Persönlich‘ haben." >> localization\de\messenger\about3Pane.ftl
