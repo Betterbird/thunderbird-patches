@@ -149,20 +149,20 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 
 :: Original strings:
 :: quick-filter-bar-negate =
-::     .title = Right-click or Ctrl+Enter on a button negates results.
+::     .title = Right-click or Ctrl+Enter on a button negates the result.
 ::       For the text and tag filter, any negated button creates an AND condition.
 ::       When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages.
 ::       Examples:
-::       • 'Starred' and 'Tagged' negated: Show all messages which are Not 'Starred' AND Not 'Tagged'.
-::       • 'Subject' negated and 'Body' selected: Show all messages where 'Subject' Does Not Contain "word" AND 'Body' Contains "word".
-::       • 'Any of' with 'Important' negated and 'Work' and 'Personal' selected:
+::       • [Starred] and [Tagged] negated: Show all messages which are Not 'Starred' AND Not 'Tagged'.
+::       • [Subject] negated and [Body] selected: Show all messages where 'Subject' Does Not Contain "word" AND 'Body' Contains "word".
+::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag.
 %lecho% "quick-filter-bar-negate ="                                                                                               >> localization\ja\messenger\about3Pane.ftl
-%lecho% "    .title = Right-click or Ctrl+Enter on a button negates results."                                                     >> localization\ja\messenger\about3Pane.ftl
+%lecho% "    .title = Right-click or Ctrl+Enter on a button negates the result."                                                  >> localization\ja\messenger\about3Pane.ftl
 %lecho% "      For the text and tag filter, any negated button creates an AND condition."                                         >> localization\ja\messenger\about3Pane.ftl
 %lecho% "      When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages." >> localization\ja\messenger\about3Pane.ftl
 %lecho% "      Examples:"                                                                                                         >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      • 'Starred' and 'Tagged' negated: Show all messages which are Not 'Starred' AND Not 'Tagged'."                     >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      • 'Subject' negated and 'Body' selected: Show all messages where 'Subject' Does Not Contain \"word\" AND 'Body' Contains \"word\"." >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      • 'Any of' with 'Important' negated and 'Work' and 'Personal' selected:"                                           >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not 'Starred' AND Not 'Tagged'."                     >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      • [Subject] negated and [Body] selected: Show all messages where 'Subject' Does Not Contain \"word\" AND 'Body' Contains \"word\"." >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      • [Any of] with [Important] negated and [Work] and [Personal] selected:"                                           >> localization\ja\messenger\about3Pane.ftl
 %lecho% "      Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag."   >> localization\ja\messenger\about3Pane.ftl
