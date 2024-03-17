@@ -157,12 +157,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       • [Subject] negated and [Body] selected: Show all messages where 'Subject' Does Not Contain "word" AND 'Body' Contains "word".
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag.
-%lecho% "quick-filter-bar-negate ="                                                                                               >> localization\fr\messenger\about3Pane.ftl
-%lecho% "    .title = Right-click or Ctrl+Enter on a button negates the result."                                                  >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      For the text and tag filter, any negated button creates an AND condition."                                         >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages." >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Examples:"                                                                                                         >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not 'Starred' AND Not 'Tagged'."                     >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      • [Subject] negated and [Body] selected: Show all messages where 'Subject' Does Not Contain \"word\" AND 'Body' Contains \"word\"." >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      • [Any of] with [Important] negated and [Work] and [Personal] selected:"                                           >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag."   >> localization\fr\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-negate ="                                                                           >> localization\fr\messenger\about3Pane.ftl
+%lecho% "    .title = Un clic droit ou Ctrl+Entrée sur un bouton négatise le résultat."                       >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Pour le filtre de texte et des étiquettes, tout bouton négatisé crée une condition ET."        >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Quand le filtre des étiquettes est négatisé, la sélection d’un bouton d’étiquette ajoute les messages respectifs à la liste." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Exemples:"                                                                                     >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      • [Suivi] et [Étiqueté] négatisés : Messages qui ne sont pas « Suivis » ET non « Étiquetés »." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      • [Sujet] négatisé et [Corps du message] sélectionné : Messages dont le « Sujet » Ne Contient Pas de \"mot\" ET « Corps du message » Contient un \"mot\"." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      • [Au moins une], avec [Important] négatisé et [Travail] et [Personnel] sélectionnés :"        >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Messages étiquetés qui n’ont pas l’étiquette « Important » ET qui ont l’étiquette « Travail » OU l’étiquette « Personnel »." >> localization\fr\messenger\about3Pane.ftl
