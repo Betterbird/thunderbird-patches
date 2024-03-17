@@ -153,16 +153,16 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       For the text and tag filter, any negated button creates an AND condition.
 ::       When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages.
 ::       Examples:
-::       • [Starred] and [Tagged] negated: Show all messages which are Not 'Starred' AND Not 'Tagged'.
-::       • [Subject] negated and [Body] selected: Show all messages where 'Subject' Does Not Contain "word" AND 'Body' Contains "word".
+::       • [Starred] and [Tagged] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’.
+::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
-::       Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag.
+::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 %lecho% "quick-filter-bar-negate ="                                                                                               >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "    .title = Right-click or Ctrl+Enter on a button negates the result."                                                  >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      For the text and tag filter, any negated button creates an AND condition."                                         >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages." >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      Examples:"                                                                                                         >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not 'Starred' AND Not 'Tagged'."                     >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      • [Subject] negated and [Body] selected: Show all messages where 'Subject' Does Not Contain \"word\" AND 'Body' Contains \"word\"." >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’."                     >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”." >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      • [Any of] with [Important] negated and [Work] and [Personal] selected:"                                           >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      Show all tagged messages which Do Not have the 'Important' tag AND which have the 'Work' OR the 'Personal' tag."   >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag."   >> localization\pt-BR\messenger\about3Pane.ftl
