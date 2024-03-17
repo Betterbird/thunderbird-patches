@@ -157,12 +157,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
-%lecho% "quick-filter-bar-negate ="                                                                                               >> localization\nl\messenger\about3Pane.ftl
-%lecho% "    .title = Right-click or Ctrl+Enter on a button negates the result."                                                  >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      For the text and tag filter, any negated button creates an AND condition."                                         >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages." >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      Examples:"                                                                                                         >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’."                     >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”." >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      • [Any of] with [Important] negated and [Work] and [Personal] selected:"                                           >> localization\nl\messenger\about3Pane.ftl
-%lecho% "      Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag."   >> localization\nl\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-negate ="                                                                                              >> localization\nl\messenger\about3Pane.ftl
+%lecho% "    .title = Rechtermuisklik of Ctrl+Enter draait het resultaat om."                                                    >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      Bij de tekst- en labelfilters, creëert een omgedraaide knop een EN-voorwaarde."                                   >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      Als het label-filter is omgedraaid, zal het selecteren van een label-knop de van toepasselijke emails toevoegen." >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      Voorbeelden:"                                                                                                     >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      • [Ster] en [Label] omgedraaid: Toon alle emails die Niet een ster hebben EN Geen label."                         >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      • [Onderwerp] omgedraaid en [Berichttekst] geselecteerd: Toon alle emails waarbij ‘Onderwerp’ Niet “woord” bevat EN ‘Berichttekst’ bevat “woord”." >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      • [Eén van] met [Belangrijk] omgedraaid en [Werk] en [Persoonlijk] geselecteerd:"                                 >> localization\nl\messenger\about3Pane.ftl
+%lecho% "      Toon alle gelabelde emails die Niet het ‘Belangrijk’ label hebben EN die wel het ‘Werk’ OF het ‘Persoonlijk’ label hebben." >> localization\nl\messenger\about3Pane.ftl
