@@ -11,6 +11,8 @@ Fix issue when making messages unread manually.
 Feature: Rework MailNotificationService.jsm to improve Windows systray tooltip: Additional debugging.
 * * *
 Rework MailNotificationService.jsm to improve Windows systray tooltip: Fix logic error.
+* * *
+Rework MailNotificationService.jsm to improve Windows systray tooltip: Remove #newCount.
 
 diff --git a/mailnews/base/public/mozINewMailListener.idl b/mailnews/base/public/mozINewMailListener.idl
 --- a/mailnews/base/public/mozINewMailListener.idl
@@ -83,9 +85,12 @@ diff --git a/mailnews/base/src/MailNotificationManager.jsm b/mailnews/base/src/M
 diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/MailNotificationService.jsm
 --- a/mailnews/base/src/MailNotificationService.jsm
 +++ b/mailnews/base/src/MailNotificationService.jsm
-@@ -31,8 +31,10 @@ class NewMailNotificationService {
+@@ -28,11 +28,12 @@ class NewMailNotificationService {
+     "mozINewMailNotificationService",
+   ]);
+ 
    #unreadCount = 0;
-   #newCount = 0;
+-  #newCount = 0;
    #listeners = [];
    #log = null;
 +  folderCountMap = new Map();
@@ -94,7 +99,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    constructor() {
      this.#log = console.createInstance({
        prefix: "mail.notification",
-@@ -43,8 +45,9 @@ class NewMailNotificationService {
+@@ -43,8 +44,9 @@ class NewMailNotificationService {
      Services.obs.addObserver(this, "profile-before-change");
      MailServices.mailSession.AddFolderListener(
        this,
@@ -104,7 +109,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
          Ci.nsIFolderListener.removed |
          Ci.nsIFolderListener.propertyFlagChanged
      );
-@@ -132,8 +135,13 @@ class NewMailNotificationService {
+@@ -132,8 +134,13 @@ class NewMailNotificationService {
        // It's a special folder *other than the inbox*, don't count it by default.
        shouldCount.data = false;
      } else if (aFolder.flags & Ci.nsMsgFolderFlags.Virtual) {
@@ -118,8 +123,18 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
        // If we're only counting inboxes and it's not an inbox...
        let onlyCountInboxes = Services.prefs.getBoolPref(
          "mail.notification.count.inbox_only",
-@@ -152,96 +160,251 @@ class NewMailNotificationService {
+@@ -144,104 +151,238 @@ class NewMailNotificationService {
+       }
+     }
+ 
+     this.#log.debug(`${aFolder.URI}: shouldCount=${shouldCount.data}`);
++    /* No one cares about this.
+     Services.obs.notifyObservers(
+       shouldCount,
+       "before-count-unread-for-folder",
+       aFolder.URI
      );
++    */
      return shouldCount.data;
    }
  
@@ -161,86 +176,71 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -      if (folder.server && !folder.server.performingBiff) {
 -        this.#log.debug(
 -          `${folder.URI} notified, but server not performing biff`
--        );
--        return;
--      }
 +  _updateNewCount(folder, newCount, isCompensation = false) {
 +    if (!this.confirmShouldCount(folder)) {
 +      return;
 +    }
 +
-+    this.#log.debug(`_updateNewCount: ${folder.URI} new messages: ${newCount}`);
++    this.#log.info(`_updateNewCount: ${folder.URI} new messages: ${newCount}`);
 +    let folderCountMapValue = this.folderCountMap.get(folder.URI);
 +    let folderCount = folderCountMapValue || 0;
 +    if (isCompensation) {
-+      this.#log.debug(
++      this.#log.info(
 +        `_updateNewCount: Compensation for ${folder.URI}, setting ${folderCount} + ${newCount}`
 +      );
 +      this.folderCountMap.set(folder.URI, folderCount + newCount);
-+      this.#newCount += newCount;
-+      this.#log.debug(
-+        `_updateNewCount: Compensation for ${
-+          folder.URI
-+        }, returning with count ${this.#newCount}`
-+      );
 +      return;
 +    }
- 
--      // Biff notifications come in for the top level of the server, we need to
--      // look for the folder that actually contains the new mail.
++
 +    if (newCount < 0 && folderCountMapValue === undefined) {
 +      // If we don't have a count for the folder, we cleared it from our map
 +      // in `_newMessagesChanged()`. So return instead of reducing the count.
-+      this.#log.debug(
++      this.#log.info(
 +        `_updateNewCount: ${folder.URI} not in map, ignoring ${newCount}`
 +      );
 +      return;
 +    }
 +
 +    let newFolderCount = Math.max(folderCount + newCount, 0);
-+    this.#log.debug(
++    this.#log.info(
 +      `_updateNewCount: ${folder.URI}, setting ${folderCount} + ${newCount} = ${newFolderCount}`
 +    );
 +    if (newFolderCount > 0) {
 +      this.folderCountMap.set(folder.URI, newFolderCount);
++      if (!this.folderNewMap.get(folder.URI)) {
++        this.#log.info(
++          `_updateNewCount: ${folder.URI} not in the map, no update`
+         );
+         return;
+       }
 +    } else {
 +      // Likely this is the second call on a compensation, so make sure the
 +      // maps don't hang around. If the maps hang around, the condition above:
 +      // if (newCount < 0 && folderCountMapValue === undefined) { ...
 +      // won't be fulfilled again.
-+      this.#log.debug(`_updateNewCount: ${folder.URI}: Deleting count map`);
++      this.#log.info(`_updateNewCount: ${folder.URI}: Deleting maps`);
 +      this.folderCountMap.delete(folder.URI);
-+      // Don't delete the folder map or count may not update in the UI below.
-+      // this.folderNewMap.delete(folder.URI);
++      this.folderNewMap.delete(folder.URI);
 +    }
-+    this.#newCount = Math.max(this.#newCount + newCount, 0);
-+    this.#log.debug(
-+      `_updateNewCount: ${folder.URI} new mail count: ${this.#newCount}`
-+    );
  
+-      // Biff notifications come in for the top level of the server, we need to
+-      // look for the folder that actually contains the new mail.
+-
 -      let allFolders = [folder, ...folder.descendants];
-+    let folderNew = this.folderNewMap.get(folder.URI);
-+    if (!folderNew) {
-+      this.#log.debug(
-+        `_updateNewCount: ${folder.URI} not in the map, returning with count ${
-+          this.#newCount
-+        }`
-+      );
-+      return;
-+    }
- 
--      this.#log.debug(`${folder.URI} notified; will check subfolders`);
--      let newCount = 0;
 +    if (this.useNewCountInBadge) {
++      let { total, output } = this._folderInfo();
 +      this._notifyListeners(
 +        Ci.mozINewMailNotificationService.count,
 +        "onCountChanged",
-+        this.#newCount,
-+        this._folderInfo()
++        total,
++        output
 +      );
 +    }
 +  }
  
+-      this.#log.debug(`${folder.URI} notified; will check subfolders`);
+-      let newCount = 0;
+-
 -      for (let folder of allFolders) {
 -        if (this.confirmShouldCount(folder)) {
 -          let folderNew = folder.getNumNewMessages(false);
@@ -248,6 +248,9 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -          if (folderNew > 0) {
 -            newCount += folderNew;
 +  _newMessagesChanged(folder, oldValue, newValue) {
++    if (!this.confirmShouldCount(folder)) {
++      return;
++    }
 +    if (newValue) {
 +      // We have new messages.
 +      // `getNumNewMessages()` doesn't work until after the biff
@@ -256,7 +259,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      // We use a change of TotalUnreadMessages.
 +      let folderNew = this.folderNewMap.get(folder.URI);
 +      if (!folderNew) {
-+        this.#log.debug(
++        this.#log.info(
 +          `_newMessagesChanged: Created map entry for ${folder.URI}`
 +        );
 +        this.folderNewMap.set(folder.URI, {
@@ -267,18 +270,16 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +        if (folderCount) {
 +          // The count arrived before the "NewMessages" notification.
 +          // This was already added in `_updateNewCount()`.
-+          // this.#newCount += folderCount;
-+          this.#log.debug(
-+            `_newMessagesChanged: ${folder.URI} new mail count: ${
-+              this.#newCount
-+            }`
++          this.#log.info(
++            `_newMessagesChanged: ${folder.URI} count: ${folderCount}`
 +          );
 +          if (this.useNewCountInBadge) {
++            let { total, output } = this._folderInfo();
 +            this._notifyListeners(
 +              Ci.mozINewMailNotificationService.count,
 +              "onCountChanged",
-+              this.#newCount,
-+              this._folderInfo()
++              total,
++              output
 +            );
            }
          }
@@ -292,22 +293,17 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      this.folderCountMap.delete(folder.URI);
 +      this.folderNewMap.delete(folder.URI);
 +      if (folderCount) {
-+        this.#log.debug(
-+          `_newMessagesChanged: ${folder.URI} new mail count: ${
-+            this.#newCount
-+          }, will reduce by ${folderCount}`
-+        );
-+        this.#newCount = Math.max(this.#newCount - folderCount, 0);
-+        this.#log.debug(
-+          `_newMessagesChanged: ${folder.URI} new mail count: ${this.#newCount}`
++        this.#log.info(
++          `_newMessagesChanged: ${folder.URI}: count going away: ${folderCount}`
 +        );
          if (this.useNewCountInBadge) {
++          let { total, output } = this._folderInfo();
            this._notifyListeners(
              Ci.mozINewMailNotificationService.count,
              "onCountChanged",
 -            this.#newCount
-+            this.#newCount,
-+            this._folderInfo()
++            total,
++            output
            );
          }
        }
@@ -329,7 +325,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -    if (!this.confirmShouldCount(folder)) {
 -      return;
 +  _folderInfo() {
-+    let DEBUGTOTAL = 0;
++    let total = 0;
 +    let totalInbox = 0;
 +    let countInbox = 0;
 +    let inboxName = "";
@@ -339,7 +335,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      if (!count) {
 +        continue;
 +      }
-+      DEBUGTOTAL += count;
++      total += count;
 +      if (value.isInbox) {
 +        totalInbox += count;
 +        countInbox++;
@@ -347,18 +343,13 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +        continue;
 +      }
 +      folders.push({ count, name: value.name });
-+    }
-+    this.#log.debug(`_folderInfo: ${DEBUGTOTAL} vs. ${this.#newCount}`);
-+    if (DEBUGTOTAL != this.#newCount) {
-+      this.#log.debug(
-+        "_folderInfo: Warning: newCount and folder sum don't match"
-+      );
      }
  
 -    if (!oldValue || oldValue < 0) {
 -      oldValue = 0;
 +    if (totalInbox == 0 && folders.length == 0) {
-+      return "";
++      this.#log.info(`_folderInfo: ${total} <empty>`);
++      return { total, output: "" };
 +    }
 +    let output = "\n";
 +    let folderAddsComma = false;
@@ -371,8 +362,8 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      folderAddsComma = true;
 +    }
 +    if (folders.length == 0) {
-+      this.#log.debug(`_folderInfo: ${output}`);
-+      return output;
++      this.#log.info(`_folderInfo: ${total} ${output}`);
++      return { total, output };
      }
 -    this.#newCount += newValue - oldValue;
 -    this.#log.debug(`#newMailReceived ${folder.URI} - ${this.#newCount} new`);
@@ -417,13 +408,13 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 +      }
 +      lineLength += folder.length;
      }
-+    this.#log.debug(`_folderInfo: ${output}`);
-+    return output;
++    this.#log.info(`_folderInfo: ${total} ${output}`);
++    return { total, output };
    }
  
    #totalUnreadMessagesChanged(folder, oldValue, newValue) {
      if (!this.confirmShouldCount(folder)) {
-@@ -267,50 +430,74 @@ class NewMailNotificationService {
+@@ -267,50 +408,72 @@ class NewMailNotificationService {
    }
  
    onFolderAdded(parentFolder, child) {
@@ -439,10 +430,10 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
    }
  
    onMessageAdded(parentFolder, msg) {
-     if (this.confirmShouldCount(msg.folder)) {
+-    if (this.confirmShouldCount(msg.folder)) {
 -      this.#log.trace(`Added <${msg.messageId}> to ${msg.folder.folderURL}`);
-+      this.#log.debug(`Added <${msg.messageId}> to ${msg.folder.folderURL}`);
-     }
+-    }
++    this.#log.debug(`Added <${msg.messageId}> to ${msg.folder.folderURL}`);
    }
  
    onFolderPropertyFlagChanged(msg, property, oldFlag, newFlag) {
@@ -506,7 +497,19 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
        );
      }
    }
-@@ -334,12 +521,13 @@ class NewMailNotificationService {
+@@ -318,9 +481,10 @@ class NewMailNotificationService {
+   // Implement mozINewMailNotificationService
+ 
+   get messageCount() {
+     if (this.useNewCountInBadge) {
+-      return this.#newCount;
++      let { total } = this._folderInfo();
++      return total;
+     }
+     return this.#unreadCount;
+   }
+ 
+@@ -334,12 +498,14 @@ class NewMailNotificationService {
      }
  
      // Ensure that first-time listeners get an accurate mail count.
@@ -516,7 +519,8 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
 -        : this.#unreadCount;
 -      aListener.onCountChanged(count);
 +      if (this.useNewCountInBadge) {
-+        aListener.onCountChanged(this.#newCount, this._folderInfo());
++        let { total, output } = this._folderInfo();
++        aListener.onCountChanged(total, output);
 +      } else {
 +        aListener.onCountChanged(this.#unreadCount, "");
 +      }
@@ -524,7 +528,7 @@ diff --git a/mailnews/base/src/MailNotificationService.jsm b/mailnews/base/src/M
  
      // If we get here, the listener wasn't already in the list
      this.#listeners.push({ obj: aListener, flags });
-@@ -365,11 +553,11 @@ class NewMailNotificationService {
+@@ -365,11 +531,11 @@ class NewMailNotificationService {
      }
      return list;
    }
