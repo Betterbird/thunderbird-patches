@@ -157,12 +157,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
-%lecho% "quick-filter-bar-negate ="                                                                    >> localization\ja\messenger\about3Pane.ftl
-%lecho% "    .title = ボタン上で右クリックまたは Ctrl+Enter を押すと結果が無効になります。"                          >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      テキストフィルターとタグフィルターでは無効にしたボタンは AND 条件を作ります。"                              >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      タグフィルターを無効にしたとき、タグボタンを選択するとそれぞれのメッセージがタグなしリストに追加されます。"          >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      例："                                                                                    >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      • 「スター付き」と「タグ付き」を無効にした場合: 「スター付き」でも「タグ付き」でもないメッセージを表示します。"       >> localization\ja\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-negate ="                                                               >> localization\ja\messenger\about3Pane.ftl
+%lecho% "    .title = ボタン上で右クリックまたは Ctrl+Enter を押すと結果が無効になります。"                     >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      テキストフィルターとタグフィルターでは無効にしたボタンは AND 条件を作ります。"                         >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      タグフィルターを無効にしたとき、タグボタンを選択するとそれぞれのメッセージがタグなしリストに追加されます。"     >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      例："                                                                               >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      • 「スター付き」と「タグ付き」を無効にした場合: 「スター付き」でも「タグ付き」でもないメッセージを表示します。"  >> localization\ja\messenger\about3Pane.ftl
 %lecho% "      • 「件名」を無効にして、「本文」が選択されている場合： 「件名」にワードが含まれておらず、かつ「本文」にワードが含まれているメッセージをすべて表示します。" >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      • 「いずれかを含む」で [Important] を無効にして、[Work] と [Personal] が選択されている場合："         >> localization\ja\messenger\about3Pane.ftl
-%lecho% "      [Important] タグがなく、かつ [Work] タグまたは [Personal] タグがあるタグ付きメッセージをすべて表示します。" >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      • 「いずれかを含む」で [重要] を無効にして、[仕事] と [プライベート] が選択されている場合："         >> localization\ja\messenger\about3Pane.ftl
+%lecho% "      [重要] タグがなく、かつ [仕事] タグまたは [プライベート] タグがあるタグ付きメッセージをすべて表示します。" >> localization\ja\messenger\about3Pane.ftl
