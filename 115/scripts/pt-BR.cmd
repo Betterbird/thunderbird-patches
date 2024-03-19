@@ -160,7 +160,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "quick-filter-bar-negate ="                                                                                               >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "    .title = Clicar com o botão direito do mouse ou pressionar Ctrl+Enter em um botão nega o resultado."                 >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      Para o filtro de texto e de etiquetas, qualquer botão negado cria uma condição E."                                 >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      Quando o filtro de tags é negado, a seleção de um botão de etiqueta adiciona as respectivas mensagens."            >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      Quando o filtro de etiquetas é negado, a seleção de um botão de etiqueta adiciona as respectivas mensagens."       >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      Exemplos:"                                                                                                         >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      • [Com estrela] e [Etiquetas] negados: Mensagens que Não são ‘Com estrela’ E Não ‘Etiquetadas’."                   >> localization\pt-BR\messenger\about3Pane.ftl
 %lecho% "      • [Assunto] negado e [Texto da mensagem] selecionado: Mensagens em que ‘Assunto’ Não Contém “palavra” E ‘Texto da mensagem’ Contém “palavra”." >> localization\pt-BR\messenger\about3Pane.ftl
