@@ -165,4 +165,4 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "      • [Destacados] y [Etiquetados] negados: Mensajes que No están ‘Destacados’ NI ‘Etiquetados’."                                >> localization\es-AR\messenger\about3Pane.ftl
 %lecho% "      • [Asunto] negado y [Cuerpo] seleccionado: Mensajes donde ‘Asunto’ No Contiene “palabra” Y ‘Cuerpo’ Contiene “palabra”." >> localization\es-AR\messenger\about3Pane.ftl
 %lecho% "      • [Cualquiera] con [Importante] negado y [Trabajo] y [Personal] seleccionados:"                                              >> localization\es-AR\messenger\about3Pane.ftl
-%lecho% "      Mensajes etiquetados que no tienen la etiqueta ‘Importante’ Y que tienen la etiqueta ‘Trabajo’ O ‘Personal’."                >> localization\es-AR\messenger\about3Pane.ftl
+%lecho% "      Mensajes etiquetados que No tienen la etiqueta ‘Importante’ Y que tienen la etiqueta ‘Trabajo’ O ‘Personal’."                >> localization\es-AR\messenger\about3Pane.ftl

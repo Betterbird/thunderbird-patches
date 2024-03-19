@@ -158,11 +158,11 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 %lecho% "quick-filter-bar-negate ="                                                                                               >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "    .title = Right-click or Ctrl+Enter on a button negates the result."                                                  >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      For the text and tag filter, any negated button creates an AND condition."                                         >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages." >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      Examples:"                                                                                                         >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’."                     >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”." >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      • [Any of] with [Important] negated and [Work] and [Personal] selected:"                                           >> localization\pt-BR\messenger\about3Pane.ftl
-%lecho% "      Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag."   >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "    .title = Clicar com o botão direito do mouse ou pressionar Ctrl+Enter em um botão nega o resultado."                 >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      Para o filtro de texto e de etiquetas, qualquer botão negado cria uma condição E."                                 >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      Quando o filtro de tags é negado, a seleção de um botão de etiqueta adiciona as respectivas mensagens."            >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      Exemplos:"                                                                                                         >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      • [Com estrela] e [Etiquetas] negados: Mensagens que Não são ‘Com estrela’ E Não ‘Etiquetadas’."                   >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      • [Assunto] negado e [Texto da mensagem] selecionado: Mensagens em que ‘Assunto’ Não Contém “palavra” E ‘Texto da mensagem’ Contém “palavra”." >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      • [Qualquer] com [Importante] negado e, [Trabalho] e [Particular] selecionado:"                                    >> localization\pt-BR\messenger\about3Pane.ftl
+%lecho% "      Mensagens etiquetadas que Não possuem a etiqueta ‘Importante’ E que têm a etiqueta ‘Trabalho’ OU ‘Particular’."    >> localization\pt-BR\messenger\about3Pane.ftl
