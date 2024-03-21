@@ -128,3 +128,41 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "menu-view-layout-stacked ="    >> localization\pl\messenger\menubar.ftl
 %lecho% "    .label = Piętrowy"         >> localization\pl\messenger\menubar.ftl
 %lecho% "    .accesskey = t"            >> localization\pl\messenger\menubar.ftl
+
+:: Original strings:
+:: other-action-msg-edit-headers =
+::     .label = Edit Headers…
+::     .accesskey = H
+:: msg-edit-dialog-title = Edit Headers
+:: msg-edit-cancel-button = Cancel
+:: msg-edit-restore-button = Restore
+::     .title = Show the original value
+:: msg-edit-update-button = Update
+%lecho% "other-action-msg-edit-headers ="         >> localization\pl\messenger\messenger.ftl
+%lecho% "    .label = Edytuj nagłówki…"           >> localization\pl\messenger\messenger.ftl
+%lecho% "    .accesskey = N"                      >> localization\pl\messenger\messenger.ftl
+%lecho% "msg-edit-dialog-title = Edytuj nagłówki" >> localization\pl\messenger\messenger.ftl
+%lecho% "msg-edit-cancel-button = Anuluj"         >> localization\pl\messenger\messenger.ftl
+%lecho% "msg-edit-restore-button = Przywróć"      >> localization\pl\messenger\messenger.ftl
+%lecho% "    .title = Pokaż wartość początkową"   >> localization\pl\messenger\messenger.ftl
+%lecho% "msg-edit-update-button = Aktualizuj"     >> localization\pl\messenger\messenger.ftl
+
+:: Original strings:
+:: quick-filter-bar-negate =
+::     .title = Right-click or Ctrl+Enter on a button negates the result.
+::       For the text and tag filter, any negated button creates an AND condition.
+::       When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages.
+::       Examples:
+::       • [Starred] and [Tags] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’.
+::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
+::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
+::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
+%lecho% "quick-filter-bar-negate ="                                                                                                             >> localization\pl\messenger\about3Pane.ftl
+%lecho% "    .title = Kliknięcie prawym przyciskiem myszy lub naciśnięcie kombinacji klawiszy Ctrl+Enter na przycisku powoduje zanegowanie wyniku." >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      W przypadku filtra tekstu i etykiet każdy zanegowany przycisk tworzy warunek ORAZ."                                              >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      Gdy filtr etykiet jest zanegowany, wybranie przycisku etykiet dodaje odpowiednie wiadomości do listy nieoznaczonych wiadomości." >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      Przykłady:"                                                                                                                      >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      • Zanegowane [Z gwiazdką] i [Z etykietą]: Pokaż wszystkie wiadomości, które nie są oznaczone gwiazdką ORAZ są bez etykiety."     >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      • Zanegowany [Temat] i wybrana [Treść]: Pokaż wszystkie wiadomości, w których „Temat” nie zawiera »słowa« ORAZ „Treść” zawiera »słowo«." >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      • [Dowolna z] z zanegowaną etykietą [Ważne] i wybranymi etykietami [Praca] i [Osobiste]:"                                        >> localization\pl\messenger\about3Pane.ftl
+%lecho% "      Wyświetla wszystkie wiadomości z etykietą, które nie mają etykiety „Ważne” ORAZ mają etykietę „Praca” LUB „Osobiste”."           >> localization\pl\messenger\about3Pane.ftl
