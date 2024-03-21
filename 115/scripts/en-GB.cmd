@@ -91,7 +91,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "      For the text and tag filter, any negated button creates an AND condition."                                         >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "      When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages." >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "      Examples:"                                                                                                         >> localization\en-GB\messenger\about3Pane.ftl
-%lecho% "      • [Starred] and [Tagged] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’."                     >> localization\en-GB\messenger\about3Pane.ftl
+%lecho% "      • [Starred] and [Tags] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’."                     >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "      • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”." >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "      • [Any of] with [Important] negated and [Work] and [Personal] selected:"                                           >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "      Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag."   >> localization\en-GB\messenger\about3Pane.ftl

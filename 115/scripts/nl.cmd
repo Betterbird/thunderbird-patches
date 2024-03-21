@@ -153,7 +153,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       For the text and tag filter, any negated button creates an AND condition.
 ::       When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages.
 ::       Examples:
-::       • [Starred] and [Tagged] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’.
+::       • [Starred] and [Tags] negated: Show all messages which are Not ‘Starred’ AND Not ‘Tagged’.
 ::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
