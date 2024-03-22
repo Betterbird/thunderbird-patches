@@ -26,6 +26,8 @@ Bug 297852 - Allow grouping in search term UI: Add icons before a search row to 
 Bug 297852 - Allow grouping in search term UI: Fix issue when prepending term at top level.
 * * *
 Bug 297852 - Allow grouping in search term UI: disallow group after group.
+* * *
+Remove term flattening which destroys complex expressions. Add handy debug function to dump expression tree.
 
 diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
 --- a/mail/base/content/SearchDialog.js
@@ -231,31 +233,159 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 diff --git a/mail/modules/SearchSpec.sys.mjs b/mail/modules/SearchSpec.sys.mjs
 --- a/mail/modules/SearchSpec.sys.mjs
 +++ b/mail/modules/SearchSpec.sys.mjs
-@@ -167,19 +167,19 @@ SearchSpec.prototype = {
-         term = cloneTerm;
-         outTerms.push(term);
-       }
-       if (iTerm == 0) {
+@@ -141,103 +141,23 @@ SearchSpec.prototype = {
+       this._listenersRegistered = false;
+     }
+   },
+ 
+-  /**
+-   * Given a list of terms, mutate them so that they form a single boolean
+-   *  group.
+-   *
+-   * @param aTerms The search terms
+-   * @param aCloneTerms Do we need to clone the terms?
+-   */
+-  _flattenGroupifyTerms(aTerms, aCloneTerms) {
+-    let iTerm = 0,
+-      term;
+-    const outTerms = aCloneTerms ? [] : aTerms;
+-    for (term of aTerms) {
+-      if (aCloneTerms) {
+-        const cloneTerm = this.session.createTerm();
+-        cloneTerm.value = term.value;
+-        cloneTerm.attrib = term.attrib;
+-        cloneTerm.arbitraryHeader = term.arbitraryHeader;
+-        cloneTerm.hdrProperty = term.hdrProperty;
+-        cloneTerm.customId = term.customId;
+-        cloneTerm.op = term.op;
+-        cloneTerm.booleanAnd = term.booleanAnd;
+-        cloneTerm.matchAll = term.matchAll;
+-        term = cloneTerm;
+-        outTerms.push(term);
+-      }
+-      if (iTerm == 0) {
 -        term.beginsGrouping = true;
 -        term.endsGrouping = false;
-+        term.beginsGrouping = 1;
-+        term.endsGrouping = 0;
-         term.booleanAnd = true;
-       } else {
+-        term.booleanAnd = true;
+-      } else {
 -        term.beginsGrouping = false;
 -        term.endsGrouping = false;
-+        term.beginsGrouping = 0;
-+        term.endsGrouping = 0;
-       }
-       iTerm++;
-     }
-     if (term) {
+-      }
+-      iTerm++;
+-    }
+-    if (term) {
 -      term.endsGrouping = true;
-+      term.endsGrouping = 1;
+-    }
+-
+-    return outTerms;
+-  },
+-
+-  /**
+-   * Normalize the provided list of terms so that all of the 'groups' in it are
+-   *  ANDed together.  If any OR clauses are detected outside of a group, we
+-   *  defer to |_flattenGroupifyTerms| to force the terms to be bundled up into
+-   *  a single group, maintaining the booleanAnd state of terms.
+-   *
+-   * This particular logic is desired because it allows the quick filter bar to
+-   *  produce interesting and useful filters.
+-   *
+-   * @param aTerms The search terms
+-   * @param aCloneTerms Do we need to clone the terms?
+-   */
+-  _groupifyTerms(aTerms, aCloneTerms) {
+-    let term;
+-    const outTerms = aCloneTerms ? [] : aTerms;
+-    let inGroup = false;
+-    for (term of aTerms) {
+-      // If we're in a group, all that is forbidden is the creation of new
+-      // groups.
+-      if (inGroup) {
+-        if (term.beginsGrouping) {
+-          // forbidden!
+-          return this._flattenGroupifyTerms(aTerms, aCloneTerms);
+-        } else if (term.endsGrouping) {
+-          inGroup = false;
+-        }
+-      } else {
+-        // If we're not in a group, the boolean must be AND.  It's okay for a group
+-        // to start.
+-        // If it's not an AND then it needs to be in a group and we use the other
+-        //  function to take care of it.  (This function can't back up...)
+-        if (!term.booleanAnd) {
+-          return this._flattenGroupifyTerms(aTerms, aCloneTerms);
+-        }
+-
+-        inGroup = term.beginsGrouping;
+-      }
+-
+-      if (aCloneTerms) {
+-        const cloneTerm = this.session.createTerm();
+-        cloneTerm.attrib = term.attrib;
+-        cloneTerm.value = term.value;
+-        cloneTerm.arbitraryHeader = term.arbitraryHeader;
+-        cloneTerm.hdrProperty = term.hdrProperty;
+-        cloneTerm.customId = term.customId;
+-        cloneTerm.op = term.op;
+-        cloneTerm.booleanAnd = term.booleanAnd;
+-        cloneTerm.matchAll = term.matchAll;
+-        cloneTerm.beginsGrouping = term.beginsGrouping;
+-        cloneTerm.endsGrouping = term.endsGrouping;
+-        term = cloneTerm;
+-        outTerms.push(term);
+-      }
++  _cloneTerms(aTerms) {
++    const outTerms = [];
++    for (const term of aTerms) {
++      const cloneTerm = this.session.createTerm();
++      cloneTerm.attrib = term.attrib;
++      cloneTerm.value = term.value;
++      cloneTerm.arbitraryHeader = term.arbitraryHeader;
++      cloneTerm.hdrProperty = term.hdrProperty;
++      cloneTerm.customId = term.customId;
++      cloneTerm.op = term.op;
++      cloneTerm.booleanAnd = term.booleanAnd;
++      cloneTerm.matchAll = term.matchAll;
++      cloneTerm.beginsGrouping = term.beginsGrouping;
++      cloneTerm.endsGrouping = term.endsGrouping;
++      outTerms.push(cloneTerm);
      }
  
      return outTerms;
    },
+@@ -250,9 +170,9 @@ SearchSpec.prototype = {
+    * @param aViewTerms The list of terms.  We take ownership and mutate it.
+    */
+   set viewTerms(aViewTerms) {
+     if (aViewTerms) {
+-      this._viewTerms = this._groupifyTerms(aViewTerms);
++      this._viewTerms = aViewTerms;
+     } else if (this._viewTerms === null) {
+       // If they are nulling out already null values, do not apply view changes!
+       return;
+     } else {
+@@ -276,9 +196,10 @@ SearchSpec.prototype = {
+   set virtualFolderTerms(aVirtualFolderTerms) {
+     if (aVirtualFolderTerms) {
+       // we need to clone virtual folder terms because they are pulled from a
+       //  persistent location rather than created on demand
+-      this._virtualFolderTerms = this._groupifyTerms(aVirtualFolderTerms, true);
++      // Hands up who understands this comment :-( - Let's clone anyway.
++      this._virtualFolderTerms = this._cloneTerms(aVirtualFolderTerms);
+     } else if (this._virtualFolderTerms === null) {
+       // If they are nulling out already null values, do not apply view changes!
+       return;
+     } else {
+@@ -301,9 +222,9 @@ SearchSpec.prototype = {
+    * @param aUserTerms The list of terms.  We take ownership and mutate it.
+    */
+   set userTerms(aUserTerms) {
+     if (aUserTerms) {
+-      this._userTerms = this._groupifyTerms(aUserTerms);
++      this._userTerms = aUserTerms;
+     } else if (this._userTerms === null) {
+       // If they are nulling out already null values, do not apply view changes!
+       return;
+     } else {
 diff --git a/mail/themes/linux/mail/filterDialog.css b/mail/themes/linux/mail/filterDialog.css
 --- a/mail/themes/linux/mail/filterDialog.css
 +++ b/mail/themes/linux/mail/filterDialog.css
@@ -2259,7 +2389,35 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
 diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
 --- a/mailnews/search/src/nsMsgLocalSearch.cpp
 +++ b/mailnews/search/src/nsMsgLocalSearch.cpp
-@@ -327,16 +327,16 @@ nsresult nsMsgSearchOfflineMail::Constru
+@@ -316,8 +316,27 @@ nsresult nsMsgSearchOfflineMail::MatchTe
+   return MatchTerms(msgToMatch, termList, defaultCharset, scope, db,
+                     EmptyCString(), false, aExpressionTree, pResult);
+ }
+ 
++#if 0
++// Handy function to dump out an expression tree for debugging.
++static void dumpExpressionTree(nsMsgSearchBoolExpression* tree, int depth,
++                               const char* prefix) {
++  for (int i = 0; i < depth; i++) printf(" ");
++  nsCString term;
++  // Need to make m_term non protected for this to compile.
++  if (tree->m_term) {
++    tree->m_term->GetTermAsString(term);
++  }
++  printf("=== %s op: %s %s\n", prefix, tree->m_boolOp ? "AND" : "OR",
++         term.get());
++  if (tree->m_leftChild)
++    dumpExpressionTree(tree->m_leftChild, depth + 2, "left");
++  if (tree->m_rightChild)
++    dumpExpressionTree(tree->m_rightChild, depth + 2, "rite");
++}
++#endif
++
+ nsresult nsMsgSearchOfflineMail::ConstructExpressionTree(
+     nsTArray<RefPtr<nsIMsgSearchTerm>> const& termList, uint32_t termCount,
+     uint32_t& aStartPosInList, nsMsgSearchBoolExpression** aExpressionTree) {
+   nsMsgSearchBoolExpression* finalExpression = *aExpressionTree;
+@@ -327,16 +346,17 @@ nsresult nsMsgSearchOfflineMail::Constru
    while (aStartPosInList < termCount) {
      nsIMsgSearchTerm* pTerm = termList[aStartPosInList];
      NS_ASSERTION(pTerm, "couldn't get term to match");
@@ -2271,7 +2429,9 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
      pTerm->GetBeginsGrouping(&beginsGrouping);
      pTerm->GetEndsGrouping(&endsGrouping);
  
-     if (beginsGrouping) {
+-    if (beginsGrouping) {
++    // Shortcut for single term groups, no recursion required.
++    if (beginsGrouping && !endsGrouping) {
        // temporarily turn off the grouping for our recursive call
 -      pTerm->SetBeginsGrouping(false);
 +      pTerm->SetBeginsGrouping(0);
@@ -2279,7 +2439,7 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
            new nsMsgSearchBoolExpression();
  
        // the first search term in the grouping is the one that holds the
-@@ -353,9 +353,9 @@ nsresult nsMsgSearchOfflineMail::Constru
+@@ -353,16 +373,17 @@ nsresult nsMsgSearchOfflineMail::Constru
        ConstructExpressionTree(termList, termCount, aStartPosInList,
                                &finalExpression->m_rightChild);
  
@@ -2290,6 +2450,15 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
      } else {
        finalExpression = nsMsgSearchBoolExpression::AddSearchTerm(
            finalExpression, pTerm,
+           nullptr);  // add the term to the expression tree
+ 
+-      if (endsGrouping) break;
++      // Only break if we're at the end of a group with more than one term.
++      if (endsGrouping && !beginsGrouping) break;
+     }
+ 
+     aStartPosInList++;
+   }  // while we still have terms to process in this group
 diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
 --- a/mailnews/search/src/nsMsgSearchTerm.cpp
 +++ b/mailnews/search/src/nsMsgSearchTerm.cpp
