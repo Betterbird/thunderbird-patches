@@ -1,0 +1,293 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711571676 -3600
+# Parent  291ee5fd14feb2d189acfbb79f0d58bc637b749c
+Bug 1831500 - Reinstate feedback during search.
+* * *
+Backout of bug 1830550 (rev. 037ea96d7379) to re-establish matches/nomatches
+* * *
+Add forgotten call to mJSTree->RowCountChanged(0, -oldSize); to clear tree when search starts.
+* * *
+Backout part of bug 1827003 (rev. ce8b1a51da8a) for wrecking search feedback.
+
+diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterListDialog.js
+--- a/mail/base/content/FilterListDialog.js
++++ b/mail/base/content/FilterListDialog.js
+@@ -1150,13 +1150,18 @@ function updateCountBox() {
+     countBox.value = PluralForm.get(
+       len,
+       gFilterBundle.getString("filterCountItems")
+     ).replace("#1", len);
++    countBox.removeAttribute("filterActive");
+     return;
+   }
+ 
+   // "N of M"
+   countBox.value = gFilterBundle.getFormattedString(
+     "filterCountVisibleOfTotal",
+     [len, sum]
+   );
++  countBox.setAttribute(
++    "filterActive",
++    len == 0 && sum > 0 ? "nomatches" : "matches"
++  );
+ }
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -4233,8 +4233,12 @@ var threadPane = {
+    * Handle threadPane select events.
+    */
+   _onSelect(event) {
+     if (!paneLayout.messagePaneVisible.isCollapsed && gDBView) {
++      // If someone selects while the results of a QFB search are aggregated,
++      // we need to save the selection since at the end of the search it is restored.
++      this.saveSelection();
++
+       messagePane.clearWebPage();
+       switch (gDBView.numSelected) {
+         case 0:
+           messagePane.clearMessage();
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -981,9 +981,25 @@ var dbViewWrapperListener = {
+       false
+     );
+   },
+   onFolderLoading(isFolderLoading) {},
+-  onSearching(isSearching) {},
++  onSearching(isSearching) {
++    if (isSearching) {
++      // Set the "searching" attribute on the threadPane.
++      window.quickFilterBar?.reflectFiltererResults();
++    }
++    const tabmail = top.document.getElementById("tabmail");
++    const tab = tabmail?.currentTabInfo;
++    if (tab) {
++      const searchBundle = Services.strings.createBundle(
++        "chrome://messenger/locale/search.properties"
++      );
++      tabmail.setTabThinking(
++        tab,
++        isSearching && searchBundle.GetStringFromName("searchingMessage")
++      );
++    }
++  },
+   onCreatedView() {
+     if (window.threadTree) {
+       for (const col of ThreadPaneColumns.getCustomColumns()) {
+         gViewWrapper.dbView.addColumnHandler(col.id, col.handler);
+@@ -1054,8 +1070,14 @@ var dbViewWrapperListener = {
+         window.threadPane.scrollToLatestRowIfNoSelection();
+       }
+     }
+     window.quickFilterBar?.onMessagesChanged();
++
++    const tabmail = top.document.getElementById("tabmail");
++    const tab = tabmail?.currentTabInfo;
++    if (tab) {
++      tabmail.setTabThinking(tab, false);
++    }
+   },
+   onMailViewChanged() {
+     window.dispatchEvent(new CustomEvent("MailViewChanged"));
+   },
+diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilterBar.js
+--- a/mail/base/content/quickFilterBar.js
++++ b/mail/base/content/quickFilterBar.js
+@@ -439,11 +439,15 @@ var quickFilterBar = {
+    * Update the UI to reflect the state of the folderDisplay in terms of
+    *  filtering.  This is expected to be called by |reflectFiltererState| and
+    *  when something happens event-wise in terms of search.
+    *
+-   * We can have one of two states:
++   * We can have one of four states:
+    * - No filter is active; no attributes exposed for CSS to do anything.
+    * - A filter is active and we are still searching; filterActive=searching.
++   * - A filter is active, completed searching, and we have results;
++   *   filterActive=matches.
++   * - A filter is active, completed searching, and we have no results;
++   *   filterActive=nomatches.
+    */
+   reflectFiltererResults() {
+     const threadPane = document.getElementById("threadTree");
+ 
+@@ -460,11 +464,25 @@ var quickFilterBar = {
+       // filter active, still searching
+       // Do not set this immediately; wait a bit and then only set this if we
+       //  still are in this same state (and we are still the active tab...)
+       setTimeout(() => {
+-        threadPane.setAttribute("filterActive", "searching");
+-        this.domNode.setAttribute("filterActive", "searching");
++        // Check status again, otherwise we'll set "searching" when
++        // the search is already over.
++        if (gViewWrapper.searching) {
++          threadPane.setAttribute("filterActive", "searching");
++          this.domNode.setAttribute("filterActive", "searching");
++        }
+       }, 500);
++    } else if (gDBView.numMsgsInView) {
++      // filter completed, results
++      // some matches
++      threadPane.setAttribute("filterActive", "matches");
++      this.domNode.setAttribute("filterActive", "matches");
++    } else {
++      // filter completed, no results
++      // no matches! :(
++      threadPane.setAttribute("filterActive", "nomatches");
++      this.domNode.setAttribute("filterActive", "nomatches");
+     }
+   },
+ 
+   // ----------------------
+diff --git a/mail/base/content/tabmail.js b/mail/base/content/tabmail.js
+--- a/mail/base/content/tabmail.js
++++ b/mail/base/content/tabmail.js
+@@ -1777,8 +1777,9 @@ ChromeUtils.defineESModuleGetters(this, 
+           statusFeedback.showStatusString(aThinkingState);
+         }
+       } else {
+         statusFeedback.showProgress(0);
++        statusFeedback.showStatusString("");
+       }
+     }
+ 
+     setTabThinking(aTabNodeOrInfo, aThinking) {
+diff --git a/mail/themes/shared/mail/filterDialog.css b/mail/themes/shared/mail/filterDialog.css
+--- a/mail/themes/shared/mail/filterDialog.css
++++ b/mail/themes/shared/mail/filterDialog.css
+@@ -86,8 +86,16 @@ checkbox:not([label]) .checkbox-label-bo
+ .ruleaction-type {
+   min-width: 15em;
+ }
+ 
++#countBox[filterActive="matches"] {
++  color: #4e9a06;
++}
++
++#countBox[filterActive="nomatches"] {
++  color: #c00;
++}
++
+ #statusbar {
+   height: 1.8em;
+   padding: 2px 4px;
+ }
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -54,12 +54,17 @@
+ }
+ 
+ #qfb-results-label {
+   margin: 3px;
++  color: var(--color-green-60);
+   text-align: end;
+   align-self: center;
+ }
+ 
++#quick-filter-bar[filterActive="nomatches"] #qfb-results-label {
++  color: var(--color-red-50);
++}
++
+ #qfb-qs-textbox {
+   flex: 1;
+   margin: 3px;
+   max-width: 450px;
+@@ -178,4 +183,58 @@
+ 
+ #qfb-upsell-line-one {
+   font-weight: bold;
+ }
++
++#threadTree[filterActive="matches"] > .tree-table {
++  background: repeating-linear-gradient(-45deg,
++                                        var(--color-gray-10),
++                                        var(--color-gray-10) 5px,
++                                        white 5px,
++                                        white 10px);
++}
++@media (prefers-color-scheme: dark) {
++  #threadTree[filterActive="matches"] > .tree-table {
++    background: repeating-linear-gradient(-45deg,
++                                          var(--color-gray-90),
++                                          var(--color-gray-90) 5px,
++                                          black 5px,
++                                          black 10px);
++  }
++}
++
++#threadTree[filterActive="nomatches"] {
++  background: repeating-linear-gradient(-45deg,
++                                        var(--color-red-10),
++                                        var(--color-red-10) 5px,
++                                        white 5px,
++                                        white 10px);
++}
++@media (prefers-color-scheme: dark) {
++  #threadTree[filterActive="nomatches"] {
++    background: repeating-linear-gradient(-45deg,
++                                          var(--color-red-90),
++                                          var(--color-red-90) 5px,
++                                          black 5px,
++                                          black 10px);
++  }
++}
++
++/* While there are no search results, we need to do the animation on the table background
++ * which is later covered by rows in the result set. */
++#threadTree[filterActive="searching"],
++#threadTree[filterActive="searching"] > .tree-table {
++  background-repeat: no-repeat;
++  background-position: 50% 40px;
++  -moz-context-properties: fill, fill-opacity;
++  fill: currentColor;
++  fill-opacity: .3;
++  background-image: url("chrome://messenger/skin/icons/search-spinner.svg");
++}
++
++#threadTree[filterActive="searching"] {
++  background-position-x: calc(50% - 10px);
++}
++
++#threadTree[filterPending] tbody {
++  display: none;
++}
+diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+@@ -285,10 +285,8 @@ nsMsgQuickSearchDBView::OnSearchHit(nsIM
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::OnSearchDone(nsresult status) {
+-  // This batch began in OnNewSearch.
+-  if (mJSTree) mJSTree->EndUpdateBatch();
+   // We're a single-folder virtual folder if viewFolder != folder, and that is
+   // the only case in which we want to be messing about with a results cache
+   // or unread counts.
+   if (m_db && m_viewFolder && m_viewFolder != m_folder) {
+@@ -352,8 +350,9 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+   m_hdrHits.Clear();
+   // this needs to happen after we remove all the keys, since RowCountChanged()
+   // will call our GetRowCount()
+   if (mTree) mTree->RowCountChanged(0, -oldSize);
++  if (mJSTree) mJSTree->RowCountChanged(0, -oldSize);
+   uint32_t folderFlags = 0;
+   if (m_viewFolder) m_viewFolder->GetFlags(&folderFlags);
+   // check if it's a virtual folder - if so, we should get the cached hits
+   // from the db, and set a flag saying that we're using cached values.
+@@ -382,12 +381,8 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+       if (mTree) mTree->EndUpdateBatch();
+       if (mJSTree) mJSTree->EndUpdateBatch();
+     }
+   }
+-
+-  // Prevent updates for every message found. This batch ends in OnSearchDone.
+-  if (mJSTree) mJSTree->BeginUpdateBatch();
+-
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgQuickSearchDBView::GetFirstMessageHdrToDisplayInThread(

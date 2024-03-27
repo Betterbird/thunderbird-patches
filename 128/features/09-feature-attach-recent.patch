@@ -1,0 +1,190 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711566128 -3600
+# Parent  1b4d99ca83da14b225a463f205fa775bb39f65c7
+Feature: Add Recent menu to allow attaching recently used files (Bug 1560737).
+
+Fix drag & drop for folders and Windows shell links.
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -128,8 +128,9 @@ var gLoadingComplete = false;
+ 
+ var gAttachmentBucket;
+ var gAttachmentCounter;
+ var gTempDirsToDelete = [];
++var gRecentFiles;
+ /**
+  * typedef {Object} FocusArea
+  *
+  * @property {Element} root - The root of a given area of the UI.
+@@ -2202,8 +2203,100 @@ function addAttachCloudMenuItems(aParent
+     }
+   }
+ }
+ 
++// This is a Windows-only function.
++function addAttachRecentMenuItems(aParentMenu) {
++  while (aParentMenu.hasChildNodes()) {
++    aParentMenu.lastChild.remove();
++  }
++
++  let fileItem;
++  const recentFiles = [];
++  try {
++    const recentDir = Services.dirsvc.get("AppData", Ci.nsIFile);
++    recentDir.append("Microsoft");
++    recentDir.append("Windows");
++    recentDir.append("Recent");
++    for (const file of recentDir.directoryEntries) {
++      if (!file.leafName.endsWith(".lnk")) {
++        continue;
++      }
++      recentFiles.push({ time: file.lastModifiedTime, file });
++    }
++    recentFiles.sort((firstEl, secondEl) => secondEl.time - firstEl.time);
++  } catch (ex) {
++    console.error(
++      "Couldn't get recent files from %AppData%\\Microsoft\\Windows\\Recent:" +
++        ex
++    );
++  }
++
++  // Now get the first five suitable ones.
++  // Resolving the shell link and testing the file is expensive,
++  // so we only get the first few.
++  const fileHandler = Services.io
++    .getProtocolHandler("file")
++    .QueryInterface(Ci.nsIFileProtocolHandler);
++  let count = 0;
++  gRecentFiles = [];
++  for (let i = 0; i <= recentFiles.length; i++) {
++    const file = recentFiles[i].file;
++    let uri;
++    try {
++      uri = fileHandler.readShellLink(file);
++    } catch (ex) {
++      console.error("Couldn't resolve shell link " + file.leafName + ":" + ex);
++      continue;
++    }
++    const test = uri.QueryInterface(Ci.nsIFileURL).file;
++    try {
++      if (!test.exists() || test.isDirectory()) {
++        continue;
++      }
++    } catch (ex) {
++      // Accessing `test.leafName` can trow again, so only report `file.leafName`.
++      console.error(
++        "Couldn't test shell link target " + file.leafName + ":" + ex
++      );
++      continue;
++    }
++
++    fileItem = document.createXULElement("menuitem");
++    const filename = test.leafName;
++    fileItem.setAttribute("label", filename);
++    fileItem.setAttribute("class", "menuitem-iconic");
++    fileItem.setAttribute("image", "moz-icon://" + filename);
++    fileItem.setAttribute(
++      "oncommand",
++      `window.addRecentFile('${count}'); event.stopPropagation();`
++    );
++    aParentMenu.appendChild(fileItem);
++    count++;
++    gRecentFiles.push({ url: uri.spec, size: test.fileSize });
++
++    if (count >= 5) {
++      break;
++    }
++  }
++
++  if (count == 0) {
++    fileItem = document.createXULElement("menuitem");
++    fileItem.setAttribute("label", "---");
++    fileItem.setAttribute("oncommand", "event.stopPropagation();");
++    aParentMenu.appendChild(fileItem);
++  }
++}
++
++function addRecentFile(index) {
++  const attachment = Cc[
++    "@mozilla.org/messengercompose/attachment;1"
++  ].createInstance(Ci.nsIMsgAttachment);
++  attachment.url = gRecentFiles[index].url;
++  attachment.size = gRecentFiles[index].size;
++  AddAttachments([attachment]);
++}
++
+ function addConvertCloudMenuItems(aParentMenu, aAfterNodeId, aRadioGroup) {
+   const afterNode = document.getElementById(aAfterNodeId);
+   while (afterNode.nextElementSibling) {
+     afterNode.nextElementSibling.remove();
+diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/components/compose/content/messengercompose.xhtml
+--- a/mail/components/compose/content/messengercompose.xhtml
++++ b/mail/components/compose/content/messengercompose.xhtml
+@@ -726,8 +726,13 @@
+   <menuitem id="attachmentListContext_attachFileItem"
+             data-l10n-id="context-menuitem-attach-files"
+             data-l10n-attrs="acceltext"
+             command="cmd_attachFile"/>
++#ifdef XP_WIN
++  <menu data-l10n-id="context-menuitem-recent-files">
++    <menupopup onpopupshowing="if (event.target == this) { addAttachRecentMenuItems(this); }"/>
++  </menu>
++#endif
+   <menu id="attachmentListContext_attachCloudMenu"
+         label="&attachCloud.label;"
+         accesskey="&attachCloud.accesskey;"
+         command="cmd_attachCloud">
+@@ -893,8 +898,13 @@
+             <menupopup id="menu_AttachPopup" onpopupshowing="updateAttachmentItems();">
+               <menuitem data-l10n-id="menuitem-attach-files"
+                         data-l10n-attrs="acceltext"
+                         command="cmd_attachFile"/>
++#ifdef XP_WIN
++              <menu data-l10n-id="menuitem-recent-files">
++                <menupopup onpopupshowing="if (event.target == this) { addAttachRecentMenuItems(this); }"/>
++              </menu>
++#endif
+               <menu label="&attachCloudCmd.label;" accesskey="&attachCloudCmd.accesskey;"
+                     command="cmd_attachCloud">
+                 <menupopup onpopupshowing="if (event.target == this) { addAttachCloudMenuItems(this); }"/>
+               </menu>
+@@ -1861,8 +1871,13 @@
+         <menuitem id="button-attachPopup_attachFileItem"
+                   data-l10n-id="menuitem-attach-files"
+                   data-l10n-attrs="acceltext"
+                   command="cmd_attachFile"/>
++#ifdef XP_WIN
++        <menu data-l10n-id="menuitem-recent-files">
++          <menupopup onpopupshowing="if (event.target == this) { addAttachRecentMenuItems(this); }"/>
++        </menu>
++#endif
+         <menu id="button-attachPopup_attachCloudMenu"
+               label="&attachCloudCmd.label;"
+               accesskey="&attachCloudCmd.accesskey;"
+               command="cmd_attachCloud">
+diff --git a/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl b/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl
+--- a/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl
++++ b/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl
+@@ -109,13 +109,19 @@ menuitem-attach-files =
+     .label = File(s)…
+     .accesskey = F
+     .acceltext = { ctrl-cmd-shift-pretty-prefix }{ trigger-attachment-picker-key }
+ 
++menuitem-recent-files =
++    .label = Recent File(s)…
++
+ context-menuitem-attach-files =
+     .label = Attach File(s)…
+     .accesskey = F
+     .acceltext = { ctrl-cmd-shift-pretty-prefix }{ trigger-attachment-picker-key }
+ 
++context-menuitem-recent-files =
++    .label = Attach Recent File(s)…
++
+ # Note: Do not translate the term 'vCard'.
+ context-menuitem-attach-vcard =
+     .label = My vCard
+     .accesskey = C
