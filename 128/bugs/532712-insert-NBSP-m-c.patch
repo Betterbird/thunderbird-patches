@@ -1,0 +1,173 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711549174 -3600
+#      Sun Mar 13 00:48:52 2022 +0100
+# Node ID abc02df41cc9810cf2c8928e1966bcbcd3044805
+# Parent  1807d6b561b470e60f6896e9b6c38f52b82d8735
+Bug 532712 - disable some code that replaces NBSP with ASCII space.
+
+diff --git a/editor/libeditor/WSRunObject.cpp b/editor/libeditor/WSRunObject.cpp
+--- a/editor/libeditor/WSRunObject.cpp
++++ b/editor/libeditor/WSRunObject.cpp
+@@ -1023,15 +1023,22 @@ WhiteSpaceVisibilityKeeper::InsertBRElem
+   return insertBRElementResult;
+ }
+ 
+ // static
++static bool priorInsertWasNBSP = false;
++static bool currentInsertIsNBSP = false;
+ Result<InsertTextResult, nsresult> WhiteSpaceVisibilityKeeper::ReplaceText(
+     HTMLEditor& aHTMLEditor, const nsAString& aStringToInsert,
+     const EditorDOMRange& aRangeToBeReplaced, const Element& aEditingHost) {
+   // MOOSE: for now, we always assume non-PRE formatting.  Fix this later.
+   // meanwhile, the pre case is handled in HandleInsertText() in
+   // HTMLEditSubActionHandler.cpp
+ 
++  // Ugly hack to make inserting a NBSP not trigger its removal when
++  // the next character is typed.
++  priorInsertWasNBSP = currentInsertIsNBSP;
++  currentInsertIsNBSP = aStringToInsert.EqualsLiteral(u"\x00A0");
++
+   // MOOSE: for now, just getting the ws logic straight.  This implementation
+   // is very slow.  Will need to replace edit rules impl with a more efficient
+   // text sink here that does the minimal amount of searching/replacing/copying
+ 
+@@ -1165,20 +1172,22 @@ Result<InsertTextResult, nsresult> White
+             &invisibleLeadingWhiteSpaceRangeAtStart);
+         AutoTrackDOMRange trackInvisibleTrailingWhiteSpaceRange(
+             aHTMLEditor.RangeUpdaterRef(),
+             &invisibleTrailingWhiteSpaceRangeAtEnd);
+-        Result<InsertTextResult, nsresult> replaceTextResult =
+-            aHTMLEditor.ReplaceTextWithTransaction(
+-                MOZ_KnownLive(
+-                    *atNBSPReplacedWithASCIIWhiteSpace.ContainerAs<Text>()),
+-                atNBSPReplacedWithASCIIWhiteSpace.Offset(), 1, u" "_ns);
+-        if (MOZ_UNLIKELY(replaceTextResult.isErr())) {
+-          NS_WARNING("HTMLEditor::ReplaceTextWithTransaction() failed");
+-          return replaceTextResult.propagateErr();
++        if (!priorInsertWasNBSP) {
++          Result<InsertTextResult, nsresult> replaceTextResult =
++              aHTMLEditor.ReplaceTextWithTransaction(
++                  MOZ_KnownLive(
++                      *atNBSPReplacedWithASCIIWhiteSpace.ContainerAs<Text>()),
++                  atNBSPReplacedWithASCIIWhiteSpace.Offset(), 1, u" "_ns);
++          if (MOZ_UNLIKELY(replaceTextResult.isErr())) {
++            NS_WARNING("HTMLEditor::ReplaceTextWithTransaction() failed");
++            return replaceTextResult.propagateErr();
++          }
++          // Ignore caret suggestion because there was
++          // AutoTransactionsConserveSelection.
++          replaceTextResult.unwrap().IgnoreCaretPointSuggestion();
+         }
+-        // Ignore caret suggestion because there was
+-        // AutoTransactionsConserveSelection.
+-        replaceTextResult.unwrap().IgnoreCaretPointSuggestion();
+       }
+     }
+ 
+     if (invisibleLeadingWhiteSpaceRangeAtStart.IsPositioned()) {
+@@ -1230,20 +1239,22 @@ Result<InsertTextResult, nsresult> White
+                                              &pointToInsert);
+         AutoTrackDOMRange trackInvisibleTrailingWhiteSpaceRange(
+             aHTMLEditor.RangeUpdaterRef(),
+             &invisibleTrailingWhiteSpaceRangeAtEnd);
+-        Result<InsertTextResult, nsresult> replaceTextResult =
+-            aHTMLEditor.ReplaceTextWithTransaction(
+-                MOZ_KnownLive(
+-                    *atNBSPReplacedWithASCIIWhiteSpace.ContainerAs<Text>()),
+-                atNBSPReplacedWithASCIIWhiteSpace.Offset(), 1, u" "_ns);
+-        if (MOZ_UNLIKELY(replaceTextResult.isErr())) {
+-          NS_WARNING("HTMLEditor::ReplaceTextWithTransaction() failed failed");
+-          return replaceTextResult.propagateErr();
++        if (!priorInsertWasNBSP) {
++          Result<InsertTextResult, nsresult> replaceTextResult =
++              aHTMLEditor.ReplaceTextWithTransaction(
++                  MOZ_KnownLive(
++                      *atNBSPReplacedWithASCIIWhiteSpace.ContainerAs<Text>()),
++                  atNBSPReplacedWithASCIIWhiteSpace.Offset(), 1, u" "_ns);
++          if (MOZ_UNLIKELY(replaceTextResult.isErr())) {
++            NS_WARNING("HTMLEditor::ReplaceTextWithTransaction() failed failed");
++            return replaceTextResult.propagateErr();
++          }
++          // Ignore caret suggestion because there was
++          // AutoTransactionsConserveSelection.
++          replaceTextResult.unwrap().IgnoreCaretPointSuggestion();
+         }
+-        // Ignore caret suggestion because there was
+-        // AutoTransactionsConserveSelection.
+-        replaceTextResult.unwrap().IgnoreCaretPointSuggestion();
+         // Don't refer the following variables anymore unless tracking the
+         // change.
+         atNBSPReplaceableWithSP.Clear();
+         invisibleLeadingWhiteSpaceRangeAtStart.Clear();
+@@ -3488,8 +3499,17 @@ nsresult WhiteSpaceVisibilityKeeper::Nor
+               *atPreviousCharOfEndOfVisibleWhiteSpaces.ContainerAs<Text>())) {
+         return NS_OK;
+       }
+ 
++#if 0
++  This block gets in the way of inserting NBSP with Ctrl+Shift+Space since it
++  replaces the NBSP immediately with `ReplaceTextWithTransaction(..., u" "_ns)`.
++  So kill the whole block to have one thing less to worry about.
++
++  Note that this is controlled by
++  `!StaticPrefs::editor_white_space_normalization_blink_compatible()`
++  so perhaps the days of this code are counted anyway.
++
+       // Next, replace the NBSP with an ASCII white-space if it's surrounded
+       // by visible contents (or immediately before a <br> element).
+       // However, if it follows or is followed by a preformatted linefeed,
+       // we shouldn't do this because an ASCII white-space will be collapsed
+@@ -3511,8 +3531,9 @@ nsresult WhiteSpaceVisibilityKeeper::Nor
+         // `Selection` due to the purpose of this method.
+         replaceTextResult.unwrap().IgnoreCaretPointSuggestion();
+         return NS_OK;
+       }
++#endif
+     }
+     // If the text node is not preformatted, and the NBSP is followed by a <br>
+     // element and following (maybe multiple) collapsible ASCII white-spaces,
+     // remove the NBSP, but inserts a NBSP before the spaces.  This makes a line
+@@ -3943,8 +3964,13 @@ WSRunScanner::ComputeRangeInTextNodesCon
+ // static
+ Result<EditorDOMRangeInTexts, nsresult>
+ WSRunScanner::GetRangeInTextNodesToBackspaceFrom(const EditorDOMPoint& aPoint,
+                                                  const Element& aEditingHost) {
++
++  // Backspace deletion calls this, so undo insertion hack.
++  priorInsertWasNBSP = false;
++  currentInsertIsNBSP = false;
++
+   // Corresponding to computing delete range part of
+   // `WhiteSpaceVisibilityKeeper::DeletePreviousWhiteSpace()`
+   MOZ_ASSERT(aPoint.IsSetAndValid());
+ 
+@@ -4038,8 +4064,14 @@ WSRunScanner::GetRangeInTextNodesToBacks
+ // static
+ Result<EditorDOMRangeInTexts, nsresult>
+ WSRunScanner::GetRangeInTextNodesToForwardDeleteFrom(
+     const EditorDOMPoint& aPoint, const Element& aEditingHost) {
++
++  // Forward deletion does NOT appear to call this, but undoing the
++  // insertion hack won't hurt, just in case.
++  priorInsertWasNBSP = false;
++  currentInsertIsNBSP = false;
++
+   // Corresponding to computing delete range part of
+   // `WhiteSpaceVisibilityKeeper::DeleteInclusiveNextWhiteSpace()`
+   MOZ_ASSERT(aPoint.IsSetAndValid());
+ 
+@@ -4288,8 +4320,13 @@ EditorDOMRange WSRunScanner::GetRangeFor
+ // static
+ EditorDOMRange
+ WSRunScanner::GetRangeContainingInvisibleWhiteSpacesAtRangeBoundaries(
+     Element* aEditingHost, const EditorDOMRange& aRange) {
++
++  // Forward deletion calls this, so undo insertion hack.
++  priorInsertWasNBSP = false;
++  currentInsertIsNBSP = false;
++
+   MOZ_ASSERT(aRange.IsPositionedAndValid());
+   MOZ_ASSERT(aRange.EndRef().IsSetAndValid());
+   MOZ_ASSERT(aRange.StartRef().IsSetAndValid());
+ 
