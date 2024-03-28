@@ -1,0 +1,282 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711661650 -3600
+# Parent  338e138a72fe173345895b0124deba415b81de3b
+Feature: Bug 1831667: Re-establish total and unread/selected counts.
+* * *
+Feature: Bug 1831667: Re-establish total and unread/selected counts, take 2
+* * *
+Feature: Bug 1831667: Re-establish counts, also show row count if different.
+* * *
+Feature: Bug 1831667: Re-establish counts, also show row count if different, take 2.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -2434,8 +2434,9 @@ var folderPane = {
+ 
+     if (this._modes.unread.active && !folder.server.hidden) {
+       this._modes.unread.changeUnreadCount(folder, newValue);
+     }
++    threadPaneHeader.updateStatusBar();
+   },
+ 
+   /**
+    * Called when a folder's total count changes, to update the UI.
+@@ -2458,8 +2459,9 @@ var folderPane = {
+ 
+       // Update the row itself.
+       row.updateTotalMessageCount();
+     });
++    threadPaneHeader.updateStatusBar();
+   },
+ 
+   /**
+    * Called when a server's `prettyName` changes, to update the UI.
+@@ -3684,8 +3686,15 @@ var threadPaneHeader = {
+    * If the header area is hidden.
+    * @type {boolean}
+    */
+   isHidden: false,
++  /**
++   * Variables to keep track of the status bar counts.
++   */
++  msgBundle: null,
++  unreadElement: null,
++  totalElement: null,
++  countsElement: null,
+ 
+   init() {
+     this.isHidden = XULStoreUtils.isItemHidden("messenger", "threadPaneHeader");
+     this.bar = document.getElementById("threadPaneHeaderBar");
+@@ -3708,8 +3717,14 @@ var threadPaneHeader = {
+         position: "after_end",
+         triggerEvent: event,
+       });
+     });
++
++    this.msgBundle = top.document.getElementById("bundle_messenger");
++    this.unreadElement = top.document.getElementById("unreadMessageCount");
++    this.totalElement = top.document.getElementById("totalMessageCount");
++    this.countsElement = top.document.getElementById("messageCounts");
++    this.updateStatusBar();
+   },
+ 
+   uninit() {
+     window.removeEventListener("qfbtoggle", this);
+@@ -3831,8 +3846,9 @@ var threadPaneHeader = {
+    */
+   onFolderSelected() {
+     // Bail out if the pane is hidden as we don't need to update anything.
+     if (this.isHidden) {
++      this.updateStatusBar();
+       return;
+     }
+ 
+     // Hide any potential stale data if we don't have a folder.
+@@ -3853,8 +3869,10 @@ var threadPaneHeader = {
+     );
+ 
+     this.folderName.hidden = false;
+     this.folderCount.hidden = false;
++    // Spin the event loop to give view creation a breather.
++    setTimeout(() => this.updateStatusBar());
+   },
+ 
+   /**
+    * Update the total message count in the header if the value changed for the
+@@ -3872,8 +3890,47 @@ var threadPaneHeader = {
+       this.folderCount,
+       "thread-pane-folder-message-count",
+       { count: newValue }
+     );
++    this.updateStatusBar();
++  },
++
++  updateStatusBar() {
++    if (!this.countsElement) {
++      return;
++    }
++    // Not updating if we're not viewing the current folder.
++    if (
++      !gFolder ||
++      top.window.document.getElementById("tabmail")?.currentAbout3Pane
++        ?.gFolder != gFolder
++    ) {
++      return;
++    }
++    // Note that `gDBView?.numMsgsInView` is usually the same as
++    // `gFolder?.getTotalMessages(false)` but for quick filter views
++    // the former is equal to the number of search hits.
++    let rowCount = gDBView?.rowCount;
++    let count = gFolder?.getTotalMessages(false) || rowCount;
++    if (count === undefined) {
++      // Too early to show, let's get out of here.
++      return;
++    }
++    let unread = gFolder?.getNumUnread(false) || 0;
++    let selected = gDBView?.numSelected || 0;
++
++    let numUnread =
++      selected > 1
++        ? this.msgBundle.getFormattedString("selectedMsgStatus", [selected])
++        : this.msgBundle.getFormattedString("unreadMsgStatus", [unread]);
++    // The view may have less rows than the folder if threads are ignored or collapsed.
++    if (rowCount && rowCount != count) {
++      count = `${rowCount} / ${count}`;
++    }
++    let numTotal = this.msgBundle.getFormattedString("totalMsgStatus", [count]);
++    this.unreadElement.setAttribute("value", numUnread);
++    this.totalElement.setAttribute("value", numTotal);
++    this.countsElement.hidden = false;
+   },
+ 
+   /**
+    * Count the number of currently selected messages and update the selected
+@@ -4109,8 +4166,9 @@ var threadPane = {
+           // The selected index hasn't changed, but a collapsed row represents
+           // multiple messages, so for our purposes the selection has changed.
+           threadTree.dispatchEvent(new CustomEvent("select"));
+         }
++        threadPaneHeader.updateStatusBar();
+         break;
+       case "scroll":
+         if (this.isFirstScroll) {
+           this.isFirstScroll = false;
+@@ -4244,8 +4302,9 @@ var threadPane = {
+       // we need to save the selection since at the end of the search it is restored.
+       this.saveSelection();
+ 
+       messagePane.clearWebPage();
++      threadPaneHeader.updateStatusBar();
+       switch (gDBView.numSelected) {
+         case 0:
+           messagePane.clearMessage();
+           messagePane.clearMessages();
+@@ -6135,8 +6194,9 @@ var sortController = {
+           }
+         }
+         break;
+     }
++    threadPaneHeader.updateStatusBar();
+   },
+   sortByThread() {
+     threadPane.updateListRole(false);
+     gViewWrapper.showThreaded = true;
+@@ -6309,8 +6369,9 @@ commandController.registerCallback(
+     threadPane.saveSelection();
+     gViewWrapper.dbView.doCommand(Ci.nsMsgViewCommandType.expandAll);
+     gViewWrapper._threadExpandAll = true;
+     threadPane.restoreSelection();
++    threadPaneHeader.updateStatusBar();
+   },
+   () => !!gViewWrapper?.dbView
+ );
+ commandController.registerCallback(
+@@ -6319,8 +6380,9 @@ commandController.registerCallback(
+     threadPane.saveSelection();
+     gViewWrapper.dbView.doCommand(Ci.nsMsgViewCommandType.collapseAll);
+     gViewWrapper._threadExpandAll = false;
+     threadPane.restoreSelection({ expand: false });
++    threadPaneHeader.updateStatusBar();
+   },
+   () => !!gViewWrapper?.dbView
+ );
+ 
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1037,8 +1037,9 @@ var dbViewWrapperListener = {
+ 
+     // There is no persisted thread last expanded state for synthetic views.
+     if (all && !gViewWrapper.isSynthetic) {
+       window.threadPane.restoreThreadState();
++      window.threadPaneHeader.updateStatusBar();
+     }
+ 
+     // Try to restore what was selected. Keep the saved selection (if there is
+     // one) until we have all of the messages. This will also reveal selected
+diff --git a/mail/base/content/mailTabs.js b/mail/base/content/mailTabs.js
+--- a/mail/base/content/mailTabs.js
++++ b/mail/base/content/mailTabs.js
+@@ -283,8 +283,11 @@ var mailTabType = {
+           { capture: true, once: true }
+         );
+       },
+       showTab(tab) {
++        if (tab.chromeBrowser.currentURI.spec == "about:3pane") {
++          tab.chromeBrowser.contentWindow?.threadPaneHeader?.updateStatusBar();
++        }
+         if (
+           tab.chromeBrowser.currentURI.spec != "about:3pane" ||
+           tab.chromeBrowser.contentDocument.readyState != "complete"
+         ) {
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -106,8 +106,23 @@ function verifyOpenAccountHubTab() {
+ 
+   openAccountSetupTab();
+ }
+ 
++/**
++ * For non-folder based tabs, message counts don't apply.
++ * Therefore hide the counts for those tabs.
++ */
++var statusMessageCountsMonitor = {
++  onTabTitleChanged() {},
++  onTabSwitched(aTab, aOldTab) {
++    if (aTab.mode.name == "mail3PaneTab" || aTab.mode.name == "glodaSearch") {
++      top.document.getElementById("messageCounts").hidden = false;
++    } else {
++      top.document.getElementById("messageCounts").hidden = true;
++    }
++  },
++};
++
+ let _resolveDelayedStartup;
+ var delayedStartupPromise = new Promise(resolve => {
+   _resolveDelayedStartup = resolve;
+ });
+@@ -170,8 +185,9 @@ var gMailInit = {
+       tabmail.registerTabType(mailTabType);
+       // glodaFacetTab* in glodaFacetTab.js
+       tabmail.registerTabType(glodaFacetTabType);
+       tabmail.registerTabMonitor(GlodaSearchBoxTabMonitor);
++      tabmail.registerTabMonitor(statusMessageCountsMonitor);
+       tabmail.openFirstTab();
+     }
+ 
+     // This also registers the contentTabType ("contentTab")
+diff --git a/mail/base/content/messenger.xhtml b/mail/base/content/messenger.xhtml
+--- a/mail/base/content/messenger.xhtml
++++ b/mail/base/content/messenger.xhtml
+@@ -678,8 +678,12 @@
+                class="text-link"
+                onclick="openInvitationsDialog()"
+                onkeypress="if (event.key == 'Enter') { openInvitationsDialog(); }"/>
+       </hbox>
++      <hbox id="messageCounts">
++        <label id="unreadMessageCount" class="statusbarpanel"/>
++        <label id="totalMessageCount" class="statusbarpanel"/>
++      </hbox>
+     </hbox>
+ #include ../../../calendar/base/content/calendar-status-bar.inc.xhtml
+   </hbox>
+ </vbox><!-- Closing #messengerBody. -->
+diff --git a/mail/locales/en-US/chrome/messenger/messenger.properties b/mail/locales/en-US/chrome/messenger/messenger.properties
+--- a/mail/locales/en-US/chrome/messenger/messenger.properties
++++ b/mail/locales/en-US/chrome/messenger/messenger.properties
+@@ -152,8 +152,12 @@ documentLoading=Loading Message…
+ # Place the word %1$S in your translation where the name of the comma separated folders should appear.
+ # Place the word %2$S in your translation where the name of the comma separated accounts should appear.
+ autosyncProgress=Synchronizing messages in %1$S from %2$S…
+ 
++unreadMsgStatus=Unread: %S
++selectedMsgStatus=Selected: %S
++totalMsgStatus=Total: %S
++
+ # localized folder names
+ 
+ localFolders=Local Folders
+ 

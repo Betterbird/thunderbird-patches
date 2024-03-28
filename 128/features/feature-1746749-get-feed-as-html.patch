@@ -1,0 +1,101 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711661054 -3600
+# Parent  1c668ffcd7271ded837fe84a9ee0052c36bf9099
+Bug 1746749 - Feeds: Implement fallback to HTML if fetching XML fails.
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -79,8 +79,9 @@ Feed.prototype = {
+   mFolder: null,
+   mInvalidFeed: false,
+   mFeedType: null,
+   mLastModified: null,
++  mRetryHTML: false,
+ 
+   get folder() {
+     return this.mFolder;
+   },
+@@ -136,9 +137,9 @@ Feed.prototype = {
+     }
+ 
+     // Before we try to download the feed, make sure we aren't already
+     // processing the feed by looking up the url in our feed cache.
+-    if (FeedCache.getFeed(this.url)) {
++    if (!this.mRetryHTML && FeedCache.getFeed(this.url)) {
+       if (this.downloadCallback) {
+         this.downloadCallback.downloaded(
+           this,
+           lazy.FeedUtils.kNewsBlogFeedIsBusy
+@@ -176,9 +177,13 @@ Feed.prototype = {
+     this.request.setRequestHeader("If-Modified-Since", lastModified);
+ 
+     // Only order what you're going to eat...
+     this.request.responseType = "document";
+-    this.request.overrideMimeType("text/xml");
++    if (this.mRetryHTML) {
++      this.request.overrideMimeType("text/html");
++    } else {
++      this.request.overrideMimeType("text/xml");
++    }
+     this.request.setRequestHeader("Accept", lazy.FeedUtils.REQUEST_ACCEPT);
+     this.request.timeout = lazy.FeedUtils.REQUEST_TIMEOUT;
+     this.request.onload = this.onDownloaded;
+     this.request.onreadystatechange = this.onReadyStateChange;
+@@ -457,11 +462,54 @@ Feed.prototype = {
+     lazy.FeedUtils.setSubscriptionAttr(this.url, this.server, "link", aNewLink);
+   },
+ 
+   parse() {
++    let doc;
++    if (this.mRetryHTML) {
++      this.mRetryHTML = false;
++      let xml = new XMLSerializer().serializeToString(this.request.responseXML);
++      // No idea why links have a closing tag missing.
++      xml = xml.replace(/<link \/>(.*)/g, "<link>$1</link>");
++      // Clean up some things related to CDADA.
++      xml = xml.replace(/<!--\[CDATA\[(.*?)-->/g, "<![CDATA[$1>");
++      xml = xml.replace(/&lt;!\[CDATA\[(.*?)&gt;/g, "<![CDATA[$1>");
++      xml = xml.replace(/\]\]&gt;/g, "]]>");
++      try {
++        doc = new DOMParser().parseFromString(xml, "text/xml");
++      } catch (ex) {
++        lazy.FeedUtils.log.error(
++          "Feed.parse: HTML to XML conversion error" + xml
++        );
++        this.onParseError(this);
++        this.request = null;
++        this.mInvalidFeed = false;
++        return;
++      }
++      lazy.FeedUtils.log.info("Feed.parse: Fallback to HTML successful");
++    } else {
++      doc = this.request.responseXML;
++      let docElem = doc.documentElement;
++      if (docElem.namespaceURI == lazy.FeedUtils.MOZ_PARSERERROR_NS) {
++        // Gecko caught a basic parsing error.
++        let errStr =
++          docElem.firstChild.textContent +
++          "\n" +
++          docElem.firstElementChild.textContent;
++        lazy.FeedUtils.log.info(
++          "Feed.parse: XML error, trying HTML download: - " + errStr
++        );
++
++        // We asked for text/xml and got back an error, so let's try again
++        // with text/html.
++        this.mRetryHTML = true;
++        this.download(this.parseItems, this.downloadCallback);
++        return;
++      }
++    }
++
+     // Create a feed parser which will parse the feed.
+     let parser = new lazy.FeedParser();
+-    this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
++    this.itemsToStore = parser.parseFeed(this, doc);
+     parser = null;
+ 
+     if (this.mInvalidFeed) {
+       this.request = null;

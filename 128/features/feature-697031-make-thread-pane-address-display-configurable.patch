@@ -1,0 +1,159 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711659557 -3600
+# Parent  ccef2ca8737a3c17f838e6583d7e22f216d6c8d4
+Bug 697031 - prefs mail.addressDisplayAuthor/mail.addressDisplayRecipients to determine display.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -326,8 +326,11 @@ pref("mail.ui-rdf.version", 0);
+ /////////////////////////////////////////////////////////////////
+ // Overrides of the core mailnews.js and composer.js prefs
+ /////////////////////////////////////////////////////////////////
+ pref("mail.showCondensedAddresses", true); // show the friendly display name for people I know
++// 1: Show display name, 2: Show e-mail address, 3: Show both.
++pref("mail.addressDisplayAuthor", 1);
++pref("mail.addressDisplayRecipients", 1);
+ 
+ pref("mailnews.attachments.display.start_expanded", false);
+ // hidden pref for changing how we present attachments in the message pane
+ pref("mail.pane_config.dynamic", 0);
+diff --git a/mailnews/addrbook/modules/AddrBookManager.sys.mjs b/mailnews/addrbook/modules/AddrBookManager.sys.mjs
+--- a/mailnews/addrbook/modules/AddrBookManager.sys.mjs
++++ b/mailnews/addrbook/modules/AddrBookManager.sys.mjs
+@@ -197,9 +197,21 @@ Services.prefs.addObserver("mail.display
+ // the displayname in the thread tree and message header.
+ Services.prefs.addObserver("mail.showCondensedAddresses", () => {
+   Services.prefs.setIntPref(
+     "mail.displayname.version",
+-    Services.prefs.getIntPref("mail.displayname.version") + 1
++    Services.prefs.getIntPref("mail.displayname.version", 0) + 1
++  );
++});
++Services.prefs.addObserver("mail.addressDisplayAuthor", () => {
++  Services.prefs.setIntPref(
++    "mail.displayname.version",
++    Services.prefs.getIntPref("mail.displayname.version", 0) + 1
++  );
++});
++Services.prefs.addObserver("mail.addressDisplayRecipients", () => {
++  Services.prefs.setIntPref(
++    "mail.displayname.version",
++    Services.prefs.getIntPref("mail.displayname.version", 0) + 1
+   );
+ });
+ 
+ /**
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -338,8 +338,15 @@ nsresult nsMsgDBView::FetchAuthor(nsIMsg
+       CopyUTF8toUTF16(cachedDisplayName, aSenderString);
+       return NS_OK;
+     }
+   }
++#define DISPLAY_NAME_ONLY 1
++#define DISPLAY_EMAIL_ONLY 2
++#define DISPLAY_NAME_EMAIL 3
++  int32_t addressDisplay = DISPLAY_NAME_ONLY;
++  prefs->GetIntPref("mail.addressDisplayAuthor", &addressDisplay);
++  if (addressDisplay < DISPLAY_NAME_ONLY || addressDisplay > DISPLAY_NAME_EMAIL)
++    addressDisplay = DISPLAY_NAME_ONLY;
+ 
+   nsCString author;
+   (void)aHdr->GetAuthor(getter_Copies(author));
+ 
+@@ -360,22 +367,29 @@ nsresult nsMsgDBView::FetchAuthor(nsIMsg
+   if (aSenderString.IsEmpty()) {
+     // We can't use the display name in the card; use the name contained in
+     // the header or email address.
+     if (name.IsEmpty()) {
+-      CopyUTF8toUTF16(emailAddress, aSenderString);
++      addressDisplay = DISPLAY_EMAIL_ONLY;
++    } else if (emailAddress.IsEmpty()) {
++      addressDisplay = DISPLAY_NAME_ONLY;
+     } else {
+       int32_t atPos;
+-      if ((atPos = name.FindChar('@')) == kNotFound ||
+-          name.FindChar('.', atPos) == kNotFound) {
+-        aSenderString = name;
+-      } else {
+-        // Found @ followed by a dot, so this looks like a spoofing case.
+-        aSenderString = name;
+-        aSenderString.AppendLiteral(" <");
+-        AppendUTF8toUTF16(emailAddress, aSenderString);
+-        aSenderString.Append('>');
++      if ((atPos = name.FindChar('@')) != kNotFound &&
++          name.FindChar('.', atPos) != kNotFound) {
++        // Found @ followed by a dot, which looks like a spoofing case.
++        addressDisplay = DISPLAY_NAME_EMAIL;
+       }
+     }
++    if (addressDisplay == DISPLAY_NAME_ONLY) {
++      aSenderString = name;
++    } else if (addressDisplay == DISPLAY_EMAIL_ONLY) {
++      CopyUTF8toUTF16(emailAddress, aSenderString);
++    } else {
++      aSenderString = name;
++      aSenderString.AppendLiteral(" <");
++      AppendUTF8toUTF16(emailAddress, aSenderString);
++      aSenderString.Append('>');
++    }
+   }
+ 
+   if (multipleAuthors) {
+     aSenderString.AppendLiteral(" ");
+@@ -441,8 +455,12 @@ nsresult nsMsgDBView::FetchRecipients(ns
+       CopyUTF8toUTF16(cachedRecipients, aRecipientsString);
+       return NS_OK;
+     }
+   }
++  int32_t addressDisplay = DISPLAY_NAME_ONLY;
++  prefs->GetIntPref("mail.addressDisplayRecipients", &addressDisplay);
++  if (addressDisplay < DISPLAY_NAME_ONLY || addressDisplay > DISPLAY_NAME_EMAIL)
++    addressDisplay = DISPLAY_NAME_ONLY;
+ 
+   nsCString unparsedRecipients;
+   nsresult rv = aHdr->GetRecipients(getter_Copies(unparsedRecipients));
+ 
+@@ -474,22 +492,29 @@ nsresult nsMsgDBView::FetchRecipients(ns
+     if (recipient.IsEmpty()) {
+       // We can't use the display name in the card; use the name contained in
+       // the header or email address.
+       if (curName.IsEmpty()) {
+-        CopyUTF8toUTF16(curAddress, recipient);
++        addressDisplay = DISPLAY_EMAIL_ONLY;
++      } else if (curAddress.IsEmpty()) {
++        addressDisplay = DISPLAY_NAME_ONLY;
+       } else {
+         int32_t atPos;
+-        if ((atPos = curName.FindChar('@')) == kNotFound ||
+-            curName.FindChar('.', atPos) == kNotFound) {
+-          recipient = curName;
+-        } else {
+-          // Found @ followed by a dot, so this looks like a spoofing case.
+-          recipient = curName;
+-          recipient.AppendLiteral(" <");
+-          AppendUTF8toUTF16(curAddress, recipient);
+-          recipient.Append('>');
++        if ((atPos = curName.FindChar('@')) != kNotFound &&
++            curName.FindChar('.', atPos) != kNotFound) {
++          // Found @ followed by a dot, which looks like a spoofing case.
++          addressDisplay = DISPLAY_NAME_EMAIL;
+         }
+       }
++      if (addressDisplay == DISPLAY_NAME_ONLY) {
++        recipient = curName;
++      } else if (addressDisplay == DISPLAY_EMAIL_ONLY) {
++        CopyUTF8toUTF16(curAddress, recipient);
++      } else {
++        recipient = curName;
++        recipient.AppendLiteral(" <");
++        AppendUTF8toUTF16(curAddress, recipient);
++        recipient.Append('>');
++      }
+     }
+ 
+     // Add ', ' between each recipient.
+     if (i != 0) aRecipientsString.AppendLiteral(u", ");
