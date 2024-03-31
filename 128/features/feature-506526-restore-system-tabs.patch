@@ -1,0 +1,152 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711900716 -7200
+# Parent  0b25ea5265adc6bb32200a596cc853b53d123180
+Feature: Based on the patch for bug 506526, allow system tabs to be restored.
+
+System tabs are: add-ons manager, account settings, (advanced) settings, activity manager, calendar, address book, downloads, chat.
+Closed tabs are: message and folder tabs, all non-system content tabs showing external content.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -558,10 +558,12 @@ pref("mail.tabs.firstTab.startupURI", ""
+ 
+ // Allow the tabs to be in the titlebar on supported systems
+ pref("mail.tabs.drawInTitlebar", true);
+ 
+-// Save and restore the tabs session on startup.
+-pref("mail.tabs.restoreSession", true);
++// Save and restore the tabs session on startup:
++// 0: Restore none, 32768: Restore "system" tabs, 65536: Restore all tabs.
++// Future use: 1 to 32767 as bit field to more granularly select which ones to restore.
++pref("mail.tabs.restoreSession", 65536);
+ 
+ // The breakpad report server to link to in about:crashes
+ pref("breakpad.reportURL", "https://crash-stats.mozilla.com/report/index/");
+ 
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -643,12 +643,44 @@ function HandleAppCommandEvent(evt) {
+  *   last 3pane window is being closed.
+  */
+ function getWindowStateForSessionPersistence(shutdown = false) {
+   const tabmail = document.getElementById("tabmail");
+-  if (shutdown && !Services.prefs.getBoolPref("mail.tabs.restoreSession")) {
+-    // Only restore the special firstTab, always at 0.
+-    let firstTab = tabmail.tabInfo.find(t => t.first);
+-    tabmail.tabInfo = firstTab ? [firstTab] : [];
++  if (shutdown) {
++    const tabRestore = Services.prefs.getIntPref(
++      "mail.tabs.restoreSession",
++      65536
++    );
++    if (tabRestore == 0) {
++      // Only restore the special firstTab, always at 0.
++      const firstTab = tabmail.tabInfo.find(t => t.first);
++      tabmail.tabInfo = firstTab ? [firstTab] : [];
++    } else if (tabRestore == 32768) {
++      // Restore "system" tabs, so discard mail tabs, folder tabs and
++      // content tabs which don't have a chrome URL.
++      const reducedTabs = [];
++      for (const tab of tabmail.tabInfo) {
++        if (tab.first) {
++          // We keep the first tab.
++        } else if (tab.chromeBrowser?.currentURI?.spec == "about:3pane") {
++          // Not restoring folders.
++          continue;
++        } else if (tab.chromeBrowser?.currentURI?.spec == "about:message") {
++          // Not restoring messages.
++          continue;
++        } else if (tab.browser?.getAttribute("remote")) {
++          // Not restoring remote browsers, for example after searching for
++          // add-ons or using openContentTab("https://www.betterbird.eu").
++          // There are add-ons which can open web pages in tabs.
++          continue;
++        }
++        // Everything else we keep. Note that Gloda search results (facet view)
++        // already doesn't get presisted, so no need to skip it.
++        reducedTabs.push(tab);
++      }
++      if (tabmail.tabInfo.length != reducedTabs.length) {
++        tabmail.tabInfo = reducedTabs;
++      }
++    }
+   }
+ 
+   const tabsState = tabmail.persistTabs();
+   return { type: "3pane", tabs: tabsState };
+diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
+--- a/mail/components/preferences/general.inc.xhtml
++++ b/mail/components/preferences/general.inc.xhtml
+@@ -139,14 +139,24 @@
+         <spacer flex="1"/>
+       </hbox>
+       <hbox>
+         <vbox>
+-          <checkbox id="restoreTabs"
+-                    data-l10n-id="restore-tabs-session-label"
+-                    preference="mail.tabs.restoreSession"/>
++          <label data-l10n-id="restore-tabs-session-label"
++                 control="restoreTabsBehavior"/>
+         </vbox>
+         <spacer flex="1"/>
+-      </hbox>      <hbox>
++      </hbox>
++      <hbox>
++        <radiogroup id="restoreTabsBehavior" class="indent"
++                    preference="mail.tabs.restoreSession"
++                    orient="horizontal">
++          <radio value="65536" data-l10n-id="restore-all-tabs"/>
++          <radio value="32768" data-l10n-id="restore-system-tabs"/>
++          <radio value="0" data-l10n-id="restore-no-tabs"/>
++        </radiogroup>
++        <spacer flex="1"/>
++      </hbox>
++      <hbox>
+         <vbox>
+           <checkbox id="autoHideTabbar"
+                     data-l10n-id="auto-hide-tabbar-label"
+                     preference="mail.tabs.autoHide"/>
+diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
+--- a/mail/components/preferences/general.js
++++ b/mail/components/preferences/general.js
+@@ -93,9 +93,9 @@ Preferences.addAll([
+   { id: "layers.acceleration.disabled", type: "bool", inverted: true },
+   { id: "searchintegration.enable", type: "bool" },
+   { id: "mail.tabs.drawInTitlebar", type: "bool" },
+   { id: "mail.tabs.autoHide", type: "bool" },
+-  { id: "mail.tabs.restoreSession", type: "bool" },
++  { id: "mail.tabs.restoreSession", type: "int" },
+ ]);
+ if (AppConstants.platform == "win" || AppConstants.platform == "linux") {
+   Preferences.add({ id: "mail.minimizeToTray", type: "bool" });
+ }
+diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
+--- a/mail/locales/en-US/messenger/preferences/preferences.ftl
++++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
+@@ -272,10 +272,21 @@ draw-in-titlebar-label =
+     .label = Hide system window titlebar
+     .accesskey = H
+ 
+ restore-tabs-session-label =
+-    .label = Open previous tabs
+-    .accesskey = b
++    .value = Restore tabs on startup:
++
++restore-all-tabs =
++    .label = All tabs
++    .accesskey = t
++
++restore-system-tabs =
++    .label = System tabs
++    .accesskey = s
++
++restore-no-tabs =
++    .label = None
++    .accesskey = n
+ 
+ auto-hide-tabbar-label =
+     .label = Auto hide tab bar
+     .accesskey = A

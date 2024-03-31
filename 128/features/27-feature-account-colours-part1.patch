@@ -1,0 +1,436 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711902326 -7200
+# Parent  5495ff050231cb245d4457a5e35bf2b66dc94ea5
+Feature: Account colours, part 1: Account Manager and folder tree.
+
+See https://bugzilla.mozilla.org/show_bug.cgi?id=1482172 and
+https://addons.thunderbird.net/en-US/thunderbird/addon/account-colors/
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -63,8 +63,11 @@ const { ThreadPaneColumns } = ChromeUtil
+ 
+ // As defined in nsMsgDBView.h.
+ const MSG_VIEW_FLAG_DUMMY = 0x20000000;
+ 
++const SPECIALUSE_NOT_OUTBOX =
++  Ci.nsMsgFolderFlags.SpecialUse & ~Ci.nsMsgFolderFlags.Queue;
++
+ /**
+  * The TreeListbox widget that displays folders.
+  */
+ var folderTree;
+@@ -1062,8 +1065,10 @@ var folderPane = {
+             const folderRow = folderPane._createFolderRow(
+               this.name,
+               childFolder
+             );
++            // This is already colored by its server.
++            folderRow.style.backgroundColor = "";
+             serverRow.insertChildInOrder(folderRow);
+             folderPane._addSubFolders(childFolder, folderRow, this.name);
+             return;
+           }
+@@ -1074,8 +1079,10 @@ var folderPane = {
+           this.containerList,
+           childFolder,
+           this.name
+         );
++        // This is already colored by its server.
++        folderRow.style.backgroundColor = "";
+         folderPane._addSubFolders(childFolder, folderRow, this.name);
+       },
+ 
+       removeFolder(parentFolder, childFolder) {
+@@ -2502,8 +2509,33 @@ var folderPane = {
+       row.setServerName(name);
+     }
+   },
+ 
++  changeServerColor(folder) {
++    const color = folder.server.RGBAcolor;
++    for (const row of folderTree.querySelectorAll(
++      `li[data-server-key="${folder.server.key}"]`
++    )) {
++      const f = MailServices.folderLookup.getFolderForURL(row.uri);
++      // Put color only on folders in smart mode.
++      if (row.id.startsWith("smart-")) {
++        // Only put color on top Inbox, etc., not sub-folders.
++        if (f.flags & SPECIALUSE_NOT_OUTBOX || f.isServer) {
++          // If the parent already has the style, clear it.
++          if (row.parentElement?.closest("li")?.style.backgroundColor) {
++            row.style.backgroundColor = "";
++          } else {
++            row.style.backgroundColor = color;
++          }
++        }
++      } else if (row.id.startsWith("recent-")) {
++        row.style.backgroundColor = color;
++      } else if (f.isServer) {
++        row.style.backgroundColor = color;
++      }
++    }
++  },
++
+   /**
+    * Update the UI widget to reflect the real folder size when the "FolderSize"
+    * property changes.
+    *
+@@ -5974,9 +6006,17 @@ var folderListener = {
+       gViewWrapper?.close(true);
+     }
+   },
+   onMessageRemoved() {},
+-  onFolderPropertyChanged() {},
++  onFolderPropertyChanged(folder, property) {
++    switch (property) {
++      case "Color":
++        if (folder.isServer) {
++          folderPane.changeServerColor(folder);
++        }
++        break;
++    }
++  },
+   onFolderIntPropertyChanged(folder, property, oldValue, newValue) {
+     switch (property) {
+       case "BiffState":
+         folderPane.changeNewMessages(
+diff --git a/mail/base/content/widgets/folder-tree-row.mjs b/mail/base/content/widgets/folder-tree-row.mjs
+--- a/mail/base/content/widgets/folder-tree-row.mjs
++++ b/mail/base/content/widgets/folder-tree-row.mjs
+@@ -11,8 +11,11 @@ ChromeUtils.defineESModuleGetters(lazy, 
+   MailServices: "resource:///modules/MailServices.sys.mjs",
+   XULStoreUtils: "resource:///modules/XULStoreUtils.sys.mjs",
+ });
+ 
++const SPECIALUSE_NOT_OUTBOX =
++  Ci.nsMsgFolderFlags.SpecialUse & ~Ci.nsMsgFolderFlags.Queue;
++
+ /**
+  * Represents a single row in the folder tree. The row can be for a server or
+  * a folder. Use `folderPane._createServerRow` or `folderPane._createFolderRow`
+  * to create rows.
+@@ -241,8 +244,12 @@ class FolderTreeRow extends HTMLLIElemen
+       this.unreadCount = server.rootFolder.getNumUnread(isCollapsed);
+       this.totalCount = server.rootFolder.getTotalMessages(isCollapsed);
+     }
+     this.setFolderPropertiesFromFolder(server.rootFolder);
++    const color = server.RGBAcolor;
++    if (color) {
++      this.style.backgroundColor = color;
++    }
+   }
+ 
+   /**
+    * Set some properties based on the folder for this row.
+@@ -270,8 +277,26 @@ class FolderTreeRow extends HTMLLIElemen
+       this.classList.add("noselect-folder");
+     } else {
+       this.setAttribute("draggable", "true");
+     }
++    const color = folder.server.RGBAcolor;
++    if (!color) {
++      return;
++    }
++    if (
++      this.id.startsWith("smart-") &&
++      // Only put color on top Inbox, etc., not sub-folders.
++      // There is a problem here were special folders which are not part
++      // of a unified folder get colored twice, once as special folder,
++      // then as part of a server.
++      // The style is removed later, see comment:
++      // "This is already colored by its server".
++      folder.flags & SPECIALUSE_NOT_OUTBOX
++    ) {
++      this.style.backgroundColor = color;
++    } else if (this.id.startsWith("recent-")) {
++      this.style.backgroundColor = color;
++    }
+   }
+ 
+   /**
+    * Update new message state of the row.
+diff --git a/mailnews/base/prefs/content/AccountManager.js b/mailnews/base/prefs/content/AccountManager.js
+--- a/mailnews/base/prefs/content/AccountManager.js
++++ b/mailnews/base/prefs/content/AccountManager.js
+@@ -1890,8 +1890,12 @@ var gAccountTree = {
+       treeitem.setAttribute("PageTag", amChrome);
+       // Add icons based on account type.
+       if (server) {
+         treeitem.classList.add("serverType-" + server.type);
++        let color = server.RGBAcolor;
++        if (color) {
++          treeitem.style.backgroundColor = color;
++        }
+         if (server.isSecure) {
+           treeitem.classList.add("isSecure");
+         }
+         // For IM accounts, we can try to fetch a protocol specific icon.
+diff --git a/mailnews/base/prefs/content/am-main.js b/mailnews/base/prefs/content/am-main.js
+--- a/mailnews/base/prefs/content/am-main.js
++++ b/mailnews/base/prefs/content/am-main.js
+@@ -46,8 +46,17 @@ function serverPrettyNameOnBlur(event) {
+   parent.setAccountLabel(gAccount.key, event.target.value);
+   setAccountTitle();
+ }
+ 
++function serverColorOnChange(event) {
++  let row = parent.document.getElementById(gAccount.key);
++  if (row) {
++    let color = document.getElementById("server.color").value;
++    gAccount.incomingServer.color = color;
++    row.style.backgroundColor = gAccount.incomingServer.RGBAcolor;
++  }
++}
++
+ /**
+  * Update an account's main settings title with the account name if applicable.
+  */
+ function setAccountTitle() {
+diff --git a/mailnews/base/prefs/content/am-main.xhtml b/mailnews/base/prefs/content/am-main.xhtml
+--- a/mailnews/base/prefs/content/am-main.xhtml
++++ b/mailnews/base/prefs/content/am-main.xhtml
+@@ -67,8 +67,17 @@
+           onblur="serverPrettyNameOnBlur(event);"
+           prefstring="mail.server.%serverkey%.name"
+           aria-labelledby="server.prettyName.label"
+         />
++        <html:input
++          id="server.color"
++          type="color"
++          wsm_persist="true"
++          class="input-inline"
++          style="flex: 0.1;"
++          onchange="serverColorOnChange(event);"
++          prefstring="mail.server.%serverkey%.color"
++        />
+       </hbox>
+ 
+       <separator />
+ 
+diff --git a/mailnews/base/prefs/content/am-serverwithnoidentities.js b/mailnews/base/prefs/content/am-serverwithnoidentities.js
+--- a/mailnews/base/prefs/content/am-serverwithnoidentities.js
++++ b/mailnews/base/prefs/content/am-serverwithnoidentities.js
+@@ -93,4 +93,13 @@ function onSave() {
+   document
+     .getElementById("server.storeContractID")
+     .setAttribute("value", storeContractID);
+ }
++
++function serverColorOnChange(event) {
++  let row = parent.document.getElementById(gAccount.key);
++  if (row) {
++    let color = document.getElementById("server.color").value;
++    gAccount.incomingServer.color = color;
++    row.style.backgroundColor = gAccount.incomingServer.RGBAcolor;
++  }
++}
+diff --git a/mailnews/base/prefs/content/am-serverwithnoidentities.xhtml b/mailnews/base/prefs/content/am-serverwithnoidentities.xhtml
+--- a/mailnews/base/prefs/content/am-serverwithnoidentities.xhtml
++++ b/mailnews/base/prefs/content/am-serverwithnoidentities.xhtml
+@@ -71,8 +71,17 @@
+           onblur="parent.setAccountLabel(gAccount.key, this.value);"
+           prefstring="mail.server.%serverkey%.name"
+           aria-labelledby="server.prettyName.label"
+         />
++        <html:input
++          id="server.color"
++          type="color"
++          wsm_persist="true"
++          class="input-inline"
++          style="flex: 0.1;"
++          onchange="serverColorOnChange(event);"
++          prefstring="mail.server.%serverkey%.color"
++        />
+       </hbox>
+ 
+       <separator class="thin" />
+ 
+diff --git a/mailnews/base/public/nsIMsgIncomingServer.idl b/mailnews/base/public/nsIMsgIncomingServer.idl
+--- a/mailnews/base/public/nsIMsgIncomingServer.idl
++++ b/mailnews/base/public/nsIMsgIncomingServer.idl
+@@ -493,8 +493,16 @@ interface nsIMsgIncomingServer : nsISupp
+    * 400000000 = RSS,           500000000 = News
+    * If a new server type is created a TB UI reviewer must decide its sort order.
+    */
+   readonly attribute long sortOrder;
++
++  /**
++   * Color for the server in the folder pane.
++   * color format: CSS format: #FF0000.
++   * RGBAcolor format: CSS format: rgba(r, g, b, t).
++   */
++  attribute ACString color;
++  readonly attribute ACString RGBAcolor;
+ };
+ 
+ %{C++
+ /*
+diff --git a/mailnews/base/src/MsgIncomingServer.sys.mjs b/mailnews/base/src/MsgIncomingServer.sys.mjs
+--- a/mailnews/base/src/MsgIncomingServer.sys.mjs
++++ b/mailnews/base/src/MsgIncomingServer.sys.mjs
+@@ -707,8 +707,40 @@ export class MsgIncomingServer {
+     }
+     return this.authMethod != Ci.nsMsgAuthMethod.OAuth2;
+   }
+ 
++  get color() {
++    return this.getCharValue("color");
++  }
++
++  set color(value) {
++    this.setCharValue("color", value);
++    this.rootFolder.NotifyPropertyChanged(
++      "Color",
++      "", // Old value doesn't matter.
++      value
++    );
++  }
++
++  get RGBAcolor() {
++    let color = this.getCharValue("color");
++    // Consider #000000 as not set. Reject bogus values.
++    if (
++      !color ||
++      color == "#000000" ||
++      !color.startsWith("#") ||
++      color.length != 7
++    ) {
++      return "";
++    }
++
++    // Turn #RRGGBB into rgba(rr, gg, bb, tt)
++    let r = parseInt(color.substring(1, 3), 16);
++    let g = parseInt(color.substring(3, 5), 16);
++    let b = parseInt(color.substring(5, 7), 16);
++    return `rgba(${r}, ${g}, ${b}, 0.2)`;
++  }
++
+   getCharValue(prefName) {
+     try {
+       return this._prefs.getCharPref(prefName);
+     } catch (e) {
+diff --git a/mailnews/base/src/nsMsgIncomingServer.cpp b/mailnews/base/src/nsMsgIncomingServer.cpp
+--- a/mailnews/base/src/nsMsgIncomingServer.cpp
++++ b/mailnews/base/src/nsMsgIncomingServer.cpp
+@@ -40,8 +40,9 @@
+ #include "nsIObserverService.h"
+ #include "mozilla/Unused.h"
+ #include "nsIUUIDGenerator.h"
+ #include "nsIArray.h"
++#include "nsPrintfCString.h"
+ 
+ #define PORT_NOT_SET -1
+ 
+ nsMsgIncomingServer::nsMsgIncomingServer()
+@@ -2045,4 +2046,53 @@ nsMsgIncomingServer::GetSortOrder(int32_
+   NS_ENSURE_ARG_POINTER(aSortOrder);
+   *aSortOrder = 100000000;
+   return NS_OK;
+ }
++
++NS_IMETHODIMP
++nsMsgIncomingServer::GetColor(nsACString& color) {
++  return GetCharValue("color", color);
++}
++
++NS_IMETHODIMP
++nsMsgIncomingServer::SetColor(const nsACString& color) {
++  nsresult rv = SetCharValue("color", color);
++  NS_ENSURE_SUCCESS(rv, rv);
++  nsCOMPtr<nsIMsgFolder> rootFolder;
++  GetRootFolder(getter_AddRefs(rootFolder));
++  if (rootFolder) {
++    // Old value doesn't matter.
++    rootFolder->NotifyPropertyChanged("Color"_ns, EmptyCString(), color);
++  }
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsMsgIncomingServer::GetRGBAcolor(nsACString& aColor) {
++  aColor.Truncate();
++  nsCString color;
++  nsresult rv = GetCharValue("color", color);
++  if (NS_FAILED(rv)) return NS_OK;
++
++  // Consider #000000 as not set. Reject bogus values.
++  if (color.IsEmpty() || color.EqualsLiteral("#000000") || color[0] != '#' ||
++      color.Length() != 7) {
++    return NS_OK;
++  }
++
++  // Turn #RRGGBB into rgba(rr, gg, bb, tt)
++  char colorBytes[3];
++  colorBytes[2] = 0;
++  const char* c = color.get() + 1;
++  int r, g, b;
++#define SCAN_BYTES(var)           \
++  colorBytes[0] = *c;             \
++  colorBytes[1] = *(c + 1);       \
++  sscanf(colorBytes, "%x", &var); \
++  c += 2;
++
++  SCAN_BYTES(r);
++  SCAN_BYTES(g);
++  SCAN_BYTES(b);
++  aColor = nsPrintfCString("rgba(%d, %d, %d, 0.2)", r, g, b);
++  return NS_OK;
++}
+diff --git a/mailnews/extensions/newsblog/am-newsblog.js b/mailnews/extensions/newsblog/am-newsblog.js
+--- a/mailnews/extensions/newsblog/am-newsblog.js
++++ b/mailnews/extensions/newsblog/am-newsblog.js
+@@ -70,8 +70,17 @@ function serverPrettyNameOnBlur(event) {
+   parent.setAccountLabel(gAccount.key, event.target.value);
+   setAccountTitle();
+ }
+ 
++function serverColorOnChange(event) {
++  let row = parent.document.getElementById(gAccount.key);
++  if (row) {
++    let color = document.getElementById("server.color").value;
++    gAccount.incomingServer.color = color;
++    row.style.backgroundColor = gAccount.incomingServer.RGBAcolor;
++  }
++}
++
+ /**
+  * Update an account's main settings title with the account name if applicable.
+  *
+  * @returns {void}
+diff --git a/mailnews/extensions/newsblog/am-newsblog.xhtml b/mailnews/extensions/newsblog/am-newsblog.xhtml
+--- a/mailnews/extensions/newsblog/am-newsblog.xhtml
++++ b/mailnews/extensions/newsblog/am-newsblog.xhtml
+@@ -78,8 +78,17 @@
+           aria-labelledby="server.prettyNameLabel"
+           onblur="serverPrettyNameOnBlur(event);"
+           prefstring="mail.server.%serverkey%.name"
+         />
++        <html:input
++          id="server.color"
++          type="color"
++          wsm_persist="true"
++          class="input-inline"
++          style="flex: 0.1;"
++          onchange="serverColorOnChange(event);"
++          prefstring="mail.server.%serverkey%.color"
++        />
+       </hbox>
+ 
+       <separator class="thin" />
+ 
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -570,8 +570,9 @@ pref("mail.server.default.max_size", 50)
+ pref("mail.server.default.delete_mail_left_on_server", false);
+ pref("mail.server.default.valid", true);
+ pref("mail.server.default.abbreviate", true);
+ pref("mail.server.default.isSecure", false);
++pref("mail.server.default.color", "");
+ // cleartext password. @see nsIMsgIncomingServer.authMethod.
+ pref("mail.server.default.authMethod", 3);
+ // @see nsIMsgIncomingServer.socketType
+ pref("mail.server.default.socketType", 0);
