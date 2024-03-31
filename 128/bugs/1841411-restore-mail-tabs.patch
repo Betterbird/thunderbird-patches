@@ -1,0 +1,92 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711920518 -7200
+# Parent  bf8ec68facb75da8ae7c4f3de69d01589eb3b5f0
+Bug 1841411 - Hacky mitigation of problems due to restoring mail tabs.
+
+diff --git a/mail/base/content/tabmail.js b/mail/base/content/tabmail.js
+--- a/mail/base/content/tabmail.js
++++ b/mail/base/content/tabmail.js
+@@ -1422,9 +1422,9 @@ ChromeUtils.defineESModuleGetters(this, 
+      * |persistTabs|. This is currently a synchronous operation, but in
+      * the future this may kick off an asynchronous mechanism to restore
+      * the tabs one-by-one.
+      */
+-    restoreTabs(aPersistedState, aDontRestoreFirstTab) {
++    async restoreTabs(aPersistedState, aDontRestoreFirstTab) {
+       const tabs = aPersistedState.tabs;
+       let indexToSelect = null;
+ 
+       for (const [iTab, tabState] of tabs.entries()) {
+@@ -1440,8 +1440,71 @@ ChromeUtils.defineESModuleGetters(this, 
+         //  tab as the guy to select.
+         if (iTab == aPersistedState.selectedIndex) {
+           indexToSelect = this.tabInfo.length - 1;
+         }
++
++        // There is something fundamentally wrong here.
++        // Observed behaviour is that mail tabs don't load if we don't wait until
++        // the are loaded completely. We've also seen other tabs, like Settings or the
++        // Add-ons Manager, being loaded incomplete and defective.
++        // So as a makeshift solution, we'll wait for the tab to load before
++        // restoring the next one.
++
++        // If the tab has a `chromeBrowser`, wait for it to load.
++        // Note that `this.tabInfo.length - 1` is the newest tab.
++        if (
++          this.tabInfo.length >= 1 &&
++          this.tabInfo[this.tabInfo.length - 1].chromeBrowser
++        ) {
++          const chromeBrowser =
++            this.tabInfo[this.tabInfo.length - 1].chromeBrowser;
++          if (chromeBrowser.contentDocument.readyState != "complete") {
++            await new Promise(r => {
++              // Code from mailTabs.js.
++              // Experiments show that it mostly resolves via "DOMContentLoaded"
++              // but sometimes also via "load".
++              let resolved = false;
++              chromeBrowser.addEventListener(
++                "DOMContentLoaded",
++                event => {
++                  if (event.target == chromeBrowser.contentDocument) {
++                    if (!resolved) {
++                      resolved = true;
++                      r();
++                    }
++                  }
++                },
++                { capture: true, once: true }
++              );
++              chromeBrowser.addEventListener(
++                "load",
++                event => {
++                  if (event.target == chromeBrowser.contentDocument) {
++                    if (!resolved) {
++                      resolved = true;
++                      r();
++                    }
++                  }
++                },
++                { capture: true, once: true }
++              );
++              // Kill the wait with a timeout if the two events above haven't fired.
++              setTimeout(() => {
++                if (!resolved) {
++                  resolved = true;
++                  const uri =
++                    tabState.state?.messageURI ||
++                    tabState.state?.folderURI ||
++                    "<unknown>";
++                  console.error(
++                    `Unable to restore tab for ${uri} after five seconds`
++                  );
++                  r();
++                }
++              }, 5000);
++            });
++          }
++        }
+       }
+ 
+       if (indexToSelect != null && !aDontRestoreFirstTab) {
+         this.tabContainer.selectedIndex = indexToSelect;

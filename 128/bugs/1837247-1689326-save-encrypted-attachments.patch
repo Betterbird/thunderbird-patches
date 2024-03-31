@@ -1,0 +1,82 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711919489 -7200
+# Parent  af577854ca95634c60f70e478adbdaa260ff5777
+Bug 1837247 and bug 1689326 - Introduce MimeDecryptHandler 'pass through' for saving encrypted attachments.
+
+Based on work by the pEp Project referenced in https://bugzilla.mozilla.org/show_bug.cgi?id=1689326#c4
+
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+@@ -186,8 +186,15 @@ MimeDecryptHandler.prototype = {
+     this.decryptedHeaders = null;
+     this.xferEncoding = ENCODING_DEFAULT;
+     this.boundary = lazy.EnigmailMime.getBoundary(mimeSvc.contentType);
+ 
++    // "Pass through" mode for saving encrypted attachments to a file.
++    this.passThrough = 
++      this.uri && /[?&]filename=.*\.eml(&|$)/.test(this.uri.spec);
++      // The original pEp solution also had the following which doesn't appear
++      // to be necessary any more:
++      // && !this.uri.spec.includes("type=application/x-message-display");
++
+     const now = Date.now();
+     const timeoutReached =
+       EnigmailSingletons.lastMessageDecryptTime &&
+       now - EnigmailSingletons.lastMessageDecryptTime > 10000;
+@@ -240,8 +247,12 @@ MimeDecryptHandler.prototype = {
+     this.inStream.init(stream);
+ 
+     if (count > 0) {
+       var data = this.inStream.read(count);
++      if (this.passThrough) {
++        this.cacheData(data);
++        return;
++      }
+ 
+       if (this.mimePartCount == 0 && this.dataIsBase64 === null) {
+         // try to determine if this could be a base64 encoded message part
+         this.dataIsBase64 = this.isBase64Encoding(data);
+@@ -370,8 +381,14 @@ MimeDecryptHandler.prototype = {
+     const currMsg = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
+ 
+     this.backgroundJob = false;
+ 
++    if (this.passThrough) {
++      // This is a save operation of a message/rfc822 attachment. Just return the original text.
++      this.mimeSvc.outputDecryptedData(this.outQueue, this.outQueue.length);
++      return;
++    }
++
+     if (this.uri) {
+       // return if not decrypting currently displayed message (except if
+       // printing, replying, etc)
+ 
+@@ -821,9 +838,11 @@ MimeDecryptHandler.prototype = {
+       try {
+         const msgDbHdr = this.uri.QueryInterface(
+           Ci.nsIMsgMessageUrl
+         ).messageHeader;
+-        msgDbHdr.subject = this.decryptedHeaders.get("subject");
++        if (msgDbHdr) {
++          msgDbHdr.subject = this.decryptedHeaders.get("subject");
++        }
+       } catch (e) {
+         console.warn(`Updating subject FAILED for ${this.uri.spec}`);
+       }
+     }
+diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.sys.mjs
+--- a/mail/modules/AttachmentInfo.sys.mjs
++++ b/mail/modules/AttachmentInfo.sys.mjs
+@@ -194,10 +194,8 @@ export class AttachmentInfo {
+           // If no tabmail, open PDF same as other attachments.
+         }
+       }
+ 
+-      // Just use the old method for handling messages, it works.
+-
+       let { name, url } = this;
+ 
+       const sourceURI = Services.io.newURI(url);
+       async function saveToFile(path, isTmp = false) {
