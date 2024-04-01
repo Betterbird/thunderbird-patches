@@ -1,0 +1,253 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1712009838 -7200
+# Parent  eeae3c17794bb66522fe0a746c089bb9d1c4ddb8
+Implement negation for QuickFilterBar filter and text filter buttons - Part 2:
+
+Make the term that yields untagged messages the first tag-related term instead of the last. Add debugging output.
+
+diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
+--- a/mail/modules/QuickFilterManager.sys.mjs
++++ b/mail/modules/QuickFilterManager.sys.mjs
+@@ -531,10 +531,41 @@ export var QuickFilterManager = {
+       } catch (ex) {
+         console.error(ex);
+       }
+     }
++    this.dumpTerms(searchTerms);
+     return searchTerms.length ? [searchTerms, listeners] : [null, listeners];
+   },
++
++  dumpTerms(aTerms) {
++    let condition = "";
++    for (const term of aTerms) {
++      if (condition) {
++        condition += " ";
++      }
++      if (term.matchAll) {
++        condition = "ALL";
++        break;
++      }
++      condition += term.booleanAnd ? "AND " : "OR ";
++      if (term.beginsGrouping == 0) {
++        condition += "(";
++      } else {
++        for (let i = 0; i < term.beginsGrouping; i++) {
++          condition += "[";
++        }
++      }
++      condition += term.termAsString;
++      if (term.endsGrouping == 0) {
++        condition += ")";
++      } else {
++        for (let i = 0; i < term.endsGrouping; i++) {
++          condition += "]";
++        }
++      }
++    }
++    console.info("Condition:", condition);
++  },
+ };
+ 
+ /**
+  * Meta-filter, just handles whether or not things are sticky.
+@@ -653,12 +684,8 @@ var TagFacetingFilter = {
+     // it's the simple case if the value is just a boolean
+     if (typeof aFilterValue != "object") {
+       return true;
+     }
+-    // Not a simple case.
+-    if (aFilterValue.inverted) {
+-      return false;
+-    }
+     // but also if the object contains no non-null values
+     let simpleCase = true;
+     for (const key in aFilterValue.tags) {
+       const value = aFilterValue.tags[key];
+@@ -683,10 +710,12 @@ var TagFacetingFilter = {
+     }
+ 
+     let term, value;
+ 
++    const isSimple = this.isSimple(aFilterValue);
++
+     // Just the true/false case - in both we want all the tags.
+-    if (this.isSimple(aFilterValue)) {
++    if (isSimple && !aFilterValue.inverted) {
+       term = aTermCreator.createTerm();
+       term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+       value = term.value;
+       value.str = "";
+@@ -708,8 +737,39 @@ var TagFacetingFilter = {
+       term = null;
+ 
+       const excludeTerms = [];
+ 
++      // This is what we do, for example:
++      // [OR/Any] has(tag1) hasNo(tag2) has(tag3) hasNo(tag4)
++      // becomes:
++      // AND[Contains,tag1), OR(Contains,tag3],
++      // AND[DoesntContain,tag2), AND(DoesntContain,tag4]
++      // where [] denote groups.
++      // To do so, we collect the "hasNo" tags in `excludeTerms` and append
++      // them at the end. If there is no "has", we need to prepend an empty term.
++      //
++      // Things get tricky when we want to show untagged messages.
++      if (aFilterValue.inverted) {
++        // In case there are no "has" and "hasNo" selections, we can just add
++        // AND(IsEmpty,) to the list of existing terms.
++        // Otherwise, we add AND[IsEmpty,) to begin a group, we make sure
++        // that the next group goes in with OR and that the overall group is
++        // closed at the end.
++        term = aTermCreator.createTerm();
++        term.beginsGrouping = isSimple ? 0 : 1;
++        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++        value = term.value;
++        value.str = "";
++        term.value = value;
++        term.op = Ci.nsMsgSearchOp.IsEmpty;
++        term.booleanAnd = true;
++        term.endsGrouping = 0;
++        aTerms.push(term);
++        if (isSimple) {
++          return null;
++        }
++      }
++
+       const mode = aFilterValue.mode;
+       for (const key in aFilterValue.tags) {
+         const shouldFilter = aFilterValue.tags[key];
+         if (shouldFilter !== null) {
+@@ -720,11 +780,15 @@ var TagFacetingFilter = {
+           value.str = key;
+           term.value = value;
+           if (shouldFilter) {
+             term.op = Ci.nsMsgSearchOp.Contains;
+-            // AND for the group. Inside the group we also want AND if the
+-            // mode is set to "All of".
+-            term.booleanAnd = firstIncludeClause || mode === "AND";
++            // AND for the group unless we prepended "untagged".
++            // Inside the group we also want AND if the mode is set to "All of".
++            if (firstIncludeClause) {
++              term.booleanAnd = !aFilterValue.inverted;
++            } else {
++              term.booleanAnd = mode === "AND";
++            }
+             term.beginsGrouping = firstIncludeClause ? 1 : 0;
+             aTerms.push(term);
+             firstIncludeClause = false;
+             lastIncludeTerm = term;
+@@ -754,9 +818,17 @@ var TagFacetingFilter = {
+           value = term.value;
+           value.str = "";
+           term.value = value;
+           term.op = Ci.nsMsgSearchOp.IsntEmpty;
+-          term.booleanAnd = true;
++          term.booleanAnd = !aFilterValue.inverted;
++          if (aFilterValue.inverted) {
++            // Move the `beginsGrouping` from the first exclude term to here so we get:
++            // AND [tag,is empty,) OR [tag,isn't empty,)
++            //                        AND (tag,doesn't contain,$label1)
++            //                        AND (tag,doesn't contain,$label2]]
++            term.beginsGrouping = 1;
++            excludeTerms[0].beginsGrouping = 0;
++          }
+           aTerms.push(term);
+         }
+ 
+         // (extend in the exclusions)
+@@ -764,21 +836,11 @@ var TagFacetingFilter = {
+         aTerms.push.apply(aTerms, excludeTerms);
+       }
+ 
+       if (aFilterValue.inverted) {
+-        // Show untagged, in addition to any tag button checked state combination.
+-        term = aTermCreator.createTerm();
+-        term.beginsGrouping = !firstIncludeClause || !firstExcludeClause ? 1 : 0;
+-        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+-        value = term.value;
+-        value.str = "";
+-        term.value = value;
+-        term.op = Ci.nsMsgSearchOp.IsEmpty;
+-        // OR with any other tag terms in that group, but AND to combine with
+-        // other filters.
+-        term.booleanAnd = !(!firstIncludeClause || !firstExcludeClause);
+-        term.endsGrouping = !firstIncludeClause || !firstExcludeClause ? 1 : 0;
+-        aTerms.push(term);
++        // Whatever term that got pushed last needs to close the additional
++        // group we opened.
++        aTerms[aTerms.length - 1].endsGrouping++;
+       }
+     }
+     return null;
+   },
+@@ -890,13 +952,29 @@ var TagFacetingFilter = {
+       aNode.inverted =
+         aFilterValue === false || aFilterValue?.inverted === true;
+     }
+     if (aFilterValue != null && typeof aFilterValue == "object") {
+-      this._populateTagBar(aFilterValue, aDocument, aMuxer);
+-      const hasSelectedTag = Object.entries(aFilterValue.tags).some(
+-        tag => tag[1] !== null
++      let hasTagSelected = false;
++      let hasTagInverted = false;
++      for (const key in aFilterValue.tags) {
++        const value = aFilterValue.tags[key];
++        if (value === true) {
++          hasTagSelected = true;
++        } else if (value === false) {
++          hasTagInverted = true;
++        }
++      }
++      // Then the tag filter is inverted, we only allow either selection or inversion of tag buttons.
++      // If we allowed both, the backend couldn't process the resulting expression.
++      this._populateTagBar(
++        aFilterValue,
++        aDocument,
++        aMuxer,
++        hasTagInverted && aFilterValue.inverted,
++        hasTagSelected && aFilterValue.inverted
+       );
+-      aDocument.getElementById("qfb-boolean-mode").disabled = !hasSelectedTag;
++      aDocument.getElementById("qfb-boolean-mode").disabled =
++        !hasTagSelected && !hasTagInverted;
+     }
+ 
+     aDocument
+       .getElementById("threadTree")
+@@ -910,9 +988,9 @@ var TagFacetingFilter = {
+       tagbar.hidden = !hasTag;
+     }
+   },
+ 
+-  _populateTagBar(aState, aDocument, aMuxer) {
++  _populateTagBar(aState, aDocument, aMuxer, preventSelect, preventInvert) {
+     const tagbar = aDocument.getElementById("quickFilterBarTagsContainer");
+     const keywordMap = aState.tags;
+ 
+     // If we have a mode stored use that. If we don't have a mode, then update
+@@ -927,8 +1005,11 @@ var TagFacetingFilter = {
+ 
+     function clickHandler() {
+       const tagKey = this.getAttribute("value");
+       const state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
++      if (state.tags[tagKey] === null && preventSelect) {
++        this.pressed = false;
++      }
+       state.tags[tagKey] = this.pressed ? true : null;
+       aMuxer.updateSearch();
+     }
+ 
+@@ -936,8 +1017,12 @@ var TagFacetingFilter = {
+       if (aEvent.button == 2) {
+         // A |toggle-button| sets up pressed and inverted in the constructor.
+         const tagKey = this.getAttribute("value");
+         const state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
++        if (state.tags[tagKey] !== false && preventInvert) {
++          this.pressed = false;
++          this.inverted = false;
++        }
+         state.tags[tagKey] = !this.pressed ? null : !this.inverted;
+         aMuxer.updateSearch();
+         aEvent.preventDefault();
+       }
