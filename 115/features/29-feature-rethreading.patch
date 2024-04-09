@@ -31,6 +31,8 @@ To exit ReThread Mode with no action:
   Keyboard: ESC key.
 * * *
 Fix for structured headers.
+* * *
+Fix encoding issues.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
@@ -532,7 +534,7 @@ diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys
 new file mode 100644
 --- /dev/null
 +++ b/mail/modules/MessageEditor.sys.mjs
-@@ -0,0 +1,1257 @@
+@@ -0,0 +1,1275 @@
 +/* Authored by Alta88 and contributed to the Betterbird Project.
 + * See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE
 + * for license details.
@@ -714,16 +716,15 @@ new file mode 100644
 +  #TMP_FILENAME = "tmpMessageEditor.eml";
 +
 +  async #getMessage() {
-+    let rawMessage = await this.getRawMessage(this.#messageURI);
-+    const encoding = lazy.MailStringUtils.detectCharset(rawMessage);
-+    rawMessage = lazy.MailStringUtils.byteStringToString(rawMessage);
++    const rawMessage = await this.getRawMessage(this.#messageURI);
++    this.charset = lazy.MailStringUtils.detectCharset(rawMessage);
 +    const headersEnd = rawMessage.match(/\r?\n\r?\n/g)[0];
 +    const newlineLength = headersEnd.match(/(\r?\n)/)[1].length;
 +    // The blank newline belongs to the body.
 +    const headersEndOffset = rawMessage.indexOf(headersEnd) + newlineLength;
 +    this.msgHeaders = rawMessage.substr(0, headersEndOffset);
 +    this.msgBody = rawMessage.substring(this.msgHeaders.length);
-+    this.log.debug("#getMessage: original message headers -> " + encoding);
++    this.log.debug("#getMessage: original message headers -> " + this.charset);
 +    this.log.debug(this.msgHeaders);
 +
 +    this.#initEditableHeaders();
@@ -817,6 +818,15 @@ new file mode 100644
 +  }
 +
 +  /*
++   * Remove a headerLine.
++   *
++   * @param {string} headerLine
++   */
++  #removeHeaderLine(headerLine) {
++    this.msgHeaders = this.msgHeaders.replace(headerLine, "");
++  }
++
++  /*
 +   * Returns the raw string header value, given a headerLine.
 +   *
 +   * @param {string} headerLine - There may be more than 1 with same header,
@@ -853,7 +863,8 @@ new file mode 100644
 +    // We want a string and not deconstructed header parts; parse unstructured.
 +    return lazy.MimeParser.parseHeaderField(
 +      headerValue,
-+      lazy.MimeParser.HEADER_OPTION_DECODE_2047
++      lazy.MimeParser.HEADER_OPTION_ALLOW_RAW,
++      this.charset
 +    );
 +  }
 +
@@ -936,7 +947,7 @@ new file mode 100644
 +    this.log.debug(headerLine);
 +    this.log.debug(origHeaderLine);
 +    if (headerLine) {
-+      this.msgHeaders = this.msgHeaders.replace(headerLine, "");
++      this.#removeHeaderLine(headerLine);
 +    }
 +    // Restore original case, which should have been preserved.
 +    headerName = origHeaderLine.split(this.#ORIGINAL)[1];
@@ -971,7 +982,7 @@ new file mode 100644
 +      )
 +    ) {
 +      this.log.warn(
-+        `#updateHeaderValue: headerName not updateable - ${headerName}`
++        `updateHeaderValue: headerName not updateable - ${headerName}`
 +      );
 +      this.#doUpdate("updatevalue", false);
 +      return;
@@ -981,7 +992,7 @@ new file mode 100644
 +
 +    const headerLine = this.getHeaderLines(headerName)[headerLineIndex];
 +    if (!headerLine) {
-+      this.log.warn(`#updateHeaderValue: headerName not found - ${headerName}`);
++      this.log.warn(`updateHeaderValue: headerName not found - ${headerName}`);
 +      this.#doUpdate("updatevalue", false);
 +      return;
 +    }
@@ -990,7 +1001,7 @@ new file mode 100644
 +      ? "_" + (headerLineIndex + 1)
 +      : "";
 +    const origHeaderName = this.#ORIGINAL + headerName + origHeaderLineIndexStr;
-+    this.log.debug("#updateHeaderValue: origHeaderName - " + origHeaderName);
++    this.log.debug("updateHeaderValue: origHeaderName - " + origHeaderName);
 +    const origHeaderLine = this.getHeaderLines(origHeaderName)[0];
 +    if (!origHeaderLine) {
 +      // Get the headerName line and effectively clone it while renaming the
@@ -1001,7 +1012,7 @@ new file mode 100644
 +      const origHeaderName =
 +        this.#ORIGINAL + caseHeaderName + origHeaderLineIndexStr;
 +      this.log.debug(
-+        "#updateHeaderValue: origHeaderName, case - " + origHeaderName
++        "updateHeaderValue: origHeaderName, case - " + origHeaderName
 +      );
 +      if (
 +        !this.#updateHeaderName(
@@ -1011,7 +1022,7 @@ new file mode 100644
 +        )
 +      ) {
 +        this.log.warn(
-+          `#updateHeaderValue: backup original header failed - ${headerName}`
++          `updateHeaderValue: backup original header failed - ${headerName}`
 +        );
 +        this.#doUpdate("updatevalue", false);
 +        return;
@@ -1056,6 +1067,12 @@ new file mode 100644
 +    if (headerName.toLowerCase() != curHeaderName.toLowerCase()) {
 +      return false;
 +    }
++
++    // Convert to byteString.
++    newHeaderValue = lazy.MailStringUtils.stringToByteString(
++      newHeaderValue.toString().trim()
++    );
++
 +    // Escape any RegExp chars in the headerValue for replace to work. We will
 +    // also fix any extraneous non-spec \n or no space manglings around the ":".
 +    const curHeaderValueEsc = curHeaderValue.replace(
@@ -1065,7 +1082,7 @@ new file mode 100644
 +    re = new RegExp(`^${curHeaderName + colon + curHeaderValueEsc}`, "im");
 +    const newHeaders = this.msgHeaders.replace(
 +      re,
-+      curHeaderName + ": " + newHeaderValue.toString().trim()
++      curHeaderName + ": " + newHeaderValue
 +    );
 +    if (this.msgHeaders == newHeaders) {
 +      return false;
@@ -1269,11 +1286,11 @@ new file mode 100644
 +      );
 +      if (headerValue == this.#ORIGINAL_HEADER_VALUE_NONE) {
 +        // Remove the line.
-+        this.msgHeaders = this.msgHeaders.replace(headerLine, "");
++        this.#removeHeaderLine(headerLine);
 +      }
 +      // Have the #ORIGINAL, not <None>; keep it and remove References.
 +      headerLine = this.getHeaderLines(this.#REFERENCES)[0];
-+      this.msgHeaders = this.msgHeaders.replace(headerLine, "");
++      this.#removeHeaderLine(headerLine);
 +    }
 +
 +    headerLine = this.getHeaderLines(this.#ORIGINAL_INREPLYTO)[0];
@@ -1309,7 +1326,7 @@ new file mode 100644
 +    const headerValue = this.getHeaderValueRaw(headerLine, this.#REFERENCES);
 +    if (headerValue == this.#ORIGINAL_HEADER_VALUE_NONE) {
 +      // Remove the line.
-+      this.msgHeaders = this.msgHeaders.replace(headerLine, "");
++      this.#removeHeaderLine(headerLine);
 +    }
 +    this.#restoreHeaderValue(this.#INREPLYTO);
 +    if (this.msgHeaders == currentMsgHeaders) {
@@ -1519,7 +1536,10 @@ new file mode 100644
 +    const tmpFile = await IOUtils.getFile(
 +      PathUtils.join(PathUtils.tempDir, this.#TMP_FILENAME)
 +    );
-+    const success = await IOUtils.writeUTF8(tmpFile.path, this.newMessage)
++    const success = await IOUtils.write(
++      tmpFile.path,
++      lazy.MailStringUtils.byteStringToUint8Array(this.newMessage)
++    )
 +      .then(() => {
 +        this.log.debug("#replaceChanges: wrote to tmpFile - " + tmpFile.path);
 +        return true;
