@@ -1,0 +1,740 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1709830430 -3600
+# Parent  1d1635fe6368ef3a00405bd8ceab724cdcdf8ee3
+Attachment List on top option for messages
+Implement a collapsible message headers splitter/sizer
+- keyboard support for sizing splitters with arrow keys, toggling with enter/double-click
+* * *
+Optimize height setting for messages attachment view.
+* * *
+Do not set automatic/optimal height as attribute.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/calendar/base/themes/common/calendar.css b/calendar/base/themes/common/calendar.css
+--- a/calendar/base/themes/common/calendar.css
++++ b/calendar/base/themes/common/calendar.css
+@@ -130,9 +130,9 @@
+   }
+ }
+ 
+ .calendar-notification-bar {
+-  margin: 0 4px 4px;
++  margin: 4px;
+   border-radius: 4px;
+   box-shadow: 0 1px 2px rgba(58, 57, 68, 0.3);
+ }
+ 
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -331,8 +331,9 @@ pref("mail.showCondensedAddresses", true
+ pref("mail.addressDisplayAuthor", 1);
+ pref("mail.addressDisplayRecipients", 1);
+ 
+ pref("mailnews.attachments.display.start_expanded", false);
++pref("mailnews.attachments.display.top", false);
+ // hidden pref for changing how we present attachments in the message pane
+ pref("mail.pane_config.dynamic", 0);
+ pref("mail.pane_config.multiline_all", false);
+ pref("editor.singleLine.pasteNewlines", 4);  // substitute commas for new lines in single line text boxes
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -13,10 +13,11 @@
+ /* globals mailContextMenu */
+ 
+ // msgHdrView.js
+ /* globals AdjustHeaderView ClearCurrentHeaders ClearPendingReadTimer
+-   HideMessageHeaderPane OnLoadMsgHeaderPane OnTagsChange
++   gHeaderCustomize HideMessageHeaderPane OnLoadMsgHeaderPane OnTagsChange
+    OnUnloadMsgHeaderPane HandleAllAttachments AttachmentMenuController
++   SetAttachmentListLocation
+    currentCharacterSet: true */
+ 
+ var { MailServices } = ChromeUtils.importESModule(
+   "resource:///modules/MailServices.sys.mjs"
+@@ -58,8 +59,147 @@ function messagePaneOnResize() {
+     );
+   }
+ }
+ 
++function onHeaderSplitterAction(event) {
++  onSplitterAction(event);
++  if (
++    event.keyCode != KeyEvent.DOM_VK_RETURN &&
++    event.type != "dblclick" &&
++    event.type != "mouseup"
++  ) {
++    return;
++  }
++  let splitter = event.target;
++  let resizeElement = document.getElementById(
++    splitter.getAttribute("resize-id")
++  );
++  let messageHeader = document.getElementById("messageHeader");
++  let isCollapsed = splitter.getAttribute("state") == "collapsed";
++
++  if (gHeaderCustomize.customizeData.collapsed != isCollapsed) {
++    gHeaderCustomize.customizeData.collapsed = isCollapsed;
++    gHeaderCustomize.onPanelHidden();
++  }
++
++  if (
++    event.type == "mouseup" &&
++    !isCollapsed &&
++    messageHeader.clientHeight < resizeElement.getAttribute("height")
++  ) {
++    // Necessary to wait for reflow to happen on splitter resize.
++    setTimeout(() => {
++      resizeElement.style.height = "";
++      resizeElement.setAttribute("height", messageHeader.clientHeight);
++    });
++  }
++}
++
++function onAttachmentSplitterAction(event) {
++  onSplitterAction(event);
++  if (event.type != "mouseup") {
++    return;
++  }
++  let splitter = event.target;
++  let resizeElement = document.getElementById(
++    splitter.getAttribute("resize-id")
++  );
++  let attachmentList = document.getElementById("attachmentList");
++  let attachmentBar = document.getElementById("attachmentBar");
++  let optimalHeight = attachmentBar.clientHeight + attachmentList.scrollHeight;
++  let isCollapsed = splitter.getAttribute("state") == "collapsed";
++
++  if (!isCollapsed && optimalHeight < resizeElement.getAttribute("height")) {
++    // Necessary to wait for reflow to happen on splitter resize.
++    setTimeout(() => {
++      resizeElement.style.height = "";
++      resizeElement.removeAttribute("height");
++    });
++  }
++}
++
++/*
++ * Click or keypress. Expand/collapse with dblclick or enter; resize with arrow
++ * keys.
++ */
++function onSplitterAction(event) {
++  if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
++    return;
++  }
++
++  let splitter = event.target;
++  let resizeElement = document.getElementById(
++    splitter.getAttribute("resize-id")
++  );
++
++  if (!resizeElement) {
++    return;
++  }
++
++  let isVertical = splitter.getAttribute("orient") == "vertical";
++  let dimension = isVertical ? "height" : "width";
++  let isCollapsed = splitter.getAttribute("state") == "collapsed";
++  let minDefaultSize = isVertical ? 30 : 100;
++
++  if (event.keyCode == KeyEvent.DOM_VK_RETURN || event.type == "dblclick") {
++    if (isCollapsed) {
++      if (resizeElement.getBoundingClientRect()[dimension] == 0) {
++        let collapseSize =
++          Number(splitter.getAttribute(`collapse-${dimension}`)) ||
++          minDefaultSize;
++        let size = Number(resizeElement.getAttribute(dimension));
++        resizeElement.style[dimension] = (size || collapseSize) + "px";
++      }
++    }
++    splitter.setAttribute("state", isCollapsed ? "" : "collapsed");
++    if (event.keyCode == KeyEvent.DOM_VK_RETURN) {
++      return;
++    }
++  }
++
++  if (event.type == "dblclick" || event.type == "mouseup") {
++    splitter.blur();
++    return;
++  }
++
++  let isUpDownKey = [KeyEvent.DOM_VK_UP, KeyEvent.DOM_VK_DOWN].includes(
++    event.keyCode
++  );
++  let isLeftRightKey = [KeyEvent.DOM_VK_LEFT, KeyEvent.DOM_VK_RIGHT].includes(
++    event.keyCode
++  );
++  let isUpLeftKey = [KeyEvent.DOM_VK_UP, KeyEvent.DOM_VK_LEFT].includes(
++    event.keyCode
++  );
++  let isDownRightKey = [KeyEvent.DOM_VK_DOWN, KeyEvent.DOM_VK_RIGHT].includes(
++    event.keyCode
++  );
++  let isValidKey = isUpDownKey || isLeftRightKey;
++  if (
++    !isValidKey ||
++    (isVertical && !isUpDownKey) ||
++    (!isVertical && !isLeftRightKey)
++  ) {
++    return;
++  }
++
++  let _beforeElement = !(
++    splitter.compareDocumentPosition(resizeElement) &
++    Node.DOCUMENT_POSITION_FOLLOWING
++  );
++  let size = isCollapsed
++    ? 0
++    : Math.round(resizeElement.getBoundingClientRect()[dimension]);
++  let newSize =
++    (isUpLeftKey && _beforeElement) || (isDownRightKey && !_beforeElement)
++      ? size - 1
++      : size + 1;
++  newSize = newSize < 0 ? 0 : newSize;
++  resizeElement.style[dimension] = newSize + "px";
++  resizeElement.setAttribute(dimension, newSize);
++  splitter.setAttribute("state", newSize > 0 ? "" : "collapsed");
++}
++
+ function ReloadMessage() {
+   if (!gMessageURI) {
+     return;
+   }
+@@ -165,8 +305,10 @@ window.addEventListener("DOMContentLoade
+     folderListener,
+     Ci.nsIFolderListener.removed
+   );
+ 
++  SetAttachmentListLocation();
++
+   preferenceObserver.init();
+   Services.obs.addObserver(msgObserver, "message-content-updated");
+ 
+   const browser = getMessagePaneBrowser();
+@@ -415,8 +557,9 @@ var preferenceObserver = {
+   _topics: [
+     "mail.inline_attachments",
+     "mail.show_headers",
+     "mail.showCondensedAddresses",
++    "mailnews.attachments.display.top",
+     "mailnews.display.disallow_mime_handlers",
+     "mailnews.display.html_as",
+     "mailnews.display.prefer_plaintext",
+     "mailnews.headers.showReferences",
+@@ -440,8 +583,12 @@ var preferenceObserver = {
+   observe(subject, topic, data) {
+     if (data == "mail.show_headers") {
+       AdjustHeaderView(Services.prefs.getIntPref(data));
+     }
++    if (data == "mailnews.attachments.display.top") {
++      SetAttachmentListLocation();
++      return;
++    }
+     if (!this._reloadTimeout) {
+       // Clear the event queue before reloading the message. Several prefs may
+       // be changed at once.
+       this._reloadTimeout = setTimeout(() => {
+diff --git a/mail/base/content/aboutMessage.xhtml b/mail/base/content/aboutMessage.xhtml
+--- a/mail/base/content/aboutMessage.xhtml
++++ b/mail/base/content/aboutMessage.xhtml
+@@ -107,10 +107,17 @@
+         <vbox id="singleMessage">
+           <hbox id="msgHeaderView" collapsed="true" class="main-header-area">
+ #include msgHdrView.inc.xhtml
+           </hbox>
++        </vbox>
++        <splitter id="header-splitter" orient="vertical"
++                  resizebefore="closest" resizeafter="none"
++                  collapse="before" collapsed="true"
++                  resize-id="singleMessage" tabindex="0"
++                  onkeypress="onHeaderSplitterAction(event);"
++                  ondblclick="onHeaderSplitterAction(event)"
++                  onmouseup="onHeaderSplitterAction(event)"/>
+ #include ../../../calendar/base/content/imip-bar-overlay.inc.xhtml
+-        </vbox>
+         <!-- The msgNotificationBar appears on top of the message and displays
+              information like: junk, mdn, remote content and phishing warnings -->
+         <vbox id="mail-notification-top">
+           <!-- notificationbox will be added here lazily. -->
+@@ -129,9 +136,9 @@
+ 
+         <!-- message view -->
+         <browser id="messagepane"
+                  tooltip="aHTMLTooltip"
+-                 style="height: 0px; min-height: 1px; background-color: field;"
++                 style="height: 0px; min-height: 10px; background-color: field;"
+                  flex="1"
+                  name="messagepane"
+                  disablesecurity="true"
+                  disablehistory="true"
+@@ -145,12 +152,16 @@
+                  autocompletepopup="PopupAutoComplete"
+                  manualactiveness="true"
+                  onclick="return contentAreaClick(event);"
+                  onresize="messagePaneOnResize();"/>
+-        <splitter id="attachment-splitter" orient="vertical"
+-                  resizebefore="closest" resizeafter="closest"
+-                  collapse="after" collapsed="true"/>
+-        <vbox id="attachmentView" collapsed="true">
++        <splitter id="attachment-splitter" location="bottom" orient="vertical"
++                  resizebefore="none" resizeafter="closest"
++                  collapse="after" collapsed="true"
++                  resize-id="attachmentView" tabindex="0"
++                  onkeypress="onAttachmentSplitterAction(event)"
++                  ondblclick="onAttachmentSplitterAction(event)"
++                  onmouseup="onAttachmentSplitterAction(event)"/>
++        <vbox id="attachmentView" location="bottom" collapsed="true">
+ #include msgAttachmentView.inc.xhtml
+         </vbox>
+         <findbar id="FindToolbar" browserid="messagepane"/>
+       </vbox>
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -1261,17 +1261,8 @@ function RemoveNewHeaderViews(aHeaderTab
+  */
+ function UpdateExpandedMessageHeaders() {
+   // Iterate over each header we received and see if we have a matching entry
+   // in each header view table...
+-
+-  // Remove the height attr so that it redraws correctly. Works around a problem
+-  // that attachment-splitter causes if it's moved high enough to affect
+-  // the header box:
+-  document.getElementById("msgHeaderView").removeAttribute("height");
+-  // This height attribute may be set by toggleWrap() if the user clicked
+-  // the "more" button" in the header.
+-  // Remove it so that the height is determined automatically.
+-
+   for (const headerName in currentHeaderData) {
+     let headerEntry = null;
+ 
+     if (headerName in gExpandedHeaderView) {
+@@ -1379,8 +1370,9 @@ function ClearCurrentHeaders() {
+ }
+ 
+ function ShowMessageHeaderPane() {
+   document.getElementById("msgHeaderView").collapsed = false;
++  document.getElementById("header-splitter").collapsed = false;
+   document.getElementById("mail-notification-top").collapsed = false;
+ 
+   // Initialize the DBListener if we don't have one. This might happen when the
+   // message pane is hidden or no message was selected before, which caused the
+@@ -1390,8 +1382,9 @@ function ShowMessageHeaderPane() {
+ 
+ function HideMessageHeaderPane() {
+   const header = document.getElementById("msgHeaderView");
+   header.collapsed = true;
++  document.getElementById("header-splitter").collapsed = true;
+   document.getElementById("mail-notification-top").collapsed = true;
+ 
+   // Disable the attachment box.
+   document.getElementById("attachmentView").collapsed = true;
+@@ -1502,8 +1495,75 @@ function outputEmailAddresses(headerEntr
+   headerEntry.enclosingBox.buildView();
+ }
+ 
+ /**
++ * Set the location of the attachment list toolbar, per pref.
++ */
++function SetAttachmentListLocation() {
++  const pref = Services.prefs.getBoolPref("mailnews.attachments.display.top");
++  const location = pref ? "top" : "bottom";
++  const attachmentView = document.getElementById("attachmentView");
++  if (attachmentView.getAttribute("location") == location) {
++    // Already in the right location.
++    return;
++  }
++  const attachmentListConfigMap = {
++    top: {
++      parentId: "messagepanebox",
++      insertbeforeId: "imip-bar",
++      splitterOrient: "vertical",
++      splitterCollapse: "before",
++    },
++    bottom: {
++      parentId: "messagepanebox",
++      insertbeforeId: "FindToolbar",
++      splitterOrient: "vertical",
++      splitterCollapse: "after",
++    },
++  };
++
++  const configMap = attachmentListConfigMap[location];
++  const attachmentSplitter = document.getElementById("attachment-splitter");
++  const attachmentList = document.getElementById("attachmentList");
++
++  const parentId = configMap.parentId;
++  const insertBeforeId = configMap.insertbeforeId;
++  const splitterOrient = configMap.splitterOrient;
++  const splitterCollapse = configMap.splitterCollapse;
++
++  const desiredParent = document.getElementById(parentId);
++  const insertBefore = document.getElementById(insertBeforeId);
++
++  switch (location) {
++    case "top":
++      desiredParent.insertBefore(attachmentView, insertBefore);
++      desiredParent.insertBefore(attachmentSplitter, insertBefore);
++      attachmentSplitter.setAttribute("resizebefore", "closest");
++      attachmentSplitter.setAttribute("resizeafter", "none");
++      break;
++    case "bottom":
++      desiredParent.insertBefore(attachmentSplitter, insertBefore);
++      desiredParent.insertBefore(attachmentView, insertBefore);
++      attachmentSplitter.setAttribute("resizebefore", "none");
++      attachmentSplitter.setAttribute("resizeafter", "closest");
++      break;
++  }
++
++  document.getElementById("imip-bar").style.height = "";
++  document.getElementById("mail-notification-top").style.height = "";
++
++  attachmentView.setAttribute("location", location);
++
++  attachmentList.setAttribute(
++    "orient",
++    splitterOrient == "horizontal" ? "vertical" : "horizontal"
++  );
++  attachmentSplitter.setAttribute("orient", splitterOrient);
++  attachmentSplitter.setAttribute("collapse", splitterCollapse);
++  attachmentSplitter.setAttribute("location", location);
++}
++
++/**
+  * Return true if possible attachments in the currently loaded message can be
+  * deleted/detached.
+  */
+ function CanDetachAttachments() {
+@@ -2124,18 +2184,14 @@ function toggleAttachmentList(expanded, 
+     );
+ 
+     attachmentList.setOptimumWidth();
+ 
+-    // By design, attachmentView should not take up more than 1/4 of the message
+-    // pane space
+-    attachmentView.setAttribute(
+-      "height",
+-      Math.min(
+-        attachmentList.preferredHeight,
+-        document.getElementById("messagepanebox").getBoundingClientRect()
+-          .height / 4
+-      )
+-    );
++    // Set the user preferred height. If none, the size will be set to fit the
++    // optimal height, limited to max-height: 50%.
++    let preferredHeight = attachmentView.getAttribute("height");
++    if (preferredHeight) {
++      attachmentView.style.height = preferredHeight + "px";
++    }
+ 
+     if (updateFocus) {
+       attachmentList.focus();
+     }
+@@ -2145,9 +2201,9 @@ function toggleAttachmentList(expanded, 
+     attachmentBar.setAttribute(
+       "tooltiptext",
+       bundle.getString("expandAttachmentPaneTooltip")
+     );
+-    attachmentView.removeAttribute("height");
++    attachmentView.style.height = "";
+ 
+     if (updateFocus && document.activeElement == attachmentList) {
+       // TODO
+     }
+@@ -2587,16 +2643,18 @@ const gHeaderCustomize = {
+    *   rendered:
+    *   - "default" = icons+text
+    *   - "only-icons" = only icons
+    *   - "only-text" = only text
++   * @property {boolean} collapsed - Hide headers pane if true.
+    */
+   customizeData: {
+     showAvatar: true,
+     showBigAvatar: false,
+     showFullAddress: true,
+     hideLabels: true,
+     subjectLarge: true,
+     buttonStyle: "default",
++    collapsed: false,
+   },
+ 
+   /**
+    * Initialize the customizer.
+@@ -2618,8 +2676,9 @@ const gHeaderCustomize = {
+    * Reset and update the customized style of the message header.
+    */
+   updateLayout() {
+     const header = document.getElementById("messageHeader");
++    const headerSplitter = document.getElementById("header-splitter");
+     // Always clear existing styles to avoid visual issues.
+     header.classList.remove(
+       "message-header-large-subject",
+       "message-header-buttons-only-icons",
+@@ -2679,8 +2738,13 @@ const gHeaderCustomize = {
+         );
+         break;
+     }
+ 
++    headerSplitter.setAttribute(
++      "state",
++      this.customizeData.collapsed ? "collapsed" : ""
++    );
++
+     gMessageHeader.syncLabelsColumnWidths();
+   },
+ 
+   /**
+diff --git a/mail/base/content/widgets/mailWidgets.js b/mail/base/content/widgets/mailWidgets.js
+--- a/mail/base/content/widgets/mailWidgets.js
++++ b/mail/base/content/widgets/mailWidgets.js
+@@ -363,17 +363,8 @@
+     get itemCount() {
+       return this._childNodes.length;
+     }
+ 
+-    /**
+-     * Get the preferred height (the height that would allow us to fit
+-     * everything without scrollbars) of the attachmentlist's bounding
+-     * rectangle. Add 3px to account for item's margin.
+-     */
+-    get preferredHeight() {
+-      return this.scrollHeight + this.getBoundingClientRect().height + 3;
+-    }
+-
+     get _childNodes() {
+       return this.querySelectorAll("richlistitem.attachmentItem");
+     }
+ 
+diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
+--- a/mail/components/preferences/general.inc.xhtml
++++ b/mail/components/preferences/general.inc.xhtml
+@@ -155,8 +155,16 @@
+                     preference="mail.tabs.vertical"/>
+         </vbox>
+         <spacer flex="1"/>
+       </hbox>
++      <hbox>
++        <vbox>
++          <checkbox id="attachmentListOnTopMessages"
++                    data-l10n-id="attachments-display-top-label"
++                    preference="mailnews.attachments.display.top"/>
++        </vbox>
++        <spacer flex="1"/>
++      </hbox>
+     </html:fieldset>
+     </html:div>
+ 
+     <!-- Fonts and Colors -->
+diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
+--- a/mail/components/preferences/general.js
++++ b/mail/components/preferences/general.js
+@@ -94,8 +94,9 @@ Preferences.addAll([
+   { id: "searchintegration.enable", type: "bool" },
+   { id: "mail.tabs.drawInTitlebar", type: "bool" },
+   { id: "mail.tabs.autoHide", type: "bool" },
+   { id: "mail.tabs.vertical", type: "bool" },
++  { id: "mailnews.attachments.display.top", type: "bool" },
+ ]);
+ if (AppConstants.platform == "win" || AppConstants.platform == "linux") {
+   Preferences.add({ id: "mail.minimizeToTray", type: "bool" });
+ }
+diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
+--- a/mail/locales/en-US/messenger/preferences/preferences.ftl
++++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
+@@ -280,8 +280,12 @@ auto-hide-tabbar-description = Hide the 
+ vertical-tabs-label =
+     .label = Show tab bar vertically
+     .accesskey = v
+ 
++attachments-display-top-label =
++    .label = Display attachment list above message
++    .accesskey = p
++
+ system-integration-legend = System Integration
+ always-check-default =
+     .label = Always check to see if { -brand-short-name } is the default mail client on startup
+     .accesskey = A
+diff --git a/mail/themes/shared/mail/attachmentList.css b/mail/themes/shared/mail/attachmentList.css
+--- a/mail/themes/shared/mail/attachmentList.css
++++ b/mail/themes/shared/mail/attachmentList.css
+@@ -13,9 +13,8 @@
+   display: flex;
+   overflow-x: hidden;
+   align-items: start;
+   align-content: start;
+-  flex: 1;
+   flex-direction: row;
+   flex-wrap: wrap;
+ 
+   &[collapsed] {
+diff --git a/mail/themes/shared/mail/messageHeader.css b/mail/themes/shared/mail/messageHeader.css
+--- a/mail/themes/shared/mail/messageHeader.css
++++ b/mail/themes/shared/mail/messageHeader.css
+@@ -54,11 +54,21 @@
+   background-color: var(--layout-background-1);
+   min-width: 0;
+ }
+ 
++/* Protect against the headers overflowing the entire preview. */
++#singleMessage {
++  max-height: 85%;
++}
++
+ .main-header-area {
+   border-bottom-style: none;
+   display: block;
++  overflow-x: clip;
++  overflow-y: auto;
++  /* We need the following to lose the scroll bar when making this high
++   * enough via the splitter */
++  height: 100%;
+ }
+ 
+ .message-header-container,
+ .message-header-extra-container {
+@@ -137,22 +147,27 @@
+   align-items: center;
+ }
+ 
+ #mail-notification-top {
+-  border-bottom: 1px solid var(--splitter-color);
++  & > .notificationbox-stack:not(:empty) {
++    border-bottom: 1px solid var(--splitter-color);
++  }
+ 
+   & > .notificationbox-stack[notificationside="top"] {
+     background-color: var(--layout-background-1);
+   }
+ }
+ 
+ /* ::::: msg header toolbars ::::: */
+ 
+-#messageHeader[show_header_mode="all"],
+-#messageHeader.scrollable {
+-  overflow-y: auto;
+-  overflow-x: hidden;
+-  max-height: 14em;
++#messageHeader[show_header_mode="all"] {
++  max-height: 18em;
++}
++
++/* Height restriction for scrollable gets in the way of dragging it as
++ * big as we want. */
++#messageHeader.scrollable:not([show_header_mode="all"]) {
++  overflow: hidden;
+ }
+ 
+ #expandedBoxSpacer {
+   display: block;
+@@ -284,17 +299,55 @@ mail-tagfield[collapsed="true"] {
+   -webkit-line-clamp: 3;
+   overflow-y: auto;
+ }
+ 
++/* ::::: Splitters, header and attachments ::::: */
++
++splitter[orient="vertical"] {
++  appearance: none;
++  background-color: transparent;
++  border-width: 0;
++  border-top: 1px solid var(--splitter-color);
++  /* splitter grip area */
++  height: 5px;
++  min-height: 5px;
++  /* make only the splitter border visible */
++  margin-bottom: -5px;
++  /* because of the negative margin needed to make the splitter visible */
++  position: relative;
++  z-index: 10;
++}
++
++@media (prefers-reduced-motion: no-preference) {
++  splitter[orient="vertical"] {
++    transition: border-color 200ms;
++  }
++}
++
++splitter[orient="vertical"]:hover,
++splitter[orient="vertical"]:focus {
++  border-top: 4px solid var(--selected-item-color);
++}
++
++splitter[state="collapsed"]:not(:hover, :focus) {
++  border-top-width: 0;
++}
++
+ /* ::::: attachment view ::::: */
+ 
+ #attachmentBar {
++  min-height: inherit;
+   color: var(--layout-color-1);
+   background-color: var(--layout-background-1);
+   padding: 3px 0;
+   overflow: hidden;
+ }
+ 
++/* Collapsed list */
++#attachmentView[location="top"] #attachmentBar[tooltiptext^="Show"] {
++  border-bottom: 1px solid var(--splitter-color);
++}
++
+ #attachmentToggle {
+   /* Override button appearance */
+   appearance: none;
+   min-width: 20px;
+@@ -376,27 +429,20 @@ mail-tagfield[collapsed="true"] {
+   margin-inline: 2px 1px;
+ }
+ 
+ #attachment-splitter {
+-  appearance: none;
+-  background-color: transparent;
+-  border-width: 0;
+-  border-bottom: 1px solid var(--color-gray-30);
+-  /* splitter grip area */
+-  height: 5px;
+-  /* make only the splitter border visible */
+-  margin-top: -5px;
+-  /* because of the negative margin needed to make the splitter visible */
+-  position: relative;
+-  z-index: 10;
+-  transition: border-width .3s ease-in, border-color .3s;
+-
+-  &:not([state="collapsed"]) {
+-    border-bottom: 1px solid transparent;
++  &[location="bottom"][state="collapsed"] {
++    margin-top: -5px;
++    margin-bottom: 0;
+   }
+ 
+-  &[state="collapsed"]:hover {
+-    border-bottom: 4px solid var(--selected-item-color);
++  &[location="top"]:not([state="collapsed"], :hover, :focus) {
++    border-top-width: 1px;
++  }
++
++  /* Collapsed list - splitter on bottom */
++  &[state="collapsed"] + #attachmentView[location="top"] {
++    border-top-width: 0;
+   }
+ }
+ 
+ /* ::::: msg header captions ::::: */
+@@ -496,10 +542,12 @@ button.email-action-button {
+ #attachmentView {
+   display: flex;
+   flex-direction: column;
+   justify-content: stretch;
++  min-height: 30px;
+   /* Allow the area to shrink. */
+   min-width: 0;
++  max-height: 50%;
+   overflow: hidden;
+ }
+ 
+ #attachmentView,
