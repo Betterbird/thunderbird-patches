@@ -1,0 +1,738 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1709830391 -3600
+# Parent  07b2fe0b8a5c9608b31faf5a87e9dcbbfd51a261
+Feature: Vertical Tabs
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+* * *
+Tabs key navigation
+* * *
+Reveal tabs on mail-tabs-session-restored complete
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -555,8 +555,10 @@ pref("mail.tabs.tabMaxWidth", 250);
+ pref("mail.tabs.tabClipWidth", 140);
+ pref("mail.tabs.autoHide", true);
+ pref("mail.tabs.closeWindowWithLastTab", true);
+ pref("mail.tabs.firstTab.startupURI", "");
++pref("mail.tabs.vertical", false);
++pref("mail.tabs.alwaysShowCloseButton", true);
+ 
+ // Allow the tabs to be in the titlebar on supported systems
+ pref("mail.tabs.drawInTitlebar", true);
+ 
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -654,11 +654,11 @@ function getWindowStateForSessionPersist
+  * @returns true if the restoration was successful, false otherwise.
+  */
+ async function atStartupRestoreTabs(aDontRestoreFirstTab) {
+   const state = await SessionStoreManager.loadingWindow(window);
++  const tabmail = document.getElementById("tabmail");
+   if (state) {
+     const tabsState = state.tabs;
+-    const tabmail = document.getElementById("tabmail");
+     try {
+       tabmail.restoreTabs(tabsState, aDontRestoreFirstTab);
+     } catch (e) {
+       console.error(e);
+@@ -669,8 +669,9 @@ async function atStartupRestoreTabs(aDon
+   loadExtraTabs();
+ 
+   // Note: The tabs have not finished loading at this point.
+   SessionStoreManager._restored = true;
++  tabmail.tabContainer.showTabs(true);
+   Services.obs.notifyObservers(window, "mail-tabs-session-restored");
+ 
+   return !!state;
+ }
+diff --git a/mail/base/content/messenger.xhtml b/mail/base/content/messenger.xhtml
+--- a/mail/base/content/messenger.xhtml
++++ b/mail/base/content/messenger.xhtml
+@@ -502,9 +502,11 @@
+ # can be shared with other top level windows.
+ #include messenger-menubar.inc.xhtml
+     </toolbar>
+ 
+-    <toolbar id="tabs-toolbar" class="chromeclass-toolbar">
++      <toolbar id="tabs-toolbar"
++               class="chromeclass-toolbar"
++               collapsed="true">
+       <tabs is="tabmail-tabs" id="tabmail-tabs"
+             flex="1"
+             align="end"
+             setfocus="false"
+@@ -545,8 +547,16 @@
+   <!-- XXX This extension point (tabmail-container) is only temporary!
+        Horizontal space shouldn't be wasted if it isn't absolutely critical.
+        A mechanism for adding sidebar panes will be added in bug 476154. -->
+   <hbox id="tabmail-container" flex="1">
++    <hbox id="vertical-tabs-container"
++          collapsed="true"
++          persist="width">
++      <vbox id="vertical-tabs-toolbox"/>
++    </hbox>
++    <splitter id="vertical-tabs-splitter"
++              collapse="before"
++              collapsed="true"/>
+     <!-- Beware!  Do NOT use overlays to append nodes directly to tabmail (children
+          of tabmail is OK though). This will break Ctrl-tab switching because
+          the Custom Element will choke when it finds a child of tabmail that is
+          not a tabpanels node. -->
+diff --git a/mail/base/content/tabmail.js b/mail/base/content/tabmail.js
+--- a/mail/base/content/tabmail.js
++++ b/mail/base/content/tabmail.js
+@@ -23,12 +23,14 @@ ChromeUtils.defineESModuleGetters(this, 
+    * @implements {EventListener}
+    */
+   class MozTabmailAlltabsMenuPopup extends MozElements.MozMenuPopup {
+     connectedCallback() {
+-      if (this.delayConnectedCallback() || this.hasChildNodes()) {
++      if (this.delayConnectedCallback() || this.hasConnected) {
+         return;
+       }
+ 
++      this.hasConnected = true;
++
+       this.tabmail = document.getElementById("tabmail");
+ 
+       this._mutationObserver = new MutationObserver(records => {
+         records.forEach(mutation => {
+diff --git a/mail/base/content/widgets/tabmail-tab.js b/mail/base/content/widgets/tabmail-tab.js
+--- a/mail/base/content/widgets/tabmail-tab.js
++++ b/mail/base/content/widgets/tabmail-tab.js
+@@ -98,21 +98,58 @@
+       closeButton.addEventListener("click", () =>
+         document.getElementById("tabmail").removeTabByNode(this)
+       );
+ 
++      closeButton.addEventListener("blur", () => (closeButton.tabIndex = -1));
++
++      // Set the focus to the tab node for the next tab to be focused.
++      closeButton.addEventListener(
++        "keydown",
++        event => {
++          if (
++            event.ctrlKey ||
++            event.altKey ||
++            event.metaKey ||
++            event.shiftKey
++          ) {
++            return;
++          }
++
++          if (
++            [
++              KeyEvent.DOM_VK_LEFT,
++              KeyEvent.DOM_VK_RIGHT,
++              KeyEvent.DOM_VK_UP,
++              KeyEvent.DOM_VK_DOWN,
++            ].includes(event.keyCode)
++          ) {
++            event.target.closest(".tabmail-tab").focus();
++          }
++        },
++        { capture: true }
++      );
++
+       // Middle mouse button click on the tab also closes it.
+       this.addEventListener("click", event => {
+         if (event.button != 1) {
+           return;
+         }
+         document.getElementById("tabmail").removeTabByNode(this);
+       });
+ 
++      // Enable tab to close button on key focus. Hidden when not focused.
++      this.addEventListener("focus", () => (closeButton.tabIndex = 0));
++
++      this.addEventListener("blur", () => (closeButton.tabIndex = -1));
++
+       this.setAttribute("context", "tabContextMenu");
+ 
+       this.mCorrespondingMenuitem = null;
+ 
+       this.initializeAttributeInheritance();
++
++      // Set the container property for key scrolling. Bug 1718559.
++      this.container = this.parentElement.parentElement;
+     }
+ 
+     get linkedBrowser() {
+       const tabmail = document.getElementById("tabmail");
+diff --git a/mail/base/content/widgets/tabmail-tabs.js b/mail/base/content/widgets/tabmail-tabs.js
+--- a/mail/base/content/widgets/tabmail-tabs.js
++++ b/mail/base/content/widgets/tabmail-tabs.js
+@@ -84,8 +84,16 @@
+ 
+         dt = event.dataTransfer;
+         dt.setDragImage(thumbnail, 0, 0);
+ 
++        if (this.vertical) {
++          this._tabDropIndicatorOffsetWidth =
++            window.document.documentElement.getBoundingClientRect().width -
++            document.getElementById("tabmail-container").getBoundingClientRect()
++              .width -
++            this._tabDropIndicator.width;
++        }
++
+         event.stopPropagation();
+       });
+ 
+       this.addEventListener("dragover", event => {
+@@ -205,19 +213,20 @@
+         }
+ 
+         let newMargin;
+         const tabs = this.allTabs;
++        let tabRect;
+ 
+         if (newIndex == tabs.length) {
+-          const tabRect = tabs[newIndex - 1].getBoundingClientRect();
++          tabRect = tabs[newIndex - 1].getBoundingClientRect();
+ 
+           if (ltr) {
+             newMargin = tabRect.right - rect.left;
+           } else {
+             newMargin = rect.right - tabRect.left;
+           }
+         } else {
+-          const tabRect = tabs[newIndex].getBoundingClientRect();
++          tabRect = tabs[newIndex].getBoundingClientRect();
+ 
+           if (ltr) {
+             newMargin = tabRect.left - rect.left;
+           } else {
+@@ -228,9 +237,15 @@
+         ind.hidden = false;
+ 
+         newMargin -= ind.clientWidth / 2;
+ 
+-        ind.style.insetInlineStart = `${Math.round(newMargin)}px`;
++        if (this.vertical) {
++          ind.style.top = rect.top + newIndex * tabRect.height + "px";
++          ind.style.insetInlineStart = this._tabDropIndicatorOffsetWidth + "px";
++        } else {
++          ind.style.top = 0;
++          ind.style.insetInlineStart = `${Math.round(newMargin)}px`;
++        }
+       });
+ 
+       this.addEventListener("drop", event => {
+         const dt = event.dataTransfer;
+@@ -351,12 +366,36 @@
+     connectedCallback() {
+       if (this.delayConnectedCallback()) {
+         return;
+       }
++
++      if (this.hasConnected) {
++        Services.prefs.addObserver("mail.tabs.", this._prefObserver);
++        return;
++      }
++
+       super.connectedCallback();
+ 
++      this.hasConnected = true;
++
+       this.tabmail = document.getElementById("tabmail");
+ 
++      this.titlebar = document.getElementById("titlebar");
++
++      this.tabsToolbar = document.getElementById("tabs-toolbar");
++
++      this.verticalTabsContainer = document.getElementById(
++        "vertical-tabs-container"
++      );
++
++      this.verticalTabsToolbox = document.getElementById(
++        "vertical-tabs-toolbox"
++      );
++
++      this.verticalTabsSplitter = document.getElementById(
++        "vertical-tabs-splitter"
++      );
++
+       this.arrowScrollboxWidth = 0;
+ 
+       this.arrowScrollbox = this.querySelector("arrowscrollbox");
+ 
+@@ -370,19 +409,29 @@
+           subject.QueryInterface(Ci.nsIPrefBranch);
+           if (data == "mail.tabs.autoHide") {
+             this.mAutoHide = subject.getBoolPref("mail.tabs.autoHide");
+           }
++          if (data == "mail.tabs.vertical") {
++            this.vertical = subject.getBoolPref("mail.tabs.vertical");
++          }
++          if (data == "mail.tabs.alwaysShowCloseButton") {
++            this.alwaysShowCloseButton = subject.getBoolPref(
++              "mail.tabs.alwaysShowCloseButton"
++            );
++          }
+         }
+       };
+ 
+-      this._tabDropIndicator = this.querySelector(".tab-drop-indicator");
++      this._tabDropIndicator = document.querySelector(".tab-drop-indicator");
+ 
+       this._dragOverDelay = 350;
+ 
+       this._dragTime = 0;
+ 
+       this._mAutoHide = false;
+ 
++      this._vertical = false;
++
+       this.mAllTabsButton = document.getElementById(
+         this.getAttribute("alltabsbutton")
+       );
+       this.mAllTabsPopup = this.mAllTabsButton.menu;
+@@ -406,12 +455,21 @@
+       this.mTabMinWidth = Services.prefs.getIntPref("mail.tabs.tabMinWidth");
+       this.mTabMaxWidth = Services.prefs.getIntPref("mail.tabs.tabMaxWidth");
+       this.mTabClipWidth = Services.prefs.getIntPref("mail.tabs.tabClipWidth");
+       this.mAutoHide = Services.prefs.getBoolPref("mail.tabs.autoHide");
++      this.vertical = Services.prefs.getBoolPref("mail.tabs.vertical");
++      this.alwaysShowCloseButton = Services.prefs.getBoolPref(
++        "mail.tabs.alwaysShowCloseButton"
++      );
+ 
+       if (this.mAutoHide) {
+         this.mCollapseToolbar.collapsed = true;
+         document.documentElement.setAttribute("tabbarhidden", "true");
++        this.verticalTabsSplitter.collapsed = true;
++      }
++
++      if (this.vertical) {
++        this._updateTabsLayout();
+       }
+ 
+       this._updateCloseButtons();
+ 
+@@ -442,8 +500,9 @@
+ 
+       this.addEventListener("TabSelect", () => {
+         this._handleTabSelect();
+       });
++
+       XPCOMUtils.defineLazyPreferenceGetter(
+         this,
+         "_tabMinWidthPref",
+         "mail.tabs.tabMinWidth",
+@@ -499,8 +558,9 @@
+     set mAutoHide(val) {
+       if (val != this._mAutoHide) {
+         if (this.allTabs.length == 1) {
+           this.mCollapseToolbar.collapsed = val;
++          this.verticalTabsSplitter.collapsed = val;
+         }
+         this._mAutoHide = val;
+       }
+     }
+@@ -508,8 +568,32 @@
+     get mAutoHide() {
+       return this._mAutoHide;
+     }
+ 
++    set vertical(val) {
++      if (val != this._vertical) {
++        this._vertical = val;
++        this._updateTabsLayout();
++        this.verticalTabsContainer.collapsed = !this.vertical;
++        this.verticalTabsSplitter.collapsed = !this.vertical;
++      }
++    }
++
++    get vertical() {
++      return this._vertical;
++    }
++
++    set alwaysShowCloseButton(val) {
++      if (val != this._alwaysShowCloseButton) {
++        this._alwaysShowCloseButton = val;
++        this._updateCloseButtons();
++      }
++    }
++
++    get alwaysShowCloseButton() {
++      return this._alwaysShowCloseButton;
++    }
++
+     set selectedIndex(val) {
+       const tab = this.getItemAtIndex(val);
+       const alreadySelected = tab && tab.selected;
+ 
+@@ -530,14 +614,68 @@
+         .__lookupGetter__("selectedIndex")
+         .call(this);
+     }
+ 
++    showTabs(show) {
++      if (this.vertical) {
++        this.verticalTabsContainer.collapsed = !show;
++        this.verticalTabsSplitter.collapsed = !show;
++      } else {
++        this.tabsToolbar.collapsed = !show;
++      }
++    }
++
++    _updateTabsLayout() {
++      if (this.vertical) {
++        this.verticalTabsToolbox.append(this.tabsToolbar);
++        this._updateTabsOrient("vertical");
++
++        this.removeAttribute("align");
++        this.setAttribute("collapsetoolbar", "vertical-tabs-container");
++        this.mCollapseToolbar = this.verticalTabsContainer;
++        this.arrowScrollbox._startEndProps = null;
++        this.arrowScrollbox.removeAttribute("overflowing");
++        this.tabsToolbar.collapsed = false;
++        this.verticalTabsContainer.prepend(this._tabDropIndicator);
++
++        const width =
++          Services.xulStore.getValue(
++            document.URL,
++            "vertical-tabs-container",
++            "width"
++          ) || Services.prefs.getIntPref("mail.tabs.tabMaxWidth");
++        this.verticalTabsContainer.style.width = `${width}px`;
++
++        document.documentElement.toggleAttribute("verticaltabs", true);
++      } else {
++        this.titlebar.appendChild(this.tabsToolbar);
++        this._updateTabsOrient("horizontal");
++
++        this.setAttribute("align", "end");
++        this.setAttribute("collapsetoolbar", "tabs-toolbar");
++        this.mCollapseToolbar = this.tabsToolbar;
++        this.arrowScrollbox._startEndProps = null;
++        this.prepend(this._tabDropIndicator);
++
++        document.documentElement.toggleAttribute("verticaltabs", false);
++      }
++    }
++
++    _updateTabsOrient(orient) {
++      this.setAttribute("orient", orient);
++      this.tabsToolbar.setAttribute("orient", orient);
++      this.arrowScrollbox.setAttribute("orient", orient);
++    }
++
+     _updateCloseButtons() {
+       const width =
+         this.arrowScrollbox.firstElementChild.getBoundingClientRect().width;
+       // 0 width is an invalid value and indicates
+       // an item without display, so ignore.
+-      if (width > this.mTabClipWidth || width == 0) {
++      if (
++        this.alwaysShowCloseButton &&
++        (width > this.mTabClipWidth || width == 0)
++      ) {
+         this.setAttribute("closebuttons", "alltabs");
+       } else {
+         this.setAttribute("closebuttons", "activetab");
+       }
+@@ -553,26 +691,26 @@
+       switch (aEvent.type) {
+         case "overflow":
+           this.arrowScrollbox.ensureElementIsVisible(this.selectedItem);
+ 
+-          // filter overflow events which were dispatched on nested scrollboxes
+-          // and ignore vertical events.
++          // Filter overflow events which were dispatched on nested scrollboxes
++          // and ignore vertical events if not in vertical tabs mode.
+           if (
+             aEvent.target != this.arrowScrollbox.scrollbox ||
+-            aEvent.detail == 0
++            (!this.vertical && aEvent.detail == 0)
+           ) {
+             return;
+           }
+ 
+           this.arrowScrollbox.setAttribute("overflow", "true");
+           alltabsButton.removeAttribute("hidden");
+           break;
+         case "underflow":
+-          // filter underflow events which were dispatched on nested scrollboxes
+-          // and ignore vertical events.
++          // Filter underflow events which were dispatched on nested scrollboxes
++          // and ignore vertical events if not in vertical tabs mode.
+           if (
+             aEvent.target != this.arrowScrollbox.scrollbox ||
+-            aEvent.detail == 0
++            (!this.vertical && aEvent.detail == 0)
+           ) {
+             return;
+           }
+ 
+@@ -678,8 +816,20 @@
+ 
+     _getDropIndex(event) {
+       const tabs = this.allTabs;
+ 
++      if (this.vertical) {
++        for (let i = 0; i < tabs.length; i++) {
++          let height = tabs[i].getBoundingClientRect().height;
++          if (event.screenY < tabs[i].screenY + height / 2) {
++            // Can't drop before firstTab at 0.
++            return i || 1;
++          }
++        }
++
++        return tabs.length;
++      }
++
+       if (window.getComputedStyle(this).direction == "ltr") {
+         for (let i = 0; i < tabs.length; i++) {
+           if (
+             event.screenX <
+diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
+--- a/mail/components/preferences/general.inc.xhtml
++++ b/mail/components/preferences/general.inc.xhtml
+@@ -147,8 +147,16 @@
+                        class="tip-caption indent"/>
+         </vbox>
+         <spacer flex="1"/>
+       </hbox>
++      <hbox>
++        <vbox>
++          <checkbox id="verticalTabs"
++                    data-l10n-id="vertical-tabs-label"
++                    preference="mail.tabs.vertical"/>
++        </vbox>
++        <spacer flex="1"/>
++      </hbox>
+     </html:fieldset>
+     </html:div>
+ 
+     <!-- Fonts and Colors -->
+diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
+--- a/mail/components/preferences/general.js
++++ b/mail/components/preferences/general.js
+@@ -93,8 +93,9 @@ Preferences.addAll([
+   { id: "layers.acceleration.disabled", type: "bool", inverted: true },
+   { id: "searchintegration.enable", type: "bool" },
+   { id: "mail.tabs.drawInTitlebar", type: "bool" },
+   { id: "mail.tabs.autoHide", type: "bool" },
++  { id: "mail.tabs.vertical", type: "bool" },
+ ]);
+ if (AppConstants.platform == "win" || AppConstants.platform == "linux") {
+   Preferences.add({ id: "mail.minimizeToTray", type: "bool" });
+ }
+diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
+--- a/mail/locales/en-US/messenger/preferences/preferences.ftl
++++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
+@@ -276,8 +276,12 @@ auto-hide-tabbar-label =
+     .label = Auto hide tab bar
+     .accesskey = A
+ auto-hide-tabbar-description = Hide the tab bar when only a single tab is open
+ 
++vertical-tabs-label =
++    .label = Show tab bar vertically
++    .accesskey = v
++
+ system-integration-legend = System Integration
+ always-check-default =
+     .label = Always check to see if { -brand-short-name } is the default mail client on startup
+     .accesskey = A
+diff --git a/mail/themes/linux/mail/tabmail.css b/mail/themes/linux/mail/tabmail.css
+--- a/mail/themes/linux/mail/tabmail.css
++++ b/mail/themes/linux/mail/tabmail.css
+@@ -25,18 +25,8 @@ tabpanels {
+ /**
+  * Tab
+  */
+ 
+-.tabmail-tab .tab-label-container {
+-  /* tabmail-tab focus ring */
+-  border: 1px dotted transparent;
+-  margin: -1px !important; /* let the border not consume any space, like outline */
+-}
+-
+-.tabmail-tab[selected]:focus .tab-label-container {
+-  border-color: -moz-DialogText;
+-}
+-
+ /**
+  * Tab Scrollbox Arrow Buttons
+  */
+ 
+diff --git a/mail/themes/osx/mail/tabmail.css b/mail/themes/osx/mail/tabmail.css
+--- a/mail/themes/osx/mail/tabmail.css
++++ b/mail/themes/osx/mail/tabmail.css
+@@ -37,12 +37,8 @@ tabmail > tabbox > tabpanels {
+ 
+   &:not(:hover) .tab-icon-image:not([selected="true"]) {
+     opacity: .9;
+   }
+-
+-  &:focus .tab-label-container {
+-    outline: var(--focus-outline);
+-  }
+ }
+ 
+ .tab-label-container:not([selected="true"]) {
+   opacity: .7;
+diff --git a/mail/themes/shared/mail/about3Pane.css b/mail/themes/shared/mail/about3Pane.css
+--- a/mail/themes/shared/mail/about3Pane.css
++++ b/mail/themes/shared/mail/about3Pane.css
+@@ -680,4 +680,11 @@ body {
+ #messageBrowser,
+ #multiMessageBrowser {
+   flex: 1;
+ }
++
++#folderPaneSplitter:hover,
++#folderPaneSplitter.splitter-resizing,
++#messagePaneSplitter:hover,
++#messagePaneSplitter.splitter-resizing {
++  background-color: var(--selected-item-color);
++}
+diff --git a/mail/themes/shared/mail/tabmail.css b/mail/themes/shared/mail/tabmail.css
+--- a/mail/themes/shared/mail/tabmail.css
++++ b/mail/themes/shared/mail/tabmail.css
+@@ -15,10 +15,70 @@
+ #tabmail {
+   overflow: hidden;
+ }
+ 
++/* Vertical Tabs */
++#vertical-tabs-toolbox {
++  width: inherit;
++}
++
++#vertical-tabs-toolbox > #tabs-toolbar {
++  flex: 1;
++  padding-block-end: 3px;
++}
++
++#vertical-tabs-container > .tab-drop-indicator {
++  rotate: -90deg;
++  transform: translate(12px, 20px);
++}
++
++#tabmail-arrowscrollbox[orient="vertical"] {
++  contain: strict;
++}
++
++#tabmail-arrowscrollbox[orient="vertical"]::part(scrollbutton-up),
++#tabmail-arrowscrollbox[orient="vertical"]::part(scrollbutton-down) {
++  display: none;
++}
++#tabmail-arrowscrollbox[orient="vertical"]::part(scrollbox) {
++  padding-inline-end: 4px;
++  overflow: auto;
++}
++
++#tabmail-arrowscrollbox[orient="vertical"] > tab.tabmail-tab {
++  flex: unset;
++  max-width: none;
++  min-height: var(--tab-min-height);
++  width: unset;
++}
++
++/* Match all platforms splitter */
++#vertical-tabs-splitter {
++  /* For linux */
++  -moz-appearance: none;
++  /* For win/osx */
++  /* Common */
++  border-width: 0;
++  min-width: 0;
++  width: 5px;
++  background-color: transparent;
++  margin-top: 0;
++  position: relative;
++  z-index: 10;
++}
++
++#vertical-tabs-splitter {
++  border-inline-end: 1px solid var(--splitter-color);
++  margin-inline-start: -5px;
++}
++
++#vertical-tabs-splitter:hover {
++  border-inline-end: 5px solid var(--selected-item-color);
++}
++/* Vertical Tabs end */
++
+ #tabmail-tabs .tabmail-tab:first-child .tab-close-button,
+-#tabmail-tabs[closebuttons="activetab"] .tabmail-tab:not([selected="true"]) .tab-close-button {
++#tabmail-tabs[closebuttons="activetab"] .tabmail-tab:not(:hover, [selected="true"]) .tab-close-button {
+   display: none;
+ }
+ 
+ .tab-drop-indicator {
+@@ -84,8 +144,26 @@
+     color: inherit;
+   }
+ }
+ 
++/* Tab focus */
++.tabmail-tab[selected]:focus .tab-background,
++.tabmail-tab[selected]:focus-within .tab-background {
++  outline: 2px solid var(--selected-item-color);
++  outline-offset: -2px;
++  border-radius: var(--button-border-radius);
++}
++.tabmail-tab[selected]:focus .tab-background > .tab-line[selected="true"],
++.tabmail-tab[selected]:focus-within .tab-background > .tab-line[selected="true"] {
++  background-color: transparent;
++}
++
++.tab-close-button:focus-visible {
++  outline: 2px solid var(--selected-item-color);
++  outline-offset: -4px;
++}
++/* Tab focus end */
++
+ .tab-content {
+   padding-inline: 9px;
+   display: flex;
+   align-items: center;
+@@ -220,13 +298,13 @@ button.tab-close-button {
+ }
+ 
+ .tab-background {
+   background-clip: padding-box;
++}
+ 
+-  &[selected=true] {
+-    background-color: var(--toolbar-bgcolor);
+-    background-repeat: repeat-x;
+-  }
++.tabmail-tab:not(:focus, :focus-within) .tab-background[selected=true] {
++  background-color: var(--toolbar-bgcolor);
++  background-repeat: repeat-x;
+ }
+ 
+ /*
+  * LightweightThemeConsumer will set the current lightweight theme's header
+diff --git a/mail/themes/windows/mail/tabmail.css b/mail/themes/windows/mail/tabmail.css
+--- a/mail/themes/windows/mail/tabmail.css
++++ b/mail/themes/windows/mail/tabmail.css
+@@ -25,17 +25,8 @@ tabpanels {
+   appearance: none;
+   background-color: transparent;
+ }
+ 
+-/* tabmail-tab focus ring */
+-.tabmail-tab .tab-label-container {
+-  border: 1px dotted transparent;
+-}
+-
+-.tabmail-tab:focus .tab-label-container {
+-  border-color: -moz-DialogText;
+-}
+-
+ /**
+  * Tab Scrollbox Arrow Buttons
+  */
+ 
