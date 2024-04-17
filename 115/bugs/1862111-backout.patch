@@ -1,0 +1,96 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Parent  78667900d58b6749de9cf739b01292a5bbbf1203
+Backout rev. 235669209e4e, bug 1862111, since it's causing shutdown-hangs.
+
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -815,22 +815,16 @@ nsresult nsImapProtocol::SetupWithUrl(ns
+ 
+     nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl = do_QueryInterface(m_runningUrl);
+     nsCOMPtr<nsIMsgIncomingServer> server = do_QueryReferent(m_server);
+     if (!server) {
+       rv = mailnewsUrl->GetServer(getter_AddRefs(server));
+       NS_ENSURE_SUCCESS(rv, rv);
+       m_server = do_GetWeakReference(server);
+     }
+-    // Obtain m_rootFolder value for use only in TryToLogon().
+-    if (!m_rootFolder) {
+-      if (!server && m_server) server = do_QueryReferent(m_server);
+-      if (server) server->GetRootFolder(getter_AddRefs(m_rootFolder));
+-      MOZ_ASSERT(m_rootFolder, "null m_rootFolder");
+-    }
+     nsCOMPtr<nsIMsgFolder> folder;
+     mailnewsUrl->GetFolder(getter_AddRefs(folder));
+     mFolderLastModSeq = 0;
+     mFolderTotalMsgCount = 0;
+     mFolderHighestUID = 0;
+     m_uidValidity = kUidUnknown;
+     if (folder) {
+       nsCOMPtr<nsIMsgDatabase> folderDB;
+@@ -8501,24 +8495,16 @@ bool nsImapProtocol::TryToLogon() {
+ 
+   bool newPasswordRequested = false;
+   // remember the msgWindow before we start trying to logon, because if the
+   // server drops the connection on errors, TellThreadToDie will null out the
+   // protocolsink and we won't be able to get the msgWindow.
+   AutoProxyReleaseMsgWindow msgWindow;
+   GetMsgWindow(getter_AddRefs(msgWindow));
+ 
+-  // Block other imap threads for this server from attempting to login while
+-  // this thread is also attempting to login. This prevents sending too many
+-  // potentially invalid passwords that may cause the email provider to lock
+-  // out the account.  m_rootFolder (pointer to the server's root folder) is
+-  // the same value for all imap threads for a given server. So just using its
+-  // value as the parameter to the monitor calls.
+-  PR_CEnterMonitor(m_rootFolder);
+-  Log("TryToLogon", nullptr, "enter mon");
+   // This loops over 1) auth methods (only one per loop) and 2) password tries
+   // (with UI)
+   while (!loginSucceeded && !skipLoop && !DeathSignalReceived()) {
+     // Get password
+     if (m_currentAuthMethod !=
+             kHasAuthGssApiCapability &&  // GSSAPI uses no pw in apps
+         m_currentAuthMethod != kHasAuthExternalCapability &&
+         m_currentAuthMethod != kHasXOAuth2Capability &&
+@@ -8602,18 +8588,16 @@ bool nsImapProtocol::TryToLogon() {
+         }
+ 
+         // TODO what is this for? When does it get set to != unknown again?
+         m_currentBiffState = nsIMsgFolder::nsMsgBiffState_Unknown;
+         SendSetBiffIndicatorEvent(m_currentBiffState);
+       }  // all methods failed
+     }    // login failed
+   }      // while
+-  Log("TryToLogon", nullptr, "exit mon");
+-  PR_CExitMonitor(m_rootFolder);
+ 
+   if (loginSucceeded) {
+     MOZ_LOG(IMAP, LogLevel::Debug, ("login succeeded"));
+     bool passwordAlreadyVerified;
+     m_hostSessionList->SetPasswordForHost(GetImapServerKey(), password);
+     rv = m_hostSessionList->GetPasswordVerifiedOnline(GetImapServerKey(),
+                                                       passwordAlreadyVerified);
+     if (NS_SUCCEEDED(rv) && !passwordAlreadyVerified) {
+diff --git a/mailnews/imap/src/nsImapProtocol.h b/mailnews/imap/src/nsImapProtocol.h
+--- a/mailnews/imap/src/nsImapProtocol.h
++++ b/mailnews/imap/src/nsImapProtocol.h
+@@ -441,17 +441,16 @@ class nsImapProtocol : public nsIImapPro
+   bool m_imapThreadIsRunning;
+   void ImapThreadMainLoop(void);
+   nsresult m_connectionStatus;
+   nsCString m_connectionType;
+ 
+   bool m_nextUrlReadyToRun;
+   bool m_idleResponseReadyToHandle;
+   nsWeakPtr m_server;
+-  nsCOMPtr<nsIMsgFolder> m_rootFolder;
+ 
+   RefPtr<ImapMailFolderSinkProxy> m_imapMailFolderSink;
+   RefPtr<ImapMailFolderSinkProxy> m_imapMailFolderSinkSelected;
+   RefPtr<ImapMessageSinkProxy> m_imapMessageSink;
+   RefPtr<ImapServerSinkProxy> m_imapServerSink;
+   RefPtr<ImapServerSinkProxy> m_imapServerSinkLatest;
+   RefPtr<ImapProtocolSinkProxy> m_imapProtocolSink;
+ 
