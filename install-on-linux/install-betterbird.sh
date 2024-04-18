@@ -19,7 +19,8 @@ tmpFile=$tmpDir/download.tar.bz2
 
 # Configure installation directory.
 installDir=~
-desktopFile=~/.local/share/applications/betterbird.desktop
+desktopFileDir=~/.local/share
+desktopFile=$desktopFileDir/applications/betterbird.desktop
 
 ###
 # Functions that do all the work.
@@ -67,8 +68,9 @@ createDesktopFile() {
 }
 
 registerMIME() {
-  # Desktop file went to /.local/share/applications/, so add ~/.local/share to $XDG_DATA_DIRS
-  export XDG_DATA_DIRS="~/.local/share:$XDG_DATA_DIRS"
+  # Desktop file went to $desktopFileDir/applications/, so add $desktopFileDir to $XDG_DATA_DIRS,
+  # see: https://specifications.freedesktop.org/menu-spec/latest/ar01s02.html
+  export XDG_DATA_DIRS="$desktopFileDir:$XDG_DATA_DIRS"
   xdg-mime default betterbird.desktop x-scheme-handler/mailto
   echo MIME handler for x-scheme-handler/mailto ...
   xdg-mime query default x-scheme-handler/mailto  
