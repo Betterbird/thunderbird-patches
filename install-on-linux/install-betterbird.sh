@@ -66,6 +66,14 @@ createDesktopFile() {
   echo .. Desktop file created
 }
 
+registerMIME() {
+  # Desktop file went to /.local/share/applications/, so add ~/.local/share to $XDG_DATA_DIRS
+  export XDG_DATA_DIRS="~/.local/share:$XDG_DATA_DIRS"
+  xdg-mime default betterbird.desktop x-scheme-handler/mailto
+  echo MIME handler for x-scheme-handler/mailto ...
+  xdg-mime query default x-scheme-handler/mailto  
+}
+
 ###
 # Mainline
 checkIfBetterbirdIsRunning
@@ -73,6 +81,7 @@ downloadUpdate
 checkHash
 extract
 createDesktopFile
+registerMIME
 
 echo Install successful:
 echo Betterbird installed in $installDir/betterbird
