@@ -1,0 +1,182 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1714221662 -7200
+# Parent  bb3a53e99808cf907299de05234ece8ee22b1a40
+Bug 506064/1839085 - Match diacritics in search (search, quick search, filters).
+
+diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
+--- a/mailnews/base/src/nsMsgUtils.cpp
++++ b/mailnews/base/src/nsMsgUtils.cpp
+@@ -81,8 +81,20 @@
+ /* for logging to Error Console */
+ #include "nsIScriptError.h"
+ #include "nsIConsoleService.h"
+ 
++// Using ICU's translit.
++// For this to link, a bunch of files needs to be moved from the
++// "unused" list to the "used" list in
++// mozilla-central/config/external/icu/i18n/sources.mozbuild and
++// mozilla-central/config/external/icu/common/sources.mozbuild.
++// See feature-506064-match-diacritics-m-c.patch.
++// Furthermore, this build option needs to be cleared:
++// # DEFINES['UCONFIG_NO_TRANSLITERATION'] = True
++#include "../../../../intl/icu/source/i18n/unicode/translit.h"
++
++using namespace U_ICU_NAMESPACE;  // currently icu_73
++
+ // Log an error string to the error console
+ // (adapted from nsContentUtils::LogSimpleConsoleError).
+ // Flag can indicate error, warning or info.
+ NS_MSG_BASE void MsgLogToConsole4(const nsAString& aErrorText,
+@@ -287,8 +299,21 @@ int32_t MsgFindCharInSet(const nsString&
+                          uint32_t aOffset) {
+   return aString.FindCharInSet(aChars, aOffset);
+ }
+ 
++void NoDiacritics(const nsAString& in, nsString& out) {
++  // Transliterate UTF-16 UnicodeString
++  static Transliterator* accentsConverter = nullptr;
++  UnicodeString s(static_cast<const char16_t*>(PromiseFlatString(in).get()));
++  UErrorCode status = U_ZERO_ERROR;
++  if (!accentsConverter) {
++    accentsConverter = Transliterator::createInstance(
++        "NFD; [:Nonspacing Mark:] Remove; NFC", UTRANS_FORWARD, status);
++  }
++  accentsConverter->transliterate(s);
++  (void)out.Assign(s.getBuffer(), s.length(), mozilla::fallible_t());
++}
++
+ static bool ConvertibleToNative(const nsAutoString& str) {
+   nsAutoCString native;
+   nsAutoString roundTripped;
+   NS_CopyUnicodeToNative(str, native);
+diff --git a/mailnews/base/src/nsMsgUtils.h b/mailnews/base/src/nsMsgUtils.h
+--- a/mailnews/base/src/nsMsgUtils.h
++++ b/mailnews/base/src/nsMsgUtils.h
+@@ -261,8 +261,10 @@ NS_MSG_BASE int32_t MsgFindCharInSet(con
+ NS_MSG_BASE int32_t MsgFindCharInSet(const nsString& aString,
+                                      const char16_t* aChars,
+                                      uint32_t aOffset = 0);
+ 
++NS_MSG_BASE void NoDiacritics(const nsAString& in, nsString& out);
++
+ // advances bufferOffset to the beginning of the next line, if we don't
+ // get to maxBufferOffset first. Returns false if we didn't get to the
+ // next line.
+ NS_MSG_BASE bool MsgAdvanceToNextLine(const char* buffer,
+diff --git a/mailnews/search/public/nsMsgSearchCore.idl b/mailnews/search/public/nsMsgSearchCore.idl
+--- a/mailnews/search/public/nsMsgSearchCore.idl
++++ b/mailnews/search/public/nsMsgSearchCore.idl
+@@ -184,8 +184,9 @@ typedef struct nsMsgSearchValue
+     } u;
+     // We keep two versions of the string to avoid conversion at "search time".
+     nsCString utf8String;
+     nsString utf16String;
++    nsString utf16StringNoDiacritics;
+ } nsMsgSearchValue;
+ %}
+ 
+ [ptr] native nsMsgSearchTerm(nsMsgSearchTerm);
+diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
+--- a/mailnews/search/src/nsMsgSearchTerm.cpp
++++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -523,8 +523,9 @@ nsresult nsMsgSearchTerm::ParseValue(cha
+     if (quoteVal && inStream[valueLen - 1] == '"') valueLen--;
+ 
+     m_value.utf8String.Assign(inStream, valueLen);
+     CopyUTF8toUTF16(m_value.utf8String, m_value.utf16String);
++    NoDiacritics(m_value.utf16String, m_value.utf16StringNoDiacritics);
+   } else {
+     switch (m_attribute) {
+       case nsMsgSearchAttrib::Date:
+         PR_ParseTimeString(inStream, false, &m_value.u.date);
+@@ -990,28 +991,31 @@ nsresult nsMsgSearchTerm::MatchString(co
+ // *pResult is false when strings don't match, true if they do.
+ nsresult nsMsgSearchTerm::MatchString(const nsAString& utf16StrToMatch,
+                                       bool* pResult) {
+   NS_ENSURE_ARG_POINTER(pResult);
++  nsAutoString utf16StrToMatch2;
++  NoDiacritics(utf16StrToMatch, utf16StrToMatch2);
+ 
+   bool result = false;
+ 
+   nsresult rv = NS_OK;
+-  auto needle = m_value.utf16String;
++  auto needle = m_value.utf16StringNoDiacritics;
+ 
+   switch (m_operator) {
+     case nsMsgSearchOp::Contains:
+-      if (CaseInsensitiveFindInReadable(needle, utf16StrToMatch)) result = true;
++      if (CaseInsensitiveFindInReadable(needle, utf16StrToMatch2))
++        result = true;
+       break;
+     case nsMsgSearchOp::DoesntContain:
+-      if (!CaseInsensitiveFindInReadable(needle, utf16StrToMatch))
++      if (!CaseInsensitiveFindInReadable(needle, utf16StrToMatch2))
+         result = true;
+       break;
+     case nsMsgSearchOp::Is:
+-      if (needle.Equals(utf16StrToMatch, nsCaseInsensitiveStringComparator))
++      if (needle.Equals(utf16StrToMatch2, nsCaseInsensitiveStringComparator))
+         result = true;
+       break;
+     case nsMsgSearchOp::Isnt:
+-      if (!needle.Equals(utf16StrToMatch, nsCaseInsensitiveStringComparator))
++      if (!needle.Equals(utf16StrToMatch2, nsCaseInsensitiveStringComparator))
+         result = true;
+       break;
+     case nsMsgSearchOp::IsEmpty:
+       if (utf16StrToMatch.IsEmpty()) result = true;
+@@ -1019,14 +1023,14 @@ nsresult nsMsgSearchTerm::MatchString(co
+     case nsMsgSearchOp::IsntEmpty:
+       if (!utf16StrToMatch.IsEmpty()) result = true;
+       break;
+     case nsMsgSearchOp::BeginsWith:
+-      if (StringBeginsWith(utf16StrToMatch, needle,
++      if (StringBeginsWith(utf16StrToMatch2, needle,
+                            nsCaseInsensitiveStringComparator))
+         result = true;
+       break;
+     case nsMsgSearchOp::EndsWith:
+-      if (StringEndsWith(utf16StrToMatch, needle,
++      if (StringEndsWith(utf16StrToMatch2, needle,
+                          nsCaseInsensitiveStringComparator))
+         result = true;
+       break;
+     case nsMsgSearchOp::Matches:
+@@ -1050,10 +1054,10 @@ nsresult nsMsgSearchTerm::MatchString(co
+         return NS_OK;
+       }
+       // We need to use a local variable here since `reset()` doesn't take a
+       // copy of the string, so it needs to survive the invocation.
+-      const UnicodeString string(static_cast<const char16_t*>(
+-          PromiseFlatString(utf16StrToMatch).get()));
++      const UnicodeString string(
++          static_cast<const char16_t*>(utf16StrToMatch2.get()));
+       mRegex->reset(string);
+ 
+       bool found = mRegex->find();
+       if ((m_operator == nsMsgSearchOp::Matches && found) ||
+@@ -1799,8 +1803,9 @@ nsresult nsMsgResultElement::AssignValue
+         nsString unicodeString;
+         rv = src->GetStr(unicodeString);
+         CopyUTF16toUTF8(unicodeString, dst->utf8String);
+         dst->utf16String = unicodeString;
++        NoDiacritics(unicodeString, dst->utf16StringNoDiacritics);
+       } else
+         rv = NS_ERROR_INVALID_ARG;
+   }
+   return rv;
+diff --git a/mailnews/search/src/nsMsgSearchValue.cpp b/mailnews/search/src/nsMsgSearchValue.cpp
+--- a/mailnews/search/src/nsMsgSearchValue.cpp
++++ b/mailnews/search/src/nsMsgSearchValue.cpp
+@@ -58,8 +58,9 @@ NS_IMETHODIMP
+ nsMsgSearchValueImpl::SetStr(const nsAString& aValue) {
+   NS_ENSURE_TRUE(IS_STRING_ATTRIBUTE(mValue.attribute), NS_ERROR_ILLEGAL_VALUE);
+   CopyUTF16toUTF8(aValue, mValue.utf8String);
+   mValue.utf16String = aValue;
++  NoDiacritics(mValue.utf16String, mValue.utf16StringNoDiacritics);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
