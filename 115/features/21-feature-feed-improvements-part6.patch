@@ -1,0 +1,528 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1714558179 -7200
+# Parent  c15a828bad0be49fa163ac5d1d0bdf149e9e7503
+Feed Subscribe dialog enhancements
+NOTE: This UI should be rewritten/redesigned and remove xul/nsITree.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+1. Improve tolerance of opml import from 3rd parties.
+2. Opml file creation enhancements; save creator, feedType, folder outline type.
+3. Subscribe dialog ui/visual improvements and regression fixes.
+4. Enable feeditem move (default drag) and copy (ctrl after dragstart), cursor indicators.
+5. Improve keyboard support
+
+diff --git a/mail/themes/shared/mail/feedSubscribe.css b/mail/themes/shared/mail/feedSubscribe.css
+--- a/mail/themes/shared/mail/feedSubscribe.css
++++ b/mail/themes/shared/mail/feedSubscribe.css
+@@ -14,8 +14,13 @@
+   fill: color-mix(in srgb, var(--default) 20%, transparent);
+   stroke: var(--default);
+ }
+ 
++#rssSubscriptionsList[treelines="true"] > treechildren::-moz-tree-twisty {
++ /* The image's width is 12 pixels; accomodate treelines */
++  width: 16px;
++}
++
+ #folderNameCol {
+   flex: 2 2;
+ }
+ 
+@@ -33,8 +38,13 @@
+ :root[lwt-tree-brighttext] #rssFeedInfoBox {
+   background-color: rgba(255, 255, 255, 0.05);
+ }
+ 
++#selectFolder {
++  margin-block: 2px;
++  padding-block: 4px !important;
++}
++
+ #autotagPrefix {
+   max-width: 15em;
+ }
+ 
+diff --git a/mailnews/extensions/newsblog/Feed.jsm b/mailnews/extensions/newsblog/Feed.jsm
+--- a/mailnews/extensions/newsblog/Feed.jsm
++++ b/mailnews/extensions/newsblog/Feed.jsm
+@@ -385,8 +385,26 @@ Feed.prototype = {
+       aNewTitle
+     );
+   },
+ 
++  get feedType() {
++    return lazy.FeedUtils.getSubscriptionAttr(
++      this.url,
++      this.server,
++      "feedType",
++      ""
++    );
++  },
++
++  set feedType(feedType) {
++    lazy.FeedUtils.setSubscriptionAttr(
++      this.url,
++      this.server,
++      "feedType",
++      feedType
++    );
++  },
++
+   get lastModified() {
+     return lazy.FeedUtils.getSubscriptionAttr(
+       this.url,
+       this.server,
+@@ -675,10 +693,13 @@ Feed.prototype = {
+     if (aFeed.parseItems) {
+       // Do this only if we're in parse/store mode.
+       aFeed.removeInvalidItems(false);
+ 
+-      if (aCode == lazy.FeedUtils.kNewsBlogSuccess && aFeed.mLastModified) {
+-        aFeed.lastModified = aFeed.mLastModified;
++      if (aCode == lazy.FeedUtils.kNewsBlogSuccess) {
++        if (aFeed.mLastModified) {
++          aFeed.lastModified = aFeed.mLastModified;
++        }
++        aFeed.feedType = aFeed.mFeedType;
+       }
+ 
+       // Flush any feed item changes to disk.
+       let ds = lazy.FeedUtils.getItemsDS(aFeed.server);
+diff --git a/mailnews/extensions/newsblog/FeedUtils.jsm b/mailnews/extensions/newsblog/FeedUtils.jsm
+--- a/mailnews/extensions/newsblog/FeedUtils.jsm
++++ b/mailnews/extensions/newsblog/FeedUtils.jsm
+@@ -587,9 +587,11 @@ var FeedUtils = {
+     ds.data = ds.data.filter(x => x.url != aFeed.url);
+     ds.saveSoon();
+ 
+     // Update folderpane.
+-    Services.obs.notifyObservers(aFeed.folder, "folder-properties-changed");
++    if (aFeed.folder) {
++      Services.obs.notifyObservers(aFeed.folder, "folder-properties-changed");
++    }
+   },
+ 
+   /**
+    * Change an existing feed's url.
+@@ -907,9 +909,9 @@ var FeedUtils = {
+     Services.obs.notifyObservers(aFolder, "folder-properties-changed");
+ 
+     let win = Services.wm.getMostRecentWindow("Mail:News-BlogSubscriptions");
+     if (win) {
+-      win.FeedSubscriptions.mView.tree.invalidate();
++      win.FeedSubscriptions?.mView?.tree?.invalidate();
+     }
+   },
+ 
+   /**
+@@ -1890,9 +1892,9 @@ var FeedUtils = {
+           // Nice touch: notify so the window ca select the folder that now
+           // contains the newly subscribed feed.
+           // This is particularly nice if we just finished subscribing
+           // to a feed URL that the operating system gave us.
+-          Services.obs.notifyObservers(feed.folder, "folder-subscribed");
++          Services.obs.notifyObservers(feed.folder, "folder-attention");
+ 
+           // Check for an existing feed subscriptions window and update it.
+           let subscriptionsWindow = Services.wm.getMostRecentWindow(
+             "Mail:News-BlogSubscriptions"
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -344,9 +344,9 @@ var FeedSubscriptions = {
+     },
+ 
+     getImageSrc(aRow, aCol) {
+       let item = this.getItemAtIndex(aRow);
+-      if ((item.folder && item.folder.isServer) || item.open) {
++      if (!item || item.folder?.isServer || item.open) {
+         return "";
+       }
+ 
+       if (
+@@ -481,9 +481,9 @@ var FeedSubscriptions = {
+                 newItem.folder == curItem.parentFolder ||
+                 newItem.folder.isServer)
+             )
+           ) {
+-            dragDataResults.canDrop = true;
++            dragDataResults.canDrop = newItem.container;
+           }
+         }
+       } else {
+         // Try to get a feed url.
+@@ -1093,9 +1093,11 @@ var FeedSubscriptions = {
+     }
+ 
+     let hideRec = recommendedUnitsVal.value == "";
+     recommendedUnits.hidden = hideRec;
++    recommendedUnits.disabled = updateValue.disabled;
+     recommendedUnitsVal.hidden = hideRec;
++    recommendedUnitsVal.disabled = updateValue.disabled;
+ 
+     // Autotag items.
+     let autotagEnable = document.getElementById("autotagEnable");
+     let autotagUsePrefix = document.getElementById("autotagUsePrefix");
+@@ -1122,9 +1124,9 @@ var FeedSubscriptions = {
+ 
+     selectFolder.setAttribute("hidden", !aIsFeed);
+     selectFolder._folder = aFolder;
+     selectFolderValue.toggleAttribute("hidden", aIsFeed);
+-    selectFolderValue.setAttribute("showfilepath", false);
++    selectFolderValue.removeAttribute("showfilepath");
+ 
+     if (aIsFeed) {
+       selectFolderPopup._ensureInitialized();
+       selectFolderPopup.selectFolder(aFolder);
+@@ -1136,22 +1138,31 @@ var FeedSubscriptions = {
+       selectFolderValue.setAttribute("filepath", aFolder.filePath.path);
+     }
+   },
+ 
++  onBlurSelectFolderValue(aEvent) {
++    const target = aEvent.target;
++    target.removeAttribute("showfilepath");
++    target.value = target.getAttribute("prettypath");
++  },
++
+   onClickSelectFolderValue(aEvent) {
+     let target = aEvent.target;
+     if (
+       ("button" in aEvent &&
+         (aEvent.button != 0 ||
+-          aEvent.target.localName != "div" ||
++          aEvent.target.localName != "input" ||
+           target.selectionStart != target.selectionEnd)) ||
+       (aEvent.keyCode && aEvent.keyCode != aEvent.DOM_VK_RETURN)
+     ) {
+       return;
+     }
+ 
+     // Toggle between showing prettyPath and absolute filePath.
+-    if (target.getAttribute("showfilepath") == "true") {
++    const showFilePath = target.getAttribute("showfilepath");
++    if (!showFilePath && "button" in aEvent) {
++      target.setAttribute("showfilepath", false);
++    } else if (target.getAttribute("showfilepath") == "true") {
+       target.setAttribute("showfilepath", false);
+       target.value = target.getAttribute("prettypath");
+     } else {
+       target.setAttribute("showfilepath", true);
+@@ -1391,11 +1402,31 @@ var FeedSubscriptions = {
+     return val ? Math.round(val * 1000) / 1000 : "";
+   },
+ 
+   onKeyPress(aEvent) {
++    if (aEvent.target.id == "subscriptionsDialog") {
++      // Close button.
++      return;
++    }
++    if (aEvent.keyCode == aEvent.DOM_VK_RETURN) {
++      aEvent.preventDefault();
++      if (aEvent.target.id == "locationValue") {
++        if (!document.getElementById("addFeed").hidden) {
++          this.addFeed();
++        } else if (!document.getElementById("updateFeed").hidden) {
++          this.updateFeed();
++        }
++      } else if (aEvent.target.id == "importOPML") {
++        this.importOPML();
++      } else if (aEvent.target.id == "exportOPML") {
++        this.exportOPML(aEvent);
++      }
++    }
+     if (
+-      aEvent.keyCode == aEvent.DOM_VK_DELETE &&
+-      aEvent.target.id == "rssSubscriptionsList"
++      (aEvent.keyCode == aEvent.DOM_VK_DELETE &&
++        aEvent.target.id == "rssSubscriptionsList") ||
++      (aEvent.keyCode == aEvent.DOM_VK_RETURN &&
++        aEvent.target.id == "removeFeed")
+     ) {
+       this.removeFeed(true);
+     }
+ 
+@@ -1450,8 +1481,11 @@ var FeedSubscriptions = {
+ 
+     let locationValue = document.getElementById("locationValue");
+     let updateEnabled = document.getElementById("updateEnabled");
+ 
++    const updateValue = document.getElementById("updateValue");
++    const biffUnits = document.getElementById("biffUnits");
++
+     let quickMode = document.getElementById("quickMode");
+     let autotagEnable = document.getElementById("autotagEnable");
+     let autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     let autotagPrefix = document.getElementById("autotagPrefix");
+@@ -1467,13 +1501,10 @@ var FeedSubscriptions = {
+       quickMode.disabled =
+       autotagEnable.disabled =
+         false;
+ 
+-    updateEnabled.parentNode
+-      .querySelectorAll("input,radio,label")
+-      .forEach(item => {
+-        item.disabled = !updateEnabled.checked;
+-      });
++    updateValue.disabled = !updateEnabled.checked;
++    biffUnits.disabled = !updateEnabled.checked;
+ 
+     autotagUsePrefix.disabled = !autotagEnable.checked;
+     autotagPrefix.disabled =
+       autotagUsePrefix.disabled || !autotagUsePrefix.checked;
+@@ -1492,14 +1523,10 @@ var FeedSubscriptions = {
+       quickMode.disabled =
+         disable && !FeedUtils.getFeedUrlsInFolder(item.folder);
+       // All other options disabled unless intent is to add a feed.
+       updateEnabled.disabled = disable;
+-      updateEnabled.parentNode
+-        .querySelectorAll("input,radio,label")
+-        .forEach(item => {
+-          item.disabled = disable;
+-        });
+-
++      updateValue.disabled = disable;
++      biffUnits.disabled = disable;
+       autotagEnable.disabled = disable;
+ 
+       addFeedButton.disabled =
+         addFeedButton != focusedElement &&
+@@ -1915,8 +1942,10 @@ var FeedSubscriptions = {
+   },
+ 
+   onDragOver(aEvent) {
+     this.mView._currentDataTransfer = aEvent.dataTransfer;
++    // Must prevent default. Otherwise dropEffect gets cleared.
++    aEvent.preventDefault();
+   },
+ 
+   mFeedDownloadCallback: {
+     mSubscribeMode: true,
+@@ -1926,8 +1955,9 @@ var FeedSubscriptions = {
+       window.focus();
+       // Feed is null if our attempt to parse the feed failed.
+       let message = "";
+       let win = FeedSubscriptions;
++      let feedUrl = feed.url;
+       if (
+         aErrorCode == FeedUtils.kNewsBlogSuccess ||
+         aErrorCode == FeedUtils.kNewsBlogNoNewItems
+       ) {
+@@ -1945,8 +1975,9 @@ var FeedSubscriptions = {
+           message = FeedUtils.strings.GetStringFromName(
+             "subscribe-feedVerified"
+           );
+           win.updateStatusItem("statusText", message);
++          document.getElementById("locationValue").focus();
+           return;
+         }
+ 
+         // Update lastUpdateTime if successful.
+@@ -2035,8 +2066,11 @@ var FeedSubscriptions = {
+           feed.url &&
+           feed.server
+         ) {
+           FeedUtils.deleteFeed(feed);
++          // Do not setStatus() on feeds/folders if the feedUrl is invalid; it
++          // will create false entries in the db for an invalid url.
++          feedUrl = null;
+         }
+ 
+         if (aErrorCode == FeedUtils.kNewsBlogInvalidFeed) {
+           message = FeedUtils.strings.GetStringFromName(
+@@ -2078,10 +2112,12 @@ var FeedSubscriptions = {
+       win.mActionMode = null;
+       win.clearStatusInfo();
+       let code = feed.url.startsWith("http") ? aErrorCode : null;
+       win.updateStatusItem("statusText", message, code);
+-      FeedUtils.setStatus(feed.folder, feed.url, "code", aErrorCode);
+-      FeedUtils.setStatus(feed.folder, feed.folder.URI, "code", "");
++      if (feedUrl) {
++        FeedUtils.setStatus(feed.folder, feedUrl, "code", aErrorCode);
++        FeedUtils.setStatus(feed.folder, feed.folder.URI, "code", "");
++      }
+     },
+ 
+     // This gets called after the RSS parser finishes storing a feed item to
+     // disk.  aCurrentFeedItems is an integer corresponding to how many feed
+@@ -2570,9 +2606,9 @@ var FeedSubscriptions = {
+ 
+     if (this.mRSSServer.rootFolder.hasSubFolders) {
+       let opmlDoc = document.implementation.createDocument("", "opml", null);
+       let opmlRoot = opmlDoc.documentElement;
+-      opmlRoot.setAttribute("version", "1.0");
++      opmlRoot.setAttribute("version", "2.0");
+       opmlRoot.setAttribute("xmlns:fz", "urn:forumzilla:");
+ 
+       this.generatePPSpace(opmlRoot, SPACES2);
+ 
+@@ -2589,8 +2625,14 @@ var FeedSubscriptions = {
+       this.generatePPSpace(head, SPACES4);
+       let dt = opmlDoc.createElement("dateCreated");
+       dt.appendChild(opmlDoc.createTextNode(new Date().toUTCString()));
+       head.appendChild(dt);
++      this.generatePPSpace(head, SPACES4);
++      const ownerNameText =
++        FeedSubscriptions.brandShortName + " " + AppConstants.MOZ_APP_VERSION;
++      const ownerName = opmlDoc.createElement("ownerName");
++      ownerName.appendChild(opmlDoc.createTextNode(ownerNameText));
++      head.appendChild(ownerName);
+       this.generatePPSpace(head, SPACES2);
+       opmlRoot.appendChild(head);
+ 
+       this.generatePPSpace(opmlRoot, SPACES2);
+@@ -2707,9 +2749,10 @@ var FeedSubscriptions = {
+       );
+ 
+       // Make a folder outline element.
+       folderOutline = parent.ownerDocument.createElement("outline");
+-      folderOutline.setAttribute("title", folder.prettyName);
++      folderOutline.setAttribute("text", folder.prettyName);
++      folderOutline.setAttribute("fz:folder", true);
+       this.generatePPSpace(parent, indentString(indentLevel + 2));
+ 
+       if (folder.hasSubFolders) {
+         FeedUtils.log.debug(
+@@ -2738,12 +2781,14 @@ var FeedSubscriptions = {
+   },
+ 
+   exportOPMLOutline(aFeed, aDoc) {
+     let outRv = aDoc.createElement("outline");
+-    outRv.setAttribute("type", "rss");
+-    outRv.setAttribute("title", aFeed.title);
++    outRv.setAttribute(
++      "type",
++      aFeed.feedType.startsWith("ATOM") ? "atom" : "rss"
++    );
+     outRv.setAttribute("text", aFeed.title);
+-    outRv.setAttribute("version", "RSS");
++    outRv.setAttribute("version", aFeed.feedType);
+     outRv.setAttribute("fz:quickMode", aFeed.quickMode);
+     outRv.setAttribute("fz:options", JSON.stringify(aFeed.options));
+     outRv.setAttribute("xmlUrl", aFeed.url);
+     outRv.setAttribute("htmlUrl", aFeed.link);
+@@ -2905,14 +2950,19 @@ var FeedSubscriptions = {
+         let outlineName =
+           outline.getAttribute("text") ||
+           outline.getAttribute("title") ||
+           outline.getAttribute("xmlUrl");
+-        let feedUrl, folder;
+-
+-        if (outline.getAttribute("type") == "rss") {
+-          // A feed outline.
+-          feedUrl =
+-            outline.getAttribute("xmlUrl") || outline.getAttribute("url");
++        let folder;
++
++        const isRssType = ["rss", "atom"].includes(
++          outline.getAttribute("type")
++        );
++        const feedUrl =
++          outline.getAttribute("xmlUrl") || outline.getAttribute("url");
++
++        if (isRssType || feedUrl) {
++          // A feed outline if it contains the above feedUrl attributes,
++          // regardless of whether isRssType is true (follows the spec).
+           if (!feedUrl) {
+             FeedUtils.log.info(
+               "importOPMLOutlines: skipping, type=rss <outline> " +
+                 "has no url - " +
+@@ -2935,9 +2985,9 @@ var FeedSubscriptions = {
+           }
+ 
+           if (
+             aParentNode.tagName == "outline" &&
+-            aParentNode.getAttribute("type") != "rss"
++            !aParentNode.hasAttribute("xmlUrl")
+           ) {
+             // Parent is a folder, already created.
+             folder = feedFolder;
+           } else {
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.xhtml b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+--- a/mailnews/extensions/newsblog/feed-subscriptions.xhtml
++++ b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+@@ -55,8 +55,13 @@
+     <script>
+       window.addEventListener("load", event => {
+         FeedSubscriptions.onLoad();
+       });
++      window.addEventListener("dialogaccept", event => {
++        if (!FeedSubscriptions.onDialogAccept()) {
++          event.preventDefault();
++        }
++      });
+       window.addEventListener("keypress", event => {
+         FeedSubscriptions.onKeyPress(event);
+       });
+       window.addEventListener("mousedown", event => {
+@@ -154,18 +159,18 @@
+                   id="nameValue"
+                   type="text"
+                   class="input-inline"
+                   aria-labelledby="nameLabel"
+-                  onchange="FeedSubscriptions.setPrefs(this);"
++                  oninput="FeedSubscriptions.setPrefs(this);"
+                 />
+                 <hbox class="input-container">
+                   <html:input
+                     id="locationValue"
+                     type="url"
+                     class="uri-element input-inline"
+                     aria-labelledby="locationLabel"
+                     placeholder="&feedLocation2.placeholder;"
+-                    onchange="FeedSubscriptions.setPrefs(this);"
++                    oninput="FeedSubscriptions.clearStatusInfo(); FeedSubscriptions.setPrefs(this);"
+                     onfocus="FeedSubscriptions.onFocusChange();"
+                     onblur="FeedSubscriptions.onFocusChange();"
+                   />
+                   <hbox align="center">
+@@ -202,8 +207,9 @@
+                     readonly="readonly"
+                     aria-labelledby="feedFolderLabel"
+                     onkeypress="FeedSubscriptions.onClickSelectFolderValue(event);"
+                     onclick="FeedSubscriptions.onClickSelectFolderValue(event);"
++                    onblur="FeedSubscriptions.onBlurSelectFolderValue(event);"
+                   />
+                 </hbox>
+               </vbox>
+             </hbox>
+@@ -281,9 +287,9 @@
+                 id="autotagPrefix"
+                 type="text"
+                 class="input-inline"
+                 placeholder="&autoTagPrefix.placeholder;"
+-                onchange="FeedSubscriptions.setPrefs(this);"
++                oninput="FeedSubscriptions.setPrefs(this);"
+               />
+             </hbox>
+             <separator class="thin" />
+           </vbox>
+@@ -292,9 +298,9 @@
+         <hbox id="statusContainerBox" align="center">
+           <vbox flex="1">
+             <description id="statusText" />
+           </vbox>
+-          <spacer flex="1" />
++          <spacer flex="2" />
+           <label
+             id="validationText"
+             collapsed="true"
+             class="text-link"
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedparser.js b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feedparser.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+@@ -125,9 +125,9 @@ add_task(async function test_download() 
+             );
+             return;
+           }
+           // Feed has downloaded - make sure the right type was detected.
+-          Assert.equal(feed.mFeedType, test.feedType, "feed type matching");
++          Assert.equal(feed.feedType, test.feedType, "feed type matching");
+           Assert.equal(feed.title, test.title, "title matching");
+           // Make sure we're got the expected number of messages in the folder.
+           let cnt = [...folder.messages].length;
+           Assert.equal(cnt, test.expectedItems, "itemcount matching");
