@@ -1,27 +1,47 @@
 # HG changeset patch
 # User welpy-cw <h.w.forms@arcor.de>
-# Date 1714224013 -7200
-# Parent  d5c3a2cb4ed730b2ed37de8544de5cbf3e66e289
-Bug 1893793 - Fix setting view flags for cross-folder search views.
+# Date 1715285521 -7200
+# Parent  d6053e7d73a095ffe279d1d8024457393c814224
+Bug 1893793 - Fix setting view flags for cross-folder/synthetic search views.
 
 diff --git a/mail/modules/DBViewWrapper.jsm b/mail/modules/DBViewWrapper.jsm
 --- a/mail/modules/DBViewWrapper.jsm
 +++ b/mail/modules/DBViewWrapper.jsm
-@@ -1416,9 +1416,8 @@ DBViewWrapper.prototype = {
+@@ -1413,19 +1413,12 @@ DBViewWrapper.prototype = {
+   },
+   /**
+    * Update the view flags to use on the view.  If we are in a view update or
     *  currently don't have a view, we save the view flags for later usage when
-    *  the view gets (re)built.  If we have a view, depending on what's happening
-    *  we may re-create the view or just set the bits.  The rules/reasons are:
-    * - XFVF views can handle the flag changes, just set the flags.
+-   *  the view gets (re)built.  If we have a view, depending on what's happening
+-   *  we may re-create the view or just set the bits.  The rules/reasons are:
+-   * - XFVF views can handle the flag changes, just set the flags.
 -   * - XFVF threaded/unthreaded change must re-sort, the backend forgot.
-    * - Single-folder virtual folders (quicksearch) can handle viewFlag changes,
-    *    to/from grouped included, so set it.
-    * - Single-folder threaded/unthreaded can handle a change to/from unthreaded/
-    *    threaded, so set it.
-@@ -1443,15 +1442,8 @@ DBViewWrapper.prototype = {
-     let oldFlags = this.dbView.viewFlags;
-     let changedFlags = oldFlags ^ aViewFlags;
+-   * - Single-folder virtual folders (quicksearch) can handle viewFlag changes,
+-   *    to/from grouped included, so set it.
+-   * - Single-folder threaded/unthreaded can handle a change to/from unthreaded/
+-   *    threaded, so set it.
+-   * - Single-folder can _not_ handle a change between grouped and not-grouped,
+-   *    so re-generate the view. Also it can't handle a change involving
+-   *    kUnreadOnly or kShowIgnored.
++   *  the view gets (re)built.  If we have a view, depending on what's
++   *  happening we may re-create the view or just set the bits.
++   *
++   * @param {nsMsgViewFlagsTypeValue} aViewFlags
+    */
+   set _viewFlags(aViewFlags) {
+     if (this._viewUpdateDepth || !this.dbView) {
+       this.__viewFlags = aViewFlags;
+@@ -1437,49 +1430,36 @@ DBViewWrapper.prototype = {
+     if (this.dbView.selection && this.dbView.selection.count == 0) {
+       this.dbView.selection.currentIndex = -1;
+     }
  
-     if (this.isVirtual) {
+-    let setViewFlags = true;
+-    let reSort = false;
+-    let oldFlags = this.dbView.viewFlags;
+-    let changedFlags = oldFlags ^ aViewFlags;
+-
+-    if (this.isVirtual) {
 -      if (
 -        this.isMultiFolder &&
 -        changedFlags & Ci.nsMsgViewFlagsType.kThreadedDisplay &&
@@ -29,32 +49,140 @@ diff --git a/mail/modules/DBViewWrapper.jsm b/mail/modules/DBViewWrapper.jsm
 -      ) {
 -        reSort = true;
 -      }
-       if (this.isSingleFolder) {
-         // ugh, and the single folder case needs us to re-apply his sort...
-         reSort = true;
-       }
-diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
---- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
-+++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
-@@ -494,13 +494,17 @@ nsMsgXFVirtualFolderDBView::GetMsgFolder
- NS_IMETHODIMP
- nsMsgXFVirtualFolderDBView::SetViewFlags(nsMsgViewFlagsTypeValue aViewFlags) {
-   nsresult rv = NS_OK;
-   // If the grouping/threading has changed, rebuild the view.
--  if ((m_viewFlags & (nsMsgViewFlagsType::kGroupBySort |
--                      nsMsgViewFlagsType::kThreadedDisplay)) !=
--      (aViewFlags & (nsMsgViewFlagsType::kGroupBySort |
--                     nsMsgViewFlagsType::kThreadedDisplay))) {
+-      if (this.isSingleFolder) {
+-        // ugh, and the single folder case needs us to re-apply his sort...
+-        reSort = true;
+-      }
+-    } else {
+-      // The regular single folder case.
+-      if (
+-        changedFlags &
++    // Single-folder can _not_ handle a change between grouped and not-grouped,
++    // so re-generate the view. Also it can't handle a change involving
++    // kUnreadOnly or kShowIgnored (which are not available in virtual
++    // folders).
++    const changedFlags = this.dbView.viewFlags ^ aViewFlags;
++    if (
++      !this.isVirtual &&
++      changedFlags &
+         (Ci.nsMsgViewFlagsType.kGroupBySort |
+           Ci.nsMsgViewFlagsType.kUnreadOnly |
+           Ci.nsMsgViewFlagsType.kShowIgnored)
+-      ) {
+-        setViewFlags = false;
+-      }
+-      // ugh, and the single folder case needs us to re-apply his sort...
+-      reSort = true;
++    ) {
++      this.__viewFlags = aViewFlags;
++      this._applyViewChanges();
++      return;
+     }
+ 
+-    if (setViewFlags) {
+-      this.dbView.viewFlags = aViewFlags;
+-      if (reSort) {
+-        this.dbView.sort(this.dbView.sortType, this.dbView.sortOrder);
+-      }
+-      this.listener.onSortChanged();
+-    } else {
+-      this.__viewFlags = aViewFlags;
+-      this._applyViewChanges();
++    // XFVF views can handle the flag changes, just set the flags.
++    // Single-folder virtual folders (quicksearch) can handle viewFlag changes,
++    // to/from grouped included, so set it.
++    // Single-folder threaded/unthreaded can handle a change to/from
++    // unthreaded/threaded, so set it.
++    this.dbView.viewFlags = aViewFlags;
++    // ugh, and the single folder case needs us to re-apply his sort...
++    if (this.isSingleFolder) {
++      this.dbView.sort(this.dbView.sortType, this.dbView.sortOrder);
+     }
++    this.listener.onSortChanged();
+   },
+ 
+   /**
+    * Apply accumulated changes to the view.  If we are in a batch, we do
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -1346,4 +1346,25 @@ nsMsgSearchDBView::GetNumMsgsInView(int3
+   NS_ENSURE_ARG_POINTER(aNumMsgs);
+   *aNumMsgs = m_totalMessagesInView;
+   return NS_OK;
+ }
++
++NS_IMETHODIMP
++nsMsgSearchDBView::SetViewFlags(nsMsgViewFlagsTypeValue aViewFlags) {
++  nsresult rv = NS_OK;
++  // If the grouping/threading has changed, rebuild the view.
 +  constexpr nsMsgViewFlagsTypeValue groupedOrThreaded =
 +      (nsMsgViewFlagsType::kGroupBySort | nsMsgViewFlagsType::kThreadedDisplay);
 +  if ((m_viewFlags & groupedOrThreaded) != (aViewFlags & groupedOrThreaded)) {
-     rv = RebuildView(aViewFlags);
-+    // Changing back to unthreaded needs resorting.
++    rv = RebuildView(aViewFlags);
++    // While threaded and grouped views are sorted as they are rebuilt,
++    // switching to unthreaded simply preserves the sequence of the individual
++    // headers. Therefore, sort in this case (even when coming from grouped,
++    // to get the secondary sort right as well).
 +    if (!(aViewFlags & groupedOrThreaded)) {
 +      m_sortValid = false;
 +      Sort(m_sortType, m_sortOrder);
 +    }
-   }
++  }
++  NS_ENSURE_SUCCESS(rv, rv);
++  return nsMsgDBView::SetViewFlags(aViewFlags);
++}
+diff --git a/mailnews/base/src/nsMsgSearchDBView.h b/mailnews/base/src/nsMsgSearchDBView.h
+--- a/mailnews/base/src/nsMsgSearchDBView.h
++++ b/mailnews/base/src/nsMsgSearchDBView.h
+@@ -87,8 +87,10 @@ class nsMsgSearchDBView : public nsMsgGr
+   NS_IMETHOD ApplyCommandToIndices(
+       nsMsgViewCommandTypeValue command,
+       nsTArray<nsMsgViewIndex> const& selection) override;
  
-   nsMsgDBView::SetViewFlags(aViewFlags);
-   return rv;
++  NS_IMETHOD SetViewFlags(nsMsgViewFlagsTypeValue aViewFlags) override;
++
+  protected:
+   virtual ~nsMsgSearchDBView();
+   virtual void InternalClose() override;
+   virtual nsresult HashHdr(nsIMsgDBHdr* msgHdr, nsString& aHashKey) override;
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -490,23 +490,8 @@ nsMsgXFVirtualFolderDBView::GetMsgFolder
+   NS_IF_ADDREF(*aMsgFolder = m_viewFolder);
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP
+-nsMsgXFVirtualFolderDBView::SetViewFlags(nsMsgViewFlagsTypeValue aViewFlags) {
+-  nsresult rv = NS_OK;
+-  // If the grouping/threading has changed, rebuild the view.
+-  if ((m_viewFlags & (nsMsgViewFlagsType::kGroupBySort |
+-                      nsMsgViewFlagsType::kThreadedDisplay)) !=
+-      (aViewFlags & (nsMsgViewFlagsType::kGroupBySort |
+-                     nsMsgViewFlagsType::kThreadedDisplay))) {
+-    rv = RebuildView(aViewFlags);
+-  }
+-
+-  nsMsgDBView::SetViewFlags(aViewFlags);
+-  return rv;
+-}
+-
+ nsresult nsMsgXFVirtualFolderDBView::GetMessageEnumerator(
+     nsIMsgEnumerator** enumerator) {
+   return GetViewEnumerator(enumerator);
+ }
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+@@ -38,9 +38,8 @@ class nsMsgXFVirtualFolderDBView : publi
+                         nsIMsgDBViewCommandUpdater* aCmdUpdater) override;
+   NS_IMETHOD Close() override;
+   NS_IMETHOD GetViewType(nsMsgViewTypeValue* aViewType) override;
+   NS_IMETHOD DoCommand(nsMsgViewCommandTypeValue command) override;
+-  NS_IMETHOD SetViewFlags(nsMsgViewFlagsTypeValue aViewFlags) override;
+   NS_IMETHOD OnHdrPropertyChanged(nsIMsgDBHdr* aHdrToChange,
+                                   const nsACString& property, bool aPreChange,
+                                   uint32_t* aStatus,
+                                   nsIDBChangeListener* aInstigator) override;
