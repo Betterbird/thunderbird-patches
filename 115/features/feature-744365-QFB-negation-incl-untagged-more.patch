@@ -1,10 +1,12 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1711137285 -3600
-# Parent  ecad6b81351819be18227c5acdb6672b751ddb94
+# Parent  11cc61c8c3694215db1a21ed3276217d4c4e9376
 Implement negation for QuickFilterBar filter and text filter buttons - Part 2:
 
 Make the term that yields untagged messages the first tag-related term instead of the last. Add debugging output.
+* * *
+Authored by Alta88: Fix UX and prevent unnecessary searches in tags negation mode.
 
 diff --git a/mail/modules/QuickFilterManager.jsm b/mail/modules/QuickFilterManager.jsm
 --- a/mail/modules/QuickFilterManager.jsm
@@ -181,73 +183,76 @@ diff --git a/mail/modules/QuickFilterManager.jsm b/mail/modules/QuickFilterManag
      }
      return null;
    },
-@@ -901,13 +963,29 @@ var TagFacetingFilter = {
-       aNode.inverted =
+@@ -902,12 +964,8 @@ var TagFacetingFilter = {
          aFilterValue === false || aFilterValue?.inverted === true;
      }
      if (aFilterValue != null && typeof aFilterValue == "object") {
--      this._populateTagBar(aFilterValue, aDocument, aMuxer);
+       this._populateTagBar(aFilterValue, aDocument, aMuxer);
 -      const hasSelectedTag = Object.entries(aFilterValue.tags).some(
 -        tag => tag[1] !== null
-+      let hasTagSelected = false;
-+      let hasTagInverted = false;
-+      for (let key in aFilterValue.tags) {
-+        let value = aFilterValue.tags[key];
-+        if (value === true) {
-+          hasTagSelected = true;
-+        } else if (value === false) {
-+          hasTagInverted = true;
-+        }
-+      }
-+      // Then the tag filter is inverted, we only allow either selection or inversion of tag buttons.
-+      // If we allowed both, the backend couldn't process the resulting expression.
-+      this._populateTagBar(
-+        aFilterValue,
-+        aDocument,
-+        aMuxer,
-+        hasTagInverted && aFilterValue.inverted,
-+        hasTagSelected && aFilterValue.inverted
-       );
+-      );
 -      aDocument.getElementById("qfb-boolean-mode").disabled = !hasSelectedTag;
-+      aDocument.getElementById("qfb-boolean-mode").disabled =
-+        !hasTagSelected && !hasTagInverted;
      }
  
      aDocument
        .getElementById("threadTree")
-@@ -921,9 +999,9 @@ var TagFacetingFilter = {
-       tagbar.hidden = !hasTag;
+@@ -935,21 +993,55 @@ var TagFacetingFilter = {
+     } else {
+       aState.mode = qbm.value;
      }
-   },
  
--  _populateTagBar(aState, aDocument, aMuxer) {
-+  _populateTagBar(aState, aDocument, aMuxer, preventSelect, preventInvert) {
-     let tagbar = aDocument.getElementById("quickFilterBarTagsContainer");
-     let keywordMap = aState.tags;
- 
-     // If we have a mode stored use that. If we don't have a mode, then update
-@@ -938,8 +1016,11 @@ var TagFacetingFilter = {
- 
++    // When the tag filter is inverted, we only allow either selection or
++    // inversion of tag buttons.
++    // If we allowed both, the backend can't correctly process the resulting
++    // expression.
++    let tagsSelected = 0;
++    let tagsInverted = 0;
++    for (const tagKey in keywordMap) {
++      const value = keywordMap[tagKey];
++      if (value === true) {
++        tagsSelected++;
++      } else if (value === false) {
++        tagsInverted++;
++      }
++    }
++    qbm.disabled = !tagsSelected && !tagsInverted;
++
      function clickHandler(aEvent) {
        let tagKey = this.getAttribute("value");
-       let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
-+      if (state.tags[tagKey] === null && preventSelect) {
-+        this.pressed = false;
+-      let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-      state.tags[tagKey] = this.pressed ? true : null;
++      if (keywordMap[tagKey] === null && aState.inverted && tagsInverted) {
++        // We use a delay to clear the button to give feedback that an action
++        // was indeed performed.
++        aDocument.ownerGlobal.setTimeout(() => {
++          this.pressed = false;
++        }, 200);
++        return;
 +      }
-       state.tags[tagKey] = this.pressed ? true : null;
++      keywordMap[tagKey] = this.pressed ? true : null;
        aMuxer.updateSearch();
      }
  
-@@ -947,8 +1028,12 @@ var TagFacetingFilter = {
+     function rightClickHandler(aEvent) {
        if (aEvent.button == 2) {
          // A |toggle-button| sets up pressed and inverted in the constructor.
          let tagKey = this.getAttribute("value");
-         let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
-+        if (state.tags[tagKey] !== false && preventInvert) {
-+          this.pressed = false;
-+          this.inverted = false;
+-        let state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-        state.tags[tagKey] = !this.pressed ? null : !this.inverted;
++        const tagKeyState = keywordMap[tagKey];
++        if (
++          ((tagKeyState === null && tagsSelected) ||
++            (tagKeyState === true && tagsSelected > 1)) &&
++          aState.inverted
++        ) {
++          aDocument.ownerGlobal.setTimeout(() => {
++            this.pressed = tagKeyState === true;
++            this.inverted = false;
++          }, 200);
++          return;
 +        }
-         state.tags[tagKey] = !this.pressed ? null : !this.inverted;
++        keywordMap[tagKey] = !this.pressed ? null : !this.inverted;
          aMuxer.updateSearch();
          aEvent.preventDefault();
        }
+     }
