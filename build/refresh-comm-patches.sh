@@ -79,10 +79,10 @@ echo "======================================================="
 echo "Copying patches and series file from thunderbird-patches"
 # cp -u doesn't work on Mac :-(
 rsync -u -i ../../thunderbird-patches/$VERSION/series .hg/patches/series
-rsync -u -i ../../thunderbird-patches/$VERSION/branding/*.patch --exclude=*-m-c.patch .hg/patches/
-rsync -u -i ../../thunderbird-patches/$VERSION/bugs/*.patch     --exclude=*-m-c.patch .hg/patches/
-rsync -u -i ../../thunderbird-patches/$VERSION/features/*.patch --exclude=*-m-c.patch .hg/patches/
-rsync -u -i ../../thunderbird-patches/$VERSION/misc/*.patch     --exclude=*-m-c.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/branding/*.patch --exclude=*$MOZ.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/bugs/*.patch     --exclude=*$MOZ.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/features/*.patch --exclude=*$MOZ.patch .hg/patches/
+rsync -u -i ../../thunderbird-patches/$VERSION/misc/*.patch     --exclude=*$MOZ.patch .hg/patches/
 
 if [ -d ../../private-patches ]; then
   echo

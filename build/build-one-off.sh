@@ -114,13 +114,13 @@ fi
 if ! [ -d comm/patches ]; then
   mkdir comm/patches
 fi
-cp ../thunderbird-patches/$VERSION/series-M-C            patches/series
+cp ../thunderbird-patches/$VERSION/series$MOZU           patches/series
 cp ../thunderbird-patches/$VERSION/series           comm/patches/series
 cp ../thunderbird-patches/$VERSION/branding/*.patch comm/patches/
 cp ../thunderbird-patches/$VERSION/bugs/*.patch     comm/patches/
 cp ../thunderbird-patches/$VERSION/features/*.patch comm/patches/
 cp ../thunderbird-patches/$VERSION/misc/*.patch     comm/patches/
-mv comm/patches/*-m-c.patch patches/
+mv comm/patches/*$MOZ.patch patches/
 
 echo
 echo "======================================================="

@@ -150,13 +150,13 @@ fi
 if ! [ -d comm/.hg/patches ]; then
   mkdir comm/.hg/patches
 fi
-cp ../thunderbird-patches/$VERSION/series-M-C            .hg/patches/series
+cp ../thunderbird-patches/$VERSION/series$MOZU           .hg/patches/series
 cp ../thunderbird-patches/$VERSION/series           comm/.hg/patches/series
 cp ../thunderbird-patches/$VERSION/branding/*.patch comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/bugs/*.patch     comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/features/*.patch comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/misc/*.patch     comm/.hg/patches/
-mv comm/.hg/patches/*-m-c.patch .hg/patches/
+mv comm/.hg/patches/*$MOZ.patch .hg/patches/
 
 if [ -d ../private-patches ]; then
   echo
