@@ -1,0 +1,760 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1715808668 -7200
+# Parent  7e51f6b0c6c1ea0e8f4d83854fa84e7b99fb0aac
+Bug 1562737 - Body search in PGP encrypted messages.
+
+Short history of this patch (in the 91 version):
+https://github.com/Betterbird/thunderbird-patches/commits/main/91/bugs/1562737-body-search-encrypted.patch
+In https://github.com/Betterbird/thunderbird-patches/commit/6b80018615ad5fa0d326c0cab4306e7d9fdfd628 and
+   https://github.com/Betterbird/thunderbird-patches/commit/d6085dbab1c0905b37a88397c4d39936370a50c6
+code was added to fix a "mysterious crash". When working of bug 1554188 (close folder databases during search)
+it turned out the the re-entrancy protection led to missing MSFs not being rebuilt as they should during the search.
+Subsequently the re-entrancy gate was removed and `m_listContext` was turned into a local variable, as previously
+suggested: https://github.com/Betterbird/thunderbird-patches/commit/dc36bb5a27443feb56546fbe49368cd3b11e7289
+That destroyed search in encrypted messages altogether :-(
+In the latest version, turning `m_listContext` into a local variable is reverted and the code is left in its
+original state with no re-entrancy protection. At time of writing (13th Nov. 2022) no crashes are observed.
+* * *
+Bug 1562737 - Body search in S/MIME encrypted messages.
+
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+@@ -101,8 +101,9 @@ function MimeDecryptHandler() {
+   this.outQueue = "";
+   this.dataLength = 0;
+   this.bytesWritten = 0;
+   this.mimePartCount = 0;
++  this.inBodySearch = false;
+   this.headerMode = 0;
+   this.xferEncoding = ENCODING_DEFAULT;
+   this.matchedPgpDelimiter = 0;
+   this.exitCode = null;
+@@ -160,8 +161,9 @@ MimeDecryptHandler.prototype = {
+     this.returnStatus = null;
+     this.dataLength = 0;
+     this.decryptedData = "";
+     this.mimePartCount = 0;
++    this.inBodySearch = false;
+     this.bytesWritten = 0;
+     this.matchedPgpDelimiter = 0;
+     this.dataIsBase64 = null;
+     this.base64Cache = "";
+@@ -219,8 +221,14 @@ MimeDecryptHandler.prototype = {
+         this.cacheData(lazy.EnigmailData.decodeQuotedPrintable(data));
+       } else {
+         this.cacheData(data);
+       }
++    // Check whether this data came in via a body search.
++    } else if (this.inBodySearch) {
++      this.cacheData(data);
++    } else if (data.startsWith("-----BEGIN PGP MESSAGE-----")) {
++      this.cacheData(data);
++      this.inBodySearch = true;
+     }
+   },
+ 
+   onDataAvailable(req, stream, offset, count) {
+diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/nsMsgBodyHandler.h
+--- a/mailnews/search/public/nsMsgBodyHandler.h
++++ b/mailnews/search/public/nsMsgBodyHandler.h
+@@ -13,9 +13,12 @@
+ // nsMsgBodyHandler: used to retrieve lines from POP and IMAP offline messages.
+ // This is a helper class used by nsMsgSearchTerm::MatchBody() and
+ // nsMsgSearchTerm::MatchArbitraryHeader().
+ //---------------------------------------------------------------------------
++class nsMsgBodyHandler2;
+ class nsMsgBodyHandler {
++  friend class nsMsgBodyHandler2;
++
+  public:
+   nsMsgBodyHandler(nsIMsgSearchScopeTerm*, nsIMsgDBHdr* msg);
+ 
+   // We can also create a body handler when doing arbitrary header
+@@ -65,17 +68,30 @@ class nsMsgBodyHandler {
+   bool m_partIsHtml;   // true if the Content-type header claims text/html
+   bool m_base64part;   // true if the current part is in base64
+   bool m_isMultipart;  // true if the message is a multipart/* message
+   bool m_partIsText;   // true if the current part is text/*
++  bool m_seenMpPGP;    // true if we've seen the multipart/encrypted;
++                       // protocol="application/pgp-encrypted"; header
++  bool m_partIsPGP;    // true if the current part is the PGP payload in
++                       // application/octet-stream
++  bool m_partIsSMIME;  // true if the current part is an S/MIME part
+   bool m_inMessageAttachment;  // true if current part is message/*
+ 
+   nsTArray<nsCString> m_boundaries;  // The boundary strings to look for
+   nsCString m_partCharset;           // The charset found in the part
++  // String to hold the decrypted result.
++  nsCString mDecrypted;
+ 
+   // See implementation for comments
+   int32_t ApplyTransformations(const nsCString& line, int32_t length,
+                                bool& returnThisLine, nsCString& buf);
+   void SniffPossibleMIMEHeader(const nsCString& line);
+   static void StripHtml(nsCString& buf);
+   static void Base64Decode(nsCString& buf);
++  void DecryptPGP(const nsCString& aEncrypted, nsCString& aDecrypted);
++  void DecryptSMIME(const nsCString& aEncrypted, nsCString& aDecrypted);
++  static int OutputFunctionPGP(const char* buf, int32_t buf_size, void* arg);
++  static void OutputFunctionSMIME(void* arg, const char* buf,
++                                  unsigned long length);
++  void GetRelevantTextParts(const nsCString& aInput, nsCString& aOutput);
+ };
+ #endif
+diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMsgBodyHandler.cpp
+--- a/mailnews/search/src/nsMsgBodyHandler.cpp
++++ b/mailnews/search/src/nsMsgBodyHandler.cpp
+@@ -8,10 +8,17 @@
+ #include "nsMsgUtils.h"
+ #include "nsMsgBodyHandler.h"
+ #include "nsMsgSearchTerm.h"
+ #include "nsIInputStream.h"
++#include "nsIPgpMimeProxy.h"
++#include "nsICMSMessage.h"
++#include "nsICMSDecoder.h"
+ #include "plbase64.h"
+ #include "nsMimeTypes.h"
++#include "nsMsgI18N.h"
++#include "mozilla/Utf8.h"
++
++#include "nsMsgBodyHandler2.cpp"
+ 
+ nsMsgBodyHandler::nsMsgBodyHandler(nsIMsgSearchScopeTerm* scope,
+                                    nsIMsgDBHdr* msg) {
+   m_scope = scope;
+@@ -59,8 +66,11 @@ void nsMsgBodyHandler::Initialize()
+   m_base64part = false;
+   m_partIsQP = false;
+   m_isMultipart = false;
+   m_partIsText = true;  // Default is text/plain, maybe proven otherwise later.
++  m_seenMpPGP = false;
++  m_partIsPGP = false;
++  m_partIsSMIME = false;
+   m_pastPartHeaders = false;
+   m_inMessageAttachment = false;
+   m_headerBytesRead = 0;
+ }
+@@ -90,9 +100,9 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
+ 
+   if (outLength < 0) return -1;  // eof out
+ 
+   // For non-multipart messages, the entire message minus headers is encoded.
+-  if (!m_isMultipart && m_base64part) {
++  if (!m_isMultipart && !m_partIsSMIME && m_base64part) {
+     Base64Decode(buf);
+     outLength = buf.Length();
+     m_base64part = false;
+   }
+@@ -102,8 +112,19 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
+     StripHtml(buf);
+     outLength = buf.Length();
+   }
+ 
++  if (m_partIsSMIME) {
++    nsCString decrypted;
++    // printf("=== Decrypt this!\n|%s|\n", buf.get());
++    DecryptSMIME(buf, decrypted);
++    // printf("=== Here we go!\n|%s|\n", decrypted.get());
++    GetRelevantTextParts(decrypted, buf);
++    // printf("=== Text parts are\n|%s|\n", buf.get());
++    outLength = decrypted.Length();
++    m_partCharset = "UTF-8";
++  }
++
+   charset = m_partCharset;
+   return outLength;
+ }
+ 
+@@ -233,40 +254,55 @@ int32_t nsMsgBodyHandler::ApplyTransform
+       } else {
+         // Avoid spurious failures
+         eatThisLine = false;
+       }
+-    } else if (!m_partIsHtml) {
++    } else if (!m_partIsHtml && !m_partIsPGP) {
+       buf.Truncate();
+       eatThisLine = true;  // We have no content...
+     }
+ 
+     if (m_partIsHtml) {
+       StripHtml(buf);
+     }
+ 
++    if (m_partIsPGP) {
++      nsCString decrypted;
++      // printf("=== Decrypt this!\n|%s|\n", buf.get());
++      DecryptPGP(buf, decrypted);
++      // printf("=== Here we go!\n|%s|\n", decrypted.get());
++      GetRelevantTextParts(decrypted, buf);
++      // printf("=== Text parts are\n|%s|\n", buf.get());
++      m_partCharset = "UTF-8";
++    }
++
+     // Reset all assumed headers
+     m_pastPartHeaders = false;
+     m_base64part = false;
+     m_partIsHtml = false;
+     // If we ever see a multipart message, each part needs to set
+     // 'm_partIsText', so no more defaulting to 'true' when the part is done.
+     m_partIsText = false;
+ 
++    if (m_partIsPGP) m_seenMpPGP = false;
++    m_partIsPGP = false;
++    m_partIsSMIME = false;
++
+     // Note: we cannot reset 'm_partIsQP' yet since we still need it to process
+     // the last buffer returned here. Parsing the next part will set a new
+     // value.
+     return buf.Length();
+   }
+ 
+-  if (!m_partIsText) {
++  if (!m_partIsText && !m_partIsPGP && !m_partIsSMIME) {
+     // Ignore non-text parts
+     buf.Truncate();
+     eatThisLine = true;
+     return 0;
+   }
+ 
+-  // Accumulate base64 parts and HTML parts for later decoding or tag stripping.
+-  if (m_base64part || m_partIsHtml) {
++  // Accumulate base64 parts, HTML parts and encrypted parts for later decoding
++  // or tag stripping.
++  if (m_base64part || m_partIsHtml || m_partIsPGP || m_partIsSMIME) {
+     if (m_partIsHtml && !m_base64part) {
+       size_t bufLength = buf.Length();
+       if (!m_partIsQP || bufLength == 0 || !StringEndsWith(buf, "="_ns)) {
+         // Replace newline in HTML with a space.
+@@ -274,8 +310,10 @@ int32_t nsMsgBodyHandler::ApplyTransform
+       } else {
+         // Strip the soft line break.
+         buf.SetLength(bufLength - 1);
+       }
++    } else if (m_partIsPGP && buf.Length() > 0) {
++      buf.Append('\n');
+     }
+     buf.Append(line);
+     eatThisLine = true;
+     return buf.Length();
+@@ -309,8 +347,125 @@ void nsMsgBodyHandler::StripHtml(nsCStri
+     pBufInOut.Adopt(pBuf);
+   }
+ }
+ 
++/* static */
++int nsMsgBodyHandler::OutputFunctionPGP(const char* buf, int32_t buf_size,
++                                        void* arg) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++  self->mDecrypted.Assign(buf, buf_size);
++  return 0;
++}
++
++/* static */
++void nsMsgBodyHandler::OutputFunctionSMIME(void* arg, const char* buf,
++                                           unsigned long length) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++  self->mDecrypted.Append(buf, length);
++}
++
++void nsMsgBodyHandler::DecryptPGP(const nsCString& aEncrypted,
++                                  nsCString& aDecrypted) {
++  aDecrypted.Truncate();
++  mDecrypted.Truncate();
++  nsCOMPtr<nsIPgpMimeProxy> decryptor;
++  nsresult rv;
++  decryptor = do_CreateInstance("@mozilla.org/mime/pgp-mime-decrypt;1", &rv);
++  NS_ENSURE_SUCCESS_VOID(rv);
++
++  decryptor->Init();
++  // If we pass a boundary, code in mimeDecrypt.jsm will look for a
++  // two part multipart/encrypted structure. We just pass the net data.
++  // Use a boundary which won't be found 100%.
++  decryptor->SetContentType(
++      "multipart/encrypted; boundary=$$none$$none$$none$$none$$none"_ns);
++  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunctionPGP, this,
++                             nullptr, nullptr);
++  decryptor->Write(aEncrypted.get(), aEncrypted.Length());
++  decryptor->Finish();
++  decryptor->RemoveMimeCallback();
++  aDecrypted.Assign(mDecrypted.get());  // Make a copy.
++}
++
++void nsMsgBodyHandler::DecryptSMIME(const nsCString& aEncrypted,
++                                    nsCString& aDecrypted) {
++  aDecrypted.Truncate();
++  mDecrypted.Truncate();
++
++  // base64-decode the buffer. We need to determine the output length.
++  int32_t inLen = aEncrypted.Length();
++  int32_t maxOutLen = (inLen * 3) / 4;
++  int32_t outLen =
++      (inLen / 4) * 3 + ((inLen % 4 == 3) ? 2 : 0) + ((inLen % 4 == 2) ? 1 : 0);
++  char* decoded = (char*)moz_xmalloc(maxOutLen);
++  if (!decoded) return;
++  PL_Base64Decode(aEncrypted.get(), inLen, decoded);
++
++  nsresult rv;
++  nsCOMPtr<nsICMSDecoder> decryptor =
++      do_CreateInstance(NS_CMSDECODER_CONTRACTID, &rv);
++  rv = decryptor->Start(nsMsgBodyHandler::OutputFunctionSMIME, this);
++  NS_ENSURE_SUCCESS_VOID(rv);
++  rv = decryptor->Update(decoded, outLen);
++  free(decoded);
++  NS_ENSURE_SUCCESS_VOID(rv);
++  nsCOMPtr<nsICMSMessage> cinfo;
++  rv = decryptor->Finish(getter_AddRefs(cinfo));
++  NS_ENSURE_SUCCESS_VOID(rv);
++  aDecrypted.Assign(mDecrypted.get());  // Make a copy.
++}
++
++void nsMsgBodyHandler::GetRelevantTextParts(const nsCString& aInput,
++                                            nsCString& aOutput) {
++  aOutput.Truncate();
++
++  // Code copied from nsMsgSearchTerm::MatchBody().
++  nsMsgBodyHandler2* bodyHan2 = new nsMsgBodyHandler2(aInput);
++
++  bool endOfFile = false;
++  nsAutoCString buf;
++  nsCString charset;
++  while (!endOfFile) {
++    if (bodyHan2->GetNextLine(buf, charset) >= 0) {
++      bool softLineBreak = false;
++      // Do in-place decoding of quoted printable
++      if (bodyHan2->IsQP()) {
++        softLineBreak = StringEndsWith(buf, "="_ns);
++        MsgStripQuotedPrintable(buf);
++        // If soft line break, chop off the last char as well.
++        size_t bufLength = buf.Length();
++        if ((bufLength > 0) && softLineBreak) buf.SetLength(bufLength - 1);
++      }
++
++      if (!charset.IsEmpty() && !charset.EqualsIgnoreCase("UTF-8") &&
++          !charset.EqualsIgnoreCase("UTF8")) {
++        // Convert to UTF-8.
++        nsAutoString buf16;
++        nsresult rv = nsMsgI18NConvertToUnicode(charset, buf, buf16);
++        if (NS_FAILED(rv)) {
++          // No charset or conversion failed, maybe due to a bad charset, try
++          // UTF-8.
++          if (mozilla::IsUtf8(buf)) {
++            CopyUTF8toUTF16(buf, buf16);
++          } else {
++            // Bad luck, let's assume ASCII/windows-1252 then.
++            CopyASCIItoUTF16(buf, buf16);
++          }
++        }
++        CopyUTF16toUTF8(buf16, buf);
++      }
++
++      aOutput.Append(buf);
++
++      // Replace the line break with a space so huhu\nhaha is not found as
++      // huhuhaha.
++      if (!softLineBreak) aOutput.Append(' ');
++    } else
++      endOfFile = true;
++  }
++  delete bodyHan2;
++}
++
+ /**
+  * Determines the MIME type, if present, from the current line.
+  *
+  * m_partIsHtml, m_isMultipart, m_partIsText, m_base64part, and boundary are
+@@ -340,26 +495,58 @@ void nsMsgBodyHandler::SniffPossibleMIME
+         m_partIsQP = false;
+         m_pastPartHeaders = false;
+         m_partIsHtml = false;
+         m_partIsText = false;
++        m_seenMpPGP = false;
++        m_partIsPGP = false;
++        m_partIsSMIME = false;
+       }
+       m_isMultipart = true;
+       m_partCharset.Truncate();
++      m_seenMpPGP = false;
+     } else if (lowerCaseLine.Find("message/") != kNotFound) {
+       // Initialise again.
+       m_base64part = false;
+       m_partIsQP = false;
+       m_pastPartHeaders = false;
+       m_partIsHtml = false;
+       m_partIsText =
+           true;  // Default is text/plain, maybe proven otherwise later.
++      m_seenMpPGP = false;
++      m_partIsPGP = false;
++      m_partIsSMIME = false;
+       m_inMessageAttachment = true;
++    } else if (lowerCaseLine.Find("application/octet-stream") != kNotFound &&
++               m_seenMpPGP) {
++      m_base64part = false;
++      m_partIsQP = false;
++      m_pastPartHeaders = false;
++      m_partIsHtml = false;
++      m_partIsText = false;
++      m_seenMpPGP = false;
++      m_partIsPGP = true;
++      m_partIsSMIME = false;
++    } else if (lowerCaseLine.Find("application/pkcs7-mime") != kNotFound ||
++               lowerCaseLine.Find("application/x-pkcs7-mime") != kNotFound) {
++      m_base64part = false;
++      m_partIsQP = false;
++      m_pastPartHeaders = false;
++      m_partIsHtml = false;
++      m_partIsText = false;
++      m_seenMpPGP = false;
++      m_partIsPGP = false;
++      // S/MIME is one monolithic base64-encoded blob with no boundaries.
++      m_partIsSMIME = true;
+     } else if (lowerCaseLine.Find("text/") != kNotFound)
+       m_partIsText = true;
+     else if (lowerCaseLine.Find("text/") == kNotFound)
+       m_partIsText = false;  // We have disproven our assumption.
+   }
+ 
++  if (m_isMultipart && lowerCaseLine.Find("protocol") != kNotFound &&
++      lowerCaseLine.Find("application/pgp-encrypted") != kNotFound) {
++    m_seenMpPGP = true;
++  }
+   int32_t start;
+   if (m_isMultipart && (start = lowerCaseLine.Find("boundary=")) != kNotFound) {
+     start += 9;  // strlen("boundary=")
+     if (line[start] == '\"') start++;
+diff --git a/mailnews/search/src/nsMsgBodyHandler2.cpp b/mailnews/search/src/nsMsgBodyHandler2.cpp
+new file mode 100644
+--- /dev/null
++++ b/mailnews/search/src/nsMsgBodyHandler2.cpp
+@@ -0,0 +1,330 @@
++// ///////////////////////////////////////////////////////////////////////////
++// Below is nsMsgBodyHandler2, a copy of nsMsgBodyHandler that we use to parse
++// an entire decrypted message in a string.
++//
++// This .cpp file is included in nsMsgBodyHandler.cpp.
++// ///////////////////////////////////////////////////////////////////////////
++
++class nsMsgBodyHandler2 {
++ public:
++  explicit nsMsgBodyHandler2(const nsCString& buf);
++  virtual ~nsMsgBodyHandler2();
++  int32_t GetNextLine(nsCString& buf, nsCString& charset);
++  bool IsQP() { return m_partIsQP; }
++
++ protected:
++  void Initialize();  // common initialization code
++  int32_t GetNextLocalLine(nsCString& buf);
++
++  const char* m_currInput;
++  const char* m_currInputEnd;
++
++  // Transformations
++  // With the exception of m_isMultipart, these all apply to the various parts
++  bool m_pastPartHeaders;  // true if we've already skipped over the part
++                           // headers
++  bool m_partIsQP;     // true if the Content-Transfer-Encoding header claims
++                       // quoted-printable
++  bool m_partIsHtml;   // true if the Content-type header claims text/html
++  bool m_base64part;   // true if the current part is in base64
++  bool m_isMultipart;  // true if the message is a multipart/* message
++  bool m_partIsText;   // true if the current part is text/*
++  bool m_inMessageAttachment;  // true if current part is message/*
++
++  nsTArray<nsCString> m_boundaries;  // The boundary strings to look for
++  nsCString m_partCharset;           // The charset found in the part
++
++  // See implementation for comments
++  int32_t ApplyTransformations(const nsCString& line, int32_t length,
++                               bool& returnThisLine, nsCString& buf);
++  void SniffPossibleMIMEHeader(const nsCString& line);
++};
++
++nsMsgBodyHandler2::nsMsgBodyHandler2(const nsCString& buf) {
++  m_currInput = buf.BeginReading();
++  m_currInputEnd = m_currInput + buf.Length();
++
++  Initialize();
++}
++
++void nsMsgBodyHandler2::Initialize() {
++  // Default transformations for local message search and MAPI access
++  m_partIsHtml = false;
++  m_base64part = false;
++  m_partIsQP = false;
++  m_isMultipart = false;
++  m_partIsText = true;  // Default is text/plain, maybe proven otherwise later.
++  m_pastPartHeaders = false;
++  m_inMessageAttachment = false;
++}
++
++nsMsgBodyHandler2::~nsMsgBodyHandler2() {}
++
++int32_t nsMsgBodyHandler2::GetNextLine(nsCString& buf, nsCString& charset) {
++  int32_t length = -1;     // length of incoming line or -1 eof
++  int32_t outLength = -1;  // length of outgoing line or -1 eof
++  bool eatThisLine = true;
++  nsAutoCString nextLine;
++
++  while (eatThisLine) {
++    length = GetNextLocalLine(nextLine);
++    if (length < 0) break;  // eof in
++    outLength = ApplyTransformations(nextLine, length, eatThisLine, buf);
++  }
++
++  if (outLength < 0) return -1;  // eof out
++
++  // For non-multipart messages, the entire message minus headers is encoded.
++  if (!m_isMultipart && m_base64part) {
++    nsMsgBodyHandler::Base64Decode(buf);
++    outLength = buf.Length();
++    m_base64part = false;
++  }
++
++  // Process aggregated HTML.
++  if (!m_isMultipart && m_partIsHtml) {
++    nsMsgBodyHandler::StripHtml(buf);
++    outLength = buf.Length();
++  }
++
++  charset = m_partCharset;
++  return outLength;
++}
++
++// return -1 if no more local lines, length of next line otherwise.
++int32_t nsMsgBodyHandler2::GetNextLocalLine(nsCString& buf) {
++  if (m_currInput >= m_currInputEnd) return -1;
++
++  const char* q = m_currInput;
++  // Deliver the next line.
++  while (q < m_currInputEnd && *q && *q != '\r' && *q != '\n') q++;
++
++  int32_t l = q - m_currInput;
++  buf.Assign(m_currInput, q - m_currInput);
++
++  // This mimicks nsILineInputStream.readLine() which claims to skip
++  // LF, CR, CRLF and LFCR.
++  if (*q == '\r' && (q + 1) < m_currInputEnd && *(q + 1) == '\n') {
++    q += 2;
++  } else if (*q == '\n' && (q + 1) < m_currInputEnd && *(q + 1) == '\r') {
++    q += 2;
++  } else if (*q) {
++    q++;
++  }
++  m_currInput = q;
++
++  return l;
++}
++
++/**
++ * This method applies a sequence of transformations to the line.
++ *
++ * It applies the following sequences in order
++ * * Removes headers if the searcher doesn't want them
++ *   (sets m_past*Headers)
++ * * Determines the current MIME type.
++ *   (via SniffPossibleMIMEHeader)
++ * * Strips any HTML if the searcher doesn't want it
++ * * Strips non-text parts
++ * * Decodes any base64 part
++ *   (resetting part variables: m_base64part, m_pastPartHeaders, m_partIsHtml,
++ *    m_partIsText)
++ *
++ * @param line        (in)    the current line
++ * @param length      (in)    the length of said line
++ * @param eatThisLine (out)   whether or not to ignore this line
++ * @param buf         (inout) if m_base64part, the current part as needed for
++ *                            decoding; else, it is treated as an out param (a
++ *                            redundant version of line).
++ * @return            the length of the line after applying transformations
++ */
++int32_t nsMsgBodyHandler2::ApplyTransformations(const nsCString& line,
++                                                int32_t length,
++                                                bool& eatThisLine,
++                                                nsCString& buf) {
++  eatThisLine = false;
++
++  if (!m_pastPartHeaders)  // line is a line from the part headers
++  {
++    eatThisLine = true;
++
++    // We have already grabbed all worthwhile information from the headers,
++    // so there is no need to keep track of the current lines
++    buf.Assign(line);
++
++    SniffPossibleMIMEHeader(buf);
++
++    if (buf.IsEmpty() || buf.First() == '\r' || buf.First() == '\n') {
++      if (!m_inMessageAttachment) {
++        m_pastPartHeaders = true;
++      } else {
++        // We're in a message attachment and have just read past the
++        // part header for the attached message. We now need to read
++        // the message headers and any part headers.
++        // We can now forget about the special handling of attached messages.
++        m_inMessageAttachment = false;
++      }
++    }
++
++    return length;
++  }
++
++  // Check to see if this is one of our boundary strings.
++  bool matchedBoundary = false;
++  if (m_isMultipart && m_boundaries.Length() > 0) {
++    for (int32_t i = (int32_t)m_boundaries.Length() - 1; i >= 0; i--) {
++      if (StringBeginsWith(line, m_boundaries[i])) {
++        matchedBoundary = true;
++        // If we matched a boundary, we won't need the nested/later ones any
++        // more.
++        m_boundaries.SetLength(i + 1);
++        break;
++      }
++    }
++  }
++  if (matchedBoundary) {
++    if (m_base64part && m_partIsText) {
++      nsMsgBodyHandler::Base64Decode(buf);
++      // Work on the parsed string
++      if (!buf.Length()) {
++        NS_WARNING("Trying to transform an empty buffer");
++        eatThisLine = true;
++      } else {
++        // Avoid spurious failures
++        eatThisLine = false;
++      }
++    } else if (!m_partIsHtml) {
++      buf.Truncate();
++      eatThisLine = true;  // We have no content...
++    }
++
++    if (m_partIsHtml) {
++      nsMsgBodyHandler::StripHtml(buf);
++    }
++
++    // Reset all assumed headers
++    m_base64part = false;
++    m_pastPartHeaders = false;
++    m_partIsHtml = false;
++    // If we ever see a multipart message, each part needs to set
++    // 'm_partIsText', so no more defaulting to 'true' when the part is done.
++    m_partIsText = false;
++
++    // Note: we cannot reset 'm_partIsQP' yet since we still need it to process
++    // the last buffer returned here. Parsing the next part will set a new
++    // value.
++    return buf.Length();
++  }
++
++  if (!m_partIsText) {
++    // Ignore non-text parts
++    buf.Truncate();
++    eatThisLine = true;
++    return 0;
++  }
++
++  // Accumulate base64 parts and HTML parts for later decoding or tag stripping.
++  if (m_base64part || m_partIsHtml) {
++    if (m_partIsHtml && !m_base64part) {
++      size_t bufLength = buf.Length();
++      if (!m_partIsQP || bufLength == 0 || !StringEndsWith(buf, "="_ns)) {
++        // Replace newline in HTML with a space.
++        buf.Append(' ');
++      } else {
++        // Strip the soft line break.
++        buf.SetLength(bufLength - 1);
++      }
++    }
++    buf.Append(line);
++    eatThisLine = true;
++    return buf.Length();
++  }
++
++  buf.Assign(line);
++  return buf.Length();
++}
++
++/**
++ * Determines the MIME type, if present, from the current line.
++ *
++ * m_partIsHtml, m_isMultipart, m_partIsText, m_base64part, and boundary are
++ * all set by this method at various points in time.
++ *
++ * @param line        (in)    a header line that may contain a MIME header
++ */
++void nsMsgBodyHandler2::SniffPossibleMIMEHeader(const nsCString& line) {
++  // Some parts of MIME are case-sensitive and other parts are case-insensitive;
++  // specifically, the headers are all case-insensitive and the values we care
++  // about are also case-insensitive, with the sole exception of the boundary
++  // string, so we can't just take the input line and make it lower case.
++  nsCString lowerCaseLine(line);
++  ToLowerCase(lowerCaseLine);
++
++  if (StringBeginsWith(lowerCaseLine, "content-transfer-encoding:"_ns))
++    m_partIsQP =
++        lowerCaseLine.Find("quoted-printable") != -1;
++
++  if (StringBeginsWith(lowerCaseLine, "content-type:"_ns)) {
++    if (lowerCaseLine.Find("text/html") != kNotFound) {
++      m_partIsText = true;
++      m_partIsHtml = true;
++    } else if (lowerCaseLine.Find("multipart/") != kNotFound) {
++      if (m_isMultipart) {
++        // Nested multipart, get ready for new headers.
++        m_base64part = false;
++        m_partIsQP = false;
++        m_pastPartHeaders = false;
++        m_partIsHtml = false;
++        m_partIsText = false;
++      }
++      m_isMultipart = true;
++      m_partCharset.Truncate();
++    } else if (lowerCaseLine.Find("message/") != kNotFound) {
++      // Initialise again.
++      m_base64part = false;
++      m_partIsQP = false;
++      m_pastPartHeaders = false;
++      m_partIsHtml = false;
++      m_partIsText =
++          true;  // Default is text/plain, maybe proven otherwise later.
++      m_inMessageAttachment = true;
++    } else if (lowerCaseLine.Find("text/") != kNotFound)
++      m_partIsText = true;
++    else if (lowerCaseLine.Find("text/") == kNotFound)
++      m_partIsText = false;  // We have disproven our assumption.
++  }
++
++  int32_t start;
++  if (m_isMultipart && (start = lowerCaseLine.Find("boundary=")) != kNotFound) {
++    start += 9;  // strlen("boundary=")
++    if (line[start] == '\"') start++;
++    int32_t end = line.RFindChar('\"');
++    if (end == -1) end = line.Length();
++
++    // Collect all boundaries. Since we only react to crossing a boundary,
++    // we can simply collect the boundaries instead of forming a tree
++    // structure from the message. Keep it simple ;-)
++    nsCString boundary;
++    boundary.AssignLiteral("--");
++    boundary.Append(Substring(line, start, end - start));
++    if (!m_boundaries.Contains(boundary)) m_boundaries.AppendElement(boundary);
++  }
++
++  if (m_isMultipart &&
++      (start = lowerCaseLine.Find("charset=")) != kNotFound) {
++    start += 8;  // strlen("charset=")
++    bool foundQuote = false;
++    if (line[start] == '\"') {
++      start++;
++      foundQuote = true;
++    }
++    int32_t end = line.FindChar(foundQuote ? '\"' : ';', start);
++    if (end == -1) end = line.Length();
++
++    m_partCharset.Assign(Substring(line, start, end - start));
++  }
++
++  if (StringBeginsWith(lowerCaseLine, "content-transfer-encoding:"_ns) &&
++      lowerCaseLine.Find(ENCODING_BASE64) != kNotFound)
++    m_base64part = true;
++}
