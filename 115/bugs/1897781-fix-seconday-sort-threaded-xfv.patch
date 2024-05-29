@@ -1,0 +1,159 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1717012361 -7200
+# Parent  8fe8d32eca4d794f9bcddbd8fd000ab018021bbd
+Bug 1897781 - Set secondary sort in threaded cross-folder views.
+
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -3966,16 +3966,54 @@ void nsMsgDBView::PushSort(const MsgView
+   if (newSort.mSortType == nsMsgViewSortType::byId) m_sortColumns.Clear();
+ 
+   m_sortColumns.RemoveElement(newSort);
+   m_sortColumns.InsertElementAt(0, newSort);
+   if (m_sortColumns.Length() > kMaxNumSortColumns)
+     m_sortColumns.RemoveElementAt(kMaxNumSortColumns);
+ }
+ 
++// Update the m_sortColumns and m_secondary* data members to keep the current
++// sort as secondary. This should be called before performing the actual sort or
++// rebuilding the view to apply a new sort.
++// NOTE: This does not set m_sortType and m_sortOrder.
++void nsMsgDBView::UpdateSortInfo(nsMsgViewSortTypeValue sortType,
++                                 nsMsgViewSortOrderValue sortOrder) {
++  // If a sortType has changed, or the sortType is byCustom and a column has
++  // changed, this is the new primary sortColumnInfo.
++  // Note: m_curCustomColumn is the desired (possibly new) custom column name,
++  // while m_sortColumns[0].mCustomColumnName is the name for the last completed
++  // sort, since these are persisted after each sort.
++  if (m_sortType != sortType ||
++      (sortType == nsMsgViewSortType::byCustom && m_sortColumns.Length() &&
++       !m_sortColumns[0].mCustomColumnName.Equals(m_curCustomColumn))) {
++    // For secondary sort, remember the sort order of the original primary sort!
++    if (m_sortColumns.Length()) m_sortColumns[0].mSortOrder = m_sortOrder;
++
++    MsgViewSortColumnInfo sortColumnInfo;
++    sortColumnInfo.mSortType = sortType;
++    sortColumnInfo.mSortOrder = sortOrder;
++    if (sortType == nsMsgViewSortType::byCustom) {
++      GetCurCustomColumn(sortColumnInfo.mCustomColumnName);
++      sortColumnInfo.mColHandler = GetCurColumnHandler();
++    }
++
++    PushSort(sortColumnInfo);
++  } else {
++    // For primary sort, remember the sort order on a per column basis.
++    if (m_sortColumns.Length()) m_sortColumns[0].mSortOrder = sortOrder;
++  }
++
++  if (m_sortColumns.Length() > 1) {
++    m_secondarySort = m_sortColumns[1].mSortType;
++    m_secondarySortOrder = m_sortColumns[1].mSortOrder;
++    m_secondaryCustomColumn = m_sortColumns[1].mCustomColumnName;
++  }
++}
++
+ nsresult nsMsgDBView::GetCollationKey(nsIMsgDBHdr* msgHdr,
+                                       nsMsgViewSortTypeValue sortType,
+                                       nsTArray<uint8_t>& result,
+                                       nsIMsgCustomColumnHandler* colHandler) {
+   nsresult rv = NS_ERROR_UNEXPECTED;
+   NS_ENSURE_ARG_POINTER(msgHdr);
+ 
+   switch (sortType) {
+@@ -4284,48 +4322,19 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+ 
+     m_sortOrder = sortOrder;
+     // We just reversed the sort order, we still need to invalidate the view.
+     return NS_OK;
+   }
+ 
+   if (sortType == nsMsgViewSortType::byThread) return NS_OK;
+ 
+-  // If a sortType has changed, or the sortType is byCustom and a column has
+-  // changed, this is the new primary sortColumnInfo.
+-  // Note: m_curCustomColumn is the desired (possibly new) custom column name,
+-  // while m_sortColumns[0].mCustomColumnName is the name for the last completed
+-  // sort, since these are persisted after each sort.
+-  if (m_sortType != sortType ||
+-      (sortType == nsMsgViewSortType::byCustom && m_sortColumns.Length() &&
+-       !m_sortColumns[0].mCustomColumnName.Equals(m_curCustomColumn))) {
+-    // For secondary sort, remember the sort order of the original primary sort!
+-    if (m_sortColumns.Length()) m_sortColumns[0].mSortOrder = m_sortOrder;
+-
+-    MsgViewSortColumnInfo sortColumnInfo;
+-    sortColumnInfo.mSortType = sortType;
+-    sortColumnInfo.mSortOrder = sortOrder;
+-    if (sortType == nsMsgViewSortType::byCustom) {
+-      GetCurCustomColumn(sortColumnInfo.mCustomColumnName);
+-      sortColumnInfo.mColHandler = GetCurColumnHandler();
+-    }
+-
+-    PushSort(sortColumnInfo);
+-  } else {
+-    // For primary sort, remember the sort order on a per column basis.
+-    if (m_sortColumns.Length()) m_sortColumns[0].mSortOrder = sortOrder;
+-  }
+-
+-  if (m_sortColumns.Length() > 1) {
+-    m_secondarySort = m_sortColumns[1].mSortType;
+-    m_secondarySortOrder = m_sortColumns[1].mSortOrder;
+-    m_secondaryCustomColumn = m_sortColumns[1].mCustomColumnName;
+-  }
+-
++  UpdateSortInfo(sortType, sortOrder);
+   SaveSortInfo(sortType, sortOrder);
++
+   // Figure out how much memory we'll need, and then malloc it.
+   uint16_t maxLen;
+   eFieldType fieldType;
+ 
+   // Get the custom column handler for the primary sort and pass it first
+   // to GetFieldTypeAndLenForSort to get the fieldType and then either
+   // GetCollationKey or GetLongField.
+   nsIMsgCustomColumnHandler* colHandler = GetCurColumnHandler();
+diff --git a/mailnews/base/src/nsMsgDBView.h b/mailnews/base/src/nsMsgDBView.h
+--- a/mailnews/base/src/nsMsgDBView.h
++++ b/mailnews/base/src/nsMsgDBView.h
+@@ -366,16 +366,18 @@ class nsMsgDBView : public nsIMsgDBView,
+                          viewSortInfo* sortInfo);
+   static int FnSortIdUint32(const IdUint32* pItem1, const IdUint32* pItem2,
+                             viewSortInfo* sortInfo);
+ 
+   nsresult GetStatusSortValue(nsIMsgDBHdr* msgHdr, uint32_t* result);
+   nsresult GetLocationCollationKey(nsIMsgDBHdr* msgHdr,
+                                    nsTArray<uint8_t>& result);
+   void PushSort(const MsgViewSortColumnInfo& newSort);
++  void UpdateSortInfo(nsMsgViewSortTypeValue sortType,
++                      nsMsgViewSortOrderValue sortOrder);
+   nsresult EncodeColumnSort(nsString& columnSortString);
+   nsresult DecodeColumnSort(nsString& columnSortString);
+   // For view navigation.
+   nsresult NavigateFromPos(nsMsgNavigationTypeValue motion,
+                            nsMsgViewIndex startIndex, nsMsgKey* pResultKey,
+                            nsMsgViewIndex* pResultIndex,
+                            nsMsgViewIndex* pThreadIndex, bool wrap);
+   nsresult FindNextFlagged(nsMsgViewIndex startIndex,
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -1047,16 +1047,18 @@ NS_IMETHODIMP nsMsgSearchDBView::Sort(ns
+   int32_t rowCountBeforeSort = GetSize();
+ 
+   if (!rowCountBeforeSort) return NS_OK;
+ 
+   if (m_viewFlags & (nsMsgViewFlagsType::kThreadedDisplay |
+                      nsMsgViewFlagsType::kGroupBySort)) {
+     // ### This forgets which threads were expanded, and is sub-optimal
+     // since it rebuilds the thread objects.
++    UpdateSortInfo(sortType, sortOrder);
++    SaveSortInfo(sortType, sortOrder);
+     m_sortType = sortType;
+     m_sortOrder = sortOrder;
+     return RebuildView(m_viewFlags);
+   }
+ 
+   nsMsgKey preservedKey;
+   AutoTArray<nsMsgKey, 1> preservedSelection;
+   SaveAndClearSelection(&preservedKey, preservedSelection);
