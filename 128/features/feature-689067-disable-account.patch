@@ -1,0 +1,189 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1717422777 -7200
+# Parent  d0b7c94b10610777e2d29b5603f8a0bddf24ab02
+Feature: Implement pref mail.server.serverNN.disabled (bug 689067).
+
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -1037,8 +1037,11 @@ function MsgGetMessagesForAllServers(def
+     // Parallel array of folders to download to...
+     var localFoldersToDownloadTo = [];
+     var pop3Server;
+     for (const server of MailServices.accounts.allServers) {
++      if (server.disabled) {
++        continue;
++      }
+       if (server.protocolInfo.canLoginAtStartUp && server.loginAtStartUp) {
+         if (
+           defaultServer &&
+           defaultServer.equals(server) &&
+@@ -1059,8 +1062,11 @@ function MsgGetMessagesForAllServers(def
+         }
+       }
+     }
+     for (let i = 0; i < pop3DownloadServersArray.length; ++i) {
++      if (pop3DownloadServersArray[i].disabled) {
++        continue;
++      }
+       // Any ol' pop3Server will do - the serversArray specifies which servers
+       // to download from.
+       pop3Server.downloadMailFromServers(
+         pop3DownloadServersArray[i],
+@@ -1100,8 +1106,11 @@ function MsgGetMessagesForAccount(aFolde
+   }
+ 
+   if (MailOfflineMgr.isOnline() || MailOfflineMgr.getNewMail()) {
+     var server = aFolder.server;
++    if (server.disabled) {
++      return;
++    }
+     GetMessagesForInboxOnServer(server);
+   }
+ }
+ 
+@@ -1660,8 +1669,11 @@ function GetMessagesForAllAuthenticatedA
+     var localFoldersToDownloadTo = [];
+     var pop3Server;
+ 
+     for (const server of MailServices.accounts.allServers) {
++      if (server.disabled) {
++        continue;
++      }
+       if (
+         server.protocolInfo.canGetMessages &&
+         !server.passwordPromptRequired
+       ) {
+@@ -1678,8 +1690,11 @@ function GetMessagesForAllAuthenticatedA
+         }
+       }
+     }
+     for (let i = 0; i < pop3DownloadServersArray.length; ++i) {
++      if (pop3DownloadServersArray[i].disabled) {
++        continue;
++      }
+       // any ol' pop3Server will do - the serversArray specifies which servers to download from
+       pop3Server.downloadMailFromServers(
+         pop3DownloadServersArray[i],
+         msgWindow,
+diff --git a/mailnews/base/public/nsIMsgIncomingServer.idl b/mailnews/base/public/nsIMsgIncomingServer.idl
+--- a/mailnews/base/public/nsIMsgIncomingServer.idl
++++ b/mailnews/base/public/nsIMsgIncomingServer.idl
+@@ -362,8 +362,9 @@ interface nsIMsgIncomingServer : nsISupp
+   /* check to this if the server supports filters */
+   readonly attribute boolean canHaveFilters;
+ 
+   attribute boolean loginAtStartUp;
++  attribute boolean disabled;
+ 
+   attribute boolean limitOfflineMessageSize;
+   attribute long maxMessageSize;
+ 
+diff --git a/mailnews/base/src/MsgIncomingServer.sys.mjs b/mailnews/base/src/MsgIncomingServer.sys.mjs
+--- a/mailnews/base/src/MsgIncomingServer.sys.mjs
++++ b/mailnews/base/src/MsgIncomingServer.sys.mjs
+@@ -230,8 +230,9 @@ export class MsgIncomingServer {
+       ["Bool", "downloadOnBiff", "download_on_biff"],
+       ["Bool", "valid"],
+       ["Bool", "emptyTrashOnExit", "empty_trash_on_exit"],
+       ["Bool", "loginAtStartUp", "login_at_startup"],
++      ["Bool", "disabled", "disabled"],
+       [
+         "Bool",
+         "defaultCopiesAndFoldersPrefsToServer",
+         "allows_specialfolders_usage",
+diff --git a/mailnews/base/src/nsMsgIncomingServer.cpp b/mailnews/base/src/nsMsgIncomingServer.cpp
+--- a/mailnews/base/src/nsMsgIncomingServer.cpp
++++ b/mailnews/base/src/nsMsgIncomingServer.cpp
+@@ -1533,8 +1533,9 @@ NS_IMPL_SERVERPREF_BOOL(nsMsgIncomingSer
+ NS_IMPL_SERVERPREF_BOOL(nsMsgIncomingServer, Valid, "valid")
+ NS_IMPL_SERVERPREF_BOOL(nsMsgIncomingServer, EmptyTrashOnExit,
+                         "empty_trash_on_exit")
+ NS_IMPL_SERVERPREF_BOOL(nsMsgIncomingServer, LoginAtStartUp, "login_at_startup")
++NS_IMPL_SERVERPREF_BOOL(nsMsgIncomingServer, Disabled, "disabled")
+ NS_IMPL_SERVERPREF_BOOL(nsMsgIncomingServer,
+                         DefaultCopiesAndFoldersPrefsToServer,
+                         "allows_specialfolders_usage")
+ 
+diff --git a/mailnews/imap/public/nsIImapServerSink.idl b/mailnews/imap/public/nsIImapServerSink.idl
+--- a/mailnews/imap/public/nsIImapServerSink.idl
++++ b/mailnews/imap/public/nsIImapServerSink.idl
+@@ -185,8 +185,9 @@ interface nsIImapServerSink : nsISupport
+   /// tell the server if listing using lsub command
+   void setServerDoingLsub(in boolean aDoingLsub);
+   /// set whether UTF8=ACCEPT enabled or not
+   void setServerUtf8AcceptEnabled(in boolean aEnabled);
++  readonly attribute boolean serverDisabled;
+ 
+   /**
+    * Acquire the server logon lock, and run the callback before releasing the
+    * lock and returning.
+diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsImapIncomingServer.cpp
+--- a/mailnews/imap/src/nsImapIncomingServer.cpp
++++ b/mailnews/imap/src/nsImapIncomingServer.cpp
+@@ -2902,8 +2902,13 @@ nsImapIncomingServer::GetServerPassword(
+   return GetPassword(aPassword);
+ }
+ 
+ NS_IMETHODIMP
++nsImapIncomingServer::GetServerDisabled(bool* disabled) {
++  return GetDisabled(disabled);
++}
++
++NS_IMETHODIMP
+ nsImapIncomingServer::RemoveServerConnection(nsIImapProtocol* aProtocol) {
+   return RemoveConnection(aProtocol);
+ }
+ 
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -1804,8 +1804,21 @@ bool nsImapProtocol::ProcessCurrentURL()
+   m_runningUrl->GetExternalLinkUrl(&isExternalUrl);
+   m_runningUrl->GetValidUrl(&validUrl);
+   m_runningUrl->GetImapAction(&m_imapAction);
+ 
++  if (m_imapServerSink) {
++    bool isDisabled = false;
++    m_imapServerSink->GetServerDisabled(&isDisabled);
++    if (isDisabled) {
++      const char* serverKey = GetImapServerKey();
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(nsPrintfCString(
++                           "Ignoring operation 0x%x on disabled account %s",
++                           m_imapAction, serverKey)),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++    }
++  }
++
+   if (isExternalUrl) {
+     if (m_imapAction == nsIImapUrl::nsImapSelectFolder) {
+       // we need to send a start request so that the doc loader
+       // will call HandleContent on the imap service so we
+diff --git a/mailnews/imap/src/nsSyncRunnableHelpers.cpp b/mailnews/imap/src/nsSyncRunnableHelpers.cpp
+--- a/mailnews/imap/src/nsSyncRunnableHelpers.cpp
++++ b/mailnews/imap/src/nsSyncRunnableHelpers.cpp
+@@ -450,8 +450,9 @@ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, G
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, UpdateTrySTARTTLSPref, bool)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetOriginalUsername, nsACString&)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerKey, nsACString&)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerPassword, nsAString&)
++NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerDisabled, bool*)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, RemoveServerConnection, nsIImapProtocol*)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerShuttingDown, bool*)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, ResetServerConnection, const nsACString&)
+ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, SetServerDoingLsub, bool)
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -602,8 +602,9 @@ pref("mail.server.default.hidden", false
+ pref("mail.server.default.using_subscription", true);
+ pref("mail.server.default.dual_use_folders", true);
+ pref("mail.server.default.canDelete", false);
+ pref("mail.server.default.login_at_startup", false);
++pref("mail.server.default.disabled", false);
+ pref("mail.server.default.allows_specialfolders_usage", true);
+ pref("mail.server.default.canCreateFolders", true);
+ pref("mail.server.default.canFileMessages", true);
+ 
