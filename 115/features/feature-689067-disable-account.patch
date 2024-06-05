@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1717447177 -7200
-# Parent  4c39d7ec8cb3906d332b2ebb8ca0f859e33108c8
+# Parent  3ebf3c982e320302a47116323014b17b3ca98e7a
 Feature: Implement pref mail.server.serverNN.disabled (bug 689067).
 
 diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
@@ -43,7 +43,19 @@ diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWind
    }
  }
  
-@@ -1690,8 +1699,11 @@ function GetMessagesForAllAuthenticatedA
+@@ -1542,8 +1551,11 @@ function GetFolderMessages(selectedFolde
+     return;
+   }
+ 
+   for (var i = 0; i < folders.length; i++) {
++    if (folders[i].server.disabled) {
++      continue;
++    }
+     var serverType = folders[i].server.type;
+     if (folders[i].isServer && serverType == "nntp") {
+       // If we're doing "get msgs" on a news server.
+       // Update unread counts on this server.
+@@ -1690,8 +1702,11 @@ function GetMessagesForAllAuthenticatedA
      var localFoldersToDownloadTo = [];
      var pop3Server;
  
@@ -55,7 +67,7 @@ diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWind
          server.protocolInfo.canGetMessages &&
          !server.passwordPromptRequired
        ) {
-@@ -1708,8 +1720,11 @@ function GetMessagesForAllAuthenticatedA
+@@ -1708,8 +1723,11 @@ function GetMessagesForAllAuthenticatedA
          }
        }
      }
@@ -106,71 +118,30 @@ diff --git a/mailnews/base/src/nsMsgIncomingServer.cpp b/mailnews/base/src/nsMsg
                          DefaultCopiesAndFoldersPrefsToServer,
                          "allows_specialfolders_usage")
  
-diff --git a/mailnews/imap/public/nsIImapServerSink.idl b/mailnews/imap/public/nsIImapServerSink.idl
---- a/mailnews/imap/public/nsIImapServerSink.idl
-+++ b/mailnews/imap/public/nsIImapServerSink.idl
-@@ -174,5 +174,6 @@ interface nsIImapServerSink : nsISupport
-   /// tell the server if listing using lsub command
-   void setServerDoingLsub(in boolean aDoingLsub);
-   /// set whether UTF8=ACCEPT enabled or not
-   void setServerUtf8AcceptEnabled(in boolean aEnabled);
-+  readonly attribute boolean serverDisabled;
- };
-diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsImapIncomingServer.cpp
---- a/mailnews/imap/src/nsImapIncomingServer.cpp
-+++ b/mailnews/imap/src/nsImapIncomingServer.cpp
-@@ -3006,8 +3006,13 @@ nsImapIncomingServer::GetServerPassword(
-   return GetPassword(aPassword);
- }
- 
- NS_IMETHODIMP
-+nsImapIncomingServer::GetServerDisabled(bool* disabled) {
-+  return GetDisabled(disabled);
-+}
-+
-+NS_IMETHODIMP
- nsImapIncomingServer::RemoveServerConnection(nsIImapProtocol* aProtocol) {
-   return RemoveConnection(aProtocol);
- }
- 
 diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
 --- a/mailnews/imap/src/nsImapProtocol.cpp
 +++ b/mailnews/imap/src/nsImapProtocol.cpp
-@@ -1822,8 +1822,21 @@ bool nsImapProtocol::ProcessCurrentURL()
-   m_runningUrl->GetExternalLinkUrl(&isExternalUrl);
-   m_runningUrl->GetValidUrl(&validUrl);
-   m_runningUrl->GetImapAction(&m_imapAction);
- 
-+  if (m_imapServerSink) {
-+    bool isDisabled = false;
-+    m_imapServerSink->GetServerDisabled(&isDisabled);
+@@ -819,8 +819,20 @@ nsresult nsImapProtocol::SetupWithUrl(ns
+       rv = mailnewsUrl->GetServer(getter_AddRefs(server));
+       NS_ENSURE_SUCCESS(rv, rv);
+       m_server = do_GetWeakReference(server);
+     }
++    bool isDisabled;
++    server->GetDisabled(&isDisabled);
 +    if (isDisabled) {
-+      const char* serverKey = GetImapServerKey();
-+      MsgLogToConsole4(NS_ConvertUTF8toUTF16(nsPrintfCString(
-+                           "Ignoring operation 0x%x on disabled account %s",
-+                           m_imapAction, serverKey)),
-+                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
-+                       nsIScriptError::infoFlag);
++      nsCString serverKey;
++      server->GetKey(serverKey);
++      MsgLogToConsole4(
++          NS_ConvertUTF8toUTF16(nsPrintfCString(
++              "Ignoring operation on disabled account %s", serverKey.get())),
++          NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++          nsIScriptError::infoFlag);
++      return NS_ERROR_FAILURE;
 +    }
-+  }
-+
-   if (isExternalUrl) {
-     if (m_imapAction == nsIImapUrl::nsImapSelectFolder) {
-       // we need to send a start request so that the doc loader
-       // will call HandleContent on the imap service so we
-diff --git a/mailnews/imap/src/nsSyncRunnableHelpers.cpp b/mailnews/imap/src/nsSyncRunnableHelpers.cpp
---- a/mailnews/imap/src/nsSyncRunnableHelpers.cpp
-+++ b/mailnews/imap/src/nsSyncRunnableHelpers.cpp
-@@ -447,8 +447,9 @@ NS_SYNCRUNNABLEMETHOD1(ImapServerSink, G
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, UpdateTrySTARTTLSPref, bool)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetOriginalUsername, nsACString&)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerKey, nsACString&)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerPassword, nsAString&)
-+NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerDisabled, bool*)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, RemoveServerConnection, nsIImapProtocol*)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, GetServerShuttingDown, bool*)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, ResetServerConnection, const nsACString&)
- NS_SYNCRUNNABLEMETHOD1(ImapServerSink, SetServerDoingLsub, bool)
+     nsCOMPtr<nsIMsgFolder> folder;
+     mailnewsUrl->GetFolder(getter_AddRefs(folder));
+     mFolderLastModSeq = 0;
+     mFolderTotalMsgCount = 0;
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
