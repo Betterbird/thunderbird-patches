@@ -7,11 +7,14 @@ fi
 
 APPLY=""
 NOCLOBBER=""
+DELRES=""
 if [ "$#" -eq 2 ]; then
   if [ "$2" = "apply" ]; then
     APPLY="apply"
   elif [ "$2" = "noclobber" ]; then
     NOCLOBBER="noclobber"
+  elif [ "$2" = "delres" ]; then
+    DELRES="delres"
   else
     echo "Usage: $0 VERSION [apply|noclobber]" >&2
     exit 1
@@ -90,6 +93,18 @@ else
   echo "Cloning $COMM_REPO"
   cd $MOZILLA_DIR
   hg clone $COMM_REPO comm || exit 1
+fi
+
+if [ "$UNAME" = "Windows" ] && [ "$DELRES" = "delres" ] && [ -d obj-x86_64-pc-mingw32 ]; then
+  echo
+  echo "======================================================="
+  echo "Deleting .rc and .res files"
+  cd obj-x86_64-pc-mingw32
+  # del /s is much faster than find.
+  /C/Windows/system32/cmd.exe /C"del/s *.rc"
+  /C/Windows/system32/cmd.exe /C"del/s *.res"
+  cd ..
+  exit 0
 fi
 
 if [ "$UNAME" = "Linux" ] || [ "$UNAME" = "Darwin" ]; then
