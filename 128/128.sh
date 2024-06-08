@@ -1,8 +1,8 @@
 #!/bin/sh
 MOZILLA_REPO=https://hg.mozilla.org/mozilla-central/
-MOZILLA_REV=369d5331352d27705546143e21e194b8cd88b5be
+MOZILLA_REV=2c3e4c077e7b5a1c74947913e9c0ede4da42494b
 COMM_REPO=https://hg.mozilla.org/comm-central/
-COMM_REV=370dfc98b74038961e914ca01257f92ec4b164e9
+COMM_REV=61da4e8d6e258561aa9a31ed6f3f31187cadeb69
 RUST_VER=1.76.0
 MOZ="-moz"
 MOZU="-moz"
