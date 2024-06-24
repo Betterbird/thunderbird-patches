@@ -1,0 +1,961 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1719258255 -7200
+# Parent  150fc222625449d6b2fc0d80c3f4fceca16581c3
+Backed out bug 1890448, part 1. Horrible performance (bug 1904208).
+
+diff --git a/mailnews/base/public/nsIMsgPluggableStore.idl b/mailnews/base/public/nsIMsgPluggableStore.idl
+--- a/mailnews/base/public/nsIMsgPluggableStore.idl
++++ b/mailnews/base/public/nsIMsgPluggableStore.idl
+@@ -15,30 +15,13 @@ interface nsIInputStream;
+ interface nsIUrlListener;
+ interface nsIMsgDatabase;
+ interface nsITransaction;
+ interface nsIStoreScanListener;
+-interface nsIStoreCompactListener;
+ 
+ /**
+  * Pluggable message store interface. Each incoming server can have a different
+  * message store.
+  * All methods are synchronous unless otherwise specified.
+- *
+- * A single store holds messages for any number of folders.
+- *
+- * Messages in a store are given a `storeToken`, a unique ID which callers
+- * use to reference individual messages.
+- * `storeToken`s are:
+- * - Arbitrary. They are strings assigned when a message is added to
+- *   the store.
+- * - Unique to the folder the message is in (not unique over the whole
+- *   store!).
+- * - Opaque. Callers shouldn't make any assumptions about format.
+- * - Constant. Mostly. They may change during a compaction operation.
+- * In practice:
+- * - For mbox, `storeToken` is the offset of a message within the
+- *   mbox file.
+- * - For maildir, it's the filename of the message.
+  */
+ [scriptable, uuid(F732CE58-E540-4dc4-B803-9456056EBEFC)]
+ interface nsIMsgPluggableStore : nsISupports {
+   /**
+@@ -52,10 +35,10 @@ interface nsIMsgPluggableStore : nsISupp
+    *                      This will be the root folder for the server object.
+    * @param aDeep true if we should discover all descendants. Would we ever
+    *              not want to do this?
+    */
++
+   void discoverSubFolders(in nsIMsgFolder aParentFolder, in boolean aDeep);
+-
+   /**
+    * Creates storage for a new, empty folder.
+    *
+    * @param aParent parent folder
+@@ -260,72 +243,8 @@ interface nsIMsgPluggableStore : nsISupp
+    */
+   readonly attribute boolean supportsCompaction;
+ 
+   /**
+-   * Start an asynchronous compaction operation on the given folder's store.
+-   * It will go through all the messages in the store, asking the
+-   * caller-provided nsIStoreCompactListener object to decide which messages
+-   * should be kept and which should be discarded.
+-   *
+-   * This method will return *before* the operation completes.
+-   * After that, any ongoing updates are provided via the
+-   * nsIStoreCompactListener object.
+-   *
+-   * If the call to asyncCompact() returns a failure code, the operation will
+-   * not start, and no nsIStoreCompactListener callbacks will be invoked.
+-   *
+-   * If asyncCompact() returns a success code, the operation will start and
+-   * the nsIStoreCompactListener callbacks will be invoked.
+-   * It's guaranteed that no listener callbacks will be invoked until
+-   * the initial asyncCompact() call has returned.
+-   *
+-   * Once running, the compact operation iterates through each message
+-   * in the store.
+-   * For each message, it asks the nsIStoreCompactListener if the message
+-   * should be kept or not.
+-   * If no, the message will be removed from the store.
+-   * If yes, the message will be left (mostly) untouched.
+-   * "mostly" untouched, because:
+-   *   a) Messages MAY end up with a new storeToken (their unique ID within
+-   *      the store).
+-   *   b) If `patchXMozillaHeaders` is true, X-Mozilla-* headers may be
+-   *      added or modified during compaction.
+-   *
+-   * The nsIStoreCompactListener callbacks are called in this order:
+-   *
+-   * First:
+-   * .onCompactionBegin() - at the start of the operation.
+-   *
+-   * Then, for each message:
+-   *     .onRetentionQuery() - to ask if message should be kept or not.
+-   *     If the message was kept:
+-   *         .onMessageRetained() - gives the new storeToken and size.
+-   *
+-   * Finally:
+-   *  .onCompactionComplete() - at the end, with a status code.
+-   *
+-   * If any callbacks return an error, the whole operation will be rolled back
+-   * and .onCompactionComplete() will be called with the failure code.
+-   *
+-   * asyncCompact() keeps a reference to compactListener, releasing it after the
+-   * .onCompactionComplete() callback has been invoked.
+-   *
+-   * The compaction is an entirely store-based operation, and is decoupled
+-   * from the folder and database.
+-   * The expectation is that a higher-level folder compaction module can
+-   * use asyncCompact() to avoid getting bogged down in all the low-level
+-   * store details.
+-   *
+-   * @param folder - The folder to compact.
+-   * @param compactListener - Callbacks to direct the compaction.
+-   * @param patchXMozillaHeaders - If true, X-Mozilla-* headers will be patched
+-   *                               or added in kept messages.
+-   */
+-  void asyncCompact(in nsIMsgFolder folder,
+-                    in nsIStoreCompactListener compactListener,
+-                    in boolean patchXMozillaHeaders);
+-
+-  /**
+    * Is the summary file for the passed folder valid? For Berkeley Mailboxes,
+    * for local mail folders, this checks the timestamp and size of the local
+    * mail folder against values stored in the db. For other stores, this may
+    * be a noop, though other stores could certainly become invalid. For
+@@ -427,11 +346,8 @@ interface nsIMsgPluggableStore : nsISupp
+   *    while data remaining in message:
+   *      l.onDataAvailable()
+   *    l.onStopRequest()
+   *  l.onStopScan()
+-  *
+-  * If any of these return an error, the scan will be aborted,
+-  * with calls to onStopRequest() (if within a message) and onStopScan().
+   */
+ [scriptable, uuid(00D3344A-6EFB-4D18-8A5A-D9C004E62FDF)]
+ interface nsIStoreScanListener : nsIStreamListener
+ {
+@@ -452,81 +368,4 @@ interface nsIStoreScanListener : nsIStre
+    * Called when the scan operation as a whole is complete.
+    */
+   void onStopScan(in nsresult status);
+ };
+-
+-/**
+- * Callbacks used by store compaction operation, initiated via
+- * nsIMsgPluggableStore.asyncCompact().
+- * See asyncCompact() for an overview of how these callbacks are called.
+- * If any of these callbacks return an error (other than
+- * .onCompactionComplete()), the store will be rolled back to its
+- * original state.
+- */
+-[scriptable, uuid(d97f29f6-d9b7-11ee-88d9-4b3c6085612e)]
+-interface nsIStoreCompactListener : nsISupports
+-{
+-  /**
+-   * Called at the beginning of the store compaction operation.
+-   */
+-  void onCompactionBegin();
+-
+-  /**
+-   * This is invoked for each message in the store.
+-   * To keep the message, return true.
+-   * To discard the message, return false.
+-   *
+-   * Message flags and keywords are returned via the msgFlags and
+-   * msgKeywords output params for X-Mozilla-* header patching.
+-   * If asyncCompact() was invoked with patchXMozillaHeaders=false,
+-   * then msgFlags and msgKeywords will be ignored.
+-   * The caller to asyncCompact() sets patchXMozillaHeaders, so is
+-   * also responsible for supplying a suitably-aware
+-   * nsIStoreCompactListener.
+-   *
+-   * @param storeToken - The identity of the message within the store.
+-   * @param msgFlags - Flags to use for X-Mozilla-Status/Status2 patching.
+-   * @param msgKeywords - Keywords to use for X-Mozilla-Keys patching.
+-   * @returns true if the message should be kept.
+-   */
+-  boolean onRetentionQuery(in AUTF8String storeToken,
+-                           out unsigned long msgFlags,
+-                           out AUTF8String msgKeywords);
+-
+-  /**
+-   * If onRetentionQuery() returned true, then onMessageRetained() will be
+-   * called with the new storeToken and message size.
+-   * The storeToken may change if the message has been shifted around within
+-   * the store.
+-   * The message size might have changed due to X-Mozilla-* header patching.
+-   *
+-   * @param oldToken - The old storeToken as seen by onRetentionQuery().
+-   * @param newToken - The storeToken for the message after compaction.
+-   * @param newSize - The size of the message, in bytes.
+-   */
+-  void onMessageRetained(in AUTF8String oldToken,
+-                         in AUTF8String newToken,
+-                         in long long newSize);
+-
+-  /**
+-   * This will be called when the compaction operation finishes (or fails).
+-   * If the compaction fails, or if any of the other nsIStoreCompactListener
+-   * callbacks returned an error, .onCompactionComplete() will be still
+-   * be called, with status holding an error code.
+-   *
+-   * Any error returned from .onCompactionComplete() will be ignored.
+-   * The store compaction has already either completed or been rolled back,
+-   * so this is just an opportunity for the caller to perform whatever
+-   * other commit/rollback behaviour might be required on top of that.
+-   *
+-   * The space recovered by the compaction is given by oldSize-newSize.
+-   * But keep in mind that patching X-Mozilla-* headers means that sometimes
+-   * compaction can _increase_ the size of the store!
+-   *
+-   * @param status - The result of the compaction.
+-   * @param oldSize - The size of the store before compaction, in bytes.
+-   * @param newSize - The size of the store after compaction, in bytes.
+-   */
+-  void onCompactionComplete(in nsresult status,
+-                            in long long oldSize,
+-                            in long long newSize);
+-};
+diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+--- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
++++ b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+@@ -26,16 +26,15 @@
+ #include "nsIDBFolderInfo.h"
+ #include "nsMsgLocalFolderHdrs.h"
+ #include "nsMailHeaders.h"
+ #include "nsParseMailbox.h"
++#include "nsIMsgFolderCompactor.h"
+ #include "nsIPrefService.h"
+ #include "nsIPrefBranch.h"
+ #include "nsPrintfCString.h"
+ #include "nsQuarantinedOutputStream.h"
+-#include "HeaderReader.h"
+ #include "MboxMsgInputStream.h"
+ #include "MboxMsgOutputStream.h"
+-#include "mozilla/Buffer.h"
+ #include "mozilla/Logging.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/ScopeExit.h"
+ #include "mozilla/SlicedInputStream.h"
+@@ -45,9 +44,9 @@
+ 
+ mozilla::LazyLogModule gMboxLog("mbox");
+ using mozilla::LogLevel;
+ 
+-/**
++/*
+  * MboxScanner is a helper class for implementing
+  * nsMsgBrkMBoxStore::AsyncScan().
+  *
+  * It derives from nsIStreamListener purely as an implementation detail,
+@@ -168,12 +167,9 @@ NS_IMETHODIMP MboxScanner::OnDataAvailab
+ }
+ 
+ NS_IMETHODIMP MboxScanner::OnStopRequest(nsIRequest* req, nsresult status) {
+   if (mMboxStream) {
+-    nsresult rv = mScanListener->OnStopRequest(req, status);
+-    if (NS_SUCCEEDED(status) && NS_FAILED(rv)) {
+-      status = rv;  // Listener requested abort.
+-    }
++    mScanListener->OnStopRequest(req, status);
+ 
+     bool more = false;
+     if (NS_SUCCEEDED(status)) {
+       // Kick off the next message, if any.
+@@ -210,380 +206,9 @@ NS_IMETHODIMP MboxScanner::OnStopRequest
+   }
+   return NS_OK;
+ }
+ 
+-/**
+- * Helper class for mbox compaction, used by nsMsgBrkMBoxStore::AsyncCompact().
+- *
+- * It iterates through each message in the store, and writes the ones we
+- * want to keep into a new mbox file. It'll also patch X-Mozilla-* headers
+- * as it goes, if asked to.
+- * If all goes well, the old mbox file is (atomicallyish) replaced by the
+- * new one. If any error occurs, the mbox is left untouched.
+- * Doesn't fiddle with folder or database or GUI. Just the mbox file.
+- */
+-class MboxCompactor : public nsIStoreScanListener {
+- public:
+-  NS_DECL_ISUPPORTS
+-  NS_DECL_NSISTORESCANLISTENER
+-  NS_DECL_NSISTREAMLISTENER
+-  NS_DECL_NSIREQUESTOBSERVER
+-
+-  MboxCompactor() = delete;
+-
+-  /**
+-   * Create the compactor.
+-   * @param folder - The folder we're compacting.
+-   * @param listener - Callbacks to make decisions about what to keep.
+-   * @param patchXMozillaHeaders - Patch X-Mozilla-* headers as we go?
+-   */
+-  MboxCompactor(nsIMsgFolder* folder, nsIStoreCompactListener* listener,
+-                bool patchXMozillaHeaders)
+-      : mFolder(folder),
+-        mCompactListener(listener),
+-        mOriginalMboxFileSize(0),
+-        mPatchXMozillaHeaders(patchXMozillaHeaders) {}
+-
+-  /*
+-   * Start the compaction.
+-   * NOTE: this returns before any listener callbacks are invoked.
+-   * If it fails, no callbacks will be called.
+-   */
+-  nsresult BeginCompaction();
+-
+- private:
+-  virtual ~MboxCompactor() {}
+-
+-  nsresult FlushBuffer();
+-
+-  // NOTE: We're still lumbered with having to use nsIMsgFolder here,
+-  // but eventually we can decouple and just work with the store directly.
+-  // (Bug 1714472)
+-  nsCOMPtr<nsIMsgFolder> mFolder;
+-  nsCOMPtr<nsIStoreCompactListener> mCompactListener;
+-
+-  // Path for the mbox file we're compacting.
+-  nsCOMPtr<nsIFile> mMboxPath;
+-
+-  // Size of original mbox file before compaction.
+-  int64_t mOriginalMboxFileSize;
+-
+-  // The raw stream to write the new mbox file.
+-  nsCOMPtr<nsIOutputStream> mDestStream;
+-
+-  // Where we're writing the current message.
+-  // Formats mbox data and writes it out to mDestStream.
+-  // If this is null, the current message is being skipped.
+-  RefPtr<MboxMsgOutputStream> mMsgOut;
+-
+-  // The current message being processed.
+-  nsAutoCString mCurToken;  // empty = no message being processed
+-
+-  // Remember flags and keywords provided by onRetentionQuery(),
+-  // used if patching headers.
+-  uint32_t mMsgFlags;
+-  nsAutoCString mMsgKeywords;
+-
+-  // Running total of the size in bytes of the current message.
+-  int64_t mNewMsgSize;
+-
+-  // Patch X-Mozilla-* headers as we go, with message flags and keywords.
+-  // Local folders do this, others probably shouldn't.
+-  bool mPatchXMozillaHeaders;
+-
+-  // Buffer for copying message data.
+-  // This should be at least large enough to contain the start of a message
+-  // including the X-Mozilla-* headers, so we can patch them.
+-  // (It's OK if we don't have the whole header block - the X-Mozilla-*
+-  // headers will likely be right at the beginning).
+-  mozilla::Buffer<char> mBuffer{16 * 1024};
+-
+-  // How many bytes are currently contained in mBuffer.
+-  size_t mBufferCount{0};
+-};
+-
+-NS_IMPL_ISUPPORTS(MboxCompactor, nsIStoreScanListener);
+-
+-nsresult MboxCompactor::BeginCompaction() {
+-  MOZ_ASSERT(mFolder);
+-
+-  nsresult rv = mFolder->GetFilePath(getter_AddRefs(mMboxPath));
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  bool exists;
+-  rv = mMboxPath->Exists(&exists);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-  if (!exists) {
+-    // Cheesy hack - create empty mbox file if it doesn't exist.
+-    // This can happen in a few circumstances - e.g. IMAP folders without
+-    // offline storage obviously have no messages in their local mbox file.
+-    // It's valid having an empty mbox file, and cleaner to let the normal
+-    // flow of code invoke the listener begin/complete callbacks rather than
+-    // returning early and invoking them explicitly here.
+-    rv = mMboxPath->Create(nsIFile::NORMAL_FILE_TYPE, 0600);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-  }
+-
+-  rv = mMboxPath->GetFileSize(&mOriginalMboxFileSize);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  // Create output stream for our dest mbox.
+-  rv = NS_NewSafeLocalFileOutputStream(getter_AddRefs(mDestStream), mMboxPath,
+-                                       -1, 00600);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  nsCOMPtr<nsIMsgPluggableStore> msgStore;
+-  rv = mFolder->GetMsgStore(getter_AddRefs(msgStore));
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  // Start iterating over all the messages!
+-  // The scan will hold a reference to us until it's completed, so
+-  // no kingfudeathgrippery required here.
+-  rv = msgStore->AsyncScan(mFolder, this);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  return NS_OK;
+-}
+-
+-// nsIStoreScanListener callback called when the scan starts.
+-NS_IMETHODIMP MboxCompactor::OnStartScan() {
+-  return mCompactListener->OnCompactionBegin();
+-}
+-
+-// nsIStoreScanListener callback called at the start of each message.
+-NS_IMETHODIMP MboxCompactor::OnStartMessage(nsACString const& storeToken) {
+-  MOZ_ASSERT(mCurToken.IsEmpty());  // We should _not_ be processing a msg yet!
+-
+-  // Ask compactListener if we should keep this message.
+-  bool keepMsg;
+-  nsresult rv = mCompactListener->OnRetentionQuery(storeToken, &mMsgFlags,
+-                                                   mMsgKeywords, &keepMsg);
+-  if (NS_FAILED(rv)) {
+-    return rv;  // Abort the scan.
+-  }
+-
+-  mCurToken = storeToken;
+-  mNewMsgSize = 0;
+-  mBufferCount = 0;
+-  if (keepMsg) {
+-    // Open mMsgOut to write a single message.
+-    MOZ_ASSERT(mDestStream);
+-    MOZ_ASSERT(!mMsgOut);
+-    mMsgOut = new MboxMsgOutputStream(mDestStream, false);
+-  }
+-
+-  return NS_OK;
+-}
+-
+-// nsIStoreScanListener callback, called after OnStartMessage().
+-NS_IMETHODIMP MboxCompactor::OnStartRequest(nsIRequest* req) {
+-  // We've already set up everything in OnStartMessage().
+-  return NS_OK;
+-}
+-
+-// Helper to drain count number of bytes from stream.
+-static nsresult readAndDiscard(nsIInputStream* stream, uint32_t count) {
+-  char buf[FILE_IO_BUFFER_SIZE];
+-  while (count > 0) {
+-    uint32_t ask = std::min((uint32_t)FILE_IO_BUFFER_SIZE, count);
+-    uint32_t got;
+-    nsresult rv = stream->Read(buf, ask, &got);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    count -= got;
+-  }
+-  return NS_OK;
+-}
+-
+-// Helper to write data to an outputstream, until complete or error.
+-static nsresult writeSpan(nsIOutputStream* writeable,
+-                          mozilla::Span<const char> data) {
+-  while (!data.IsEmpty()) {
+-    uint32_t n;
+-    nsresult rv = writeable->Write(data.Elements(), data.Length(), &n);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    data = data.Last(data.Length() - n);
+-  }
+-  return NS_OK;
+-}
+-
+-// nsIStoreScanListener callback to deliver a chunk of the current message.
+-NS_IMETHODIMP MboxCompactor::OnDataAvailable(nsIRequest* req,
+-                                             nsIInputStream* stream,
+-                                             uint64_t offset, uint32_t count) {
+-  if (!mMsgOut) {
+-    // We're discarding this message.
+-    return readAndDiscard(stream, count);
+-  }
+-
+-  // While there is still data available...
+-  while (count > 0) {
+-    uint32_t maxReadCount =
+-        std::min((uint32_t)(mBuffer.Length() - mBufferCount), count);
+-    uint32_t readCount;
+-    nsresult rv = stream->Read(mBuffer.Elements() + mBufferCount, maxReadCount,
+-                               &readCount);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-
+-    count -= readCount;
+-    mBufferCount += readCount;
+-    if (mBufferCount == mBuffer.Length()) {
+-      // Buffer is full.
+-      rv = FlushBuffer();
+-      NS_ENSURE_SUCCESS(rv, rv);
+-      MOZ_ASSERT(mBufferCount == 0);  // Buffer is now empty.
+-    }
+-  }
+-  return NS_OK;
+-}
+-
+-// nsIStoreScanListener callback called at end of each message.
+-NS_IMETHODIMP MboxCompactor::OnStopRequest(nsIRequest* req, nsresult status) {
+-  auto cleanup = mozilla::MakeScopeExit([&] {
+-    if (mMsgOut) {
+-      mMsgOut->Close();
+-      mMsgOut = nullptr;
+-    }
+-    mCurToken.Truncate();
+-    mMsgFlags = 0;
+-    mMsgKeywords.Truncate();
+-  });
+-
+-  if (mMsgOut && NS_SUCCEEDED(status)) {
+-    // Write out any leftover data.
+-    nsresult rv = FlushBuffer();
+-    NS_ENSURE_SUCCESS(rv, rv);
+-
+-    int64_t msgStart = mMsgOut->StartPos();
+-    rv = mMsgOut->Finish();  // Commit.
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    MOZ_ASSERT(msgStart >= 0);
+-    // tell the listener
+-    nsCString newToken = nsPrintfCString("%" PRId64, msgStart);
+-    rv = mCompactListener->OnMessageRetained(mCurToken, newToken, mNewMsgSize);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-  }
+-
+-  return NS_OK;
+-}
+-
+-// nsIStoreScanListener callback called when the scan completes.
+-NS_IMETHODIMP MboxCompactor::OnStopScan(nsresult status) {
+-  nsresult rv = status;
+-
+-  if (NS_SUCCEEDED(rv)) {
+-    nsCOMPtr<nsISafeOutputStream> safe = do_QueryInterface(mDestStream, &rv);
+-    if (NS_SUCCEEDED(rv)) {
+-      rv = safe->Finish();
+-    }
+-  }
+-
+-  int64_t finalSize = 0;
+-  if (NS_SUCCEEDED(rv)) {
+-    rv = mMboxPath->GetFileSize(&finalSize);
+-  }
+-
+-  mCompactListener->OnCompactionComplete(rv, mOriginalMboxFileSize, finalSize);
+-  return NS_OK;
+-}
+-
+-// Flush out the message data held in mBuffer/mBufferCount.
+-// Also handles on-the-fly patching of X-Mozilla-Headers if that was requested.
+-// If this succeeds, the buffer will be empty upon return.
+-nsresult MboxCompactor::FlushBuffer() {
+-  MOZ_ASSERT(mMsgOut);  // Shouldn't get here if we're skipping msg!
+-  nsresult rv;
+-  auto buf = mBuffer.AsSpan().First(mBufferCount);
+-  // Only do X-Mozilla-* patching for the first chunk, and only if patching
+-  // has been requested.
+-  if (mNewMsgSize > 0 || !mPatchXMozillaHeaders) {
+-    // Just output the buffer verbatim.
+-    rv = writeSpan(mMsgOut, buf);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    mNewMsgSize += buf.Length();
+-    mBufferCount = 0;
+-    return NS_OK;
+-  }
+-
+-  // This is the first chunk of a new message and we want to update the
+-  // X-Mozilla-(Status|Status2|Keys) headers as we go.
+-
+-  // Sniff for CRs to decide what kind of EOL is in use.
+-  auto cr = std::find(buf.cbegin(), buf.cend(), '\r');
+-  nsAutoCString eolSeq;
+-  if (cr == buf.cend()) {
+-    eolSeq.Assign("\n"_ns);  // No CR found.
+-  } else {
+-    eolSeq.Assign("\r\n"_ns);
+-  }
+-
+-  // Read as many headers as we can. We might not have the complete header
+-  // block our in buffer, but that's OK - the X-Mozilla-* ones should be
+-  // right at the start).
+-  nsTArray<HeaderReader::Hdr> headers;
+-  HeaderReader rdr;
+-  auto leftover = rdr.Parse(buf, [&](auto const& hdr) -> bool {
+-    auto const& name = hdr.Name(buf);
+-    if (!name.EqualsLiteral(HEADER_X_MOZILLA_STATUS) &&
+-        !name.EqualsLiteral(HEADER_X_MOZILLA_STATUS2) &&
+-        !name.EqualsLiteral(HEADER_X_MOZILLA_KEYWORDS)) {
+-      headers.AppendElement(hdr);
+-    }
+-    return true;
+-  });
+-
+-  // Write out X-Mozilla-* headers first - we'll create these from scratch.
+-  auto out =
+-      nsPrintfCString(HEADER_X_MOZILLA_STATUS ": %4.4x", mMsgFlags & 0xFFFF);
+-  out.Append(eolSeq);
+-  rv = writeSpan(mMsgOut, out);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-  mNewMsgSize += out.Length();
+-
+-  out = nsPrintfCString(HEADER_X_MOZILLA_STATUS2 ": %8.8x",
+-                        mMsgFlags & 0xFFFF0000);
+-  out.Append(eolSeq);
+-  rv = writeSpan(mMsgOut, out);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-  mNewMsgSize += out.Length();
+-
+-  // The X-Mozilla-Keys header is dynamically modified as users tag/untag
+-  // messages, so aim to leave some space for in-place edits.
+-  out = nsPrintfCString(HEADER_X_MOZILLA_KEYWORDS ": %-*s",
+-                        X_MOZILLA_KEYWORDS_BLANK_LEN, mMsgKeywords.get());
+-  out.Append(eolSeq);
+-  rv = writeSpan(mMsgOut, out);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-  mNewMsgSize += out.Length();
+-
+-  // Write out the rest of the headers.
+-  for (auto const& hdr : headers) {
+-    auto h = buf.Subspan(hdr.pos, hdr.len);
+-    rv = writeSpan(mMsgOut, h);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    mNewMsgSize += h.Length();
+-  }
+-
+-  // The header parser consumes the blank line. If we've completed parsing
+-  // we need to output it now.
+-  // If we haven't parsed all the headers yet, then the blank line will be
+-  // safely copied verbatim as part of the remaining data.
+-  if (rdr.IsComplete()) {
+-    rv = writeSpan(mMsgOut, eolSeq);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    mNewMsgSize += eolSeq.Length();
+-  }
+-
+-  // Write out everything else in the buffer verbatim.
+-  if (leftover.Length() > 0) {
+-    rv = writeSpan(mMsgOut, leftover);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    mNewMsgSize += leftover.Length();
+-  }
+-  mBufferCount = 0;
+-  return NS_OK;
+-}
+-
+-/****************************************************************************
++/*
+  * nsMsgBrkMBoxStore implementation.
+  */
+ nsMsgBrkMBoxStore::nsMsgBrkMBoxStore() {}
+ 
+@@ -1356,8 +981,15 @@ nsMsgBrkMBoxStore::CopyMessages(bool isM
+   *aCopyDone = false;
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP
++nsMsgBrkMBoxStore::GetSupportsCompaction(bool* aSupportsCompaction) {
++  NS_ENSURE_ARG_POINTER(aSupportsCompaction);
++  *aSupportsCompaction = true;
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgBrkMBoxStore::AsyncScan(nsIMsgFolder* folder,
+                                            nsIStoreScanListener* scanListener) {
+   nsCOMPtr<nsIFile> mboxPath;
+   nsresult rv = folder->GetFilePath(getter_AddRefs(mboxPath));
+@@ -1605,31 +1237,9 @@ NS_IMETHODIMP nsMsgBrkMBoxStore::Estimat
+   }
+   nsCOMPtr<nsIFile> file;
+   rv = folder->GetFilePath(getter_AddRefs(file));
+   NS_ENSURE_SUCCESS(rv, rv);
+-  // There can be cases where the mbox file won't exist (e.g. non-offline
+-  // IMAP folder). Return 0 size for that case.
+-  bool exists;
+-  rv = file->Exists(&exists);
++  rv = file->GetFileSize(size);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  if (exists) {
+-    rv = file->GetFileSize(size);
+-    NS_ENSURE_SUCCESS(rv, rv);
+-  }
++
+   return NS_OK;
+ }
+-
+-NS_IMETHODIMP
+-nsMsgBrkMBoxStore::GetSupportsCompaction(bool* aSupportsCompaction) {
+-  NS_ENSURE_ARG_POINTER(aSupportsCompaction);
+-  *aSupportsCompaction = true;
+-  return NS_OK;
+-}
+-
+-NS_IMETHODIMP nsMsgBrkMBoxStore::AsyncCompact(
+-    nsIMsgFolder* folder, nsIStoreCompactListener* compactListener,
+-    bool patchXMozillaHeaders) {
+-  // Fire and forget. MboxScanner will hold itself in existence until finished.
+-  RefPtr<MboxCompactor> compactor(
+-      new MboxCompactor(folder, compactListener, patchXMozillaHeaders));
+-  return compactor->BeginCompaction();
+-}
+diff --git a/mailnews/local/src/nsMsgMaildirStore.cpp b/mailnews/local/src/nsMsgMaildirStore.cpp
+--- a/mailnews/local/src/nsMsgMaildirStore.cpp
++++ b/mailnews/local/src/nsMsgMaildirStore.cpp
+@@ -1210,14 +1210,8 @@ nsMsgMaildirStore::GetSupportsCompaction
+   *aSupportsCompaction = false;
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgMaildirStore::AsyncCompact(
+-    nsIMsgFolder* folder, nsIStoreCompactListener* compactListener,
+-    bool patchXMozillaHeaders) {
+-  return NS_ERROR_NOT_IMPLEMENTED;
+-}
+-
+ NS_IMETHODIMP nsMsgMaildirStore::AsyncScan(nsIMsgFolder* folder,
+                                            nsIStoreScanListener* scanListener) {
+   nsCOMPtr<nsIFile> maildirPath;
+   nsresult rv = folder->GetFilePath(getter_AddRefs(maildirPath));
+diff --git a/mailnews/local/test/unit/test_mailStoreCompact.js b/mailnews/local/test/unit/test_mailStoreCompact.js
+deleted file mode 100644
+--- a/mailnews/local/test/unit/test_mailStoreCompact.js
++++ /dev/null
+@@ -1,228 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+-/**
+- * Tests for nsIMsgPluggableStore compaction support.
+- * Tests _only_ the mailstore side - no folder/db involvement!
+- */
+-
+-const { MessageGenerator } = ChromeUtils.importESModule(
+-  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+-);
+-
+-/**
+- * Helper to calculate a checksum for a file.
+- *
+- * @param {string} fileName - Full path to file.
+- * @returns {string} checksum of the file contents.
+- */
+-async function fileChecksum(fileName) {
+-  const md5 = Cc["@mozilla.org/security/hash;1"].createInstance(
+-    Ci.nsICryptoHash
+-  );
+-  md5.init(Ci.nsICryptoHash.MD5);
+-  const raw = await IOUtils.read(fileName);
+-  md5.update(raw, raw.byteLength);
+-  return md5.finish(true);
+-}
+-
+-/**
+- * Helper class to provide async listener for store compaction.
+- */
+-class PromiseStoreCompactListener {
+-  QueryInterface = ChromeUtils.generateQI(["nsIStoreCompactListener"]);
+-  #promise = Promise.withResolvers();
+-
+-  onCompactionBegin() {}
+-  onRetentionQuery(_storeToken) {
+-    // By default, keep all messages.
+-    return true;
+-  }
+-  onMessageRetained(_oldToken, _newToken, _newSize) {}
+-  onCompactionComplete(status, _oldSize, _newSize) {
+-    if (status == Cr.NS_OK) {
+-      this.#promise.resolve();
+-    } else {
+-      this.#promise.reject(status);
+-    }
+-  }
+-  get promise() {
+-    return this.#promise.promise;
+-  }
+-}
+-
+-/**
+- * Test that discarding all messages yields an empty store.
+- */
+-async function test_discardAll() {
+-  // NOTE: we should be able to create stand-alone msgStore to run tests on,
+-  // but currently they are tightly coupled with folders, msgDB et al...
+-  // Bug 1714472 should sort that out and strip away some of this cruft.
+-  localAccountUtils.loadLocalMailAccount();
+-  const inbox = localAccountUtils.inboxFolder;
+-
+-  Assert.ok(inbox.msgStore.supportsCompaction);
+-
+-  const generator = new MessageGenerator();
+-  inbox.addMessageBatch(
+-    generator
+-      .makeMessages({ count: 10 })
+-      .map(message => message.toMessageString())
+-  );
+-
+-  const compactListener = new PromiseStoreCompactListener();
+-  // Monkey-patch to discard all messages.
+-  compactListener.onRetentionQuery = function (_storeToken) {
+-    return false;
+-  };
+-
+-  inbox.msgStore.asyncCompact(inbox, compactListener, true);
+-  await compactListener.promise;
+-
+-  Assert.equal(inbox.filePath.fileSize, 0, "should be left with an empty mbox");
+-
+-  // Clear up so we can run again on different store type.
+-  localAccountUtils.clearAll();
+-}
+-
+-/**
+- * Test that throwing errors in listener callbacks leaves mbox untouched.
+- */
+-async function test_listenerErrors() {
+-  localAccountUtils.loadLocalMailAccount();
+-  const inbox = localAccountUtils.inboxFolder;
+-
+-  Assert.ok(inbox.msgStore.supportsCompaction);
+-
+-  const generator = new MessageGenerator();
+-  inbox.addMessageBatch(
+-    generator
+-      .makeMessages({ count: 10 })
+-      .map(message => message.toMessageString())
+-  );
+-
+-  // Checksum the mbox file before we do anything.
+-  const checksumBefore = await fileChecksum(inbox.filePath.path);
+-
+-  // Run compaction, failing listener callback in turn.
+-  // We'll use an arbitrary but identifable code: NS_ERROR_CRYPTOMINING_URI.
+-  {
+-    // Check that onCompactionBegin() can abort.
+-    const l = new PromiseStoreCompactListener();
+-    l.onCompactionBegin = function () {
+-      throw Components.Exception("", Cr.NS_ERROR_CRYPTOMINING_URI);
+-    };
+-    inbox.msgStore.asyncCompact(inbox, l, true);
+-    await Assert.rejects(l.promise, e => {
+-      return e === Cr.NS_ERROR_CRYPTOMINING_URI;
+-    });
+-    // Unchanged mbox file?
+-    const checksumAfter = await fileChecksum(inbox.filePath.path);
+-    Assert.equal(checksumBefore, checksumAfter);
+-  }
+-
+-  {
+-    // Check that onRetentionQuery() can abort.
+-    const l = new PromiseStoreCompactListener();
+-    l.onRetentionQuery = function (_storeToken) {
+-      throw Components.Exception("", Cr.NS_ERROR_CRYPTOMINING_URI);
+-    };
+-    inbox.msgStore.asyncCompact(inbox, l, true);
+-    await Assert.rejects(l.promise, e => {
+-      return e === Cr.NS_ERROR_CRYPTOMINING_URI;
+-    });
+-    // Unchanged mbox file?
+-    const checksumAfter = await fileChecksum(inbox.filePath.path);
+-    Assert.equal(checksumBefore, checksumAfter);
+-  }
+-
+-  {
+-    // Check that onMessageRetained() can abort.
+-    const l = new PromiseStoreCompactListener();
+-    l.onMessageRetained = function (_oldToken, _newToken, _newSize) {
+-      throw Components.Exception("", Cr.NS_ERROR_CRYPTOMINING_URI);
+-    };
+-    inbox.msgStore.asyncCompact(inbox, l, true);
+-    await Assert.rejects(l.promise, e => {
+-      return e === Cr.NS_ERROR_CRYPTOMINING_URI;
+-    });
+-    // Unchanged mbox file?
+-    const checksumAfter = await fileChecksum(inbox.filePath.path);
+-    Assert.equal(checksumBefore, checksumAfter);
+-  }
+-
+-  // Don't bother failing onCompactionComplete() - the compaction is already
+-  // complete by then.
+-
+-  // Clear up so we can run again on different store type.
+-  localAccountUtils.clearAll();
+-}
+-
+-/**
+- * Test that mbox is left untouched if we fail after retaining some messages.
+- */
+-async function test_midwayFail() {
+-  localAccountUtils.loadLocalMailAccount();
+-  const inbox = localAccountUtils.inboxFolder;
+-
+-  Assert.ok(inbox.msgStore.supportsCompaction);
+-
+-  // Some test messages.
+-  const numMessages = 50;
+-  const generator = new MessageGenerator();
+-  inbox.addMessageBatch(
+-    generator
+-      .makeMessages({ count: numMessages })
+-      .map(message => message.toMessageString())
+-  );
+-
+-  // Checksum the mbox file before we do anything.
+-  const checksumBefore = await fileChecksum(inbox.filePath.path);
+-
+-  // Monkey-patch a listener to keep every other message then fail
+-  // half way through.
+-  const l = new PromiseStoreCompactListener();
+-  l.queriedCount = 0;
+-  l.onRetentionQuery = function (_storeToken) {
+-    ++this.queriedCount;
+-    return (this.queriedCount & 1) == 0;
+-  };
+-  l.onMessageRetained = function (_oldToken, _newToken, _newSize) {
+-    // Abort halfway through.
+-    if (this.queriedCount >= numMessages / 2) {
+-      throw Components.Exception("", Cr.NS_ERROR_CRYPTOMINING_URI);
+-    }
+-  };
+-
+-  // Go!
+-  inbox.msgStore.asyncCompact(inbox, l, true);
+-  await Assert.rejects(l.promise, e => {
+-    return e === Cr.NS_ERROR_CRYPTOMINING_URI;
+-  });
+-
+-  // Unchanged mbox file?
+-  const checksumAfter = await fileChecksum(inbox.filePath.path);
+-  Assert.equal(checksumBefore, checksumAfter);
+-
+-  localAccountUtils.clearAll();
+-}
+-
+-// TODO
+-// More test ideas:
+-// - Test X-Mozilla-* header patching (higher-level folder-compact tests
+-//   already cover this, but it'd probably be cleaner doing it here).
+-
+-// Return a wrapper which sets the store type before running fn().
+-function withStore(store, fn) {
+-  return async () => {
+-    Services.prefs.setCharPref("mail.serverDefaultStoreContractID", store);
+-    await fn();
+-  };
+-}
+-
+-// Only mbox has compaction. For now. It is possible others might in future.
+-const mboxStore = "@mozilla.org/msgstore/berkeleystore;1";
+-add_task(withStore(mboxStore, test_discardAll));
+-add_task(withStore(mboxStore, test_listenerErrors));
+-add_task(withStore(mboxStore, test_midwayFail));
+diff --git a/mailnews/local/test/unit/xpcshell.ini b/mailnews/local/test/unit/xpcshell.ini
+--- a/mailnews/local/test/unit/xpcshell.ini
++++ b/mailnews/local/test/unit/xpcshell.ini
+@@ -17,9 +17,8 @@ prefs =
+ [test_localFolder.js]
+ [test_mailboxContentLength.js]
+ [test_mailboxProtocol.js]
+ [test_mailboxURL.js]
+-[test_mailStoreCompact.js]
+ [test_msgCopy.js]
+ [test_msgIDParsing.js]
+ [test_noTop.js]
+ [test_noUidl.js]

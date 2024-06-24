@@ -1,0 +1,2103 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1719258248 -7200
+# Parent  35afe6405c776fef325dd9ff4aae109daf27b460
+Backed out bug 1890448, part 2. Horrible performance (bug 1904208).
+
+diff --git a/mailnews/base/public/moz.build b/mailnews/base/public/moz.build
+--- a/mailnews/base/public/moz.build
++++ b/mailnews/base/public/moz.build
+@@ -32,8 +32,9 @@ XPIDL_SOURCES += [
+     "nsIMsgEnumerator.idl",
+     "nsIMsgFolder.idl",
+     "nsIMsgFolderCache.idl",
+     "nsIMsgFolderCacheElement.idl",
++    "nsIMsgFolderCompactor.idl",
+     "nsIMsgFolderListener.idl",
+     "nsIMsgFolderNotificationService.idl",
+     "nsIMsgHdr.idl",
+     "nsIMsgIdentity.idl",
+diff --git a/mailnews/base/public/nsIMsgFolderCompactor.idl b/mailnews/base/public/nsIMsgFolderCompactor.idl
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/public/nsIMsgFolderCompactor.idl
+@@ -0,0 +1,34 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++interface nsIMsgFolder;
++interface nsIMsgWindow;
++interface nsIUrlListener;
++
++[scriptable, uuid(38c7e876-3083-4aea-8dcd-0ea0ec1753a3)]
++
++/**
++ * Use this for any object that wants to handle compacting folders.
++ * Currently, the folders themselves create this object.
++ */
++
++interface nsIMsgFolderCompactor :  nsISupports
++{
++  /**
++   * Compact the passed in array of folders.
++   *
++   * @param folders              The folders to compact.
++   * @param listener             Notified of completion, can be null.
++   *                             OnStartRunningUrl() will not be called.
++   *                             OnStopRunningUrl() will be called upon
++   *                             completion, with a null URL.
++   * @param window               Used for progress/status, can be null.
++   */
++  void compactFolders(in Array<nsIMsgFolder> folders,
++                      in nsIUrlListener listener,
++                      in nsIMsgWindow window);
++};
+diff --git a/mailnews/base/public/nsIMsgFolderListener.idl b/mailnews/base/public/nsIMsgFolderListener.idl
+--- a/mailnews/base/public/nsIMsgFolderListener.idl
++++ b/mailnews/base/public/nsIMsgFolderListener.idl
+@@ -189,9 +189,9 @@ interface nsIMsgFolderListener : nsISupp
+   void folderRenamed(in nsIMsgFolder aOrigFolder, in nsIMsgFolder aNewFolder);
+ 
+ 
+   /**
+-   * Called to indicate beginning of compaction of the
++   * Called to indicate nsIMsgFolderCompactor is beginning compaction of the
+    * folder.  If the summary file was missing or out-of-date and a parse
+    * is required, this notification will come after the completion of the
+    * parse.  The compactor will be holding the folder's semaphore when
+    * this notification is generated.  This only happens for local folders
+@@ -202,9 +202,9 @@ interface nsIMsgFolderListener : nsISupp
+   void folderCompactStart(in nsIMsgFolder folder);
+ 
+ 
+   /**
+-   * Called when compaction of the folder is completed.
++   * Called when nsIMsgFolderCompactor has completed compaction of the folder.
+    * At this point, the folder semaphore has been released and the database
+    * has been committed.
+    *
+    * @param {nsIMsgFolder} folder - Target folder of the compaction.
+diff --git a/mailnews/base/src/MboxMsgOutputStream.h b/mailnews/base/src/MboxMsgOutputStream.h
+--- a/mailnews/base/src/MboxMsgOutputStream.h
++++ b/mailnews/base/src/MboxMsgOutputStream.h
+@@ -51,9 +51,8 @@ class MboxMsgOutputStream : public nsIOu
+   // The underlying mboxStream must be nsISeekable.
+   explicit MboxMsgOutputStream(nsIOutputStream* mboxStream,
+                                bool closeInnerWhenDone = false);
+   MboxMsgOutputStream() = delete;
+-  int64_t StartPos() { return mStartPos; }
+ 
+  private:
+   virtual ~MboxMsgOutputStream();
+ 
+diff --git a/mailnews/base/src/components.conf b/mailnews/base/src/components.conf
+--- a/mailnews/base/src/components.conf
++++ b/mailnews/base/src/components.conf
+@@ -154,8 +154,14 @@ Classes = [
+         "init_method": "Init",
+         "headers": ["/comm/mailnews/base/src/nsSubscribableServer.h"],
+     },
+     {
++        "cid": "{56c4c2ac-fe4a-4528-aa78-f8fb579b029c}",
++        "contract_ids": ["@mozilla.org/messenger/foldercompactor;1"],
++        "type": "nsMsgFolderCompactor",
++        "headers": ["/comm/mailnews/base/src/nsMsgFolderCompactor.h"],
++    },
++    {
+         "cid": "{52f860e0-1dd2-11b2-aa72-bb751981bd00}",
+         "contract_ids": ["@mozilla.org/messenger/msgdbview;1?type=threaded"],
+         "type": "nsMsgThreadedDBView",
+         "headers": ["/comm/mailnews/base/src/nsMsgThreadedDBView.h"],
+diff --git a/mailnews/base/src/moz.build b/mailnews/base/src/moz.build
+--- a/mailnews/base/src/moz.build
++++ b/mailnews/base/src/moz.build
+@@ -3,9 +3,8 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ EXPORTS += [
+-    "FolderCompactor.h",
+     "HeaderReader.h",
+     "LineReader.h",
+     "MboxMsgInputStream.h",
+     "MboxMsgOutputStream.h",
+@@ -32,9 +31,8 @@ EXPORTS += [
+     "UrlListener.h",
+ ]
+ 
+ SOURCES += [
+-    "FolderCompactor.cpp",
+     "MailNewsDLF.cpp",
+     "MailnewsLoadContextInfo.cpp",
+     "MboxMsgInputStream.cpp",
+     "MboxMsgOutputStream.cpp",
+@@ -57,8 +55,9 @@ SOURCES += [
+     "nsMsgDBView.cpp",
+     "nsMsgEnumerator.cpp",
+     "nsMsgFileStream.cpp",
+     "nsMsgFolderCache.cpp",
++    "nsMsgFolderCompactor.cpp",
+     "nsMsgFolderNotificationService.cpp",
+     "nsMsgGroupThread.cpp",
+     "nsMsgGroupView.cpp",
+     "nsMsgI18N.cpp",
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -19,9 +19,9 @@
+ #include "nsISeekableStream.h"
+ #include "nsIChannel.h"
+ #include "nsITransport.h"
+ #include "nsIWindowWatcher.h"
+-#include "FolderCompactor.h"
++#include "nsIMsgFolderCompactor.h"
+ #include "nsIDocShell.h"
+ #include "nsIMsgWindow.h"
+ #include "nsIPrompt.h"
+ #include "nsIInterfaceRequestorUtils.h"
+@@ -1714,12 +1714,15 @@ nsresult nsMsgDBFolder::HandleAutoCompac
+         if (okToCompact) {
+           NotifyFolderEvent(kAboutToCompact);
+ 
+           if (localExpungedBytes > 0 || offlineExpungedBytes > 0) {
++            nsCOMPtr<nsIMsgFolderCompactor> folderCompactor = do_CreateInstance(
++                "@mozilla.org/messenger/foldercompactor;1", &rv);
++            NS_ENSURE_SUCCESS(rv, rv);
+             for (nsIMsgFolder* f : offlineFolderArray) {
+               folderArray.AppendElement(f);
+             }
+-            rv = AsyncCompactFolders(folderArray, nullptr, aWindow);
++            rv = folderCompactor->CompactFolders(folderArray, nullptr, aWindow);
+           }
+         }
+       }
+     }
+diff --git a/mailnews/base/src/nsMsgFolderCompactor.cpp b/mailnews/base/src/nsMsgFolderCompactor.cpp
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/src/nsMsgFolderCompactor.cpp
+@@ -0,0 +1,1416 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "msgCore.h"  // precompiled header...
++#include "nsCOMPtr.h"
++#include "nsIMsgFolder.h"
++#include "nsIFile.h"
++#include "nsNetUtil.h"
++#include "nsIMsgHdr.h"
++#include "nsIChannel.h"
++#include "nsIStreamListener.h"
++#include "nsIMsgMessageService.h"
++#include "nsMsgUtils.h"
++#include "nsISeekableStream.h"
++#include "nsIDBFolderInfo.h"
++#include "nsIPrompt.h"
++#include "nsIMsgLocalMailFolder.h"
++#include "nsIMsgImapMailFolder.h"
++#include "nsMailHeaders.h"
++#include "nsMsgLocalFolderHdrs.h"
++#include "nsIMsgDatabase.h"
++#include "nsMsgMessageFlags.h"
++#include "nsMsgFolderFlags.h"
++#include "nsIMsgStatusFeedback.h"
++#include "nsIMsgFolderNotificationService.h"
++#include "nsMsgFolderCompactor.h"
++#include "nsIOutputStream.h"
++#include "nsIInputStream.h"
++#include "nsPrintfCString.h"
++#include "nsIStringBundle.h"
++#include "nsICopyMessageStreamListener.h"
++#include "nsIMsgWindow.h"
++#include "nsIMsgPluggableStore.h"
++#include "mozilla/Buffer.h"
++#include "HeaderReader.h"
++#include "LineReader.h"
++#include "MboxMsgOutputStream.h"
++#include "mozilla/Components.h"
++
++static nsresult GetBaseStringBundle(nsIStringBundle** aBundle) {
++  NS_ENSURE_ARG_POINTER(aBundle);
++  nsCOMPtr<nsIStringBundleService> bundleService =
++      mozilla::components::StringBundle::Service();
++  NS_ENSURE_TRUE(bundleService, NS_ERROR_UNEXPECTED);
++  nsCOMPtr<nsIStringBundle> bundle;
++  return bundleService->CreateBundle(
++      "chrome://messenger/locale/messenger.properties", aBundle);
++}
++
++#define COMPACTOR_READ_BUFF_SIZE 16384
++
++/**
++ * nsFolderCompactState is a helper class for nsFolderCompactor, which
++ * handles compacting the mbox for a single local folder.
++ *
++ * This class also patches X-Mozilla-* headers where required. Usually
++ * these headers are edited in-place without changing the overall size,
++ * but sometimes there's not enough room. So as compaction involves
++ * rewriting the whole file anyway, we take the opportunity to make some
++ * more space and correct those headers.
++ *
++ * NOTE (for future cleanups):
++ *
++ * This base class calls nsIMsgMessageService.copyMessages() to iterate
++ * through messages, passing itself in as a listener. Callbacks from
++ * both nsICopyMessageStreamListener and nsIStreamListener are invoked.
++ *
++ * nsOfflineStoreCompactState uses a different mechanism - see separate
++ * notes below.
++ *
++ * The way the service invokes the listener callbacks is pretty quirky
++ * and probably needs a good sorting out, but for now I'll just document what
++ * I've observed here:
++ *
++ * - The service calls OnStartRequest() at the start of the first message.
++ * - StartMessage() is called at the start of subsequent messages.
++ * - EndCopy() is called at the end of every message except the last one,
++ *   where OnStopRequest() is invoked instead.
++ * - OnDataAvailable() is called to pass the message body of each message
++ *   (in multiple calls if the message is big enough).
++ * - EndCopy() doesn't ever seem to be passed a failing error code from
++ *   what I can see, and its own return code is ignored by upstream code.
++ */
++class nsFolderCompactState : public nsIStreamListener,
++                             public nsICopyMessageStreamListener,
++                             public nsIUrlListener {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_DECL_NSIREQUESTOBSERVER
++  NS_DECL_NSISTREAMLISTENER
++  NS_DECL_NSICOPYMESSAGESTREAMLISTENER
++  NS_DECL_NSIURLLISTENER
++
++  nsFolderCompactState(void);
++
++  nsresult Compact(nsIMsgFolder* folder,
++                   std::function<void(nsresult, uint64_t)> completionFn,
++                   nsIMsgWindow* msgWindow);
++
++ protected:
++  virtual ~nsFolderCompactState(void);
++
++  virtual nsresult InitDB(nsIMsgDatabase* db);
++  virtual nsresult StartCompacting();
++  virtual nsresult FinishCompact();
++  void CloseOutputStream();
++  void CleanupTempFilesAfterError();
++  nsresult FlushBuffer();
++
++  nsresult Init(nsIMsgFolder* aFolder, const char* aBaseMsgUri,
++                nsIMsgDatabase* aDb, nsIFile* aPath, nsIMsgWindow* aMsgWindow);
++  nsresult BuildMessageURI(const char* baseURI, nsMsgKey key, nsCString& uri);
++  nsresult ShowStatusMsg(const nsString& aMsg);
++  nsresult ReleaseFolderLock();
++  void ShowCompactingStatusMsg();
++  nsresult BeginMsgWrite();
++
++  nsCString m_baseMessageUri;       // base message uri
++  nsCString m_messageUri;           // current message uri being copy
++  nsCOMPtr<nsIMsgFolder> m_folder;  // current folder being compact
++  nsCOMPtr<nsIMsgDatabase> m_db;    // new database for the compact folder
++  nsCOMPtr<nsIFile> m_file;         // new mailbox for the compact folder
++  // The underlying temporary mbox file we're writing to.
++  nsCOMPtr<nsIOutputStream> m_fileStream;
++  // The output stream for the current message.
++  RefPtr<MboxMsgOutputStream> m_msgOut;
++  // All message keys that need to be copied over.
++  nsTArray<nsMsgKey> m_keys;
++
++  // Sum of the sizes of the messages, accumulated as we visit each msg.
++  uint64_t m_totalMsgSize{0};
++  // Number of bytes that can be expunged while compacting.
++  uint64_t m_totalExpungedBytes{0};
++  // Index of the current copied message key in key array.
++  uint32_t m_curIndex{0};
++  // Offset of the current message within the mbox.
++  uint64_t m_startOfNewMsg{0};
++
++  // Number of bytes written so far into the message.
++  uint64_t m_msgSize{0};
++
++  mozilla::Buffer<char> m_buffer{COMPACTOR_READ_BUFF_SIZE};
++  uint32_t m_bufferCount{0};
++
++  // We'll use this if we need to output any EOLs - we try to preserve the
++  // convention found in the input data.
++  nsCString m_eolSeq{MSG_LINEBREAK};
++
++  // The status of the copying operation.
++  nsresult m_status{NS_OK};
++  nsCOMPtr<nsIMsgMessageService> m_messageService;  // message service for
++                                                    // copying
++  nsCOMPtr<nsIMsgWindow> m_window;
++  nsCOMPtr<nsIMsgDBHdr> m_curSrcHdr;
++  // Flag set when we're waiting for local folder to complete parsing.
++  bool m_parsingFolder;
++
++  // Function which will be run when the folder compaction completes.
++  // Takes a result code and the number of bytes which were expunged.
++  std::function<void(nsresult, uint64_t)> m_completionFn;
++  bool m_alreadyWarnedDiskSpace{false};
++};
++
++NS_IMPL_ISUPPORTS(nsFolderCompactState, nsIRequestObserver, nsIStreamListener,
++                  nsICopyMessageStreamListener, nsIUrlListener)
++
++nsFolderCompactState::nsFolderCompactState() { m_parsingFolder = false; }
++
++nsFolderCompactState::~nsFolderCompactState() {
++  CloseOutputStream();
++  if (NS_FAILED(m_status)) {
++    CleanupTempFilesAfterError();
++    // if for some reason we failed remove the temp folder and database
++  }
++}
++
++void nsFolderCompactState::CloseOutputStream() {
++  if (m_fileStream) {
++    m_fileStream->Close();
++    m_fileStream = nullptr;
++  }
++}
++
++void nsFolderCompactState::CleanupTempFilesAfterError() {
++  CloseOutputStream();
++  if (m_db) m_db->ForceClosed();
++  nsCOMPtr<nsIFile> summaryFile;
++  GetSummaryFileLocation(m_file, getter_AddRefs(summaryFile));
++  m_file->Remove(false);
++  summaryFile->Remove(false);
++}
++
++nsresult nsFolderCompactState::BuildMessageURI(const char* baseURI,
++                                               nsMsgKey key, nsCString& uri) {
++  uri.Append(baseURI);
++  uri.Append('#');
++  uri.AppendInt(key);
++
++  return NS_OK;
++}
++
++nsresult nsFolderCompactState::InitDB(nsIMsgDatabase* db) {
++  nsCOMPtr<nsIMsgDatabase> mailDBFactory;
++  nsresult rv = db->ListAllKeys(m_keys);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsCOMPtr<nsIMsgDBService> msgDBService =
++      do_GetService("@mozilla.org/msgDatabase/msgDBService;1", &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++  rv = msgDBService->OpenMailDBFromFile(m_file, m_folder, true, false,
++                                        getter_AddRefs(m_db));
++
++  if (rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE ||
++      rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING)
++    // if it's out of date then reopen with upgrade.
++    return msgDBService->OpenMailDBFromFile(m_file, m_folder, true, true,
++                                            getter_AddRefs(m_db));
++  return rv;
++}
++
++nsresult nsFolderCompactState::Compact(
++    nsIMsgFolder* folder, std::function<void(nsresult, uint64_t)> completionFn,
++    nsIMsgWindow* msgWindow) {
++  NS_ENSURE_ARG_POINTER(folder);
++  m_completionFn = completionFn;
++  m_window = msgWindow;
++  nsresult rv;
++  nsCOMPtr<nsIMsgDatabase> db;
++  nsCOMPtr<nsIFile> path;
++  nsCString baseMessageURI;
++
++  nsCOMPtr<nsIMsgLocalMailFolder> localFolder = do_QueryInterface(folder, &rv);
++  if (NS_SUCCEEDED(rv) && localFolder) {
++    rv = localFolder->GetDatabaseWOReparse(getter_AddRefs(db));
++    if (NS_FAILED(rv) || !db) {
++      if (rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING ||
++          rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE) {
++        m_folder = folder;  // will be used to compact
++        m_parsingFolder = true;
++        rv = localFolder->ParseFolder(m_window, this);
++      }
++      return rv;
++    } else {
++      bool valid;
++      rv = db->GetSummaryValid(&valid);
++      if (!valid)  // we are probably parsing the folder because we selected it.
++      {
++        folder->NotifyCompactCompleted();
++        if (m_completionFn) {
++          m_completionFn(NS_OK, m_totalExpungedBytes);
++          m_completionFn = nullptr;
++        }
++        return NS_OK;
++      }
++    }
++  } else {
++    rv = folder->GetMsgDatabase(getter_AddRefs(db));
++    NS_ENSURE_SUCCESS(rv, rv);
++  }
++
++  rv = folder->GetFilePath(getter_AddRefs(path));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  do {
++    bool exists = false;
++    rv = path->Exists(&exists);
++    if (!exists) {
++      // No need to compact if the local file does not exist.
++      // Can happen e.g. on IMAP when the folder is not marked for offline use.
++      break;
++    }
++
++    int64_t expunged = 0;
++    folder->GetExpungedBytes(&expunged);
++    if (expunged == 0) {
++      // No need to compact if nothing would be expunged.
++      break;
++    }
++
++    int64_t diskSize;
++    rv = folder->GetSizeOnDisk(&diskSize);
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    int64_t diskFree;
++    rv = path->GetDiskSpaceAvailable(&diskFree);
++    if (NS_FAILED(rv)) {
++      // If GetDiskSpaceAvailable() failed, better bail out fast.
++      if (rv != NS_ERROR_NOT_IMPLEMENTED) return rv;
++      // Some platforms do not have GetDiskSpaceAvailable implemented.
++      // In that case skip the preventive free space analysis and let it
++      // fail in compact later if space actually wasn't available.
++    } else {
++      // Let's try to not even start compact if there is really low free space.
++      // It may still fail later as we do not know how big exactly the folder DB
++      // will end up being. The DB already doesn't contain references to
++      // messages that are already deleted. So theoretically it shouldn't shrink
++      // with compact. But in practice, the automatic shrinking of the DB may
++      // still have not yet happened. So we cap the final size at 1KB per
++      // message.
++      db->Commit(nsMsgDBCommitType::kCompressCommit);
++
++      int64_t dbSize;
++      rv = db->GetDatabaseSize(&dbSize);
++      NS_ENSURE_SUCCESS(rv, rv);
++
++      int32_t totalMsgs;
++      rv = folder->GetTotalMessages(false, &totalMsgs);
++      NS_ENSURE_SUCCESS(rv, rv);
++      int64_t expectedDBSize =
++          std::min<int64_t>(dbSize, ((int64_t)totalMsgs) * 1024);
++      if (diskFree < diskSize - expunged + expectedDBSize) {
++        if (!m_alreadyWarnedDiskSpace) {
++          folder->ThrowAlertMsg("compactFolderInsufficientSpace", m_window);
++          m_alreadyWarnedDiskSpace = true;
++        }
++        break;
++      }
++    }
++
++    rv = folder->GetBaseMessageURI(baseMessageURI);
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    rv = Init(folder, baseMessageURI.get(), db, path, m_window);
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    bool isLocked = true;
++    m_folder->GetLocked(&isLocked);
++    if (isLocked) {
++      CleanupTempFilesAfterError();
++      m_folder->ThrowAlertMsg("compactFolderDeniedLock", m_window);
++      break;
++    }
++
++    // If we got here start the real compacting.
++    nsCOMPtr<nsISupports> supports;
++    QueryInterface(NS_GET_IID(nsISupports), getter_AddRefs(supports));
++    m_folder->AcquireSemaphore(supports);
++    m_totalExpungedBytes += expunged;
++    return StartCompacting();
++
++  } while (false);  // block for easy skipping the compaction using 'break'
++
++  // Skipped folder, for whatever reason.
++  folder->NotifyCompactCompleted();
++  if (m_completionFn) {
++    m_completionFn(NS_OK, m_totalExpungedBytes);
++    m_completionFn = nullptr;
++  }
++  return NS_OK;
++}
++
++nsresult nsFolderCompactState::ShowStatusMsg(const nsString& aMsg) {
++  if (!m_window || aMsg.IsEmpty()) return NS_OK;
++
++  nsCOMPtr<nsIMsgStatusFeedback> statusFeedback;
++  nsresult rv = m_window->GetStatusFeedback(getter_AddRefs(statusFeedback));
++  if (NS_FAILED(rv) || !statusFeedback) return NS_OK;
++
++  // Try to prepend account name to the message.
++  nsString statusMessage;
++  do {
++    nsCOMPtr<nsIMsgIncomingServer> server;
++    rv = m_folder->GetServer(getter_AddRefs(server));
++    if (NS_FAILED(rv)) break;
++    nsAutoString accountName;
++    rv = server->GetPrettyName(accountName);
++    if (NS_FAILED(rv)) break;
++    nsCOMPtr<nsIStringBundle> bundle;
++    rv = GetBaseStringBundle(getter_AddRefs(bundle));
++    if (NS_FAILED(rv)) break;
++    AutoTArray<nsString, 2> params = {accountName, aMsg};
++    rv = bundle->FormatStringFromName("statusMessage", params, statusMessage);
++  } while (false);
++
++  // If fetching any of the needed info failed, just show the original message.
++  if (NS_FAILED(rv)) statusMessage.Assign(aMsg);
++  return statusFeedback->SetStatusString(statusMessage);
++}
++
++nsresult nsFolderCompactState::Init(nsIMsgFolder* folder,
++                                    const char* baseMsgUri, nsIMsgDatabase* db,
++                                    nsIFile* path, nsIMsgWindow* aMsgWindow) {
++  nsresult rv;
++
++  m_folder = folder;
++  m_baseMessageUri = baseMsgUri;
++  m_file = do_CreateInstance(NS_LOCAL_FILE_CONTRACTID, &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++  m_file->InitWithFile(path);
++
++  m_file->SetNativeLeafName("nstmp"_ns);
++  // Make sure we are not crunching existing nstmp file.
++  rv = m_file->CreateUnique(nsIFile::NORMAL_FILE_TYPE, 00600);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  m_window = aMsgWindow;
++  m_totalMsgSize = 0;
++  rv = InitDB(db);
++  if (NS_FAILED(rv)) {
++    CleanupTempFilesAfterError();
++    return rv;
++  }
++
++  m_curIndex = 0;
++
++  rv = MsgNewBufferedFileOutputStream(getter_AddRefs(m_fileStream), m_file, -1,
++                                      00600);
++  if (NS_FAILED(rv))
++    m_folder->ThrowAlertMsg("compactFolderWriteFailed", m_window);
++  else
++    rv = GetMessageServiceFromURI(nsDependentCString(baseMsgUri),
++                                  getter_AddRefs(m_messageService));
++  if (NS_FAILED(rv)) {
++    m_status = rv;
++  }
++  return rv;
++}
++
++void nsFolderCompactState::ShowCompactingStatusMsg() {
++  nsString statusString;
++  nsresult rv = m_folder->GetStringWithFolderNameFromBundle("compactingFolder",
++                                                            statusString);
++  if (!statusString.IsEmpty() && NS_SUCCEEDED(rv)) ShowStatusMsg(statusString);
++}
++
++NS_IMETHODIMP nsFolderCompactState::OnStartRunningUrl(nsIURI* url) {
++  return NS_OK;
++}
++
++// If we had to kick off a folder parse, this will be called when it
++// completes.
++NS_IMETHODIMP nsFolderCompactState::OnStopRunningUrl(nsIURI* url,
++                                                     nsresult status) {
++  if (m_parsingFolder) {
++    m_parsingFolder = false;
++    if (NS_SUCCEEDED(status)) {
++      // Folder reparse succeeded. Start compacting it.
++      status = Compact(m_folder, m_completionFn, m_window);
++      if (NS_SUCCEEDED(status)) {
++        return NS_OK;
++      }
++    }
++  }
++
++  // This is from bug 249754. The aim is to close the DB file to avoid
++  // running out of filehandles when large numbers of folders are compacted.
++  // But it seems like filehandle management would be better off being
++  // handled by the DB class itself (it might be already, but it's hard to
++  // tell)...
++  m_folder->SetMsgDatabase(nullptr);
++
++  if (m_completionFn) {
++    m_completionFn(status, m_totalExpungedBytes);
++    m_completionFn = nullptr;
++  }
++  return NS_OK;
++}
++
++nsresult nsFolderCompactState::StartCompacting() {
++  nsresult rv = NS_OK;
++  // Notify that compaction is beginning.  We do this even if there are no
++  // messages to be copied because the summary database still gets blown away
++  // which is still pretty interesting.  (And we like consistency.)
++  nsCOMPtr<nsIMsgFolderNotificationService> notifier(
++      do_GetService("@mozilla.org/messenger/msgnotificationservice;1"));
++  if (notifier) {
++    notifier->NotifyFolderCompactStart(m_folder);
++  }
++
++  // TODO: test whether sorting the messages (m_keys) by messageOffset
++  // would improve performance on large files (less seeks).
++  // The m_keys array is in the order as stored in DB and on IMAP or News
++  // the messages stored on the mbox file are not necessarily in the same order.
++  if (m_keys.Length() > 0) {
++    nsCOMPtr<nsIURI> notUsed;
++    ShowCompactingStatusMsg();
++    NS_ADDREF_THIS();
++    rv = m_messageService->CopyMessages(m_keys, m_folder, this, false, nullptr,
++                                        m_window, getter_AddRefs(notUsed));
++  } else {  // no messages to copy with
++    FinishCompact();
++  }
++  return rv;
++}
++
++nsresult nsFolderCompactState::FinishCompact() {
++  NS_ENSURE_TRUE(m_folder, NS_ERROR_NOT_INITIALIZED);
++  NS_ENSURE_TRUE(m_file, NS_ERROR_NOT_INITIALIZED);
++
++  // All okay time to finish up the compact process
++  nsCOMPtr<nsIFile> path;
++  nsCOMPtr<nsIDBFolderInfo> folderInfo;
++
++  // get leaf name and database name of the folder
++  nsresult rv = m_folder->GetFilePath(getter_AddRefs(path));
++  NS_ENSURE_SUCCESS(rv, rv);
++  nsCOMPtr<nsIFile> folderPath =
++      do_CreateInstance(NS_LOCAL_FILE_CONTRACTID, &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++  rv = folderPath->InitWithFile(path);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsCOMPtr<nsIFile> oldSummaryFile;
++  rv = GetSummaryFileLocation(folderPath, getter_AddRefs(oldSummaryFile));
++  NS_ENSURE_SUCCESS(rv, rv);
++  nsAutoCString dbName;
++  oldSummaryFile->GetNativeLeafName(dbName);
++  nsAutoCString folderName;
++  path->GetNativeLeafName(folderName);
++
++  // close down the temp file stream; preparing for deleting the old folder
++  // and its database; then rename the temp folder and database
++  if (m_fileStream) {
++    m_fileStream->Flush();
++    m_fileStream->Close();
++    m_fileStream = nullptr;
++  }
++
++  // make sure the new database is valid.
++  // Close it so we can rename the .msf file.
++  if (m_db) {
++    m_db->ForceClosed();
++    m_db = nullptr;
++  }
++
++  nsCOMPtr<nsIFile> newSummaryFile;
++  rv = GetSummaryFileLocation(m_file, getter_AddRefs(newSummaryFile));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsCOMPtr<nsIDBFolderInfo> transferInfo;
++  m_folder->GetDBTransferInfo(getter_AddRefs(transferInfo));
++
++  // close down database of the original folder
++  m_folder->ForceDBClosed();
++
++  // Sanity check - mbox size should always be larger than the messages
++  // written to it (because of "From " lines, escaping, and a blank line
++  // at the end of each message).
++  nsCOMPtr<nsIFile> cloneFile;
++  int64_t fileSize = 0;
++  rv = m_file->Clone(getter_AddRefs(cloneFile));
++  if (NS_SUCCEEDED(rv)) rv = cloneFile->GetFileSize(&fileSize);
++  bool tempFileRightSize = ((uint64_t)fileSize >= m_totalMsgSize);
++  NS_WARNING_ASSERTION(tempFileRightSize,
++                       "temp file not of expected size in compact");
++
++  bool folderRenameSucceeded = false;
++  bool msfRenameSucceeded = false;
++  if (NS_SUCCEEDED(rv) && tempFileRightSize) {
++    // First we're going to try and move the old summary file out the way.
++    // We don't delete it yet, as we want to keep the files in sync.
++    nsCOMPtr<nsIFile> tempSummaryFile;
++    rv = oldSummaryFile->Clone(getter_AddRefs(tempSummaryFile));
++    if (NS_SUCCEEDED(rv))
++      rv = tempSummaryFile->CreateUnique(nsIFile::NORMAL_FILE_TYPE, 0600);
++
++    nsAutoCString tempSummaryFileName;
++    if (NS_SUCCEEDED(rv))
++      rv = tempSummaryFile->GetNativeLeafName(tempSummaryFileName);
++
++    if (NS_SUCCEEDED(rv)) {
++      rv = oldSummaryFile->MoveToNative((nsIFile*)nullptr, tempSummaryFileName);
++    }
++
++    NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
++                         "error moving compacted folder's db out of the way");
++    if (NS_SUCCEEDED(rv)) {
++      // Now we've successfully moved the summary file out the way, try moving
++      // the newly compacted message file over the old one.
++      rv = m_file->MoveToNative((nsIFile*)nullptr, folderName);
++      folderRenameSucceeded = NS_SUCCEEDED(rv);
++      NS_WARNING_ASSERTION(folderRenameSucceeded,
++                           "error renaming compacted folder");
++      if (folderRenameSucceeded) {
++        // That worked, so land the new summary file in the right place.
++        nsCOMPtr<nsIFile> renamedCompactedSummaryFile;
++        newSummaryFile->Clone(getter_AddRefs(renamedCompactedSummaryFile));
++        if (renamedCompactedSummaryFile) {
++          rv = renamedCompactedSummaryFile->MoveToNative((nsIFile*)nullptr,
++                                                         dbName);
++          msfRenameSucceeded = NS_SUCCEEDED(rv);
++        }
++        NS_WARNING_ASSERTION(msfRenameSucceeded,
++                             "error renaming compacted folder's db");
++      }
++
++      if (!msfRenameSucceeded) {
++        // Do our best to put the summary file back to where it was
++        rv = tempSummaryFile->MoveToNative((nsIFile*)nullptr, dbName);
++        if (NS_SUCCEEDED(rv)) {
++          // Flagging that a renamed db no longer exists.
++          tempSummaryFile = nullptr;
++        } else {
++          NS_WARNING("error restoring uncompacted folder's db");
++        }
++      }
++    }
++    // We don't want any temporarily renamed summary file to lie around
++    if (tempSummaryFile) tempSummaryFile->Remove(false);
++  }
++
++  NS_WARNING_ASSERTION(msfRenameSucceeded, "compact failed");
++  nsresult rvReleaseFolderLock = ReleaseFolderLock();
++  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvReleaseFolderLock),
++                       "folder lock not released successfully");
++  rv = NS_FAILED(rv) ? rv : rvReleaseFolderLock;
++
++  // Cleanup of nstmp-named compacted files if failure
++  if (!folderRenameSucceeded) {
++    // remove the abandoned compacted version with the wrong name
++    m_file->Remove(false);
++  }
++  if (!msfRenameSucceeded) {
++    // remove the abandoned compacted summary file
++    newSummaryFile->Remove(false);
++  }
++
++  if (msfRenameSucceeded) {
++    // Transfer local db information from transferInfo
++    nsCOMPtr<nsIMsgDBService> msgDBService =
++        do_GetService("@mozilla.org/msgDatabase/msgDBService;1", &rv);
++    NS_ENSURE_SUCCESS(rv, rv);
++    rv = msgDBService->OpenFolderDB(m_folder, true, getter_AddRefs(m_db));
++    NS_ENSURE_TRUE(m_db, NS_FAILED(rv) ? rv : NS_ERROR_FAILURE);
++    // These errors are expected.
++    rv = (rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING ||
++          rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE)
++             ? NS_OK
++             : rv;
++    m_db->SetSummaryValid(true);
++    if (transferInfo) m_folder->SetDBTransferInfo(transferInfo);
++
++    // since we're transferring info from the old db, we need to reset the
++    // expunged bytes
++    nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
++    m_db->GetDBFolderInfo(getter_AddRefs(dbFolderInfo));
++    if (dbFolderInfo) dbFolderInfo->SetExpungedBytes(0);
++  }
++  if (m_db) m_db->Close(true);
++  m_db = nullptr;
++
++  // Notify that compaction of the folder is completed.
++  nsCOMPtr<nsIMsgFolderNotificationService> notifier(
++      do_GetService("@mozilla.org/messenger/msgnotificationservice;1"));
++  if (notifier) {
++    notifier->NotifyFolderCompactFinish(m_folder);
++  }
++
++  m_folder->NotifyCompactCompleted();
++  if (m_completionFn) {
++    m_completionFn(rv, m_totalExpungedBytes);
++    m_completionFn = nullptr;
++  }
++
++  return NS_OK;
++}
++
++nsresult nsFolderCompactState::ReleaseFolderLock() {
++  nsresult result = NS_OK;
++  if (!m_folder) return result;
++  bool haveSemaphore;
++  nsCOMPtr<nsISupports> supports;
++  QueryInterface(NS_GET_IID(nsISupports), getter_AddRefs(supports));
++  result = m_folder->TestSemaphore(supports, &haveSemaphore);
++  if (NS_SUCCEEDED(result) && haveSemaphore)
++    result = m_folder->ReleaseSemaphore(supports);
++  return result;
++}
++
++NS_IMETHODIMP
++nsFolderCompactState::OnStartRequest(nsIRequest* request) {
++  // Still some confusion with nsICopyMessageStreamListener -
++  // OnStartRequest() and StartMessage() may both be called.
++  // So handle the possibility we've already called BeginMsgWrite().
++  if (m_msgOut) {
++    return NS_OK;
++  }
++  return BeginMsgWrite();
++}
++
++NS_IMETHODIMP
++nsFolderCompactState::OnStopRequest(nsIRequest* request, nsresult status) {
++  nsCOMPtr<nsIMsgDBHdr> msgHdr;
++  nsresult rv = EndCopy(nullptr, status);
++  if (NS_FAILED(rv) && NS_SUCCEEDED(status)) {
++    status = rv;
++  }
++
++  if (NS_FAILED(status)) {
++    // Set m_status to status so the destructor can remove the temp folder and
++    // database.
++    m_status = status;
++    CleanupTempFilesAfterError();
++    m_folder->NotifyCompactCompleted();
++    ReleaseFolderLock();
++    m_folder->ThrowAlertMsg("compactFolderWriteFailed", m_window);
++  } else {
++    // XXX TODO: Error checking and handling missing here.
++    if (m_curIndex >= m_keys.Length()) {
++      msgHdr = nullptr;
++      // no more to copy finish it up
++      FinishCompact();
++    } else {
++      // in case we're not getting an error, we still need to pretend we did get
++      // an error, because the compact did not successfully complete.
++      m_folder->NotifyCompactCompleted();
++      CleanupTempFilesAfterError();
++      ReleaseFolderLock();
++    }
++  }
++  NS_RELEASE_THIS();  // kill self
++  return status;
++}
++
++// Handle the message data.
++// (NOTE: nsOfflineStoreCompactState overrides this)
++NS_IMETHODIMP
++nsFolderCompactState::OnDataAvailable(nsIRequest* request,
++                                      nsIInputStream* inStr,
++                                      uint64_t sourceOffset, uint32_t count) {
++  MOZ_ASSERT(m_fileStream);
++  MOZ_ASSERT(inStr);
++
++  nsresult rv = NS_OK;
++
++  while (count > 0) {
++    uint32_t maxReadCount =
++        std::min((uint32_t)m_buffer.Length() - m_bufferCount, count);
++    uint32_t readCount;
++    rv = inStr->Read(m_buffer.Elements() + m_bufferCount, maxReadCount,
++                     &readCount);
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    count -= readCount;
++    m_bufferCount += readCount;
++    if (m_bufferCount == m_buffer.Length()) {
++      rv = FlushBuffer();
++      NS_ENSURE_SUCCESS(rv, rv);
++    }
++  }
++  if (m_bufferCount > 0) {
++    rv = FlushBuffer();
++    NS_ENSURE_SUCCESS(rv, rv);
++  }
++  return NS_OK;
++}
++
++// Helper to write data to an outputstream, until complete or error.
++static nsresult WriteSpan(nsIOutputStream* writeable,
++                          mozilla::Span<const char> data) {
++  while (!data.IsEmpty()) {
++    uint32_t n;
++    nsresult rv = writeable->Write(data.Elements(), data.Length(), &n);
++    NS_ENSURE_SUCCESS(rv, rv);
++    data = data.Last(data.Length() - n);
++  }
++  return NS_OK;
++}
++
++// Flush contents of m_buffer to the output file.
++// (NOTE: not used by nsOfflineStoreCompactState)
++// More complicated than it should be because we need to fiddle with
++// some of the X-Mozilla-* headers on the fly.
++nsresult nsFolderCompactState::FlushBuffer() {
++  MOZ_ASSERT(m_msgOut);
++  nsresult rv;
++  auto buf = m_buffer.AsSpan().First(m_bufferCount);
++  // Only do header twiddling for the first chunk.
++  if (m_msgSize > 0) {
++    // Not the first chunk - just copy data verbatim.
++    rv = WriteSpan(m_msgOut, buf);
++    NS_ENSURE_SUCCESS(rv, rv);
++    m_msgSize += buf.Length();
++    m_bufferCount = 0;
++    return NS_OK;
++  }
++
++  // This is the first chunk of a new message. We'll update the
++  // X-Mozilla-(Status|Status2|Keys) headers as we go.
++
++  // Sniff the data to see if we can spot any CRs.
++  // If so, we'll use CRLFs instead of platform-native EOLs.
++  auto sniffChunk = buf.First(std::min<size_t>(buf.Length(), 512));
++  auto cr = std::find(sniffChunk.cbegin(), sniffChunk.cend(), '\r');
++  if (cr != sniffChunk.cend()) {
++    m_eolSeq.Assign("\r\n"_ns);
++  }
++
++  // Read as many headers as we can. We might not have the complete header
++  // block our in buffer, but that's OK - the X-Mozilla-* ones should be
++  // right at the start).
++  nsTArray<HeaderReader::Hdr> headers;
++  HeaderReader rdr;
++  auto leftover = rdr.Parse(buf, [&](auto const& hdr) -> bool {
++    auto const& name = hdr.Name(buf);
++    if (!name.EqualsLiteral(HEADER_X_MOZILLA_STATUS) &&
++        !name.EqualsLiteral(HEADER_X_MOZILLA_STATUS2) &&
++        !name.EqualsLiteral(HEADER_X_MOZILLA_KEYWORDS)) {
++      headers.AppendElement(hdr);
++    }
++    return true;
++  });
++
++  // Write out X-Mozilla-* headers first - we'll create these from scratch.
++  uint32_t msgFlags = 0;
++  nsAutoCString keywords;
++  if (m_curSrcHdr) {
++    m_curSrcHdr->GetFlags(&msgFlags);
++    m_curSrcHdr->GetStringProperty("keywords", keywords);
++    // growKeywords is set if msgStore didn't have enough room to edit
++    // X-Mozilla-* headers in situ. We'll rewrite all those headers
++    // regardless but we still want to clear it.
++    uint32_t grow;
++    m_curSrcHdr->GetUint32Property("growKeywords", &grow);
++    if (grow) {
++      m_curSrcHdr->SetUint32Property("growKeywords", 0);
++    }
++  }
++
++  auto out =
++      nsPrintfCString(HEADER_X_MOZILLA_STATUS ": %4.4x", msgFlags & 0xFFFF);
++  out.Append(m_eolSeq);
++  rv = WriteSpan(m_msgOut, out);
++  NS_ENSURE_SUCCESS(rv, rv);
++  m_msgSize += out.Length();
++
++  out = nsPrintfCString(HEADER_X_MOZILLA_STATUS2 ": %8.8x",
++                        msgFlags & 0xFFFF0000);
++  out.Append(m_eolSeq);
++  rv = WriteSpan(m_msgOut, out);
++  NS_ENSURE_SUCCESS(rv, rv);
++  m_msgSize += out.Length();
++
++  // Try to leave room for future in-place keyword edits.
++  while (keywords.Length() < X_MOZILLA_KEYWORDS_BLANK_LEN) {
++    keywords.Append(' ');
++  }
++  out = nsPrintfCString(HEADER_X_MOZILLA_KEYWORDS ": %s", keywords.get());
++  out.Append(m_eolSeq);
++  rv = WriteSpan(m_msgOut, out);
++  NS_ENSURE_SUCCESS(rv, rv);
++  m_msgSize += out.Length();
++
++  // Write out the rest of the headers.
++  for (auto const& hdr : headers) {
++    auto h = buf.Subspan(hdr.pos, hdr.len);
++    rv = WriteSpan(m_msgOut, h);
++    NS_ENSURE_SUCCESS(rv, rv);
++    m_msgSize += h.Length();
++  }
++
++  // The header parser consumes the blank line, If we've completed parsing
++  // we need to output it now.
++  // If we haven't parsed all the headers yet then the blank line will be
++  // safely copied verbatim as part of the remaining data.
++  if (rdr.IsComplete()) {
++    rv = WriteSpan(m_msgOut, m_eolSeq);
++    NS_ENSURE_SUCCESS(rv, rv);
++    m_msgSize += m_eolSeq.Length();
++  }
++
++  // Write out everything else in the buffer verbatim.
++  if (leftover.Length() > 0) {
++    rv = WriteSpan(m_msgOut, leftover);
++    NS_ENSURE_SUCCESS(rv, rv);
++    m_msgSize += leftover.Length();
++  }
++  m_bufferCount = 0;
++  return NS_OK;
++}
++
++/**
++ * nsOfflineStoreCompactState is a helper class for nsFolderCompactor which
++ * handles compacting the mbox for a single offline IMAP folder.
++ *
++ * nsOfflineStoreCompactState does *not* do any special X-Mozilla-* header
++ * handling, unlike the base class.
++ *
++ * NOTE (for future cleanups):
++ * This class uses a different mechanism to iterate through messages. It uses
++ * nsIMsgMessageService.streamMessage() to stream each message in turn,
++ * passing itself in as an nsIStreamListener. The nsICopyMessageStreamListener
++ * callbacks implemented in the base class are _not_ used here.
++ * For each message, the standard OnStartRequest(), OnDataAvailable()...,
++ * OnStopRequest() sequence is seen.
++ * Nothing too fancy, but it's not always clear where code from the base class
++ * is being used and when it is not, so it can be complicated to pick through.
++ *
++ */
++class nsOfflineStoreCompactState : public nsFolderCompactState {
++ public:
++  nsOfflineStoreCompactState(void);
++  virtual ~nsOfflineStoreCompactState(void);
++  NS_IMETHOD OnStopRequest(nsIRequest* request, nsresult status) override;
++  NS_IMETHOD OnStartRequest(nsIRequest* request) override;
++  NS_IMETHOD OnDataAvailable(nsIRequest* request, nsIInputStream* inStr,
++                             uint64_t sourceOffset, uint32_t count) override;
++
++ protected:
++  nsresult CopyNextMessage(bool& done);
++  virtual nsresult InitDB(nsIMsgDatabase* db) override;
++  virtual nsresult StartCompacting() override;
++  virtual nsresult FinishCompact() override;
++
++  char m_dataBuffer[COMPACTOR_READ_BUFF_SIZE + 1];  // temp data buffer for
++                                                    // copying message
++};
++
++nsOfflineStoreCompactState::nsOfflineStoreCompactState() {}
++
++nsOfflineStoreCompactState::~nsOfflineStoreCompactState() {}
++
++nsresult nsOfflineStoreCompactState::InitDB(nsIMsgDatabase* db) {
++  // Start with the list of messages we have offline as the possible
++  // message to keep when compacting the offline store.
++  db->ListAllOfflineMsgs(m_keys);
++  m_db = db;
++  return NS_OK;
++}
++
++/**
++ * This will copy one message to the offline store, but if it fails to
++ * copy the next message, it will keep trying messages until it finds one
++ * it can copy, or it runs out of messages.
++ */
++nsresult nsOfflineStoreCompactState::CopyNextMessage(bool& done) {
++  while (m_curIndex < m_keys.Length()) {
++    // Filter out msgs that have the "pendingRemoval" attribute set.
++    nsCOMPtr<nsIMsgDBHdr> hdr;
++    nsCString pendingRemoval;
++    nsresult rv =
++        m_db->GetMsgHdrForKey(m_keys[m_curIndex], getter_AddRefs(hdr));
++    NS_ENSURE_SUCCESS(rv, rv);
++    hdr->GetStringProperty("pendingRemoval", pendingRemoval);
++    if (!pendingRemoval.IsEmpty()) {
++      m_curIndex++;
++      // Turn off offline flag for message, since after the compact is
++      // completed; we won't have the message in the offline store.
++      uint32_t resultFlags;
++      hdr->AndFlags(~nsMsgMessageFlags::Offline, &resultFlags);
++      // We need to clear this in case the user changes the offline retention
++      // settings.
++      hdr->SetStringProperty("pendingRemoval", ""_ns);
++      continue;
++    }
++    m_messageUri.Truncate();  // clear the previous message uri
++    rv = BuildMessageURI(m_baseMessageUri.get(), m_keys[m_curIndex],
++                         m_messageUri);
++    NS_ENSURE_SUCCESS(rv, rv);
++    nsCOMPtr<nsIURI> dummyNull;
++    rv = m_messageService->StreamMessage(m_messageUri, this, m_window, nullptr,
++                                         false, ""_ns, true,
++                                         getter_AddRefs(dummyNull));
++    // if copy fails, we clear the offline flag on the source message.
++    if (NS_FAILED(rv)) {
++      nsCOMPtr<nsIMsgDBHdr> hdr;
++      m_messageService->MessageURIToMsgHdr(m_messageUri, getter_AddRefs(hdr));
++      if (hdr) {
++        uint32_t resultFlags;
++        hdr->AndFlags(~nsMsgMessageFlags::Offline, &resultFlags);
++      }
++      m_curIndex++;
++      continue;
++    } else
++      break;
++  }
++  done = m_curIndex >= m_keys.Length();
++  // In theory, we might be able to stream the next message, so
++  // return NS_OK, not rv.
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsOfflineStoreCompactState::OnStartRequest(nsIRequest* request) {
++  return BeginMsgWrite();
++}
++
++NS_IMETHODIMP
++nsOfflineStoreCompactState::OnStopRequest(nsIRequest* request,
++                                          nsresult status) {
++  nsCOMPtr<nsIURI> uri;
++  nsCOMPtr<nsIMsgDBHdr> msgHdr;
++  nsCOMPtr<nsIMsgStatusFeedback> statusFeedback;
++  nsCOMPtr<nsIChannel> channel;
++  bool done = false;
++  nsresult rv = status;
++  if (!m_msgOut) {
++    goto done;
++  }
++
++  // Wrap up the current message
++  if (NS_FAILED(rv)) {
++    // Uh-oh... something went wrong. Close() will try and roll back
++    // the borked message.
++    m_msgOut->Close();
++    m_msgOut = nullptr;
++    goto done;
++  }
++
++  // All good - commit the message.
++  rv = m_msgOut->Finish();
++  m_msgOut = nullptr;
++
++  // The NS_MSG_ERROR_MSG_NOT_OFFLINE error should allow us to continue, so we
++  // check for it specifically and don't terminate the compaction.
++  if (NS_FAILED(rv) && rv != NS_MSG_ERROR_MSG_NOT_OFFLINE) goto done;
++
++  // We know the request is an nsIChannel we can get a URI from, but this is
++  // probably bad form. See Bug 1528662.
++  channel = do_QueryInterface(request, &rv);
++  NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
++                       "error QI nsIRequest to nsIChannel failed");
++  if (NS_FAILED(rv)) goto done;
++  rv = channel->GetURI(getter_AddRefs(uri));
++  if (NS_FAILED(rv)) goto done;
++  rv = m_messageService->MessageURIToMsgHdr(m_messageUri,
++                                            getter_AddRefs(msgHdr));
++  if (NS_FAILED(rv)) goto done;
++
++  // This is however an unexpected condition, so let's print a warning.
++  if (rv == NS_MSG_ERROR_MSG_NOT_OFFLINE) {
++    nsAutoCString spec;
++    uri->GetSpec(spec);
++    nsPrintfCString msg("Message expectedly not available offline: %s",
++                        spec.get());
++    NS_WARNING(msg.get());
++  }
++
++  if (msgHdr) {
++    if (NS_SUCCEEDED(status)) {
++      msgHdr->SetMessageOffset(m_startOfNewMsg);
++      nsCString storeToken = nsPrintfCString("%" PRIu64, m_startOfNewMsg);
++      msgHdr->SetStringProperty("storeToken", storeToken);
++      msgHdr->SetOfflineMessageSize(m_msgSize);
++    } else {
++      uint32_t resultFlags;
++      msgHdr->AndFlags(~nsMsgMessageFlags::Offline, &resultFlags);
++    }
++  }
++
++  if (m_window) {
++    m_window->GetStatusFeedback(getter_AddRefs(statusFeedback));
++    if (statusFeedback)
++      statusFeedback->ShowProgress(100 * m_curIndex / m_keys.Length());
++  }
++  // advance to next message
++  m_curIndex++;
++  rv = CopyNextMessage(done);
++  if (done) {
++    m_db->Commit(nsMsgDBCommitType::kCompressCommit);
++    msgHdr = nullptr;
++    // no more to copy finish it up
++    ReleaseFolderLock();
++    FinishCompact();
++    NS_RELEASE_THIS();  // kill self
++  }
++
++done:
++  if (NS_FAILED(rv)) {
++    m_status = rv;  // set the status to rv so the destructor can remove the
++                    // temp folder and database
++    ReleaseFolderLock();
++    NS_RELEASE_THIS();  // kill self
++
++    if (m_completionFn) {
++      m_completionFn(m_status, m_totalExpungedBytes);
++    }
++    return rv;
++  }
++  return rv;
++}
++
++nsresult nsOfflineStoreCompactState::FinishCompact() {
++  // All okay time to finish up the compact process
++  nsCOMPtr<nsIFile> path;
++  uint32_t flags;
++
++  // get leaf name and database name of the folder
++  m_folder->GetFlags(&flags);
++  nsresult rv = m_folder->GetFilePath(getter_AddRefs(path));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsCString leafName;
++  path->GetNativeLeafName(leafName);
++
++  if (m_fileStream) {
++    // close down the temp file stream; preparing for deleting the old folder
++    // and its database; then rename the temp folder and database
++    m_fileStream->Flush();
++    m_fileStream->Close();
++    m_fileStream = nullptr;
++  }
++
++  // make sure the new database is valid
++  nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
++  m_db->GetDBFolderInfo(getter_AddRefs(dbFolderInfo));
++  if (dbFolderInfo) dbFolderInfo->SetExpungedBytes(0);
++  // this forces the m_folder to update mExpungedBytes from the db folder info.
++  int64_t expungedBytes;
++  m_folder->GetExpungedBytes(&expungedBytes);
++  m_folder->UpdateSummaryTotals(true);
++  m_db->SetSummaryValid(true);
++
++  // remove the old folder
++  path->Remove(false);
++
++  // rename the copied folder to be the original folder
++  m_file->MoveToNative((nsIFile*)nullptr, leafName);
++
++  ShowStatusMsg(EmptyString());
++  m_folder->NotifyCompactCompleted();
++  if (m_completionFn) {
++    m_completionFn(NS_OK, m_totalExpungedBytes);
++  }
++  return rv;
++}
++
++NS_IMETHODIMP
++nsFolderCompactState::Init(nsICopyMessageListener* destination) {
++  return NS_OK;
++}
++
++// This is called at the start of each message by both nsFolderCompactState and
++// nsOfflineStoreCompactState.
++NS_IMETHODIMP
++nsFolderCompactState::StartMessage() {
++  // Still some confusion with nsICopyMessageStreamListener -
++  // OnStartRequest() and StartMessage() may both be called.
++  // So handle the possibility we've already called BeginMsgWrite().
++  if (m_msgOut) {
++    return NS_OK;
++  }
++  return BeginMsgWrite();
++}
++
++// Set up the state for writing a single message.
++nsresult nsFolderCompactState::BeginMsgWrite() {
++  NS_ASSERTION(m_fileStream, "Fatal, null m_fileStream...");
++  nsresult rv;
++  nsCOMPtr<nsISeekableStream> seekableStream =
++      do_QueryInterface(m_fileStream, &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++  // This will force an internal flush, but not a sync. Tell should really do
++  // an internal flush, but it doesn't, and I'm afraid to change that
++  // nsIFileStream.cpp code anymore.
++  seekableStream->Seek(nsISeekableStream::NS_SEEK_CUR, 0);
++  // Record the start position of the message.
++  int64_t curStreamPos;
++  rv = seekableStream->Tell(&curStreamPos);
++  NS_ENSURE_SUCCESS(rv, rv);
++  m_startOfNewMsg = curStreamPos;
++  m_msgSize = 0;
++
++  // Open m_msgOut to write a single message.
++  MOZ_ASSERT(m_fileStream);
++  MOZ_ASSERT(!m_msgOut);
++  m_msgOut = new MboxMsgOutputStream(m_fileStream);
++
++  // Get URI and msgDBHdr for the message.
++  m_messageUri.Truncate();
++  rv =
++      BuildMessageURI(m_baseMessageUri.get(), m_keys[m_curIndex], m_messageUri);
++  NS_ENSURE_SUCCESS(rv, rv);
++  rv = m_messageService->MessageURIToMsgHdr(m_messageUri,
++                                            getter_AddRefs(m_curSrcHdr));
++  NS_ENSURE_SUCCESS(rv, rv);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsFolderCompactState::EndMessage(nsMsgKey key) { return NS_OK; }
++
++NS_IMETHODIMP
++nsFolderCompactState::EndCopy(nsIURI* uri, nsresult status) {
++  nsCOMPtr<nsIMsgDBHdr> msgHdr;
++  nsCOMPtr<nsIMsgDBHdr> newMsgHdr;
++
++  if (m_curIndex >= m_keys.Length()) {
++    NS_WARNING("m_curIndex out of bounds");
++    return NS_ERROR_UNEXPECTED;
++  }
++
++  // Close/flush the current message.
++  NS_ENSURE_STATE(m_msgOut);
++
++  nsresult rv;
++  if (NS_SUCCEEDED(status)) {
++    rv = m_msgOut->Finish();  // Commit.
++  } else {
++    rv = m_msgOut->Close();  // Roll back.
++  }
++  m_msgOut = nullptr;
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
++
++  if (NS_FAILED(status)) {
++    // EndCopy() succeeded - it handled the failure.
++    return NS_OK;
++  }
++
++  // Done with the current message; copying the existing message header
++  // to the new database.
++  if (m_curSrcHdr) {
++    nsMsgKey key;
++    m_curSrcHdr->GetMessageKey(&key);
++    m_db->CopyHdrFromExistingHdr(key, m_curSrcHdr, true,
++                                 getter_AddRefs(newMsgHdr));
++  }
++  m_curSrcHdr = nullptr;
++  if (newMsgHdr) {
++    nsCString storeToken = nsPrintfCString("%" PRIu64, m_startOfNewMsg);
++    newMsgHdr->SetStringProperty("storeToken", storeToken);
++    newMsgHdr->SetMessageOffset(m_startOfNewMsg);
++    newMsgHdr->SetMessageSize(m_msgSize);
++
++    m_totalMsgSize += m_msgSize;
++  }
++
++  //  m_db->Commit(nsMsgDBCommitType::kLargeCommit);  // no sense committing
++  //  until the end
++  // advance to next message
++  m_curIndex++;
++  nsCOMPtr<nsIMsgStatusFeedback> statusFeedback;
++  if (m_window) {
++    m_window->GetStatusFeedback(getter_AddRefs(statusFeedback));
++    if (statusFeedback)
++      statusFeedback->ShowProgress(100 * m_curIndex / m_keys.Length());
++  }
++  return NS_OK;
++}
++
++nsresult nsOfflineStoreCompactState::StartCompacting() {
++  nsresult rv = NS_OK;
++  if (m_keys.Length() > 0 && m_curIndex == 0) {
++    NS_ADDREF_THIS();  // We own ourselves, until we're done, anyway.
++    ShowCompactingStatusMsg();
++    bool done = false;
++    rv = CopyNextMessage(done);
++    if (!done) return rv;
++  }
++  ReleaseFolderLock();
++  FinishCompact();
++  return rv;
++}
++
++NS_IMETHODIMP
++nsOfflineStoreCompactState::OnDataAvailable(nsIRequest* request,
++                                            nsIInputStream* inStr,
++                                            uint64_t sourceOffset,
++                                            uint32_t count) {
++  if (!m_fileStream || !inStr) return NS_ERROR_FAILURE;
++
++  nsresult rv = NS_OK;
++
++  uint32_t maxReadCount, readCount, writeCount;
++  uint32_t bytesWritten;
++
++  while (NS_SUCCEEDED(rv) && (int32_t)count > 0) {
++    maxReadCount =
++        count > sizeof(m_dataBuffer) - 1 ? sizeof(m_dataBuffer) - 1 : count;
++    writeCount = 0;
++    rv = inStr->Read(m_dataBuffer, maxReadCount, &readCount);
++
++    if (NS_SUCCEEDED(rv)) {
++      m_msgOut->Write(m_dataBuffer, readCount, &bytesWritten);
++      m_msgSize += bytesWritten;
++      writeCount += bytesWritten;
++      count -= readCount;
++      if (writeCount != readCount) {
++        m_folder->ThrowAlertMsg("compactFolderWriteFailed", m_window);
++        return NS_MSG_ERROR_WRITING_MAIL_FOLDER;
++      }
++    }
++  }
++  return rv;
++}
++
++//////////////////////////////////////////////////////////////////////////////
++// nsMsgFolderCompactor implementation
++//////////////////////////////////////////////////////////////////////////////
++
++NS_IMPL_ISUPPORTS(nsMsgFolderCompactor, nsIMsgFolderCompactor)
++
++nsMsgFolderCompactor::nsMsgFolderCompactor() {}
++
++nsMsgFolderCompactor::~nsMsgFolderCompactor() {}
++
++NS_IMETHODIMP nsMsgFolderCompactor::CompactFolders(
++    const nsTArray<RefPtr<nsIMsgFolder>>& folders, nsIUrlListener* listener,
++    nsIMsgWindow* window) {
++  MOZ_ASSERT(mQueue.IsEmpty());
++  mWindow = window;
++  mListener = listener;
++  mTotalBytesGained = 0;
++  mQueue = folders.Clone();
++  mQueue.Reverse();
++
++  // Can't guarantee that anyone will keep us in scope until we're done, so...
++  MOZ_ASSERT(!mKungFuDeathGrip);
++  mKungFuDeathGrip = this;
++
++  // nsIMsgFolderCompactor idl states this isn't called...
++  // but maybe it should be?
++  //  if (mListener) {
++  //    mListener->OnStartRunningUrl(nullptr);
++  //  }
++
++  NextFolder();
++
++  return NS_OK;
++}
++
++void nsMsgFolderCompactor::NextFolder() {
++  while (!mQueue.IsEmpty()) {
++    // Should only ever have one compactor running.
++    MOZ_ASSERT(mCompactor == nullptr);
++
++    nsCOMPtr<nsIMsgFolder> folder = mQueue.PopLastElement();
++
++    // Sanity check - should we be compacting this folder?
++    nsCOMPtr<nsIMsgPluggableStore> msgStore;
++    nsresult rv = folder->GetMsgStore(getter_AddRefs(msgStore));
++    if (NS_FAILED(rv)) {
++      NS_WARNING("Skipping folder with no msgStore");
++      continue;
++    }
++    bool storeSupportsCompaction;
++    msgStore->GetSupportsCompaction(&storeSupportsCompaction);
++    if (!storeSupportsCompaction) {
++      NS_WARNING("Trying to compact a non-mbox folder");
++      continue;  // just skip it.
++    }
++
++    nsCOMPtr<nsIMsgImapMailFolder> imapFolder(do_QueryInterface(folder));
++    if (imapFolder) {
++      uint32_t flags;
++      folder->GetFlags(&flags);
++      if (flags & nsMsgFolderFlags::Offline) {
++        mCompactor = new nsOfflineStoreCompactState();
++      }
++    } else {
++      mCompactor = new nsFolderCompactState();
++    }
++    if (!mCompactor) {
++      NS_WARNING("skipping compact of non-offline folder");
++      continue;
++    }
++
++    // Callback for when a folder compaction completes.
++    auto completionFn = [self = RefPtr<nsMsgFolderCompactor>(this),
++                         compactState = mCompactor](nsresult status,
++                                                    uint64_t expungedBytes) {
++      if (NS_SUCCEEDED(status)) {
++        self->mTotalBytesGained += expungedBytes;
++      } else {
++        // Failed. We want to keep going with the next folder, but make sure
++        // we return a failing code upon overall completion.
++        self->mOverallStatus = status;
++        NS_WARNING("folder compact failed.");
++      }
++
++      // Release our lock on the compactor - it's done.
++      self->mCompactor = nullptr;
++      self->NextFolder();
++    };
++
++    rv = mCompactor->Compact(folder, completionFn, mWindow);
++    if (NS_SUCCEEDED(rv)) {
++      // Now wait for the compactor to let us know it's finished,
++      // via the completion callback fn.
++      return;
++    }
++    mOverallStatus = rv;
++    mCompactor = nullptr;
++    NS_WARNING("folder compact failed - skipping folder");
++  }
++
++  // Done. No more folders to compact.
++
++  if (mListener) {
++    // If there were multiple failures, this will communicate only the
++    // last one, but that's OK. Main thing is to indicate that _something_
++    // went wrong.
++    mListener->OnStopRunningUrl(nullptr, mOverallStatus);
++  }
++  ShowDoneStatus();
++
++  // We're not needed any more.
++  mKungFuDeathGrip = nullptr;
++  mListener = nullptr;
++  return;
++}
++
++void nsMsgFolderCompactor::ShowDoneStatus() {
++  if (!mWindow) {
++    return;
++  }
++  nsCOMPtr<nsIStringBundle> bundle;
++  nsresult rv = GetBaseStringBundle(getter_AddRefs(bundle));
++  NS_ENSURE_SUCCESS_VOID(rv);
++  nsAutoString expungedAmount;
++  FormatFileSize(mTotalBytesGained, true, expungedAmount);
++  AutoTArray<nsString, 1> params = {expungedAmount};
++  nsString msg;
++  rv = bundle->FormatStringFromName("compactingDone", params, msg);
++  NS_ENSURE_SUCCESS_VOID(rv);
++
++  nsCOMPtr<nsIMsgStatusFeedback> statusFeedback;
++  mWindow->GetStatusFeedback(getter_AddRefs(statusFeedback));
++  if (statusFeedback) {
++    statusFeedback->SetStatusString(msg);
++  }
++}
+diff --git a/mailnews/base/src/nsMsgFolderCompactor.h b/mailnews/base/src/nsMsgFolderCompactor.h
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/src/nsMsgFolderCompactor.h
+@@ -0,0 +1,48 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef _nsMsgFolderCompactor_h
++#define _nsMsgFolderCompactor_h
++
++#include "nsIMsgFolderCompactor.h"
++
++class nsIMsgFolder;
++class nsIMsgWindow;
++class nsFolderCompactState;
++
++/**
++ * nsMsgFolderCompactor implements nsIMsgFolderCompactor, which allows the
++ * caller to kick off a batch of folder compactions (via compactFolders()).
++ */
++class nsMsgFolderCompactor : public nsIMsgFolderCompactor {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_DECL_NSIMSGFOLDERCOMPACTOR
++
++  nsMsgFolderCompactor();
++
++ protected:
++  virtual ~nsMsgFolderCompactor();
++  // The folders waiting to be compacted.
++  nsTArray<RefPtr<nsIMsgFolder>> mQueue;
++
++  // If any individual folders fail to compact, we stash the latest fail code
++  // here (to return via listener upon overall completion).
++  nsresult mOverallStatus{NS_OK};
++
++  // If set, OnStopRunningUrl() will be called when all folders done.
++  nsCOMPtr<nsIUrlListener> mListener;
++  // If set, progress status updates will be sent here.
++  nsCOMPtr<nsIMsgWindow> mWindow;
++  RefPtr<nsMsgFolderCompactor> mKungFuDeathGrip;
++  uint64_t mTotalBytesGained{0};
++
++  // The currently-running compactor.
++  RefPtr<nsFolderCompactState> mCompactor;
++
++  void NextFolder();
++  void ShowDoneStatus();
++};
++#endif
+diff --git a/mailnews/base/test/unit/test_compactFailure.js b/mailnews/base/test/unit/test_compactFailure.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/test/unit/test_compactFailure.js
+@@ -0,0 +1,136 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++var { MockRegistrar } = ChromeUtils.importESModule(
++  "resource://testing-common/MockRegistrar.sys.mjs"
++);
++
++/* import-globals-from ../../../test/resources/logHelper.js */
++load("../../../resources/logHelper.js");
++var { addMessagesToFolder, MessageGenerator, MessageScenarioFactory } =
++  ChromeUtils.importESModule(
++    "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++  );
++var { MessageInjection } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageInjection.sys.mjs"
++);
++var { PromiseTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
++);
++
++Services.prefs.setCharPref(
++  "mail.serverDefaultStoreContractID",
++  "@mozilla.org/msgstore/berkeleystore;1"
++);
++
++var gTargetFolder;
++var gCid;
++
++// Allow certain xpcom errors.
++logHelperAllowedErrors.push("NS_ERROR_FILE_NOT_FOUND");
++
++var MsgDBServiceFailure = {
++  QueryInterface: ChromeUtils.generateQI(["nsIMsgDBService"]),
++
++  openMailDBFromFile(file, folder, create, leaveInvalidDB) {
++    if (folder.name == "ShouldFail") {
++      throw Components.Exception("", Cr.NS_ERROR_FILE_NOT_FOUND);
++    }
++    return this._genuine.openMailDBFromFile(
++      file,
++      folder,
++      create,
++      leaveInvalidDB
++    );
++  },
++
++  openFolderDB(folder, leaveInvalidDB) {
++    return this._genuine.openFolderDB(folder, leaveInvalidDB);
++  },
++  createNewDB(folder) {
++    return this._genuine.createNewDB(folder);
++  },
++  registerPendingListener(folder, listener) {
++    this._genuine.registerPendingListener(folder, listener);
++  },
++  unregisterPendingListener(listener) {
++    this._genuine.unregisterPendingListener(listener);
++  },
++  cachedDBForFolder(folder) {
++    return this._genuine.cachedDBFolder(folder);
++  },
++  get openDBs() {
++    return this._genuine.openDBs;
++  },
++};
++
++function generate_messages() {
++  const messageGenerator = new MessageGenerator();
++  const scenarioFactory = new MessageScenarioFactory(messageGenerator);
++  let messages = [];
++  messages = messages.concat(scenarioFactory.directReply(10));
++  return messages;
++}
++
++async function compact_with_exception(expectedException) {
++  const compactor = Cc[
++    "@mozilla.org/messenger/foldercompactor;1"
++  ].createInstance(Ci.nsIMsgFolderCompactor);
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  compactor.compactFolders([gTargetFolder], listener, null);
++  try {
++    await listener.promise;
++    do_throw(
++      "nsIMsgFolderCompactor listener wasn't called with a failure code."
++    );
++  } catch (failureCode) {
++    Assert.equal(expectedException, failureCode);
++  }
++}
++
++function create_local_folders() {
++  const rootFolder = localAccountUtils.rootFolder;
++  const localTrashFolder = rootFolder.getChildNamed("Trash");
++  localTrashFolder.setFlag(Ci.nsMsgFolderFlags.Trash);
++}
++
++async function delete_all_messages() {
++  const promiseCopyListener = new PromiseTestUtils.PromiseCopyListener();
++  gTargetFolder.deleteMessages(
++    [...gTargetFolder.messages],
++    null,
++    false, // Do not delete storage.
++    true, // Is a move.
++    promiseCopyListener,
++    false // Do not allow undo, currently leaks.
++  );
++  await promiseCopyListener.promise;
++}
++
++add_setup(function () {
++  localAccountUtils.loadLocalMailAccount();
++  create_local_folders();
++});
++
++add_task(async function test_compact_without_failure() {
++  // Setup open failure folder.
++  gTargetFolder =
++    localAccountUtils.rootFolder.createLocalSubfolder("ShouldFail");
++  addMessagesToFolder(generate_messages(), gTargetFolder);
++
++  await new Promise(resolve => {
++    mailTestUtils.updateFolderAndNotify(gTargetFolder, resolve);
++  });
++  // Delete messages.
++  await delete_all_messages();
++  // Setup db service mock.
++  gCid = MockRegistrar.register(
++    "@mozilla.org/msgDatabase/msgDBService;1",
++    MsgDBServiceFailure
++  );
++  // Test compact without failure.
++  await compact_with_exception(Cr.NS_ERROR_FILE_NOT_FOUND);
++  // Teardown db service mock.
++  MockRegistrar.unregister(gCid);
++});
+diff --git a/mailnews/base/test/unit/test_folderCompact.js b/mailnews/base/test/unit/test_folderCompact.js
+--- a/mailnews/base/test/unit/test_folderCompact.js
++++ b/mailnews/base/test/unit/test_folderCompact.js
+@@ -275,13 +275,29 @@ var gTestArray = [
+     gExpectedFolder3Size = calculateExpectedMboxSize(gLocalFolder3);
+ 
+     // Save the first message key, which will change after compact with
+     // rebuild.
++    const f2m2Key =
++      gLocalFolder2.msgDatabase.getMsgHdrForMessageID(gMsg2ID).messageKey;
+ 
+     // force expunged bytes count to get cached.
+     gLocalFolder2.expungedBytes;
++    // mark localFolder2 as having an invalid db, and remove it
++    // for good measure.
++    gLocalFolder2.msgDatabase.summaryValid = false;
++    gLocalFolder2.msgDatabase = null;
++    gLocalFolder2.ForceDBClosed();
++    const dbPath = gLocalFolder2.filePath;
++    dbPath.leafName = dbPath.leafName + ".msf";
++    dbPath.remove(false);
+ 
+     showMessages(localAccountUtils.inboxFolder, "before compactAll");
++    // Save the key for the inbox message, we'll check after compact that it
++    // did not change.
++    const preInboxMsg3Key =
++      localAccountUtils.inboxFolder.msgDatabase.getMsgHdrForMessageID(
++        gMsg3ID
++      ).messageKey;
+ 
+     // We used to check here that the keys did not change during rebuild.
+     // But that is no true in general, it was only conicidental since the
+     // checked folder had never been compacted, so the key equaled the offset.
+@@ -298,8 +314,26 @@ var gTestArray = [
+     await listener.promise;
+ 
+     showMessages(localAccountUtils.inboxFolder, "after compactAll");
+     showMessages(gLocalFolder2, "after compactAll");
++
++    // For the inbox, which was compacted but not rebuild, key is unchanged.
++    const postInboxMsg3Key =
++      localAccountUtils.inboxFolder.msgDatabase.getMsgHdrForMessageID(
++        gMsg3ID
++      ).messageKey;
++    Assert.equal(preInboxMsg3Key, postInboxMsg3Key);
++
++    // For folder2, which was rebuilt, keys change but all messages should exist.
++    const message2 = gLocalFolder2.msgDatabase.getMsgHdrForMessageID(gMsg2ID);
++    Assert.ok(message2);
++    Assert.ok(gLocalFolder2.msgDatabase.getMsgHdrForMessageID(gMsg3ID));
++
++    // In folder2, gMsg2ID is the first message. After compact with database
++    // rebuild, that key has now changed.
++    Assert.notEqual(message2.messageKey, f2m2Key);
++  },
++  async function lastTestCheck() {
+     await verifyMboxSize(localAccountUtils.inboxFolder, gExpectedInboxSize);
+     await verifyMboxSize(gLocalFolder2, gExpectedFolder2Size);
+     await verifyMboxSize(gLocalFolder3, gExpectedFolder3Size);
+     verifyMsgOffsets(gLocalFolder2);
+diff --git a/mailnews/base/test/unit/xpcshell.ini b/mailnews/base/test/unit/xpcshell.ini
+--- a/mailnews/base/test/unit/xpcshell.ini
++++ b/mailnews/base/test/unit/xpcshell.ini
+@@ -19,8 +19,9 @@ support-files = nodelist_test.xml data/*
+ [test_bug471682.js]
+ [test_bug514945.js]
+ [test_closedDB.js]
+ [test_compactColumnSave.js]
++[test_compactFailure.js]
+ [test_converterDeferredAccount.js]
+ [test_copyChaining.js]
+ [test_copyToInvalidDB.js]
+ [test_detachToFile.js]
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -55,9 +55,9 @@
+ #include "nsIMsgAccountManager.h"
+ #include "nsIImapMockChannel.h"
+ #include "nsNetUtil.h"
+ #include "nsImapNamespace.h"
+-#include "FolderCompactor.h"
++#include "nsIMsgFolderCompactor.h"
+ #include "nsMsgMessageFlags.h"
+ #include "nsISpamSettings.h"
+ #include <time.h>
+ #include "nsIMsgMailNewsUrl.h"
+@@ -1267,9 +1267,18 @@ nsresult nsImapMailFolder::ExpungeAndCom
+     }
+     bool storeSupportsCompaction;
+     msgStore->GetSupportsCompaction(&storeSupportsCompaction);
+     if (storeSupportsCompaction && folder->mFlags & nsMsgFolderFlags::Offline) {
+-      return AsyncCompactFolders({folder}, finalListener, msgWindow);
++      nsCOMPtr<nsIMsgFolderCompactor> folderCompactor =
++          do_CreateInstance("@mozilla.org/messenger/foldercompactor;1", &rv);
++      if (NS_FAILED(rv)) {
++        if (finalListener) {
++          return finalListener->OnStopRunningUrl(nullptr, rv);
++        }
++        return rv;
++      }
++      return folderCompactor->CompactFolders({folder}, finalListener,
++                                             msgWindow);
+     }
+     // Not going to run a compaction, so signal that we're all done.
+     if (finalListener) {
+       return finalListener->OnStopRunningUrl(nullptr, NS_OK);
+@@ -1277,12 +1286,10 @@ nsresult nsImapMailFolder::ExpungeAndCom
+     return NS_OK;
+   };
+ 
+   if (WeAreOffline()) {
+-    // Can't run an expunge. Dispatch the next stage (compact) immediately.
+-    NS_DispatchToMainThread(NS_NewRunnableFunction(
+-        "doCompact", [doCompact] { doCompact(nullptr, NS_OK); }));
+-    return NS_OK;
++    // Can't run an expunge. Kick off the next stage (compact) immediately.
++    return doCompact(nullptr, NS_OK);
+   }
+ 
+   // Run the expunge, followed by the compaction.
+   RefPtr<UrlListener> expungeListener = new UrlListener();
+@@ -1326,16 +1333,22 @@ NS_IMETHODIMP nsImapMailFolder::Expunge(
+ 
+ NS_IMETHODIMP nsImapMailFolder::CompactAll(nsIUrlListener* aListener,
+                                            nsIMsgWindow* aMsgWindow) {
+   nsresult rv;
++
++  nsCOMPtr<nsIMsgFolderCompactor> folderCompactor =
++      do_CreateInstance("@mozilla.org/messenger/foldercompactor;1", &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++
+   nsCOMPtr<nsIMsgFolder> rootFolder;
+   rv = GetRootFolder(getter_AddRefs(rootFolder));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgWindow> msgWindow = aMsgWindow;
+ 
+   // Set up a callable which will start the compaction phase.
+-  auto doCompact = [rootFolder, listener = nsCOMPtr<nsIUrlListener>(aListener),
++  auto doCompact = [folderCompactor, rootFolder,
++                    listener = nsCOMPtr<nsIUrlListener>(aListener),
+                     msgWindow]() {
+     // Collect all the compactable folders.
+     nsTArray<RefPtr<nsIMsgFolder>> foldersToCompact;
+     nsTArray<RefPtr<nsIMsgFolder>> allDescendants;
+@@ -1358,14 +1371,12 @@ NS_IMETHODIMP nsImapMailFolder::CompactA
+       if (storeSupportsCompaction) {
+         foldersToCompact.AppendElement(folder);
+       }
+     }
+-    nsresult rv = AsyncCompactFolders(foldersToCompact, listener, msgWindow);
++    nsresult rv =
++        folderCompactor->CompactFolders(foldersToCompact, listener, msgWindow);
+     if (NS_FAILED(rv) && listener) {
+       // Make sure the listener hears about the failure.
+-      // A bit icky... but we're combined with IMAP expunge.
+-      // From the callers point of view the operation has already
+-      // been kicked off, and they'll be expecting this callback.
+       listener->OnStopRunningUrl(nullptr, rv);
+     }
+   };
+ 
+@@ -1385,37 +1396,36 @@ NS_IMETHODIMP nsImapMailFolder::CompactA
+       foldersToExpunge.AppendElement(imapFolder);
+     }
+   }
+ 
+-  if (WeAreOffline() || foldersToExpunge.IsEmpty()) {
+-    // No expunge step. Dispatch the next stage (compact) immediately.
+-    NS_DispatchToMainThread(NS_NewRunnableFunction("doCompact", doCompact));
+-    return NS_OK;
+-  }
+-
+-  // Kick off expunge on all the folders (the IMAP protocol will handle
+-  // queuing them up as needed).
+-
+-  // A listener to track the completed expunges.
+-  RefPtr<UrlListener> l = new UrlListener();
+-  l->mStopFn = [expungeCount = foldersToExpunge.Length(), doCompact](
+-                   nsIURI* url, nsresult status) mutable -> nsresult {
+-    // NOTE: we're ignoring expunge result code - nothing much we can do
+-    // here to recover, so just plough on.
+-    --expungeCount;
+-    if (expungeCount == 0) {
+-      // All the expunges are done so start compacting.
+-      doCompact();
+-    }
+-    return NS_OK;
+-  };
+-  // Commence expunging.
+-  for (auto& imapFolder : foldersToExpunge) {
+-    rv = imapFolder->Expunge(l, aMsgWindow);
+-    if (NS_FAILED(rv)) {
+-      // Make sure expungeCount is kept in sync!
+-      l->OnStopRunningUrl(nullptr, rv);
+-    }
++  if (!WeAreOffline() && !foldersToExpunge.IsEmpty()) {
++    // Kick off expunge on all the folders (the IMAP protocol will handle
++    // queuing them up as needed).
++
++    // A listener to track the completed expunges.
++    RefPtr<UrlListener> l = new UrlListener();
++    l->mStopFn = [expungeCount = foldersToExpunge.Length(), doCompact](
++                     nsIURI* url, nsresult status) mutable -> nsresult {
++      // NOTE: we're ignoring expunge result code - nothing much we can do
++      // here to recover, so just plough on.
++      --expungeCount;
++      if (expungeCount == 0) {
++        // All the expunges are done so start compacting.
++        doCompact();
++      }
++      return NS_OK;
++    };
++    // Go!
++    for (auto& imapFolder : foldersToExpunge) {
++      rv = imapFolder->Expunge(l, aMsgWindow);
++      if (NS_FAILED(rv)) {
++        // Make sure expungeCount is kept in sync!
++        l->OnStopRunningUrl(nullptr, rv);
++      }
++    }
++  } else {
++    // No expunging. Start the compaction immediately.
++    doCompact();
+   }
+ 
+   return NS_OK;
+ }
+diff --git a/mailnews/imap/test/unit/test_compactOfflineStore.js b/mailnews/imap/test/unit/test_compactOfflineStore.js
+--- a/mailnews/imap/test/unit/test_compactOfflineStore.js
++++ b/mailnews/imap/test/unit/test_compactOfflineStore.js
+@@ -16,9 +16,8 @@ var { MessageGenerator } = ChromeUtils.i
+ var { PromiseTestUtils } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+ );
+ 
+-// Force mbox msgStore.
+ Services.prefs.setCharPref(
+   "mail.serverDefaultStoreContractID",
+   "@mozilla.org/msgstore/berkeleystore;1"
+ );
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -7,9 +7,8 @@
+ #include "nsIPrefBranch.h"
+ #include "nsISeekableStream.h"
+ #include "prlog.h"
+ 
+-#include "FolderCompactor.h"
+ #include "HeaderReader.h"
+ #include "LineReader.h"
+ #include "msgCore.h"  // precompiled header...
+ #include "nsLocalMailFolder.h"
+@@ -37,8 +36,9 @@
+ #include "nsIDocShell.h"
+ #include "nsIPrompt.h"
+ #include "nsIPop3URL.h"
+ #include "nsIMsgMailSession.h"
++#include "nsIMsgFolderCompactor.h"
+ #include "nsNetCID.h"
+ #include "nsISpamSettings.h"
+ #include "nsMailHeaders.h"
+ #include "nsCOMArray.h"
+@@ -620,14 +620,42 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Comp
+       if (!hasDB || expungedBytes > 0) folderArray.AppendElement(folder);
+     }
+   }
+ 
+-  return AsyncCompactFolders(folderArray, aListener, aMsgWindow);
++  if (folderArray.IsEmpty()) {
++    // Nothing to do - early out.
++    if (aListener) {
++      aListener->OnStopRunningUrl(nullptr, NS_OK);
++    }
++    return NS_OK;
++  }
++
++  nsCOMPtr<nsIMsgFolderCompactor> folderCompactor =
++      do_CreateInstance("@mozilla.org/messenger/foldercompactor;1", &rv);
++  return folderCompactor->CompactFolders(folderArray, aListener, aMsgWindow);
+ }
+ 
+ NS_IMETHODIMP nsMsgLocalMailFolder::Compact(nsIUrlListener* aListener,
+                                             nsIMsgWindow* aMsgWindow) {
+-  return AsyncCompactFolders({this}, aListener, aMsgWindow);
++  nsCOMPtr<nsIMsgPluggableStore> msgStore;
++  nsresult rv = GetMsgStore(getter_AddRefs(msgStore));
++  NS_ENSURE_SUCCESS(rv, rv);
++  int64_t expungedBytes = 0;
++  GetExpungedBytes(&expungedBytes);
++  bool supportsCompaction;
++  msgStore->GetSupportsCompaction(&supportsCompaction);
++  if (!supportsCompaction || expungedBytes == 0) {
++    // Nothing to do. Early out.
++    if (aListener) {
++      aListener->OnStopRunningUrl(nullptr, NS_OK);
++    }
++    return NS_OK;
++  }
++
++  nsCOMPtr<nsIMsgFolderCompactor> folderCompactor =
++      do_CreateInstance("@mozilla.org/messenger/foldercompactor;1", &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++  return folderCompactor->CompactFolders({this}, aListener, aMsgWindow);
+ }
+ 
+ NS_IMETHODIMP nsMsgLocalMailFolder::EmptyTrash(nsIUrlListener* aListener) {
+   nsresult rv;

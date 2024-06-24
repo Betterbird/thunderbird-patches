@@ -1,0 +1,96 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1719258241 -7200
+# Parent  3ed7ceb4377429e628761d5ca456950776b9f9ab
+Backed out bug 1900172, since it depends on the new folder compaction (bug 1890448) which is backed out for its horrible performance (bug 1904208).
+
+diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+--- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
++++ b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+@@ -477,18 +477,9 @@ NS_IMETHODIMP MboxCompactor::OnStopScan(
+   }
+ 
+   int64_t finalSize = 0;
+   if (NS_SUCCEEDED(rv)) {
+-    // nsIFile.fileSize is cached on Windows, but this cache is not correctly
+-    // invalidated after write (Bug 1022704).
+-    // So clone it before reading the size again.
+-    // This dirties the cached values, forcing it to actually ask the
+-    // filesystem again (see Bug 307815, Bug 456603).
+-    nsCOMPtr<nsIFile> path;
+-    rv = mMboxPath->Clone(getter_AddRefs(path));
+-    if (NS_SUCCEEDED(rv)) {
+-      rv = path->GetFileSize(&finalSize);
+-    }
++    rv = mMboxPath->GetFileSize(&finalSize);
+   }
+ 
+   mCompactListener->OnCompactionComplete(rv, mOriginalMboxFileSize, finalSize);
+   return NS_OK;
+diff --git a/mailnews/local/test/unit/test_mailStoreCompact.js b/mailnews/local/test/unit/test_mailStoreCompact.js
+--- a/mailnews/local/test/unit/test_mailStoreCompact.js
++++ b/mailnews/local/test/unit/test_mailStoreCompact.js
+@@ -207,57 +207,8 @@ async function test_midwayFail() {
+ 
+   localAccountUtils.clearAll();
+ }
+ 
+-/**
+- * Test that onCompactionComplete returns sensible before and after sizes.
+- * See Bug 1900172.
+- */
+-async function test_sizesAtCompletion() {
+-  localAccountUtils.loadLocalMailAccount();
+-  const inbox = localAccountUtils.inboxFolder;
+-
+-  Assert.ok(inbox.msgStore.supportsCompaction);
+-
+-  const generator = new MessageGenerator();
+-  inbox.addMessageBatch(
+-    generator
+-      .makeMessages({ count: 50 })
+-      .map(message => message.toMessageString())
+-  );
+-
+-  let info = await IOUtils.stat(inbox.filePath.path);
+-  const oldFileSize = info.size;
+-
+-  // Monkey-patch listener to discard every second message and to note
+-  // sizes upon completion.
+-  const l = new PromiseStoreCompactListener();
+-  l.msgCount = 0;
+-  l.onRetentionQuery = function (_storeToken) {
+-    ++this.msgCount;
+-    return this.msgCount % 2 == 0;
+-  };
+-  l._onCompactionComplete = l.onCompactionComplete;
+-  l.onCompactionComplete = function (status, oldSize, newSize) {
+-    this.newSize = newSize;
+-    this.oldSize = oldSize;
+-    this._onCompactionComplete(status, oldSize, newSize);
+-  };
+-
+-  inbox.msgStore.asyncCompact(inbox, l, true);
+-  await l.promise;
+-
+-  // NOTE: We avoid the use of inbox.filePath.fileSize because of
+-  // nsIfile stat caching under windows (Bug 456603).
+-  info = await IOUtils.stat(inbox.filePath.path);
+-  const newFileSize = info.size;
+-
+-  Assert.equal(oldFileSize, l.oldSize, "reported oldSize matches filesize");
+-  Assert.equal(newFileSize, l.newSize, "reported newSize matches filesize");
+-
+-  localAccountUtils.clearAll();
+-}
+-
+ // TODO
+ // More test ideas:
+ // - Test X-Mozilla-* header patching (higher-level folder-compact tests
+ //   already cover this, but it'd probably be cleaner doing it here).
+@@ -274,5 +225,4 @@ function withStore(store, fn) {
+ const mboxStore = "@mozilla.org/msgstore/berkeleystore;1";
+ add_task(withStore(mboxStore, test_discardAll));
+ add_task(withStore(mboxStore, test_listenerErrors));
+ add_task(withStore(mboxStore, test_midwayFail));
+-add_task(withStore(mboxStore, test_sizesAtCompletion));
