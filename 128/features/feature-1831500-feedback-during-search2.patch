@@ -1,0 +1,586 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1719906495 -7200
+# Parent  cefcb83a261a62167fa4695a93c45ca56b945cf1
+Improve QuickFilter status feedback when searching and switching folders.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -2823,9 +2823,9 @@ var folderPane = {
+       this._changeRows(folder, row => row.updateSizeCount(false, folder));
+     }
+   },
+ 
+-  _onSelect() {
++  async _onSelect() {
+     const isSynthetic = gViewWrapper?.isSynthetic;
+     threadPane.saveSelection();
+     threadPane.hideIgnoredMessageNotification();
+     if (!isSynthetic) {
+@@ -2904,9 +2904,9 @@ var folderPane = {
+       paneLayout.folderPaneSplitter.resizeDirection =
+         layoutConfig.folderPaneSplitterDir;
+       accountCentralBrowser.hidden = true;
+ 
+-      quickFilterBar.activeElement = null;
++      await quickFilterBar.onFolderSelected();
+       threadPane.restoreColumns();
+ 
+       gViewWrapper = new DBViewWrapper(dbViewWrapperListener);
+ 
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1039,12 +1039,8 @@ var dbViewWrapperListener = {
+     );
+   },
+   onFolderLoading() {},
+   onSearching(isSearching) {
+-    if (isSearching) {
+-      // Set the "searching" attribute on the threadPane.
+-      window.quickFilterBar?.reflectFiltererResults();
+-    }
+     const tabmail = top.document.getElementById("tabmail");
+     const tab = tabmail?.currentTabInfo;
+     if (tab) {
+       const searchBundle = Services.strings.createBundle(
+@@ -1151,14 +1147,10 @@ var dbViewWrapperListener = {
+       window.threadPaneHeader.updateMessageCount(
+         gViewWrapper.dbView.numMsgsInView
+       );
+     }
+-    window.quickFilterBar?.onMessagesChanged();
+-
+-    const tabmail = top.document.getElementById("tabmail");
+-    const tab = tabmail?.currentTabInfo;
+-    if (tab) {
+-      tabmail.setTabThinking(tab, false);
++    if (!window.quickFilterBar?.searchHit || all) {
++      window.quickFilterBar?.onMessagesChanged();
+     }
+   },
+   onMailViewChanged() {
+     window.dispatchEvent(new CustomEvent("MailViewChanged"));
+@@ -1167,10 +1159,8 @@ var dbViewWrapperListener = {
+     // If there is no selection, scroll to the most relevant end.
+     window.threadPane?.scrollToLatestRowIfNoSelection();
+   },
+   onMessagesRemoved() {
+-    window.quickFilterBar?.onMessagesChanged();
+-
+     if (!gDBView || (!gFolder && !gViewWrapper?.isSynthetic)) {
+       // This can't be a notification about the message currently displayed.
+       return;
+     }
+diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
+--- a/mail/base/content/quickFilterBar.inc.xhtml
++++ b/mail/base/content/quickFilterBar.inc.xhtml
+@@ -53,10 +53,11 @@
+                   data-l10n-id="quick-filter-bar-attachment">
+             <span data-l10n-id="quick-filter-bar-attachment-label"></span>
+           </button>
+         </div>
++        <span id="qfb-searching-icon"></span>
+         <span id="qfb-info-icon"
+-             data-l10n-id="quick-filter-bar-negate"></span>
++              data-l10n-id="quick-filter-bar-negate"></span>
+         <span id="qfb-results-label"></span>
+       </div>
+       <div id="quickFilterBarSecondFilters">
+         <div id="quick-filter-bar-filter-text-bar" hidden="hidden">
+diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilterBar.js
+--- a/mail/base/content/quickFilterBar.js
++++ b/mail/base/content/quickFilterBar.js
+@@ -19,8 +19,9 @@ class ToggleButton extends HTMLButtonEle
+   constructor() {
+     super();
+     this.addEventListener("click", () => {
+       this.pressed = !this.pressed;
++      this.inverted = false;
+     });
+     this.addEventListener("keypress", event => {
+       this.inverted = event.ctrlKey && !this.inverted;
+       this.pressed = !this.inverted && this.pressed;
+@@ -79,8 +80,26 @@ var quickFilterBar = {
+    * @type {integer}
+    */
+   searchTimeoutID: 0,
+ 
++  /**
++   * If true, the "results" filter will process each message sent from the
++   * backend, in onSearchHit(), and create a nice running count of matches.
++   * But there may be a resource hit for very large folders, where many/most
++   * messages match.
++   *
++   * @type {boolean}
++   */
++  searchHit: true,
++
++  /**
++   * Delay to allow ui elements to paint prior to starting a search, as search
++   * runs on the main thread and causes a pause.
++   *
++   * @type {integer}
++   */
++  deferredDelay: 300,
++
+   async init() {
+     await window.customElements.whenDefined("search-bar");
+     this._bindUI();
+     this.updateRovingTab();
+@@ -110,10 +129,10 @@ var quickFilterBar = {
+         return;
+       }
+       if (this.filterer.userHitEscape()) {
+         // User hit the escape key; do our undo-ish thing.
+-        this.updateSearch();
+         this.reflectFiltererState();
++        this.deferredUpdateSearch();
+       } else {
+         // Close the filter since there was nothing left to relax.
+         this._showFilterBar(false);
+       }
+@@ -356,9 +375,9 @@ var quickFilterBar = {
+     );
+     if (!xulStickyVal) {
+       return;
+     }
+-    this.filterer.setFilterValue("sticky", xulStickyVal == "true");
++    this.filterer.setFilterValue("sticky", xulStickyVal == "true" || null);
+ 
+     // If sticky setting is set, show any saved filters.
+     // Otherwise do not display saved filters on load.
+     if (xulStickyVal != "true") {
+@@ -422,8 +441,31 @@ var quickFilterBar = {
+     }
+   },
+ 
+   /**
++   * Reset UI; reflectFiltererResults() requires a view.
++   */
++  clearInDOM() {
++    const filterDef = QuickFilterManager.filterDefsByName.results;
++    const domNode = document.getElementById(filterDef.domId);
++    filterDef.reflectInDOM(domNode, null, document);
++    document.getElementById("qfb-text-search-upsell").hidePopup();
++
++    const threadTree = document.getElementById("threadTree");
++    threadTree.removeAttribute("filterActive");
++    this.domNode.removeAttribute("filterActive");
++  },
++
++  /**
++   * Start 'searching' feedback.
++   */
++  reflectSearchStart() {
++    const threadTree = document.getElementById("threadTree");
++    threadTree.setAttribute("filterActive", "searching");
++    this.domNode.setAttribute("filterActive", "searching");
++  },
++
++  /**
+    * Update the UI to reflect the state of the filterer constraints.
+    *
+    * @param [aFilterName] If only a single filter needs to be updated, name it.
+    */
+@@ -484,18 +526,13 @@ var quickFilterBar = {
+       threadPane.removeAttribute("filterActive");
+       this.domNode.removeAttribute("filterActive");
+     } else if (gViewWrapper.searching) {
+       // filter active, still searching
+-      // Do not set this immediately; wait a bit and then only set this if we
+-      //  still are in this same state (and we are still the active tab...)
+-      setTimeout(() => {
+-        // Check status again, otherwise we'll set "searching" when
+-        // the search is already over.
+-        if (gViewWrapper.searching) {
+-          threadPane.setAttribute("filterActive", "searching");
+-          this.domNode.setAttribute("filterActive", "searching");
+-        }
+-      }, 500);
++      // Although searching state is set earlier (and visualized using css
++      // transitions), it needs to be reset in cases of interrupted searches
++      // with partial matches and which restart with new filters.
++      threadPane.setAttribute("filterActive", "searching");
++      this.domNode.setAttribute("filterActive", "searching");
+     } else if (gDBView.numMsgsInView) {
+       // filter completed, results
+       // some matches
+       threadPane.setAttribute("filterActive", "matches");
+@@ -541,9 +578,17 @@ var quickFilterBar = {
+    *   this function, if any.
+    */
+   deferredUpdateSearch(activeElement) {
+     clearTimeout(this.searchTimeoutID);
+-    this.searchTimeoutID = setTimeout(() => this.updateSearch(activeElement));
++
++    // Immediate 'searching' UI feedback though.
++    this.clearInDOM();
++    this.reflectSearchStart();
++
++    this.searchTimeoutID = setTimeout(
++      () => this.updateSearch(activeElement),
++      this.deferredDelay
++    );
+   },
+ 
+   /**
+    * Update the user terms part of the search definition to reflect the active
+@@ -559,8 +604,14 @@ var quickFilterBar = {
+ 
+     this.activeElement = activeElement;
+     this.filterer.displayedFolder = gFolder;
+ 
++    if (this._filterer.isAnyFilterActive()) {
++      // Set to 0 to create a filter listener if a search is about to start.
++      // A value of null will not create this listener.
++      this.filterer.setFilterValue("results", this.searchHit ? 0 : null, true);
++    }
++
+     const [terms, listeners] = this.filterer.createSearchTerms(
+       gViewWrapper.search.session
+     );
+ 
+@@ -599,9 +650,9 @@ var quickFilterBar = {
+     this.reflectFiltererState();
+     XULStoreUtils.setValue("messenger", "quickFilterBar", "visible", show);
+ 
+     // Update the message list to reflect the filters status.
+-    this.updateSearch();
++    this.deferredUpdateSearch();
+     // Cannot call the below function when threadTree hasn't been initialized yet.
+     if (!init) {
+       threadTree.table.body.focus();
+     }
+@@ -611,9 +662,9 @@ var quickFilterBar = {
+    * Called by the view wrapper so we can update the results count.
+    */
+   onMessagesChanged() {
+     const filtering = gViewWrapper?.search?.userTerms != null;
+-    const newCount = filtering ? gDBView.numMsgsInView : null;
++    const newCount = filtering ? gDBView?.numMsgsInView : null;
+     this.filterer.setFilterValue("results", newCount, true);
+ 
+     // - postFilterProcess everyone who cares
+     // This may need to be converted into an asynchronous process at some point.
+@@ -646,16 +697,29 @@ var quickFilterBar = {
+   /**
+    * The displayed folder changed. Reset or reapply the filter, depending on
+    * the sticky state.
+    */
+-  onFolderChanged() {
++  async onFolderSelected() {
++    this.activeElement = null;
++    this.clearInDOM();
+     this.filterer = new QuickFilterState(this.filterer);
+-    this.reflectFiltererState();
+     if (this._filterer?.filterValues.sticky) {
+-      this.updateSearch();
++      if (this._filterer.isAnyFilterActive()) {
++        this.reflectSearchStart();
++        await new Promise(resolve => setTimeout(resolve, this.deferredDelay));
++      }
++    } else {
++      this.reflectFiltererState();
+     }
+   },
+ 
++  /**
++   * The new displayed folder is loading, ready to update the search.
++   */
++  onFolderChanged() {
++    this.updateSearch();
++  },
++
+   _testHelperResetFilterState() {
+     if (!this._filterer) {
+       return;
+     }
+diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
+--- a/mail/modules/QuickFilterManager.sys.mjs
++++ b/mail/modules/QuickFilterManager.sys.mjs
+@@ -104,8 +104,36 @@ export class QuickFilterState {
+     }
+   }
+ 
+   /**
++   * Check if there is anything to filter.
++   */
++  isAnyFilterActive() {
++    let anyFilterActive = false;
++    for (const [tfName, tfValue] of Object.entries(this.filterValues)) {
++      if (["sticky", "results"].includes(tfName)) {
++        continue;
++      }
++      if (tfName == "text") {
++        if (tfValue.text === null) {
++          continue;
++        }
++        anyFilterActive = MessageTextFilter.isTextFilterActive(tfValue.states);
++        if (anyFilterActive) {
++          break;
++        }
++        continue;
++      }
++      if (tfValue !== null) {
++        anyFilterActive = true;
++        break;
++      }
++    }
++
++    return anyFilterActive;
++  }
++
++  /**
+    * Track the last filter that was affirmatively applied. If you hit escape
+    * and this value is non-null, we clear the referenced filter constraint.
+    * If you hit escape and the value is null, we clear all filters.
+    */
+@@ -256,9 +284,9 @@ export class QuickFilterSearchListener {
+       Cu.forceGC();
+     }
+ 
+     try {
+-      this.listener.onSearchMessage(this.scratch, aMsgHdr, aFolder);
++      this.listener.onSearchMessage(this.scratch, aMsgHdr, aFolder, this.muxer);
+     } catch (ex) {
+       console.error(ex);
+     }
+   }
+@@ -951,9 +979,9 @@ var TagFacetingFilter = {
+       const filterValue = aMuxer.getFilterValueForMutation(
+         TagFacetingFilter.name
+       );
+       filterValue.mode = aEvent.target.value;
+-      aMuxer.updateSearch();
++      aMuxer.deferredUpdateSearch();
+     }
+     aDocument
+       .getElementById("qfb-boolean-mode")
+       .addEventListener("ValueChange", commandHandler);
+@@ -981,12 +1009,8 @@ var TagFacetingFilter = {
+     if (aFilterValue != null && typeof aFilterValue == "object") {
+       this._populateTagBar(aFilterValue, aDocument, aMuxer);
+     }
+ 
+-    aDocument
+-      .getElementById("threadTree")
+-      .toggleAttribute("filterPending", aFilterValue === false);
+-
+     const tagbar = aDocument.getElementById("quickFilterBarTagsContainer");
+     if (aFilterValue == null) {
+       tagbar.hidden = true;
+     } else if (typeof aFilterValue == "object") {
+@@ -1035,9 +1059,9 @@ var TagFacetingFilter = {
+         }, 200);
+         return;
+       }
+       keywordMap[tagKey] = this.pressed ? true : null;
+-      aMuxer.updateSearch();
++      aMuxer.deferredUpdateSearch();
+     }
+ 
+     function rightClickHandler(aEvent) {
+       if (aEvent.button == 2) {
+@@ -1055,9 +1079,9 @@ var TagFacetingFilter = {
+           }, 200);
+           return;
+         }
+         keywordMap[tagKey] = !this.pressed ? null : !this.inverted;
+-        aMuxer.updateSearch();
++        aMuxer.deferredUpdateSearch();
+         aEvent.preventDefault();
+       }
+     }
+ 
+@@ -1301,9 +1325,9 @@ export var MessageTextFilter = {
+       // There are three possible states: null, true, and false (inverted).
+       const state = aMuxer.getFilterValueForMutation(MessageTextFilter.name);
+       const filterDef = MessageTextFilter.textFilterDefsByDomId[this.id];
+       state.states[filterDef.name] = !this.pressed ? null : !this.inverted;
+-      aMuxer.updateSearch();
++      aMuxer.deferredUpdateSearch();
+       lazy.XULStoreUtils.setValue(
+         "messenger",
+         "quickFilter",
+         "textFilters",
+@@ -1427,8 +1451,20 @@ export var MessageTextFilter = {
+     return [aState, "upsell", false];
+   },
+ 
+   /**
++   * @param {object} states - The filterValue.states object.
++   * @returns {boolean} - True if any textFilter is checked.
++   */
++  isTextFilterActive(states) {
++    return Object.entries(states).some(
++      ([tfName, tfValue]) =>
++        this.textFilterDefs[tfName].attrib &&
++        (tfValue === true || tfValue === false)
++    );
++  },
++
++  /**
+    * Maps text filter names to whether they are enabled by default.
+    *
+    * @type {Object<string, boolean>}
+    */
+@@ -1499,9 +1535,13 @@ MessageTextFilter.defineTextFilter({
+  */
+ QuickFilterManager.defineFilter({
+   name: "results",
+   domId: "qfb-results-label",
+-  appendTerms() {},
++  domNode: null,
++  document: null,
++  appendTerms(_aTermCreator, _aTerms, aFilterValue) {
++    return aFilterValue === null ? aFilterValue : this;
++  },
+ 
+   /**
+    * Our state is meaningless; we implement this to avoid clearState ever
+    * thinking we were a facet.
+@@ -1516,9 +1556,34 @@ QuickFilterManager.defineFilter({
+   propagateState() {
+     return null;
+   },
+ 
++  onSearchStart(_aState) {
++    return { count: 0, found: false };
++  },
++
++  onSearchMessage(scratch, _aMsgHdr, _aFolder, aMuxer) {
++    scratch.count++;
++    this.reflectInDOM(this.domNode, scratch.count, this.document);
++    if (!scratch.found && scratch.count > 0) {
++      // Show the list.
++      scratch.found = true;
++      aMuxer.reflectFiltererResults();
++    }
++  },
++
++  onSearchDone(aState, _scratch, _aStatus) {
++    return [aState, false, false];
++  },
++
+   reflectInDOM(aNode, aFilterValue, aDocument) {
++    if (!this.domNode) {
++      this.domNode = aNode;
++    }
++    if (!this.document) {
++      this.document = aDocument;
++    }
++
+     if (aFilterValue == null) {
+       aNode.removeAttribute("data-l10n-id");
+       aNode.removeAttribute("data-l10n-attrs");
+       aNode.textContent = "";
+@@ -1532,9 +1597,14 @@ QuickFilterManager.defineFilter({
+       });
+       aNode.style.visibility = "visible";
+     }
+ 
+-    aDocument.getElementById("qfb-info-icon").hidden = aFilterValue !== null;
++    aDocument
++      .getElementById("quick-filter-bar")
++      .toggleAttribute("count", aFilterValue ? aFilterValue : false);
++    aDocument
++      .getElementById("threadTree")
++      .toggleAttribute("count", aFilterValue ? aFilterValue : false);
+   },
+   /**
+    * We slightly abuse the filtering hook to figure out how many messages there
+    * are and whether a filter is active. What makes this reasonable is that
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -70,14 +70,47 @@
+   display: none;
+ }
+ 
+ #qfb-info-icon {
+-  -moz-context-properties: fill, stroke;
+-  margin: var(--button-margin);
+-  content: var(--icon-info);
+-  fill: transparent;
+-  stroke: currentColor;
+-  cursor: help;
++  & {
++    margin: var(--button-margin);
++    content: var(--icon-info);
++    fill: transparent;
++    stroke: currentColor;
++    -moz-context-properties: fill, stroke;
++    cursor: help;
++    display: none;
++  }
++  #quick-filter-bar:not([filterActive]) & {
++    display: block;
++  }
++}
++
++#qfb-searching-icon {
++  & {
++    visibility: collapse;
++    width: 0;
++    height: 16px;
++    opacity: 0;
++    fill: var(--color-amber-30);
++    -moz-context-properties: fill, stroke;
++    content: url("chrome://global/skin/icons/loading.png");
++  }
++  @media (prefers-reduced-motion: reduce) {
++    content: var(--icon-clock);
++  }
++  #quick-filter-bar[filterActive="searching"] & {
++    visibility: visible;
++    width: 16px;
++    opacity: 1;
++    transition-property: width, opacity;
++  }
++  #quick-filter-bar[filterActive="searching"][count] & {
++    transition-delay: 0s;
++  }
++  #quick-filter-bar[filterActive="searching"]:not([count]) & {
++    transition-delay: 2000ms;
++  }
+ }
+ 
+ #qfb-results-label {
+   margin: 3px;
+@@ -271,27 +304,8 @@
+                                           black 10px);
+   }
+ }
+ 
+-/* While there are no search results, we need to do the animation on the table background
+- * which is later covered by rows in the result set. */
+-#threadTree[filterActive="searching"],
+-#threadTree[filterActive="searching"] > .tree-table {
+-  background-repeat: no-repeat;
+-  background-position: 50% 40px;
+-  -moz-context-properties: fill, fill-opacity;
+-  fill: currentColor;
+-  fill-opacity: .3;
+-  background-image: url("chrome://messenger/skin/icons/search-spinner.svg");
++#threadTree[filterActive="searching"]:not([count]) tbody,
++#threadTree[filterActive="nomatches"] tbody {
++  visibility: collapse;
+ }
+-
+-#threadTree[filterActive="searching"] {
+-  background-position-x: calc(50% - 10px);
+-}
+-
+-#threadTree[filterPending] tbody {
+-  display: none;
+-}
+-
+-#threadTree[filterPending] tbody {
+-  display: none;
+-}
