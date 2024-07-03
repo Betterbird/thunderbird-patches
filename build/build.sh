@@ -286,14 +286,14 @@ if [ "$NOCLOBBER" = "noclobber" ]; then
   echo "======================================================="
   echo "NOT running clobber."
   if [ "$UNAME" = "Linux" ]; then
-    if [ "$UNAME_ARCH" = "x86_64" ]; then
+    if [ "$UNAME_ARCH" = "x86_64" ] && [ -d obj-x86_64-pc-linux-gnu ]; then
       touch obj-x86_64-pc-linux-gnu/CLOBBER
-    elif [ "$UNAME_ARCH" = "aarch64" ]; then
+    elif [ "$UNAME_ARCH" = "aarch64" ] && [ -d obj-aarch64-unknown-linux-gnu ]; then
       touch obj-aarch64-unknown-linux-gnu/CLOBBER
     fi
-  elif [ "$UNAME" = "Darwin" ]; then
+  elif [ "$UNAME" = "Darwin" ] && [ -d obj-x86_64-apple-darwin ]; then
     touch obj-x86_64-apple-darwin/CLOBBER
-  elif [ "$UNAME" = "Windows" ]; then
+  elif [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-mingw32 ]; then
     touch obj-x86_64-pc-mingw32/CLOBBER
   fi
 else
