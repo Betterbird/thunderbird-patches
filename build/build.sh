@@ -326,11 +326,11 @@ if [ "$UNAME" = "Linux" ]; then
 elif [ "$UNAME" = "Darwin" ]; then
   echo
   echo "======================================================="
-  echo "Find you disk image here"
+  echo "Find your disk image here"
   ls $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
 elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
-  echo "Find you disk image here"
+  echo "Find your disk image here"
   ls $MOZILLA_DIR/obj-x86_64-pc-mingw32/dist/install/sea/*.installer.exe
 fi
