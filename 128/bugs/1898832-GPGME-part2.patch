@@ -1,0 +1,128 @@
+# HG changeset patch
+# User Kai Engert <kaie@kuix.de>
+# Date 1720293754 -7200
+# Node ID 90810b770b1b50d6fa68ce035b1a4a2692d21b92
+# Parent  3937da04513f8c105977981f429fd587e0fc02be
+Bug 1898832 - Convert GPGME signing output from ASCII armor to binary, if necessary.
+
+diff --git a/mail/extensions/openpgp/content/modules/RNP.sys.mjs b/mail/extensions/openpgp/content/modules/RNP.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/RNP.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/RNP.sys.mjs
+@@ -3681,8 +3681,20 @@ export var RNP = {
+     }
+     return email;
+   },
+ 
++  isASCIIArmored(typedArray) {
++    const compareWith = "-----BEGIN";
++    if (typedArray.length < compareWith.length) {
++      return false;
++    }
++    let beginStr = "";
++    for (let i = 0; i < compareWith.length; i++) {
++      beginStr += String.fromCharCode(typedArray[i]);
++    }
++    return beginStr.startsWith(compareWith);
++  },
++
+   async encryptAndOrSign(plaintext, args, resultStatus) {
+     let signedInner;
+ 
+     if (args.sign && args.senderKeyIsExternal) {
+@@ -3704,8 +3716,14 @@ export var RNP = {
+         // combine it with the encryption produced by RNP.
+         const orgEncrypt = args.encrypt;
+         args.encrypt = false;
+         signedInner = await lazy.GPGME.sign(plaintext, args, resultStatus);
++        // Despite our request to produce binary data, GPGME.sign might
++        // have produce ASCII armored encoding, e.g. if the user has
++        // a configuration file that enables it.
++        if (this.isASCIIArmored(signedInner)) {
++          signedInner = this.deArmorTypedArray(signedInner);
++        }
+         args.encrypt = orgEncrypt;
+       } else {
+         // We aren't asked to encrypt, but sign only. That means the
+         // caller needs the detatched signature, either for MIME
+@@ -4892,8 +4910,61 @@ export var RNP = {
+ 
+     return result;
+   },
+ 
++  deArmorTypedArray(input_array) {
++    const input_from_memory = new RNPLib.rnp_input_t();
++    RNPLib.rnp_input_from_memory(
++      input_from_memory.address(),
++      input_array,
++      input_array.length,
++      false
++    );
++    const max_out = input_array.length * 2 + 150; // extra bytes for head/tail/hash lines
++
++    const output_to_memory = new RNPLib.rnp_output_t();
++    RNPLib.rnp_output_to_memory(output_to_memory.address(), max_out);
++
++    if (RNPLib.rnp_dearmor(input_from_memory, output_to_memory)) {
++      throw new Error("rnp_dearmor failed");
++    }
++
++    let result = null;
++
++    const result_buf = new lazy.ctypes.uint8_t.ptr();
++    const result_len = new lazy.ctypes.size_t();
++    if (
++      !RNPLib.rnp_output_memory_get_buf(
++        output_to_memory,
++        result_buf.address(),
++        result_len.address(),
++        false
++      )
++    ) {
++      // result_len is of type UInt64, I don't know of a better way
++      // to convert it to an integer.
++      const b_len = parseInt(result_len.value.toString());
++
++      // type casting the pointer type to an array type allows us to
++      // access the elements by index.
++      const uint8_array = lazy.ctypes.cast(
++        result_buf,
++        lazy.ctypes.uint8_t.array(result_len.value).ptr
++      ).contents;
++
++      result = new Uint8Array(b_len);
++
++      for (let i = 0; i < b_len; i++) {
++        result[i] = uint8_array[i];
++      }
++    }
++
++    RNPLib.rnp_input_destroy(input_from_memory);
++    RNPLib.rnp_output_destroy(output_to_memory);
++
++    return result;
++  },
++
+   // Will change the expiration date of all given keys to newExpiry.
+   // fingerprintArray is an array, containing fingerprints, both
+   // primary key fingerprints and subkey fingerprints are allowed.
+   // The function assumes that all involved keys have already been
+diff --git a/mail/extensions/openpgp/content/modules/RNPLib.sys.mjs b/mail/extensions/openpgp/content/modules/RNPLib.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/RNPLib.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/RNPLib.sys.mjs
+@@ -1742,8 +1742,16 @@ function enableRNPLibJS() {
+       rnp_output_t,
+       ctypes.char.ptr
+     ),
+ 
++    rnp_dearmor: librnp.declare(
++      "rnp_dearmor",
++      abi,
++      rnp_result_t,
++      rnp_input_t,
++      rnp_output_t
++    ),
++
+     rnp_op_verify_get_protection_info: librnp.declare(
+       "rnp_op_verify_get_protection_info",
+       abi,
+       rnp_result_t,
