@@ -1,0 +1,119 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1720293431 -7200
+# Parent  e1d39c15a98f6e490c03b950b6f580e91101f2f4
+Bug NNN15 - Scrap secondary sort if primary sort is unique.
+
+Bonus point: Fix console error when view has no sort, doesn't seem to happen in 128.
+
+diff --git a/mail/modules/DBViewWrapper.sys.mjs b/mail/modules/DBViewWrapper.sys.mjs
+--- a/mail/modules/DBViewWrapper.sys.mjs
++++ b/mail/modules/DBViewWrapper.sys.mjs
+@@ -1150,8 +1150,13 @@ DBViewWrapper.prototype = {
+       // kUnderlyingSynthetic or kUnderlyingSearchView
+       dbviewContractId += "search";
+     }
+ 
++    if (this._sort.length == 0) {
++      console.warn(`No sort array for view of type "${dbviewContractId}"`);
++      return null;
++    }
++
+     // and now zero the saved-off flags.
+     this.__viewFlags = null;
+ 
+     const dbView = Cc[dbviewContractId].createInstance(Ci.nsIMsgDBView);
+@@ -1160,9 +1165,14 @@ DBViewWrapper.prototype = {
+       this.listener.msgWindow,
+       this.listener.threadPaneCommandUpdater
+     );
+     // Excluding Group By views, use the least-specific sort so we can clock
+-    // them back through to build up the correct sort order,
++    // them back through to build up the correct sort order.
++    // (**):
++    // Observed behavior is that index is always 0. `this._sort.length == 2`
++    // has only ever been observed with a "Group By" view had a Quick Filter applied.
++    // That second entry appeared to be invalid (byAuthor).
++    // STR in https://bugzilla.mozilla.org/show_bug.cgi?id=1860322
+     const index =
+       viewFlags & Ci.nsMsgViewFlagsType.kGroupBySort
+         ? 0
+         : this._sort.length - 1;
+@@ -1209,9 +1219,18 @@ DBViewWrapper.prototype = {
+ 
+     // If Grouped By, the view has already been opened with the most specific
+     // sort (groups themselves are always sorted by date).
+     if (!(viewFlags & Ci.nsMsgViewFlagsType.kGroupBySort)) {
+-      // clock through the rest of the sorts, if there are any
++      // Clock through the rest of the sorts, if there are any.
++      // This is nonsense for two reasons. At most, there are two
++      // sorts, primary and secondary, as noted in:
++      // https://bugzilla.mozilla.org/show_bug.cgi?id=1899664
++      // Secondly, as observed in (**) above, this loop will never run.
++      // That's cool, since opening the view already sorts it, the backend
++      // gets the secondary sort from the database, even for cross-folder views.
++      // Sorting the view multiple times is a performance hit and also
++      // the sort we're using, std::sort(), isn't stable, so the second
++      // sort would mess up the first. Oh boy, what a mess!
+       for (let iSort = this._sort.length - 2; iSort >= 0; iSort--) {
+         const [_sortType, _sortOrder, _sortColumnId] = this._sort[iSort];
+         dbView.curCustomColumn =
+           _sortType == Ci.nsMsgViewSortType.byCustom ? _sortColumnId : "";
+@@ -1510,8 +1529,13 @@ DBViewWrapper.prototype = {
+       this.dbView = null;
+     }
+ 
+     this.dbView = this._createView();
++    if (!this.dbView) {
++      console.warn("No view created");
++      return;
++    }
++
+     // if the synthetic view defines columns, add those for it
+     if (this.isSynthetic) {
+       for (const customCol of this._syntheticView.customColumns) {
+         customCol.bindToView(this.dbView);
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -3981,9 +3981,18 @@ void nsMsgDBView::UpdateSortInfo(nsMsgVi
+       m_sortColumns[0].mSortOrder = sortOrder;
+     }
+   }
+ 
+-  if (m_sortColumns.Length() > 1) {
++  // Reset secondary sort:
++  m_secondarySort = nsMsgViewSortType::byId;
++  m_secondarySortOrder = nsMsgViewSortOrder::ascending;
++  m_secondaryCustomColumn.Truncate();
++
++  // No need for a potentially slow secondary sort if the primary sort is
++  // "almost" unique.
++  if (m_sortColumns.Length() > 1 && sortType != nsMsgViewSortType::byDate &&
++      sortType != nsMsgViewSortType::byReceived &&
++      sortType != nsMsgViewSortType::byId) {
+     m_secondarySort = m_sortColumns[1].mSortType;
+     m_secondarySortOrder = m_sortColumns[1].mSortOrder;
+     m_secondaryCustomColumn = m_sortColumns[1].mCustomColumnName;
+   }
+@@ -4158,9 +4167,19 @@ nsresult nsMsgDBView::RestoreSortInfo() 
+     // Restore m_sortColumns from db.
+     nsString sortColumnsString;
+     folderInfo->GetProperty("sortColumns", sortColumnsString);
+     DecodeColumnSort(sortColumnsString);
+-    if (m_sortColumns.Length() > 1) {
++
++    // Reset secondary sort:
++    m_secondarySort = nsMsgViewSortType::byId;
++    m_secondarySortOrder = nsMsgViewSortOrder::ascending;
++    m_secondaryCustomColumn.Truncate();
++
++    // No need for a potentially slow secondary sort if the primary sort is
++    // "almost" unique.
++    if (m_sortColumns.Length() > 1 && m_sortType != nsMsgViewSortType::byDate &&
++        m_sortType != nsMsgViewSortType::byReceived &&
++        m_sortType != nsMsgViewSortType::byId) {
+       m_secondarySort = m_sortColumns[1].mSortType;
+       m_secondarySortOrder = m_sortColumns[1].mSortOrder;
+       m_secondaryCustomColumn = m_sortColumns[1].mCustomColumnName;
+     }
