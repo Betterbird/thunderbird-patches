@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
 # Date 1719907768 -7200
-# Parent  7f02ce4bd5e81fbcd68bc8cd52434851807d5e3c
+# Parent  7f3fd902294b7792ecedb54c4ea58280d79aad1c
 Implement negation for QuickFilterBar filter and text filter buttons.
 
 Authored by Alta88 and contributed to the Betterbird Project.
@@ -13,6 +13,15 @@ For example: find all NOT Starred messages, or all messages where Subject does
 NOT contain "sometext". For top level filters (Starred, etc.), the operator is AND.
 For the text filter (Sender, Subject, etc.), the operator is OR, but becomes AND with negation.
 Negation is indicated with a red strike-through.
+
+* * * From feature-744365-QFB-negation-incl-untagged-more.patch authored by Betterbird, with modifications as indicated below by Alta88:
+https://github.com/Betterbird/thunderbird-patches/blob/main/128/unused/feature-744365-QFB-negation-incl-untagged-more.patch
+
+Implement negation for QuickFilterBar filter and text filter buttons - Part 2:
+
+Make the term that yields untagged messages the first tag-related term instead of the last. Add debugging output.
+* * *
+Authored by Alta88: Fix UX and prevent unnecessary searches in tags negation mode.
 
 diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
 --- a/mail/base/content/quickFilterBar.inc.xhtml
@@ -172,27 +181,59 @@ diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/me
 diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
 --- a/mail/modules/QuickFilterManager.sys.mjs
 +++ b/mail/modules/QuickFilterManager.sys.mjs
-@@ -679,8 +679,12 @@ var TagFacetingFilter = {
-     // it's the simple case if the value is just a boolean
-     if (typeof aFilterValue != "object") {
-       return true;
+@@ -557,10 +557,41 @@ export var QuickFilterManager = {
+       } catch (ex) {
+         console.error(ex);
+       }
      }
-+    // Not a simple case.
-+    if (aFilterValue.inverted) {
-+      return false;
++    this.dumpTerms(searchTerms);
+     return searchTerms.length ? [searchTerms, listeners] : [null, listeners];
+   },
++
++  dumpTerms(aTerms) {
++    let condition = "";
++    for (const term of aTerms) {
++      if (condition) {
++        condition += " ";
++      }
++      if (term.matchAll) {
++        condition = "ALL";
++        break;
++      }
++      condition += term.booleanAnd ? "AND " : "OR ";
++      if (term.beginsGrouping == 0) {
++        condition += "(";
++      } else {
++        for (let i = 0; i < term.beginsGrouping; i++) {
++          condition += "[";
++        }
++      }
++      condition += term.termAsString;
++      if (term.endsGrouping == 0) {
++        condition += ")";
++      } else {
++        for (let i = 0; i < term.endsGrouping; i++) {
++          condition += "]";
++        }
++      }
 +    }
-     // but also if the object contains no non-null values
-     let simpleCase = true;
-     for (const key in aFilterValue.tags) {
-       const value = aFilterValue.tags[key];
-@@ -705,25 +709,25 @@ var TagFacetingFilter = {
++    console.info("Condition:", condition);
++  },
+ };
+ 
+ /**
+  * Meta-filter, just handles whether or not things are sticky.
+@@ -705,33 +736,66 @@ var TagFacetingFilter = {
      }
  
      let term, value;
  
 -    // just the true/false case
+-    if (this.isSimple(aFilterValue)) {
++    const isSimple = this.isSimple(aFilterValue);
++
 +    // Just the true/false case - in both we want all the tags.
-     if (this.isSimple(aFilterValue)) {
++    if (isSimple && !aFilterValue.inverted) {
        term = aTermCreator.createTerm();
        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
        value = term.value;
@@ -218,33 +259,97 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
        let firstIncludeClause = true,
          firstExcludeClause = true;
        let lastIncludeTerm = null;
-@@ -784,8 +788,25 @@ var TagFacetingFilter = {
+       term = null;
+ 
+       const excludeTerms = [];
+ 
++      // This is what we do, for example:
++      // [OR/Any] has(tag1) hasNo(tag2) has(tag3) hasNo(tag4)
++      // becomes:
++      // AND[Contains,tag1), OR(Contains,tag3],
++      // AND[DoesntContain,tag2), AND(DoesntContain,tag4]
++      // where [] denote groups.
++      // To do so, we collect the "hasNo" tags in `excludeTerms` and append
++      // them at the end. If there is no "has", we need to prepend an empty term.
++      //
++      // Things get tricky when we want to show untagged messages.
++      if (aFilterValue.inverted) {
++        // In case there are no "has" and "hasNo" selections, we can just add
++        // AND(IsEmpty,) to the list of existing terms.
++        // Otherwise, we add AND[IsEmpty,) to begin a group, we make sure
++        // that the next group goes in with OR and that the overall group is
++        // closed at the end.
++        term = aTermCreator.createTerm();
++        term.beginsGrouping = isSimple ? 0 : 1;
++        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++        value = term.value;
++        value.str = "";
++        term.value = value;
++        term.op = Ci.nsMsgSearchOp.IsEmpty;
++        term.booleanAnd = true;
++        term.endsGrouping = 0;
++        aTerms.push(term);
++        if (isSimple) {
++          return null;
++        }
++      }
++
+       const mode = aFilterValue.mode;
+       for (const key in aFilterValue.tags) {
+         const shouldFilter = aFilterValue.tags[key];
+         if (shouldFilter !== null) {
+@@ -742,11 +806,15 @@ var TagFacetingFilter = {
+           value.str = key;
+           term.value = value;
+           if (shouldFilter) {
+             term.op = Ci.nsMsgSearchOp.Contains;
+-            // AND for the group. Inside the group we also want AND if the
+-            // mode is set to "All of".
+-            term.booleanAnd = firstIncludeClause || mode === "AND";
++            // AND for the group unless we prepended "untagged".
++            // Inside the group we also want AND if the mode is set to "All of".
++            if (firstIncludeClause) {
++              term.booleanAnd = !aFilterValue.inverted;
++            } else {
++              term.booleanAnd = mode === "AND";
++            }
+             term.beginsGrouping = firstIncludeClause ? 1 : 0;
+             aTerms.push(term);
+             firstIncludeClause = false;
+             lastIncludeTerm = term;
+@@ -776,16 +844,30 @@ var TagFacetingFilter = {
+           value = term.value;
+           value.str = "";
+           term.value = value;
+           term.op = Ci.nsMsgSearchOp.IsntEmpty;
+-          term.booleanAnd = true;
++          term.booleanAnd = !aFilterValue.inverted;
++          if (aFilterValue.inverted) {
++            // Move the `beginsGrouping` from the first exclude term to here so we get:
++            // AND [tag,is empty,) OR [tag,isn't empty,)
++            //                        AND (tag,doesn't contain,$label1)
++            //                        AND (tag,doesn't contain,$label2]]
++            term.beginsGrouping = 1;
++            excludeTerms[0].beginsGrouping = 0;
++          }
+           aTerms.push(term);
+         }
+ 
          // (extend in the exclusions)
          excludeTerms[excludeTerms.length - 1].endsGrouping = 1;
          aTerms.push.apply(aTerms, excludeTerms);
        }
 +
 +      if (aFilterValue.inverted) {
-+        // Show untagged, in addition to any tag button checked state combination.
-+        term = aTermCreator.createTerm();
-+        term.beginsGrouping =
-+          !firstIncludeClause || !firstExcludeClause ? 1 : 0;
-+        term.attrib = Ci.nsMsgSearchAttrib.Keywords;
-+        value = term.value;
-+        value.str = "";
-+        term.value = value;
-+        term.op = Ci.nsMsgSearchOp.IsEmpty;
-+        // OR with any other tag terms in that group, but AND to combine with
-+        // other filters.
-+        term.booleanAnd = !(!firstIncludeClause || !firstExcludeClause);
-+        term.endsGrouping = !firstIncludeClause || !firstExcludeClause ? 1 : 0;
-+        aTerms.push(term);
++        // Whatever term that got pushed last needs to close the additional
++        // group we opened.
++        aTerms[aTerms.length - 1].endsGrouping++;
 +      }
      }
      return null;
    },
  
-@@ -807,10 +828,17 @@ var TagFacetingFilter = {
+@@ -807,10 +889,17 @@ var TagFacetingFilter = {
      if (aCurState == null) {
        return [null, false, false];
      }
@@ -262,7 +367,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
      const tagCount = tags.length;
      for (let iTag = 0; iTag < tagCount; iTag++) {
        const tag = tags[iTag];
-@@ -822,39 +850,36 @@ var TagFacetingFilter = {
+@@ -822,39 +911,36 @@ var TagFacetingFilter = {
      return [outKeyMap, true, false];
    },
  
@@ -310,7 +415,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
      //  onSearchStart/onSearchMessage/onSearchDone get to do their thing.
      return [checked, true];
    },
-@@ -873,19 +898,44 @@ var TagFacetingFilter = {
+@@ -873,19 +959,40 @@ var TagFacetingFilter = {
        .addEventListener("ValueChange", commandHandler);
    },
  
@@ -338,10 +443,6 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
        this._populateTagBar(aFilterValue, aDocument, aMuxer);
 -    } else {
 -      aDocument.getElementById("quickFilterBarTagsContainer").hidden = true;
-+      const hasSelectedTag = Object.entries(aFilterValue.tags).some(
-+        tag => tag[1] !== null
-+      );
-+      aDocument.getElementById("qfb-boolean-mode").disabled = !hasSelectedTag;
 +    }
 +
 +    aDocument
@@ -358,12 +459,41 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
    },
  
    _populateTagBar(aState, aDocument, aMuxer) {
-@@ -905,25 +955,17 @@ var TagFacetingFilter = {
+@@ -901,29 +1008,55 @@ var TagFacetingFilter = {
+     } else {
+       aState.mode = qbm.value;
+     }
+ 
++    // When the tag filter is inverted, we only allow either selection or
++    // inversion of tag buttons.
++    // If we allowed both, the backend can't correctly process the resulting
++    // expression.
++    let tagsSelected = 0;
++    let tagsInverted = 0;
++    for (const tagKey in keywordMap) {
++      const value = keywordMap[tagKey];
++      if (value === true) {
++        tagsSelected++;
++      } else if (value === false) {
++        tagsInverted++;
++      }
++    }
++    qbm.disabled = !tagsSelected && !tagsInverted;
++
      function clickHandler() {
        const tagKey = this.getAttribute("value");
-       const state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
-       state.tags[tagKey] = this.pressed ? true : null;
+-      const state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-      state.tags[tagKey] = this.pressed ? true : null;
 -      this.removeAttribute("inverted");
++      if (keywordMap[tagKey] === null && aState.inverted && tagsInverted) {
++        // We use a delay to clear the button to give feedback that an action
++        // was indeed performed.
++        aDocument.ownerGlobal.setTimeout(() => {
++          this.pressed = false;
++        }, 200);
++        return;
++      }
++      keywordMap[tagKey] = this.pressed ? true : null;
        aMuxer.updateSearch();
      }
  
@@ -374,19 +504,30 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 -
 +        // A |toggle-button| sets up pressed and inverted in the constructor.
          const tagKey = this.getAttribute("value");
-         const state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
+-        const state = aMuxer.getFilterValueForMutation(TagFacetingFilter.name);
 -        state.tags[tagKey] = this.pressed ? false : null;
 -        if (this.pressed) {
 -          this.setAttribute("inverted", "true");
 -        } else {
 -          this.removeAttribute("inverted");
--        }
-+        state.tags[tagKey] = !this.pressed ? null : !this.inverted;
++        const tagKeyState = keywordMap[tagKey];
++        if (
++          ((tagKeyState === null && tagsSelected) ||
++            (tagKeyState === true && tagsSelected > 1)) &&
++          aState.inverted
++        ) {
++          aDocument.ownerGlobal.setTimeout(() => {
++            this.pressed = tagKeyState === true;
++            this.inverted = false;
++          }, 200);
++          return;
+         }
++        keywordMap[tagKey] = !this.pressed ? null : !this.inverted;
          aMuxer.updateSearch();
          aEvent.preventDefault();
        }
      }
-@@ -932,19 +974,15 @@ var TagFacetingFilter = {
+@@ -932,19 +1065,15 @@ var TagFacetingFilter = {
      while (tagbar.children.length > 1) {
        tagbar.lastElementChild.remove();
      }
@@ -406,7 +547,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
          //  elements such as these until they get displayed, which definitely
          //  means not before we append it into the tree.
          const button = aDocument.createElement("button", {
-@@ -955,11 +993,9 @@ var TagFacetingFilter = {
+@@ -955,11 +1084,9 @@ var TagFacetingFilter = {
          button.addEventListener("click", clickHandler);
          button.addEventListener("contextmenu", rightClickHandler);
          if (keywordMap[tag.key] !== null) {
@@ -419,7 +560,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
          button.textContent = tag.tag;
          button.setAttribute("value", tag.key);
          const color = tag.color;
-@@ -976,9 +1012,8 @@ var TagFacetingFilter = {
+@@ -976,9 +1103,8 @@ var TagFacetingFilter = {
          }
          tagbar.appendChild(button);
        }
@@ -429,7 +570,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  };
  QuickFilterManager.defineFilter(TagFacetingFilter);
  
-@@ -1076,16 +1111,19 @@ export var MessageTextFilter = {
+@@ -1076,16 +1202,19 @@ export var MessageTextFilter = {
    appendTerms(aTermCreator, aTerms, aFilterValue) {
      let term, value;
  
@@ -450,7 +591,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
              }
              const tfDef = this.textFilterDefs[tfName];
  
-@@ -1094,11 +1132,13 @@ export var MessageTextFilter = {
+@@ -1094,11 +1223,13 @@ export var MessageTextFilter = {
              value = term.value;
              value.attrib = tfDef.attrib;
              value.str = phrase;
@@ -467,7 +608,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
              aTerms.push(term);
              firstClause = false;
            }
-@@ -1166,11 +1206,12 @@ export var MessageTextFilter = {
+@@ -1166,11 +1297,12 @@ export var MessageTextFilter = {
      );
  
      // -- Expando Buttons!
@@ -481,7 +622,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
        lazy.XULStoreUtils.setValue(
          "messenger",
          "quickFilter",
-@@ -1183,8 +1224,11 @@ export var MessageTextFilter = {
+@@ -1183,8 +1315,11 @@ export var MessageTextFilter = {
        const textFilter = this.textFilterDefs[name];
        aDocument
          .getElementById(textFilter.domId)
@@ -493,7 +634,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
    },
  
    onCommand(aState, aNode, aEvent, aDocument) {
-@@ -1256,10 +1300,12 @@ export var MessageTextFilter = {
+@@ -1256,10 +1391,12 @@ export var MessageTextFilter = {
      // Update our expanded filters buttons.
      const states = aFilterValue.states;
      for (const name in this.textFilterDefs) {
@@ -508,7 +649,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  
      // Toggle the expanded filters visibility.
      aDocument.getElementById("quick-filter-bar-filter-text-bar").hidden =
-@@ -1353,9 +1399,9 @@ MessageTextFilter.defineTextFilter({
+@@ -1353,9 +1490,9 @@ MessageTextFilter.defineTextFilter({
  MessageTextFilter.defineTextFilter({
    name: "body",
    domId: "qfb-qs-body",
@@ -519,7 +660,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  
  /**
   * The results label says whether there were any matches and, if so, how many.
-@@ -1394,8 +1440,10 @@ QuickFilterManager.defineFilter({
+@@ -1394,8 +1531,10 @@ QuickFilterManager.defineFilter({
          count: aFilterValue,
        });
        aNode.style.visibility = "visible";
