@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
 # Date 1717862792 -7200
-# Parent  fe5bf552221ebf4dffc42bbee57053adcaa98577
+# Parent  4aa05ca5ef3a0f4221793b83015a5cfa576f72ba
 Message Rethreading and implementation of a generalized message editor class.
 
 Authored by Alta88 and contributed to the Betterbird Project.
@@ -33,6 +33,11 @@ To exit ReThread Mode with no action:
 Fix for structured headers.
 * * *
 Fix encoding issues.
+* * *
+29-feature-rethreading-UPDATE.patch
+
+1. Implement threadpane contextmenu "unthread" and "reset" actions, currently only available via keyboard.
+2. Ensure any message in a tab/window is also replaced post rethread/edit.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
@@ -64,7 +69,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
    TagUtils: "resource:///modules/TagUtils.sys.mjs",
    UIDensity: "resource:///modules/UIDensity.sys.mjs",
    UIFontSize: "resource:///modules/UIFontSize.sys.mjs",
-@@ -4454,8 +4455,9 @@ var threadPane = {
+@@ -4457,8 +4458,9 @@ var threadPane = {
      threadTree.addEventListener("select", this);
      threadTree.table.body.addEventListener("dragstart", this);
      threadTree.addEventListener("dragover", this);
@@ -74,7 +79,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
      threadTree.addEventListener("collapsed", this);
      threadTree.addEventListener("scroll", this);
      threadTree.addEventListener("showplaceholder", this);
-@@ -4506,8 +4508,11 @@ var threadPane = {
+@@ -4509,8 +4511,11 @@ var threadPane = {
          break;
        case "drop":
          this._onDrop(event);
@@ -86,7 +91,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
        case "collapsed":
          if (event.detail == threadTree.selectedIndex) {
            // The selected index hasn't changed, but a collapsed row represents
-@@ -4625,8 +4630,53 @@ var threadPane = {
+@@ -4628,8 +4633,53 @@ var threadPane = {
  
      if (event.key == "Enter") {
        this._onItemActivate(event);
@@ -140,7 +145,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
  
    _onMiddleClick(event) {
      const row =
-@@ -4666,8 +4716,15 @@ var threadPane = {
+@@ -4669,8 +4719,15 @@ var threadPane = {
    /**
     * Handle threadPane select events.
     */
@@ -156,7 +161,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
        // If someone selects while the results of a QFB search are aggregated,
        // we need to save the selection since at the end of the search it is restored.
        this.saveSelection();
-@@ -4735,8 +4792,15 @@ var threadPane = {
+@@ -4738,8 +4795,15 @@ var threadPane = {
        event.preventDefault();
        return;
      }
@@ -172,7 +177,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
      if (!threadTree.selectedIndices.includes(row.index)) {
        if (gViewWrapper.isGroupedByHeaderAtIndex(row.index)) {
          event.preventDefault();
-@@ -4846,28 +4910,42 @@ var threadPane = {
+@@ -4849,28 +4913,41 @@ var threadPane = {
     * Handle threadPane dragover events.
     */
    _onDragOver(event) {
@@ -208,17 +213,16 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 +        return;
 +      }
 +      event.dataTransfer.dropEffect = "copy";
-+      if (row.index == this._currentDropRow?.index) {
-+        return;
++      if (row.index != this._currentDropRow?.index) {
++        this._clearDropTarget();
++        row.classList.add("drop-target");
++        this._currentDropRow = row;
 +      }
-+      this._clearDropTarget();
-+      row.classList.add("drop-target");
-+      this._currentDropRow = row;
      }
    },
  
    /**
-@@ -4876,9 +4954,22 @@ var threadPane = {
+@@ -4879,9 +4956,22 @@ var threadPane = {
    _onDrop(event) {
      if (event.target.closest("thead")) {
        return; // Only allow dropping in the body.
@@ -241,7 +245,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
        const extFile = event.dataTransfer
          .mozGetDataAt("application/x-moz-file", i)
          .QueryInterface(Ci.nsIFile);
-@@ -4896,8 +4987,32 @@ var threadPane = {
+@@ -4899,8 +4989,32 @@ var threadPane = {
        }
      }
    },
@@ -274,7 +278,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
      let row =
        event.target.closest(`tr[is^="thread-"]`) ||
        threadTree.getRowAtIndex(threadTree.currentIndex);
-@@ -4975,8 +5090,252 @@ var threadPane = {
+@@ -4978,8 +5092,261 @@ var threadPane = {
        top.messenger.saveAs(messageURI.value.data, true, null, file.path, true);
      },
    },
@@ -506,15 +510,24 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 +   */
 +  updateThreading(action = "rethread") {
 +    action = threadTree.inKeyDnD ?? action;
-+    const dragIndex = this._currentDragRow.index;
-+    const dropIndex = this._currentDropRow?.index;
-+    const newParentMessageURI = gDBView.getURIForViewIndex(dropIndex);
++    this.doUpdateThreading(
++      action,
++      this._currentDragRow.index,
++      gDBView.getURIForViewIndex(this._currentDropRow?.index)
++    );
++  },
 +
++  /*
++   * @param {string} action - In "rethread", "unthread", "reset".
++   * @param {integer} sourceIndex - Index of message to rethread.
++   * @param {?string} newParentMessageURI - Actually a nsIMsgMailNewsUrl url.
++   */
++  doUpdateThreading(action, sourceIndex, newParentMessageURI) {
 +    const [successFn, errorFn] =
-+      this.saveStateForMessageReplaceAtIndex(dragIndex);
++      this.saveStateForMessageReplaceAtIndex(sourceIndex);
 +
 +    const messageEditor = new MessageEditor({
-+      messageURI: gDBView.getURIForViewIndex(dragIndex),
++      messageURI: gDBView.getURIForViewIndex(sourceIndex),
 +      msgWindow: top.msgWindow,
 +      successFn,
 +      errorFn,
@@ -527,11 +540,216 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
      QueryInterface: ChromeUtils.generateQI(["nsIMsgJSTree"]),
      _inBatch: false,
      beginUpdateBatch() {
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -312,8 +312,9 @@ window.addEventListener("DOMContentLoade
+   SetAttachmentListLocation();
+ 
+   preferenceObserver.init();
+   Services.obs.addObserver(msgObserver, "message-content-updated");
++  Services.obs.addObserver(msgObserver, "message-replaced");
+ 
+   const browser = getMessagePaneBrowser();
+ 
+   if (parent == top) {
+@@ -348,8 +349,9 @@ window.addEventListener("unload", () => 
+   OnUnloadMsgHeaderPane();
+   MailServices.mailSession.RemoveFolderListener(folderListener);
+   preferenceObserver.cleanUp();
+   Services.obs.removeObserver(msgObserver, "message-content-updated");
++  Services.obs.removeObserver(msgObserver, "message-replaced");
+   gViewWrapper?.close();
+ });
+ 
+ function displayMessage(uri, viewWrapper) {
+@@ -549,8 +551,49 @@ var msgObserver = {
+       // This notification is triggered after a partial pop3 message was
+       // fully downloaded. The old message URI is now gone. To reload the
+       // message, we display it with its new URI.
+       displayMessage(data, gViewWrapper);
++    } else if (topic == "message-replaced") {
++      // A message has been rethreaded/edited and the next message was selected
++      // upon delete; reselect the original which has a new messageURI.
++      // The |subject| will contain the old messageURI and the new messageURI.
++      // The message may be standalone in a window (tabOrWindow.isChromeWindow
++      // is true) or tab (tabOrWindow.name is mailMessageTab).
++      // Or, the message may be in a mail3PaneTab type in other windows or tabs
++      // with a message list, including synthetic (tabOrWindow.name is
++      // mail3PaneTab).
++      const tabOrWindow = window.tabOrWindow || parent.tabOrWindow;
++      const isMail3PaneTab = tabOrWindow.mode?.name == "mail3PaneTab";
++      const isSynthetic = isMail3PaneTab && parent.gViewWrapper.isSynthetic;
++      const { oldMessageURI, newMessageURI } = subject.wrappedJSObject;
++      const doMessageUpdate =
++        gMessageURI &&
++        gMessageURI != newMessageURI &&
++        messageHistory.lastSelectedRemovedMessageURI == oldMessageURI;
++
++      if (doMessageUpdate || isSynthetic) {
++        if (isMail3PaneTab) {
++          const msgService = MailServices.messageServiceFromURI(newMessageURI);
++          const msgHdr = msgService.messageURIToMsgHdr(newMessageURI);
++          if (isSynthetic) {
++            // A search results list with no gFolder; refresh() to get the
++            // updated list otherwise the message won't be there.
++            // XXX: this does not work very well.
++            setTimeout(() => {
++              parent.gViewWrapper.refresh();
++              if (doMessageUpdate) {
++                displayMessage(newMessageURI, gViewWrapper);
++              }
++            }, 500);
++          } else if (doMessageUpdate) {
++            // Select the message in the list.
++            parent.selectMessage(msgHdr);
++          }
++        } else if (doMessageUpdate) {
++          // Only for standalone messages (window or tab).
++          displayMessage(newMessageURI, gViewWrapper);
++        }
++      }
+     }
+   },
+ };
+ 
+@@ -614,20 +657,24 @@ var messageHistory = {
+    * @type {MessageHistoryEntry[]}
+    */
+   _history: [],
+   _currentIndex: -1,
++  lastSelectedRemovedMessageURI: null,
+   /**
+    * Remove the message from the history, cleaning up the state as needed in
+    * the process.
+    *
+    * @param {nsIMsgFolder} parentFolder
+    * @param {nsIMsgDBHdr} message
+    */
+   onMessageRemoved(parentFolder, message) {
++    const messageURI = parentFolder.generateMessageURI(message.messageKey);
++    if (gMessageURI == messageURI) {
++      this.lastSelectedRemovedMessageURI = messageURI;
++    }
+     if (!this._history.length) {
+       return;
+     }
+-    const messageURI = parentFolder.generateMessageURI(message.messageKey);
+     const folderURI = parentFolder.URI;
+     const oldLength = this._history.length;
+     let removedEntriesBeforeFuture = 0;
+     this._history = this._history.filter((entry, index) => {
+diff --git a/mail/base/content/mailContext.inc.xhtml b/mail/base/content/mailContext.inc.xhtml
+--- a/mail/base/content/mailContext.inc.xhtml
++++ b/mail/base/content/mailContext.inc.xhtml
+@@ -348,8 +348,15 @@
+           class="menu-iconic"
+           data-l10n-id="mail-context-menu-threads"
+           data-l10n-attrs="accesskey">
+       <menupopup id="mailContext-threadsPopup">
++        <menuitem id="mailContext-unthreadMessage"
++                  data-l10n-id="mail-context-unthread-message"
++                  data-l10n-attrs="accesskey"/>
++        <menuitem id="mailContext-resetMessageThreading"
++                  data-l10n-id="mail-context-reset-message-threading"
++                  data-l10n-attrs="accesskey"/>
++        <menuseparator id="mailContext-thread-sep"/>
+         <menuitem id="mailContext-ignoreThread"
+                   type="checkbox"
+                   label="&contextKillThreadMenu.label;"
+                   accesskey="&contextKillThreadMenu.accesskey;"/>
+diff --git a/mail/base/content/mailContext.js b/mail/base/content/mailContext.js
+--- a/mail/base/content/mailContext.js
++++ b/mail/base/content/mailContext.js
+@@ -473,8 +473,20 @@ var mailContextMenu = {
+         count: numSelectedMessages,
+       }
+     );
+ 
++    showItem("mailContext-unthreadMessage", inThreadTree);
++    enableItem(
++      "mailContext-unthreadMessage",
++      gViewWrapper.showThreaded && numSelectedMessages == 1
++    );
++    showItem("mailContext-resetMessageThreading", inThreadTree);
++    enableItem(
++      "mailContext-resetMessageThreading",
++      gViewWrapper.showThreaded && numSelectedMessages == 1
++    );
++    showItem("mailContext-thread-sep", inThreadTree);
++
+     checkItem(
+       "mailContext-ignoreThread",
+       folder?.msgDatabase.isIgnored(message?.messageKey)
+     );
+@@ -721,8 +733,24 @@ var mailContextMenu = {
+           false
+         );
+         break;
+ 
++      // Message threading
++      case "mailContext-unthreadMessage":
++        window.threadPane.doUpdateThreading(
++          "unthread",
++          gDBView.selection.currentIndex,
++          null
++        );
++        break;
++      case "mailContext-resetMessageThreading":
++        window.threadPane.doUpdateThreading(
++          "reset",
++          gDBView.selection.currentIndex,
++          null
++        );
++        break;
++
+       // Save/print/download
+       default: {
+         if (
+           document.getElementById("mailContext-moveMenu").contains(event.target)
+diff --git a/mail/locales/en-US/messenger/messenger.ftl b/mail/locales/en-US/messenger/messenger.ftl
+--- a/mail/locales/en-US/messenger/messenger.ftl
++++ b/mail/locales/en-US/messenger/messenger.ftl
+@@ -269,8 +269,16 @@ mail-context-menu-organize =
+ mail-context-menu-threads =
+     .label = Threads
+     .accesskey = T
+ 
++mail-context-unthread-message =
++    .label = Unthread Message
++    .accesskey = U
++
++mail-context-reset-message-threading =
++    .label = Restore Original Threading
++    .accesskey = R
++
+ context-menu-redirect-msg =
+     .label = Redirect
+ 
+ # This menu item is for canceling an NNTP message
+diff --git a/mail/modules/ConversationOpener.sys.mjs b/mail/modules/ConversationOpener.sys.mjs
+--- a/mail/modules/ConversationOpener.sys.mjs
++++ b/mail/modules/ConversationOpener.sys.mjs
+@@ -15,9 +15,13 @@ export class ConversationOpener {
+     }
+     if (!message || !message.folder) {
+       return false;
+     }
+-    return Gloda.isMessageIndexed(message);
++    try {
++      return Gloda.isMessageIndexed(message);
++    } catch (e) {
++      return false;
++    }
+   }
+ 
+   constructor(window) {
+     this.window = window;
 diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys.mjs
 new file mode 100644
 --- /dev/null
 +++ b/mail/modules/MessageEditor.sys.mjs
-@@ -0,0 +1,1263 @@
+@@ -0,0 +1,1275 @@
 +/* Authored by Alta88 and contributed to the Betterbird Project.
 + * See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE
 + * for license details.
@@ -1782,12 +2000,24 @@ new file mode 100644
 +      );
 +    }
 +
++    const newMessageURI = newMsgHdr.folder.getUriForMsg(newMsgHdr);
++    const oldMessageURI = this.#messageURI;
++
 +    // Initialize this object again with the new message. This will allow
 +    // repeated operations on an updated message.
-+    this.#initialize(newMsgHdr.folder.getUriForMsg(newMsgHdr));
++    this.#initialize(newMessageURI);
 +    await this.#getMessageDeferred.promise;
 +
 +    this.#successFn(newMsgHdr);
++
++    this.log.debug("#onSuccess: oldMessageURI - " + oldMessageURI);
++    this.log.debug("#onSuccess: newMessageURI - " + newMessageURI);
++
++    // And update all other places with the new message.
++    Services.obs.notifyObservers(
++      { oldMessageURI, newMessageURI },
++      "message-replaced"
++    );
 +  }
 +
 +  #onError(error) {
@@ -1811,7 +2041,7 @@ diff --git a/mail/modules/moz.build b/mail/modules/moz.build
 diff --git a/mail/themes/shared/mail/threadPane.css b/mail/themes/shared/mail/threadPane.css
 --- a/mail/themes/shared/mail/threadPane.css
 +++ b/mail/themes/shared/mail/threadPane.css
-@@ -226,8 +226,20 @@ tr[data-properties~="tagged"] .tag-icon:
+@@ -222,8 +222,20 @@ tr[data-properties~="tagged"] .tag-icon:
      }
    }
  }

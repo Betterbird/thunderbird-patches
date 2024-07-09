@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
 # Date 1713304583 -7200
-# Parent  7be124161d91501dca743f5b9459cb445b64dbba
+# Parent  57289a518372dbcd3cb74f2917adddcfbe8c2257
 Selected header editor, depends on MessageEditor class.
 
 Authored by Alta88 and contributed to the Betterbird Project.
@@ -11,11 +11,15 @@ All uses require attribution to the Author.
 The Edit Headers menuitem is found in the message toolbar More Actions menu.
 * * *
 Remove documentFragment.
+* * *
+30-feature-editHeaders-UPDATE.patch
+
+1. Threadpane contextmenu for Edit Headers.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
 --- a/mail/app/profile/all-thunderbird.js
 +++ b/mail/app/profile/all-thunderbird.js
-@@ -744,8 +744,13 @@ pref("font.name-list.monospace.el", "mon
+@@ -725,8 +725,13 @@ pref("font.name-list.monospace.el", "mon
  
  pref("mail.setup.loglevel", "Warn");
  
@@ -29,6 +33,56 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
  pref("mail.messageEditor.backupToTrash", false);
  pref("mail.messageEditor.loglevel", "Warn");
  
+diff --git a/mail/base/content/mailContext.inc.xhtml b/mail/base/content/mailContext.inc.xhtml
+--- a/mail/base/content/mailContext.inc.xhtml
++++ b/mail/base/content/mailContext.inc.xhtml
+@@ -186,8 +186,12 @@
+     <menuitem id="mailContext-editAsNew"
+               class="menuitem-iconic"
+               label="&contextEditMsgAsNew.label;"
+               accesskey="&contextEditMsgAsNew.accesskey;"/>
++    <menuitem id="mailContext-editHeaders"
++              class="menuitem-iconic"
++              data-l10n-id="other-action-msg-edit-headers"
++              data-l10n-attrs="accesskey"/>
+     <menuseparator/>
+ 
+     <menuitem id="mailContext-moveToFolderAgain"
+               class="menuitem-iconic"
+diff --git a/mail/base/content/mailContext.js b/mail/base/content/mailContext.js
+--- a/mail/base/content/mailContext.js
++++ b/mail/base/content/mailContext.js
+@@ -430,8 +430,14 @@ var mailContextMenu = {
+         numSelectedMessages &&
+         commandController.isCommandEnabled("cmd_forwardAttachment")
+     );
+ 
++    setSingleSelection("mailContext-editHeaders", message);
++    enableItem(
++      "mailContext-editHeaders",
++      inAbout3Pane && !gViewWrapper.isSynthetic
++    );
++
+     if (isDummyMessage || onSpecialItem) {
+       showItem("mailContext-tags", false);
+     } else {
+       showItem("mailContext-tags", true);
+@@ -733,8 +739,15 @@ var mailContextMenu = {
+           false
+         );
+         break;
+ 
++      // Edit message headers
++      case "mailContext-editHeaders":
++        messageBrowser.contentWindow.MsgEditHeaders(
++          !this.selectionIsOverridden
++        );
++        break;
++
+       // Message threading
+       case "mailContext-unthreadMessage":
+         window.threadPane.doUpdateThreading(
+           "unthread",
 diff --git a/mail/base/content/msgHdrView.inc.xhtml b/mail/base/content/msgHdrView.inc.xhtml
 --- a/mail/base/content/msgHdrView.inc.xhtml
 +++ b/mail/base/content/msgHdrView.inc.xhtml
@@ -48,7 +102,7 @@ diff --git a/mail/base/content/msgHdrView.inc.xhtml b/mail/base/content/msgHdrVi
 diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
 --- a/mail/base/content/msgHdrView.js
 +++ b/mail/base/content/msgHdrView.js
-@@ -2510,8 +2510,18 @@ function onShowOtherActionsPopup() {
+@@ -2471,8 +2471,19 @@ function onShowOtherActionsPopup() {
  
    document.getElementById("otherActions-calendar-convert-menu").hidden =
      isDummyMessage || !calendarDeactivator.isCalendarActivated;
@@ -56,6 +110,7 @@ diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
 +  document.getElementById("editHeadersMenuItem").disabled =
 +    isDummyMessage ||
 +    window.parent.document.URL != "about:3pane" ||
++    gViewWrapper.isSynthetic ||
 +    !gFolder ||
 +    !gFolder.canFileMessages ||
 +    !gFolder.canDeleteMessages ||
@@ -67,35 +122,37 @@ diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
    const isFeed = FeedUtils.isFeedMessage(gMessage);
    document.getElementById("otherActionsMessageBodyAs").hidden = isFeed;
    document.getElementById("otherActionsFeedBodyAs").hidden = !isFeed;
-@@ -3691,8 +3701,44 @@ function MsgMarkAsFlagged() {
+@@ -3652,8 +3663,46 @@ function MsgMarkAsFlagged() {
    MarkSelectedMessagesFlagged(!SelectedMessagesAreFlagged());
  }
  
  /**
 + * Edit selected headers.
++ *
++ * Not supported for a message in standalone window or tab, nor in a
++ * gloda results list (without gFolder no message added notice is received).
++ *
++ * TODO: it would be reasonable to support standalone messages.
++ *
++ * @param {boolean} messageIsDisplayed - If true, the message is selected and
++ *  loaded; otherwise there is no selection or the selection is different
++ *  from the loaded message (as when using the threadpane contextmenu).
 + */
-+function MsgEditHeaders() {
-+  const winType = window.parent.document.URL;
-+  if (winType != "about:3pane" || !gFolder) {
-+    // Not supported for a message in standalone window or tab, nor in a
-+    // gloda results list (without gFolder no message added notice is received).
-+    return;
-+  }
-+
++function MsgEditHeaders(messageIsDisplayed) {
 +  const msgWindow = top.msgWindow;
-+  const messageURI = gMessageURI;
 +  const selectedIndex = window.parent.threadTree.selectedIndex;
-+  if (
-+    !msgWindow.domWindow.gTabmail ||
-+    !messageURI ||
-+    !window.parent.threadPane.isValidIndex(selectedIndex)
-+  ) {
++  const restoreIndex = messageIsDisplayed ? selectedIndex : -1;
++  const messageURI = messageIsDisplayed
++    ?  gMessageURI
++    :  window.parent.gViewWrapper.dbView.getURIForViewIndex(selectedIndex);
++
++  if (!messageURI) {
 +    return;
 +  }
 +
 +  // In 3pane, we want the threadpane state restored post update/replace.
 +  const [successFn, errorFn] =
-+    window.parent.threadPane.saveStateForMessageReplaceAtIndex(selectedIndex);
++    window.parent.threadPane.saveStateForMessageReplaceAtIndex(restoreIndex);
 +
 +  const messageEditor = new window.parent.MessageEditor({
 +    messageURI,
@@ -115,7 +172,7 @@ diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
 diff --git a/mail/locales/en-US/messenger/messenger.ftl b/mail/locales/en-US/messenger/messenger.ftl
 --- a/mail/locales/en-US/messenger/messenger.ftl
 +++ b/mail/locales/en-US/messenger/messenger.ftl
-@@ -307,8 +307,12 @@ context-menu-decrypt-to-folder2 =
+@@ -315,8 +315,12 @@ context-menu-decrypt-to-folder2 =
  
  other-action-redirect-msg =
      .label = Redirect
@@ -128,7 +185,7 @@ diff --git a/mail/locales/en-US/messenger/messenger.ftl b/mail/locales/en-US/mes
      .title = Starred
      .aria-label = Starred
  
-@@ -359,8 +363,19 @@ message-header-large-subject =
+@@ -367,8 +371,19 @@ message-header-large-subject =
  message-header-all-headers =
      .label = Show all headers
      .accesskey = a
@@ -177,7 +234,7 @@ diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys
     *
     * @param {object} options
     * @param {string} options.messageURI - The to be edited message's URI.
-@@ -1195,8 +1203,278 @@ export class MessageEditor {
+@@ -1199,8 +1207,278 @@ export class MessageEditor {
        extAppLauncher.deleteTemporaryFileOnExit(file);
      }
    }
@@ -459,7 +516,7 @@ diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys
 diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/messenger.css
 --- a/mail/themes/shared/mail/messenger.css
 +++ b/mail/themes/shared/mail/messenger.css
-@@ -608,8 +608,14 @@ html|input[type="color"] {
+@@ -598,8 +598,14 @@ html|input[type="color"] {
    padding: 0 4px;
    box-shadow: none;
  }
