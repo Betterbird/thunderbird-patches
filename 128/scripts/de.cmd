@@ -181,4 +181,8 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "account-disabled ="          >> localization\de\messenger\messenger.ftl
 %lecho% "  .label = Account disabled" >> localization\de\messenger\messenger.ftl
 
+:: Calendar past events:
+%lecho% "calendar-event-listing-interval-past ="      >> localization\de\calendar\calendar-event-listing.ftl
+%lecho% "  .label = Events in the Past (after 1970)"  >> localization\de\calendar\calendar-event-listing.ftl
+
 :: Search AB via display name and nickname (upcoming).
