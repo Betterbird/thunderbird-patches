@@ -185,4 +185,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "calendar-event-listing-interval-past ="      >> localization\de\calendar\calendar-event-listing.ftl
 %lecho% "  .label = Events in the Past (after 1970)"  >> localization\de\calendar\calendar-event-listing.ftl
 
-:: Search AB via display name and nickname (upcoming).
+:: Search AB via display name and nickname.
+%lecho% "quick-filter-bar-match-addressbook ="                                                               >> localization\de\messenger\about3Pane.ftl
+%lecho% "    .label = Match Address Book"                                                                    >> localization\de\messenger\about3Pane.ftl
+%lecho% "    .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books" >> localization\de\messenger\about3Pane.ftl
