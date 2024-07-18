@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1721301535 -7200
-# Parent  a822cb97467111adbfe5107070a0d03751c16579
+# Date 1721334316 -7200
+# Parent  a844f207844b2f152d51579ddba8baa7204740d9
 Feature: QuickFilter search for textFilter matches of Display Name and Nickname contact emails in address books.
 
 Based on https://github.com/Betterbird/thunderbird-patches/blob/main/128/unused/feature-460737-quickfilter-search-by-displayname-nickname-in-addresses.patch
@@ -44,7 +44,25 @@ diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilter
  
    /**
     * Get all button groups with the roving-group class.
-@@ -588,9 +595,9 @@ var quickFilterBar = {
+@@ -584,13 +591,27 @@ var quickFilterBar = {
+       this.deferredDelay
+     );
+   },
+ 
++  reflectABSearchResult(success) {
++    const checkbox = document.getElementById("qfb-match-addressbook");
++    if (success === null) {
++      checkbox.style.outline = "";
++      checkbox.style.outlineOffset = "";
++    } else if (success) {
++      checkbox.style.outline = "var(--color-green-60) solid 1px";
++      checkbox.style.outlineOffset = "2px";
++    } else {
++      checkbox.style.outline = "var(--color-red-50) solid 1px";
++      checkbox.style.outlineOffset = "2px";
++    }
++  },
++
    /**
     * Update the user terms part of the search definition to reflect the active
     * filterer's current state.
@@ -55,17 +73,21 @@ diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilter
        return;
      }
  
-@@ -601,9 +608,9 @@ var quickFilterBar = {
+@@ -601,10 +622,12 @@ var quickFilterBar = {
        // A value of null will not create this listener.
        this.filterer.setFilterValue("results", this.searchHit ? 0 : null, true);
      }
  
 -    const [terms, listeners] = this.filterer.createSearchTerms(
+-      gViewWrapper.search.session
++    this.reflectABSearchResult(null);
 +    const [terms, listeners] = await this.filterer.createSearchTerms(
-       gViewWrapper.search.session
++      gViewWrapper.search.session,
++      this.reflectABSearchResult
      );
  
      for (const [listener, filterDef] of listeners) {
+       // it registers itself with the search session.
 diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/messenger/about3Pane.ftl
 --- a/mail/locales/en-US/messenger/about3Pane.ftl
 +++ b/mail/locales/en-US/messenger/about3Pane.ftl
@@ -87,26 +109,30 @@ diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/me
 diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
 --- a/mail/modules/QuickFilterManager.sys.mjs
 +++ b/mail/modules/QuickFilterManager.sys.mjs
-@@ -178,10 +178,10 @@ export class QuickFilterState {
+@@ -178,12 +178,13 @@ export class QuickFilterState {
     * Create the search terms appropriate to the current filter states.
     *
     * @param {nsIMsgSearchSession} aTermCreator
     */
 -  createSearchTerms(aTermCreator) {
 -    return QuickFilterManager.createSearchTerms(
-+  async createSearchTerms(aTermCreator) {
++  async createSearchTerms(aTermCreator, callback) {
 +    return await QuickFilterManager.createSearchTerms(
        this.filterValues,
-       aTermCreator
+-      aTermCreator
++      aTermCreator,
++      callback
      );
    }
-@@ -567,16 +567,16 @@ export var QuickFilterManager = {
+ 
+   /**
+@@ -567,19 +568,20 @@ export var QuickFilterManager = {
     * @param {object} aFilterValues - The values to clear by filter.
     * @param {nsIMsgSearchSession} aTermCreator
     * @returns {Array.<?string[], Array.<Array.<SearchListener, FilterDefinition>>>}
     */
 -  createSearchTerms(aFilterValues, aTermCreator) {
-+  async createSearchTerms(aFilterValues, aTermCreator) {
++  async createSearchTerms(aFilterValues, aTermCreator, callback) {
      const searchTerms = [],
        listeners = [];
      for (const filterName in aFilterValues) {
@@ -117,20 +143,29 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +        const listener = await filterDef.appendTerms(
            aTermCreator,
            searchTerms,
-           filterValue
+-          filterValue
++          filterValue,
++          callback
          );
-@@ -1223,9 +1223,9 @@ export var MessageTextFilter = {
+         if (listener) {
+           listeners.push([listener, filterDef]);
+         }
+@@ -1223,27 +1225,49 @@ export var MessageTextFilter = {
     * filters OR'ed together. So if the user queries for 'foo bar' with
     * sender and recipient enabled, we build:
     * ("foo" sender OR "foo" recipient) AND ("bar" sender OR "bar" recipient)
     */
 -  appendTerms(aTermCreator, aTerms, aFilterValue) {
-+  async appendTerms(aTermCreator, aTerms, aFilterValue) {
++  async appendTerms(aTermCreator, aTerms, aFilterValue, callback = null) {
      let term, value;
  
      if (aFilterValue.text) {
        const haveNegation = Object.entries(aFilterValue.states).some(
-@@ -1236,14 +1236,32 @@ export var MessageTextFilter = {
+         tfName => tfName[1] === false
+       );
++      let overallSuccess = null;
+       const phrases = this._parseSearchString(aFilterValue.text);
+       for (const groupedPhrases of phrases) {
          let firstClause = true;
          term = null;
          const splitPhrases = groupedPhrases.split("|");
@@ -139,7 +174,10 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +            aFilterValue.states,
 +            phrase
 +          );
-+          // XXX TODO: Give feedback when no success.
++          if (success !== null) {
++            // `null || false` is `false`.
++            overallSuccess ||= success;
++          }
 +
            for (const [tfName, tfValue] of Object.entries(aFilterValue.states)) {
              if (tfValue !== true && tfValue !== false) {
@@ -163,7 +201,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
              term.attrib = tfDef.attrib;
              value = term.value;
              value.attrib = tfDef.attrib;
-@@ -1256,16 +1274,115 @@ export var MessageTextFilter = {
+@@ -1256,16 +1280,125 @@ export var MessageTextFilter = {
              term.booleanAnd = firstClause || (!firstClause && haveNegation);
              term.beginsGrouping = firstClause ? 1 : 0;
              aTerms.push(term);
@@ -181,6 +219,9 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +          aTerms[aTerms.length - 1].endsGrouping = 1;
          }
        }
++      if (callback) {
++        callback(overallSuccess);
++      }
      }
    },
 +
@@ -190,12 +231,12 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +   *
 +   * @param {object} states - The filterValue.states object.
 +   * @param {string} searchVal - The search text.
-+   * @returns {boolean} - Success if true, error if false.
++   * @returns {boolean} - true: found addresses via AB search, false: found nothing, null: error.
 +   */
 +  async cacheEmailAddressesByDisplayNameNickName(states, searchVal) {
 +    if (!this.isEmailAddressTextFilterActive(states) || !states.matchAB) {
 +      this.emailAddressesByDisplayNameNickName = [];
-+      return true;
++      return null;
 +    }
 +
 +    // The fine code in `nsIAbDirectory.search()` can't handle a closing `)` in
@@ -212,6 +253,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +    const searchString = `(DisplayName,bw,${sv})(NickName,=,${sv})`;
 +
 +    let emailAddresses = [];
++    let error = false;
 +    const doSearch = async () => {
 +      for (const addrbook of MailServices.ab.directories) {
 +        await new Promise(resolve => {
@@ -228,6 +270,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +          try {
 +            addrbook.search(searchString, "", searchListener);
 +          } catch (ex) {
++            error = true;
 +            resolve();
 +          }
 +        });
@@ -235,15 +278,20 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +    };
 +
 +    await doSearch();
++    if (error) {
++      console.warn(`AB search with ${searchString} yielded error`);
++      this.emailAddressesByDisplayNameNickName = [];
++      return null;
++    }
 +    console.info(`AB search with ${searchString} yielded`, emailAddresses);
 +    // Tricky code to give a unique result.
 +    this.emailAddressesByDisplayNameNickName = [...new Set(emailAddresses)];
 +    if (this.emailAddressesByDisplayNameNickName.length > 100) {
 +      console.warn("Too many search conditions; search value is too general");
 +      this.emailAddressesByDisplayNameNickName = [];
-+      return false;
++      return null;
 +    }
-+    return true;
++    return this.emailAddressesByDisplayNameNickName.length > 0;
 +  },
 +
 +  /**
@@ -281,7 +329,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
      const states = Object.assign({}, this._defaultStates);
      return {
        text: null,
-@@ -1327,14 +1444,24 @@ export var MessageTextFilter = {
+@@ -1327,14 +1460,24 @@ export var MessageTextFilter = {
        const state = aMuxer.getFilterValueForMutation(MessageTextFilter.name);
        const filterDef = MessageTextFilter.textFilterDefsByDomId[this.id];
        state.states[filterDef.name] = !this.pressed ? null : !this.inverted;
@@ -306,7 +354,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  
      for (const name in this.textFilterDefs) {
        const textFilter = this.textFilterDefs[name];
-@@ -1429,8 +1556,15 @@ export var MessageTextFilter = {
+@@ -1429,8 +1572,15 @@ export var MessageTextFilter = {
  
      // Toggle the expanded filters visibility.
      aDocument.getElementById("quick-filter-bar-filter-text-bar").hidden =
@@ -322,7 +370,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  
    /**
     * In order to do our upsell we need to know when we are not getting any
-@@ -1462,14 +1596,27 @@ export var MessageTextFilter = {
+@@ -1462,14 +1612,27 @@ export var MessageTextFilter = {
     */
    isTextFilterActive(states) {
      return Object.entries(states).some(
@@ -350,7 +398,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
     *
     * @type {Object<string, boolean>}
     */
-@@ -1485,8 +1632,9 @@ export var MessageTextFilter = {
+@@ -1485,8 +1648,9 @@ export var MessageTextFilter = {
     *
     * @type {Object<string, object>}
     */
