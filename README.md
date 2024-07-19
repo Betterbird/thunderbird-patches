@@ -3,7 +3,7 @@ Betterbird is a fork of Mozilla Thunderbird. Here are the patches that provide a
 
 ## Building Betterbird
 These instruction assume that you know how to build Thunderbird. The following instructions are specific to Betterbird.
-`NN` stands for the version you want to build. Currently `115` is supported, `102` may still work.
+`NN` stands for the version you want to build. Currently `115` and `128` are supported.
 
 The build process is automated for Windows, Linux and Mac via a [build script](./build/build.sh).
 The development environment needs to be set up depending on the platform.
