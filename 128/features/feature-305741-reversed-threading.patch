@@ -1,0 +1,179 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1721686426 -7200
+# Parent  4ef13758930a9771d9d90ad1d64127c678051a9a
+Feature: Reversed threading (bug 305741).
+
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -1453,8 +1453,9 @@ nsMsgDBView::IsContainer(int32_t index, 
+     *_retval = !!(flags & MSG_VIEW_FLAG_HASCHILDREN);
+   } else {
+     *_retval = false;
+   }
++  printf("=== IsContainer %d reply %d\n", index, *_retval);
+ 
+   return NS_OK;
+ }
+ 
+@@ -4243,8 +4244,9 @@ int32_t nsMsgDBView::SecondaryCompare(ns
+ }
+ 
+ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgViewSortTypeValue sortType,
+                                 nsMsgViewSortOrderValue sortOrder) {
++  printf("=== nsMsgDBView::Sort\n");
+   EnsureCustomColumnsValid();
+ 
+   // If we're doing a stable sort, we can't just reverse the messages.
+   // Check also that the custom column we're sorting on hasn't changed.
+@@ -4265,10 +4267,12 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+ 
+     SaveSortInfo(sortType, sortOrder);
+     if (m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) {
+       ReverseThreads();
++      printf("=== reversing threads\n");
+     } else {
+       ReverseSort();
++      printf("=== reversing sort\n");
+     }
+ 
+     m_sortOrder = sortOrder;
+     // We just reversed the sort order, we still need to invalidate the view.
+@@ -4298,8 +4302,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+   if (NS_FAILED(rv)) return NS_OK;
+ 
+   nsTArray<void*> ptrs;
+   uint32_t arraySize = GetSize();
++  printf("=== sort size %u\n", arraySize);
+ 
+   if (!arraySize) return NS_OK;
+ 
+   nsCOMArray<nsIMsgFolder>* folders = GetFolders();
+@@ -4340,8 +4345,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+         NS_ENSURE_SUCCESS(rv, rv);
+       }
+ 
+       // Perform the sort.
++      printf("=== std::sort 1\n");
+       std::sort(pPtrBase.begin(), pPtrBase.end(),
+                 [&qsPrivateData](const auto& lhs, const auto& rhs) {
+                   return FnSortIdKey(lhs, rhs, &qsPrivateData) < 0;
+                 });
+@@ -4381,8 +4387,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+         }
+       }
+ 
+       // Perform the sort.
++      printf("=== std::sort 2\n");
+       std::sort(pPtrBase.begin(), pPtrBase.end(),
+                 [&qsPrivateData](const auto& lhs, const auto& rhs) {
+                   return FnSortIdUint32(lhs, rhs, &qsPrivateData) < 0;
+                 });
+@@ -4820,12 +4827,25 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
+   } else {
+     rv = ListIdsInThread(pThread, index, &numExpanded);
+   }
+ 
+-  m_flags[index] = flags;
+-  NoteChange(index, 1, nsMsgViewNotificationCode::changed);
+-
+-  NoteChange(index + 1, numExpanded, nsMsgViewNotificationCode::insertOrDelete);
++  if (m_sortType == nsMsgViewSortType::byDate && m_sortOrder == nsMsgViewSortOrder::descending) {
++    printf("=== setting flags for index %u\n", index + numExpanded);
++    m_flags[index + numExpanded] = flags;
++    ClearHdrCache();
++    NoteChange(index, 1, nsMsgViewNotificationCode::changed);
++    NoteChange(index + numExpanded, 1, nsMsgViewNotificationCode::changed);
++    NoteChange(index, numExpanded, nsMsgViewNotificationCode::insertOrDelete);
++    bool container;
++    IsContainer(index + numExpanded, &container);
++    printf("=== index %u is container %d\n", index + numExpanded, container);
++    IsContainer(index, &container);
++    printf("=== index %u is container %d\n", index, container);
++  } else {
++    m_flags[index] = flags;
++    NoteChange(index, 1, nsMsgViewNotificationCode::changed);
++    NoteChange(index + 1, numExpanded, nsMsgViewNotificationCode::insertOrDelete);
++  }
+ 
+   if (pNumExpanded != nullptr) *pNumExpanded = numExpanded;
+ 
+   return rv;
+@@ -5221,8 +5241,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
+ nsresult nsMsgDBView::ListIdsInThreadOrder(nsIMsgThread* threadHdr,
+                                            nsMsgKey parentKey, uint32_t level,
+                                            nsMsgViewIndex* viewIndex,
+                                            uint32_t* pNumListed) {
++  nsMsgViewIndex viewIndexStart = *viewIndex;
+   nsCOMPtr<nsIMsgEnumerator> msgEnumerator;
+   nsresult rv =
+       threadHdr->EnumerateMessages(parentKey, getter_AddRefs(msgEnumerator));
+   NS_ENSURE_SUCCESS(rv, rv);
+@@ -5274,8 +5295,25 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
+     rv = ListIdsInThreadOrder(threadHdr, msgKey, level + 1, viewIndex,
+                               pNumListed);
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
++
++  printf("=== level %u\n", level);
++  if (m_sortType == nsMsgViewSortType::byDate && m_sortOrder == nsMsgViewSortOrder::descending && level == 1) {
++    // Reverse everything we added, and the one before.
++    nsMsgViewIndex i = viewIndexStart - 1;
++    nsMsgViewIndex j = *viewIndex - 1;
++
++#define swap(type, var) { type val = var[i]; var[i] = var[j]; var[j] = val; }
++    while (i < j) {
++      printf("=== swap %u %u %u %u\n", i, j, viewIndexStart, *viewIndex - 1);
++      swap(nsMsgKey, m_keys);
++      swap(uint32_t, m_flags);
++      swap(uint8_t, m_levels);
++      i++;
++      j--;
++    }
++  }
+   return NS_OK;
+ }
+ 
+ void nsMsgDBView::InsertEmptyRows(nsMsgViewIndex viewIndex, int32_t numRows) {
+diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
+--- a/mailnews/base/src/nsMsgThreadedDBView.cpp
++++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
+@@ -233,10 +233,10 @@ nsresult nsMsgThreadedDBView::SortThread
+       uint32_t numExpanded;
+       m_flags[j] = flags | nsMsgMessageFlags::Elided;
+       ExpandByIndex(j, &numExpanded);
+       j += numExpanded;
+-      if (numExpanded > 0)
+-        m_flags[j - numExpanded] = flags | MSG_VIEW_FLAG_HASCHILDREN;
++      // if (numExpanded > 0)
++        // m_flags[j - numExpanded] = flags | MSG_VIEW_FLAG_HASCHILDREN;
+     } else if (flags & MSG_VIEW_FLAG_ISTHREAD &&
+                !(flags & MSG_VIEW_FLAG_HASCHILDREN)) {
+       nsCOMPtr<nsIMsgDBHdr> msgHdr;
+       nsCOMPtr<nsIMsgThread> pThread;
+@@ -245,11 +245,11 @@ nsresult nsMsgThreadedDBView::SortThread
+         m_db->GetThreadContainingMsgHdr(msgHdr, getter_AddRefs(pThread));
+         if (pThread) {
+           uint32_t numChildren;
+           pThread->GetNumChildren(&numChildren);
+-          if (numChildren > 1)
+-            m_flags[j] =
+-                flags | MSG_VIEW_FLAG_HASCHILDREN | nsMsgMessageFlags::Elided;
++          // if (numChildren > 1)
++            // m_flags[j] =
++                // flags | MSG_VIEW_FLAG_HASCHILDREN | nsMsgMessageFlags::Elided;
+         }
+       }
+     }
+   }
+@@ -262,8 +262,9 @@ nsresult nsMsgThreadedDBView::SortThread
+ NS_IMETHODIMP
+ nsMsgThreadedDBView::Sort(nsMsgViewSortTypeValue sortType,
+                           nsMsgViewSortOrderValue sortOrder) {
+   nsresult rv;
++  printf("=== nsMsgThreadedDBView::Sort\n");
+ 
+   int32_t rowCountBeforeSort = GetSize();
+ 
+   if (!rowCountBeforeSort) {
