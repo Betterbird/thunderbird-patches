@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1721731718 -7200
+# Date 1721766605 -7200
 # Parent  4ef13758930a9771d9d90ad1d64127c678051a9a
 Feature: Reversed threading (bug 305741).
 
@@ -17,7 +17,18 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    return NS_OK;
  }
  
-@@ -4243,8 +4244,9 @@ int32_t nsMsgDBView::SecondaryCompare(ns
+@@ -2183,8 +2184,10 @@ nsMsgDBView::CycleCell(int32_t row, nsTr
+ NS_IMETHODIMP
+ nsMsgDBView::Open(nsIMsgFolder* folder, nsMsgViewSortTypeValue sortType,
+                   nsMsgViewSortOrderValue sortOrder,
+                   nsMsgViewFlagsTypeValue viewFlags) {
++  mReversedThreading =
++      mozilla::Preferences::GetBool("mailnews.reversed_threading", false);
+   m_viewFlags = viewFlags;
+   m_sortOrder = sortOrder;
+   m_sortType = sortType;
+ 
+@@ -4243,8 +4246,9 @@ int32_t nsMsgDBView::SecondaryCompare(ns
  }
  
  NS_IMETHODIMP nsMsgDBView::Sort(nsMsgViewSortTypeValue sortType,
@@ -27,7 +38,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  
    // If we're doing a stable sort, we can't just reverse the messages.
    // Check also that the custom column we're sorting on hasn't changed.
-@@ -4265,10 +4267,12 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+@@ -4265,10 +4269,12 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
  
      SaveSortInfo(sortType, sortOrder);
      if (m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) {
@@ -40,7 +51,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  
      m_sortOrder = sortOrder;
      // We just reversed the sort order, we still need to invalidate the view.
-@@ -4298,8 +4302,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+@@ -4298,8 +4304,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
    if (NS_FAILED(rv)) return NS_OK;
  
    nsTArray<void*> ptrs;
@@ -50,7 +61,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    if (!arraySize) return NS_OK;
  
    nsCOMArray<nsIMsgFolder>* folders = GetFolders();
-@@ -4340,8 +4345,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+@@ -4340,8 +4347,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
          NS_ENSURE_SUCCESS(rv, rv);
        }
  
@@ -60,7 +71,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
                  [&qsPrivateData](const auto& lhs, const auto& rhs) {
                    return FnSortIdKey(lhs, rhs, &qsPrivateData) < 0;
                  });
-@@ -4381,8 +4387,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
+@@ -4381,8 +4389,9 @@ NS_IMETHODIMP nsMsgDBView::Sort(nsMsgVie
          }
        }
  
@@ -70,7 +81,44 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
                  [&qsPrivateData](const auto& lhs, const auto& rhs) {
                    return FnSortIdUint32(lhs, rhs, &qsPrivateData) < 0;
                  });
-@@ -4820,12 +4827,25 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
+@@ -4629,16 +4638,28 @@ nsresult nsMsgDBView::GetThreadCount(nsM
+ // index of the first message in the thread.
+ int32_t nsMsgDBView::CountExpandedThread(nsMsgViewIndex index) {
+   int32_t numInThread = 0;
+   nsMsgViewIndex startOfThread = index;
+-  while ((int32_t)startOfThread >= 0 && m_levels[startOfThread] != 0)
+-    startOfThread--;
+-
+-  nsMsgViewIndex threadIndex = startOfThread;
+-  do {
+-    threadIndex++;
+-    numInThread++;
+-  } while (threadIndex < m_levels.Length() && m_levels[threadIndex] != 0);
++  if (ReversedThreading()) {
++    while ((uint32_t)startOfThread < m_levels.Length() &&
++           m_levels[startOfThread] != 0)
++      startOfThread++;
++
++    int32_t threadIndex = startOfThread;
++    do {
++      threadIndex--;
++      numInThread++;
++    } while (threadIndex >= 0 && m_levels[threadIndex] != 0);
++  } else {
++    while ((int32_t)startOfThread >= 0 && m_levels[startOfThread] != 0)
++      startOfThread--;
++
++    nsMsgViewIndex threadIndex = startOfThread;
++    do {
++      threadIndex++;
++      numInThread++;
++    } while (threadIndex < m_levels.Length() && m_levels[threadIndex] != 0);
++  }
+ 
+   return numInThread;
+ }
+ 
+@@ -4820,26 +4841,52 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
    } else {
      rv = ListIdsInThread(pThread, index, &numExpanded);
    }
@@ -79,7 +127,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
 -  NoteChange(index, 1, nsMsgViewNotificationCode::changed);
 -
 -  NoteChange(index + 1, numExpanded, nsMsgViewNotificationCode::insertOrDelete);
-+  if (m_sortType == nsMsgViewSortType::byDate && m_sortOrder == nsMsgViewSortOrder::descending) {
++  if (ReversedThreading()) {
 +    printf("=== setting flags for index %u\n", index + numExpanded);
 +    m_flags[index + numExpanded] = flags;
 +    ClearHdrCache();
@@ -94,13 +142,109 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
 +  } else {
 +    m_flags[index] = flags;
 +    NoteChange(index, 1, nsMsgViewNotificationCode::changed);
-+    NoteChange(index + 1, numExpanded, nsMsgViewNotificationCode::insertOrDelete);
++    NoteChange(index + 1, numExpanded,
++               nsMsgViewNotificationCode::insertOrDelete);
 +  }
  
    if (pNumExpanded != nullptr) *pNumExpanded = numExpanded;
  
    return rv;
-@@ -5221,8 +5241,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
+ }
+ 
+ nsresult nsMsgDBView::CollapseAll() {
+   if (mJSTree) mJSTree->BeginUpdateBatch();
+-  for (uint32_t i = 0; i < GetSize(); i++) {
+-    uint32_t numExpanded;
+-    uint32_t flags = m_flags[i];
+-    if (!(flags & nsMsgMessageFlags::Elided) &&
+-        (flags & MSG_VIEW_FLAG_HASCHILDREN))
+-      CollapseByIndex(i, &numExpanded);
++  if (ReversedThreading()) {
++    int32_t i = GetSize() - 1;
++    while (i >= 0) {
++      uint32_t numExpanded = 0;
++      uint32_t flags = m_flags[i];
++      if (!(flags & nsMsgMessageFlags::Elided) &&
++          (flags & MSG_VIEW_FLAG_HASCHILDREN))
++        CollapseByIndex(i, &numExpanded);
++      i -= numExpanded + 1;
++    }
++  } else {
++    for (uint32_t i = 0; i < GetSize(); i++) {
++      uint32_t numExpanded;
++      uint32_t flags = m_flags[i];
++      if (!(flags & nsMsgMessageFlags::Elided) &&
++          (flags & MSG_VIEW_FLAG_HASCHILDREN))
++        CollapseByIndex(i, &numExpanded);
++    }
+   }
+ 
+   if (mJSTree) mJSTree->EndUpdateBatch();
+   SelectionChangedXPCOM();
+@@ -4850,8 +4897,9 @@ nsresult nsMsgDBView::CollapseByIndex(ns
+                                       uint32_t* pNumCollapsed) {
+   nsresult rv;
+   int32_t flags = m_flags[index];
+   int32_t rowDelta = 0;
++  printf("=== CollapseByIndex %u\n", index);
+ 
+   if (flags & nsMsgMessageFlags::Elided ||
+       !(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) ||
+       !(flags & MSG_VIEW_FLAG_HASCHILDREN)) {
+@@ -4865,24 +4913,38 @@ nsresult nsMsgDBView::CollapseByIndex(ns
+ 
+   flags |= nsMsgMessageFlags::Elided;
+ 
+   m_flags[index] = flags;
+-  NoteChange(index, 1, nsMsgViewNotificationCode::changed);
+-
+-  // Don't count first header in thread.
+   int32_t numRemoved = -rowDelta;
+-  if (index + 1 + numRemoved > m_keys.Length()) {
+-    NS_ERROR("trying to remove too many rows");
+-    numRemoved -= (index + 1 + numRemoved) - m_keys.Length();
+-    if (numRemoved <= 0) return NS_MSG_MESSAGE_NOT_FOUND;
+-  }
+-
+-  // Start at first id after thread.
+-  RemoveRows(index + 1, numRemoved);
++
++  printf("=== collapse %d %d\n", numRemoved, rowDelta);
++
++  if (ReversedThreading()) {
++    // Remove rows above `index`.
++    if (index < (nsMsgViewIndex)numRemoved) {
++      NS_ERROR("trying to remove too many rows");
++      numRemoved = index;
++      if (numRemoved <= 0) return NS_MSG_MESSAGE_NOT_FOUND;
++    }
++    NoteChange(index, 1, nsMsgViewNotificationCode::changed);
++    RemoveRows(index - numRemoved, numRemoved);
++    NoteChange(index - numRemoved, rowDelta,
++               nsMsgViewNotificationCode::insertOrDelete);
++  } else {
++    // Remove rows below `index`.
++    // Don't count first header in thread.
++    if (index + 1 + numRemoved > m_keys.Length()) {
++      NS_ERROR("trying to remove too many rows");
++      numRemoved -= (index + 1 + numRemoved) - m_keys.Length();
++      if (numRemoved <= 0) return NS_MSG_MESSAGE_NOT_FOUND;
++    }
++    // Start at first id after thread.
++    NoteChange(index, 1, nsMsgViewNotificationCode::changed);
++    RemoveRows(index + 1, numRemoved);
++    NoteChange(index + 1, rowDelta, nsMsgViewNotificationCode::insertOrDelete);
++  }
++
+   if (pNumCollapsed != nullptr) *pNumCollapsed = numRemoved;
+-
+-  NoteChange(index + 1, rowDelta, nsMsgViewNotificationCode::insertOrDelete);
+-
+   return rv;
+ }
+ 
+ nsresult nsMsgDBView::OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
+@@ -5221,8 +5283,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
  nsresult nsMsgDBView::ListIdsInThreadOrder(nsIMsgThread* threadHdr,
                                             nsMsgKey parentKey, uint32_t level,
                                             nsMsgViewIndex* viewIndex,
@@ -110,19 +254,24 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    nsresult rv =
        threadHdr->EnumerateMessages(parentKey, getter_AddRefs(msgEnumerator));
    NS_ENSURE_SUCCESS(rv, rv);
-@@ -5274,8 +5295,25 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
+@@ -5274,8 +5337,30 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
      rv = ListIdsInThreadOrder(threadHdr, msgKey, level + 1, viewIndex,
                                pNumListed);
      NS_ENSURE_SUCCESS(rv, rv);
    }
 +
 +  printf("=== level %u\n", level);
-+  if (m_sortType == nsMsgViewSortType::byDate && m_sortOrder == nsMsgViewSortOrder::descending && level == 1) {
++  if (ReversedThreading() && level == 1) {
 +    // Reverse everything we added, and the one before.
 +    nsMsgViewIndex i = viewIndexStart - 1;
 +    nsMsgViewIndex j = *viewIndex - 1;
 +
-+#define swap(type, var) { type val = var[i]; var[i] = var[j]; var[j] = val; }
++#define swap(type, var) \
++  {                     \
++    type val = var[i];  \
++    var[i] = var[j];    \
++    var[j] = val;       \
++  }
 +    while (i < j) {
 +      printf("=== swap %u %u %u %u\n", i, j, viewIndexStart, *viewIndex - 1);
 +      swap(nsMsgKey, m_keys);
@@ -136,6 +285,24 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  void nsMsgDBView::InsertEmptyRows(nsMsgViewIndex viewIndex, int32_t numRows) {
+diff --git a/mailnews/base/src/nsMsgDBView.h b/mailnews/base/src/nsMsgDBView.h
+--- a/mailnews/base/src/nsMsgDBView.h
++++ b/mailnews/base/src/nsMsgDBView.h
+@@ -516,8 +516,14 @@ class nsMsgDBView : public nsIMsgDBView,
+   nsIMsgCustomColumnHandler* GetCurColumnHandler();
+   bool CustomColumnsInSortAndNotRegistered();
+   void EnsureCustomColumnsValid();
+ 
++  bool mReversedThreading;
++  inline bool ReversedThreading() {
++    return mReversedThreading && m_sortType == nsMsgViewSortType::byDate &&
++           m_sortOrder == nsMsgViewSortOrder::descending;
++  }
++
+  protected:
+   static nsresult InitDisplayFormats();
+ 
+  private:
 diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
 --- a/mailnews/base/src/nsMsgThreadedDBView.cpp
 +++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
@@ -147,7 +314,7 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
 -      if (numExpanded > 0)
 -        m_flags[j - numExpanded] = flags | MSG_VIEW_FLAG_HASCHILDREN;
 +      if (numExpanded > 0) {
-+        if (m_sortType == nsMsgViewSortType::byDate && m_sortOrder == nsMsgViewSortOrder::descending) {
++        if (ReversedThreading()) {
 +          m_flags[j] = flags | MSG_VIEW_FLAG_HASCHILDREN;
 +          printf("=== SortThreads (1a): setting bit on %u\n", j);
 +        } else {
@@ -184,3 +351,18 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
    int32_t rowCountBeforeSort = GetSize();
  
    if (!rowCountBeforeSort) {
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -110,8 +110,11 @@ pref("mailnews.default_news_sort_type", 
+ // threaded mode should be based on the newest message in the thread, or on
+ // the thread root
+ pref("mailnews.sort_threads_by_root", false);
+ 
++// Reversed threading when ordered by date descending.
++pref("mailnews.reversed_threading", false);
++
+ // default view flags for new folders
+ // both flags are int values reflecting nsMsgViewFlagsType values
+ // as defined in nsIMsgDBView.idl (kNone = 0, kThreadedDisplay = 1 etc.)
+ 
