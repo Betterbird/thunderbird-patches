@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1722294074 -7200
+# Date 1722425321 -7200
 # Parent  e20f94f2f414fa831af882072b9143ac11fae10b
 Feature: Reversed threading (bug 305741). Additional changes.
 
@@ -29,7 +29,21 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
 diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
 --- a/mailnews/base/src/nsMsgThreadedDBView.cpp
 +++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
-@@ -647,13 +647,23 @@ nsMsgThreadedDBView::OnParentChanged(nsM
+@@ -565,8 +565,13 @@ nsresult nsMsgThreadedDBView::OnNewHeade
+       // NoteChange() will call RowCountChanged() which will call our
+       // GetRowCount().
+       NoteChange(insertIndex, 1, nsMsgViewNotificationCode::insertOrDelete);
+ 
++      if (ReversedThreading()) {
++        // We inserted before `threadIndex`, so this is now one further down.
++        threadIndex++;
++      }
++
+       if (aParentKey == nsMsgKey_None) {
+         // this header is the new king! try collapsing the existing thread,
+         // removing it, installing this header as king, and expanding it.
+         CollapseByIndex(threadIndex, nullptr);
+@@ -647,13 +652,23 @@ nsMsgThreadedDBView::OnParentChanged(nsM
  }
  
  nsMsgViewIndex nsMsgThreadedDBView::GetInsertInfoForNewHdr(
@@ -58,3 +72,95 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
  
    return parentIndex;
  }
+@@ -702,17 +717,30 @@ void nsMsgThreadedDBView::MoveThreadAt(n
+   if (threadIsExpanded) {
+     threadKeys.SetCapacity(childCount);
+     threadFlags.SetCapacity(childCount);
+     threadLevels.SetCapacity(childCount);
+-    for (nsMsgViewIndex index = threadIndex + 1;
+-         index < GetSize() && m_levels[index]; index++) {
+-      threadKeys.AppendElement(m_keys[index]);
+-      threadFlags.AppendElement(m_flags[index]);
+-      threadLevels.AppendElement(m_levels[index]);
++    if (ReversedThreading()) {
++      for (nsMsgViewIndex index = threadIndex - childCount;
++           index < threadIndex; index++) {
++        threadKeys.AppendElement(m_keys[index]);
++        threadFlags.AppendElement(m_flags[index]);
++        threadLevels.AppendElement(m_levels[index]);
++      }
++    } else {
++      for (nsMsgViewIndex index = threadIndex + 1;
++           index < GetSize() && m_levels[index]; index++) {
++        threadKeys.AppendElement(m_keys[index]);
++        threadFlags.AppendElement(m_flags[index]);
++        threadLevels.AppendElement(m_levels[index]);
++      }
+     }
+ 
+     uint32_t collapseCount;
+     CollapseByIndex(threadIndex, &collapseCount);
++    if (ReversedThreading()) {
++      // Thread parent has moved down due to child removal.
++      threadIndex -= childCount;
++    }
+   }
+ 
+   nsMsgDBView::RemoveByIndex(threadIndex);
+   nsMsgViewIndex newIndex = nsMsgViewIndex_None;
+@@ -722,29 +750,49 @@ void nsMsgThreadedDBView::MoveThreadAt(n
+   // is going to require some refactoring.
+   if (newIndex == nsMsgViewIndex_None) newIndex = FindHdr(threadHdr);
+ 
+   if (threadIsExpanded) {
+-    m_keys.InsertElementsAt(newIndex + 1, threadKeys);
+-    m_flags.InsertElementsAt(newIndex + 1, threadFlags);
+-    m_levels.InsertElementsAt(newIndex + 1, threadLevels);
++    if (ReversedThreading()) {
++      m_keys.InsertElementsAt(newIndex, threadKeys);
++      m_flags.InsertElementsAt(newIndex, threadFlags);
++      m_levels.InsertElementsAt(newIndex, threadLevels);
++    } else {
++      m_keys.InsertElementsAt(newIndex + 1, threadKeys);
++      m_flags.InsertElementsAt(newIndex + 1, threadFlags);
++      m_levels.InsertElementsAt(newIndex + 1, threadLevels);
++    }
++  }
++
++  if (ReversedThreading()) {
++    // Thread parent has moved up due to child insertion.
++    threadIndex += childCount;
+   }
+ 
+   if (newIndex == nsMsgViewIndex_None) {
+     NS_WARNING("newIndex=-1 in MoveThreadAt");
+     newIndex = 0;
+   }
+ 
+-  m_flags[newIndex] = saveFlags;
++  if (ReversedThreading()) {
++    m_flags[newIndex + childCount] = saveFlags;
++  } else {
++    m_flags[newIndex] = saveFlags;
++  }
+   // Unfreeze selection.
+   if (hasSelection) RestoreSelection(preservedKey, preservedSelection);
+ 
+   if (!changesDisabled) SetSuppressChangeNotifications(false);
+ 
+   nsMsgViewIndex lowIndex = threadIndex < newIndex ? threadIndex : newIndex;
+   nsMsgViewIndex highIndex = lowIndex == threadIndex ? newIndex : threadIndex;
+ 
+-  NoteChange(lowIndex, highIndex - lowIndex + childCount + 1,
+-             nsMsgViewNotificationCode::changed);
++  if (ReversedThreading()) {
++    NoteChange(lowIndex - childCount, highIndex - lowIndex + childCount + 1,
++               nsMsgViewNotificationCode::changed);
++  } else {
++    NoteChange(lowIndex, highIndex - lowIndex + childCount + 1,
++               nsMsgViewNotificationCode::changed);
++  }
+ }
+ 
+ nsresult nsMsgThreadedDBView::AddMsgToThreadNotInView(nsIMsgThread* threadHdr,
+                                                       nsIMsgDBHdr* msgHdr,
