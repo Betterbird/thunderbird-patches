@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1722461316 -7200
-# Parent  e20f94f2f414fa831af882072b9143ac11fae10b
+# Date 1722516176 -7200
+# Parent  cb4a6593cacaa063514b276767ab30a4507eaa6e
 Feature: Reversed threading (bug 305741). Additional changes.
 
 diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
@@ -39,6 +39,20 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  
      if (NS_FAILED(m_db->GetMsgHdrForKey(parentKey, getter_AddRefs(msgHdr))))
        break;
+@@ -5711,8 +5720,13 @@ nsMsgViewIndex nsMsgDBView::GetThreadRoo
+       while (lowIndex < GetSize() && m_levels[lowIndex]) lowIndex++;
+     }
+   }
+ 
++  if (ReversedThreading()) {
++    // If the row at `highIndex` is expanded, reduce to its topmost child.
++    while (highIndex > 0 && m_levels[highIndex -1]) highIndex--;
++  }
++
+   nsCOMPtr<nsIMsgDBHdr> resultHdr;
+   GetMsgHdrForViewIndex(highIndex, getter_AddRefs(resultHdr));
+ 
+   if (resultHdr != msgHdr) {
 diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 --- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 +++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
@@ -99,6 +113,235 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
  }
  
  nsresult nsMsgQuickSearchDBView::ListIdsInThreadOrder(nsIMsgThread* threadHdr,
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -462,39 +462,69 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+           // Since we know posInThread, we just want to insert the new hdr
+           // at threadIndex + posInThread, and then rebuild the view until we
+           // get to a sibling of the new hdr.
+           uint8_t newMsgLevel = viewThread->ChildLevelAt(posInThread);
+-          InsertMsgHdrAt(threadIndex + posInThread, msgHdr, msgKey, msgFlags,
+-                         newMsgLevel);
++          if (ReversedThreading()) {
++            InsertMsgHdrAt(threadIndex - posInThread + 1, msgHdr, msgKey, msgFlags,
++                           newMsgLevel);
+ 
+-          NoteChange(threadIndex + posInThread, 1,
+-                     nsMsgViewNotificationCode::insertOrDelete);
+-          for (nsMsgViewIndex viewIndex = threadIndex + ++posInThread;
+-               posInThread < viewThread->MsgCount() &&
+-               viewThread->ChildLevelAt(posInThread) > newMsgLevel;
+-               viewIndex++) {
+-            m_levels[viewIndex] = viewThread->ChildLevelAt(posInThread++);
++            NoteChange(threadIndex - posInThread + 1, 1,
++                       nsMsgViewNotificationCode::insertOrDelete);
++            for (int32_t viewIndex = threadIndex - ++posInThread + 1;
++                 viewIndex >= 0 && posInThread < viewThread->MsgCount() &&
++                 viewThread->ChildLevelAt(posInThread) > newMsgLevel;
++                 viewIndex--) {
++              m_levels[viewIndex] = viewThread->ChildLevelAt(posInThread++);
++            }
++            // We inserted before `threadIndex`, so this is now one further down.
++            threadIndex++;
++          } else {
++            InsertMsgHdrAt(threadIndex + posInThread, msgHdr, msgKey, msgFlags,
++                           newMsgLevel);
++
++            NoteChange(threadIndex + posInThread, 1,
++                       nsMsgViewNotificationCode::insertOrDelete);
++            for (nsMsgViewIndex viewIndex = threadIndex + ++posInThread;
++                 posInThread < viewThread->MsgCount() &&
++                 viewThread->ChildLevelAt(posInThread) > newMsgLevel;
++                 viewIndex++) {
++              m_levels[viewIndex] = viewThread->ChildLevelAt(posInThread++);
++            }
+           }
+-
+         } else {
+           // The new header is the root, so we need to adjust all the children.
+           InsertMsgHdrAt(threadIndex, msgHdr, msgKey, msgFlags, 0);
+           OrExtraFlag(threadIndex,
+                       MSG_VIEW_FLAG_HASCHILDREN | MSG_VIEW_FLAG_ISTHREAD);
+ 
+           NoteChange(threadIndex, 1, nsMsgViewNotificationCode::insertOrDelete);
+-          nsMsgViewIndex i;
+-          for (i = threadIndex + 1;
+-               i < m_keys.Length() && (i == threadIndex + 1 || m_levels[i]);
+-               i++)
+-            m_levels[i] = m_levels[i] + 1;
+-          // Turn off thread flags on old root.
+-          AndExtraFlag(threadIndex + 1,
+-                       ~(MSG_VIEW_FLAG_ISTHREAD | nsMsgMessageFlags::Elided |
+-                         MSG_VIEW_FLAG_HASCHILDREN));
++          if (ReversedThreading()) {
++            int32_t i;
++            for (i = threadIndex - 1;
++                 i >=0 && ((nsMsgViewIndex)i == threadIndex - 1 || m_levels[i]);
++                 i--)
++              m_levels[i] = m_levels[i] + 1;
++            // Turn off thread flags on old root.
++            AndExtraFlag(threadIndex - 1,
++                         ~(MSG_VIEW_FLAG_ISTHREAD | nsMsgMessageFlags::Elided |
++                           MSG_VIEW_FLAG_HASCHILDREN));
+ 
+-          NoteChange(threadIndex + 1, i - threadIndex + 1,
+-                     nsMsgViewNotificationCode::changed);
++            NoteChange(threadIndex - 1, i - (threadIndex - 1),
++                       nsMsgViewNotificationCode::changed);
++          } else {
++            nsMsgViewIndex i;
++            for (i = threadIndex + 1;
++                 i < m_keys.Length() && (i == threadIndex + 1 || m_levels[i]);
++                 i++)
++              m_levels[i] = m_levels[i] + 1;
++            // Turn off thread flags on old root.
++            AndExtraFlag(threadIndex + 1,
++                         ~(MSG_VIEW_FLAG_ISTHREAD | nsMsgMessageFlags::Elided |
++                           MSG_VIEW_FLAG_HASCHILDREN));
++
++            NoteChange(threadIndex + 1, i - threadIndex + 1,
++                       nsMsgViewNotificationCode::changed);
++          }
+         }
+       } else if (!parent) {
+         // New parent came into collapsed thread.
+         nsCOMPtr<nsIMsgFolder> msgFolder;
+@@ -564,18 +594,32 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
+     threadKeys.SetCapacity(childCount);
+     threadFlags.SetCapacity(childCount);
+     threadLevels.SetCapacity(childCount);
+     threadFolders.SetCapacity(childCount);
+-    for (nsMsgViewIndex index = threadIndex + 1;
+-         index < (nsMsgViewIndex)GetSize() && m_levels[index]; index++) {
+-      threadKeys.AppendElement(m_keys[index]);
+-      threadFlags.AppendElement(m_flags[index]);
+-      threadLevels.AppendElement(m_levels[index]);
+-      threadFolders.AppendObject(m_folders[index]);
++    if (ReversedThreading()) {
++      for (nsMsgViewIndex index = threadIndex - childCount;
++           index < threadIndex; index++) {
++        threadKeys.AppendElement(m_keys[index]);
++        threadFlags.AppendElement(m_flags[index]);
++        threadLevels.AppendElement(m_levels[index]);
++        threadFolders.AppendObject(m_folders[index]);
++      }
++    } else {
++      for (nsMsgViewIndex index = threadIndex + 1;
++           index < (nsMsgViewIndex)GetSize() && m_levels[index]; index++) {
++        threadKeys.AppendElement(m_keys[index]);
++        threadFlags.AppendElement(m_flags[index]);
++        threadLevels.AppendElement(m_levels[index]);
++        threadFolders.AppendObject(m_folders[index]);
++      }
+     }
+ 
+     uint32_t collapseCount;
+     CollapseByIndex(threadIndex, &collapseCount);
++    if (ReversedThreading()) {
++      // Thread parent has moved down due to child removal.
++      threadIndex -= childCount;
++    }
+   }
+ 
+   nsMsgDBView::RemoveByIndex(threadIndex);
+   m_folders.RemoveObjectAt(threadIndex);
+@@ -591,24 +635,45 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
+   threadHdr->GetFlags(&msgFlags);
+   InsertMsgHdrAt(newIndex, threadHdr, msgKey, msgFlags, 0);
+ 
+   if (threadIsExpanded) {
+-    m_keys.InsertElementsAt(newIndex + 1, threadKeys);
+-    m_flags.InsertElementsAt(newIndex + 1, threadFlags);
+-    m_levels.InsertElementsAt(newIndex + 1, threadLevels);
+-    m_folders.InsertObjectsAt(threadFolders, newIndex + 1);
++    if (ReversedThreading()) {
++      m_keys.InsertElementsAt(newIndex, threadKeys);
++      m_flags.InsertElementsAt(newIndex, threadFlags);
++      m_levels.InsertElementsAt(newIndex, threadLevels);
++      m_folders.InsertObjectsAt(threadFolders, newIndex);
++    } else {
++      m_keys.InsertElementsAt(newIndex + 1, threadKeys);
++      m_flags.InsertElementsAt(newIndex + 1, threadFlags);
++      m_levels.InsertElementsAt(newIndex + 1, threadLevels);
++      m_folders.InsertObjectsAt(threadFolders, newIndex + 1);
++    }
+   }
+ 
+-  m_flags[newIndex] = saveFlags;
++  if (ReversedThreading()) {
++    // Thread parent has moved up due to child insertion.
++    threadIndex += childCount;
++  }
++
++  if (ReversedThreading()) {
++    m_flags[newIndex + childCount] = saveFlags;
++  } else {
++    m_flags[newIndex] = saveFlags;
++  }
+   // Unfreeze selection.
+   if (hasSelection) RestoreSelection(preservedKey, preservedSelection);
+ 
+   if (!updatesSuppressed) SetSuppressChangeNotifications(false);
+ 
+   nsMsgViewIndex lowIndex = threadIndex < newIndex ? threadIndex : newIndex;
+   nsMsgViewIndex highIndex = lowIndex == threadIndex ? newIndex : threadIndex;
+-  NoteChange(lowIndex, highIndex - lowIndex + childCount + 1,
+-             nsMsgViewNotificationCode::changed);
++  if (ReversedThreading()) {
++    NoteChange(lowIndex - childCount, highIndex - lowIndex + childCount + 1,
++               nsMsgViewNotificationCode::changed);
++  } else {
++    NoteChange(lowIndex, highIndex - lowIndex + childCount + 1,
++               nsMsgViewNotificationCode::changed);
++  }
+ }
+ 
+ nsresult nsMsgSearchDBView::GetMessageEnumerator(
+     nsIMsgEnumerator** enumerator) {
+@@ -817,18 +882,32 @@ nsresult nsMsgSearchDBView::RemoveByInde
+       }
+ 
+       // Bump up the level of all the descendants of the message
+       // that was removed, if the thread was expanded.
+-      uint8_t removedLevel = m_levels[index];
+-      nsMsgViewIndex i = index + 1;
+-      if (i < m_levels.Length() && m_levels[i] > removedLevel) {
+-        // Promote the child of the removed message.
+-        uint8_t promotedLevel = m_levels[i];
+-        m_levels[i] = promotedLevel - 1;
+-        i++;
+-        // Now promote all the children of the promoted message.
+-        for (; i < m_levels.Length() && m_levels[i] > promotedLevel; i++)
+-          m_levels[i] = m_levels[i] - 1;
++      if (ReversedThreading()) {
++        uint8_t removedLevel = m_levels[index];
++        int32_t i = index - 1;
++        if (i >=0 && m_levels[i] > removedLevel) {
++          // Promote the child of the removed message.
++          uint8_t promotedLevel = m_levels[i];
++          m_levels[i] = promotedLevel - 1;
++          i--;
++          // Now promote all the children of the promoted message.
++          for (; i >= 0 && m_levels[i] > promotedLevel; i--)
++            m_levels[i] = m_levels[i] - 1;
++        }
++      } else {
++        uint8_t removedLevel = m_levels[index];
++        nsMsgViewIndex i = index + 1;
++        if (i < m_levels.Length() && m_levels[i] > removedLevel) {
++          // Promote the child of the removed message.
++          uint8_t promotedLevel = m_levels[i];
++          m_levels[i] = promotedLevel - 1;
++          i++;
++          // Now promote all the children of the promoted message.
++          for (; i < m_levels.Length() && m_levels[i] > promotedLevel; i++)
++            m_levels[i] = m_levels[i] - 1;
++        }
+       }
+     }
+   }
+ 
 diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
 --- a/mailnews/base/src/nsMsgThreadedDBView.cpp
 +++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
