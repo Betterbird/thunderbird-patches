@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1722539334 -7200
-# Parent  b7194aaa2314c2e4ccced619b2942141293a98f0
+# Parent  e2d21ea60003bc1d53239f2caaf1adf5eb00bfee
 Feature: Reversed threading (bug 305741).
 
 diff --git a/mail/base/content/widgets/treeview/thread-card.mjs b/mail/base/content/widgets/treeview/thread-card.mjs
@@ -290,7 +290,64 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    m_sortOrder = sortOrder;
    m_sortType = sortType;
  
-@@ -4680,16 +4701,28 @@ nsresult nsMsgDBView::GetThreadCount(nsM
+@@ -4532,20 +4553,32 @@ nsMsgViewIndex nsMsgDBView::ThreadIndexO
+       if (pFlags) threadHdr->GetFlags(pFlags);
+     }
+ 
+     nsMsgViewIndex startOfThread = msgIndex;
+-    while ((int32_t)startOfThread >= 0 && m_levels[startOfThread] != 0)
+-      startOfThread--;
++    if (ReversedThreading()) {
++      while (startOfThread < GetSize() - 1 && m_levels[startOfThread] != 0)
++        startOfThread++;
++    } else {
++      while (startOfThread > 0 && m_levels[startOfThread] != 0)
++        startOfThread--;
++    }
+ 
+     retIndex = startOfThread;
+     if (pThreadCount) {
+       int32_t numChildren = 0;
+-      nsMsgViewIndex threadIndex = startOfThread;
+-      do {
+-        threadIndex++;
+-        numChildren++;
+-      } while (threadIndex < m_levels.Length() && m_levels[threadIndex] != 0);
+-
++      if (ReversedThreading()) {
++        int32_t threadIndex = startOfThread;
++        do {
++          threadIndex--;
++          numChildren++;
++        } while (threadIndex >= 0 && m_levels[threadIndex] != 0);
++      } else {
++        nsMsgViewIndex threadIndex = startOfThread;
++        do {
++          threadIndex++;
++          numChildren++;
++        } while (threadIndex < m_levels.Length() && m_levels[threadIndex] != 0);
++      }
+       *pThreadCount = numChildren;
+     }
+   }
+ 
+@@ -4600,9 +4633,14 @@ nsMsgViewIndex nsMsgDBView::FindHdr(nsIM
+                                     nsMsgViewIndex startIndex,
+                                     bool allowDummy) {
+   nsMsgKey msgKey;
+   msgHdr->GetMessageKey(&msgKey);
+-  nsMsgViewIndex viewIndex = m_keys.IndexOf(msgKey, startIndex);
++  nsMsgViewIndex viewIndex;
++  if (ReversedThreading()) {
++    viewIndex = m_keys.LastIndexOf(msgKey, startIndex);
++  } else {
++    viewIndex = m_keys.IndexOf(msgKey, startIndex);
++  }
+   if (viewIndex == nsMsgViewIndex_None) return viewIndex;
+ 
+   // If we're supposed to allow dummies, and the previous index is a dummy that
+   // is not elided, then it must be the dummy corresponding to our node and
+@@ -4680,16 +4718,28 @@ nsresult nsMsgDBView::GetThreadCount(nsM
  // index of the first message in the thread.
  int32_t nsMsgDBView::CountExpandedThread(nsMsgViewIndex index) {
    int32_t numInThread = 0;
@@ -327,7 +384,34 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    return numInThread;
  }
  
-@@ -4871,26 +4904,49 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
+@@ -4797,8 +4847,11 @@ nsresult nsMsgDBView::ExpandAndSelectThr
+     if (flags & nsMsgMessageFlags::Elided) {
+       uint32_t numExpanded;
+       rv = ExpandByIndex(threadIndex, &numExpanded);
+       NS_ENSURE_SUCCESS(rv, rv);
++      if (ReversedThreading()) {
++        threadIndex += numExpanded;
++      }
+     }
+ 
+     // Get the number of messages in the expanded thread so we know how many
+     // to select.
+@@ -4815,9 +4868,13 @@ nsresult nsMsgDBView::ExpandAndSelectThr
+   if (!mTreeSelection) return NS_ERROR_UNEXPECTED;
+ 
+   // The count should be 1 or greater. If there was only one message in the
+   // thread, we just select it. If more, we select all of them.
+-  mTreeSelection->RangedSelect(threadIndex + count - 1, threadIndex, augment);
++  if (ReversedThreading()) {
++    mTreeSelection->RangedSelect(threadIndex - count + 1, threadIndex, augment);
++  } else {
++    mTreeSelection->RangedSelect(threadIndex + count - 1, threadIndex, augment);
++  }
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgDBView::ExpandAll() {
+@@ -4871,26 +4928,49 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
    } else {
      rv = ListIdsInThread(pThread, index, &numExpanded);
    }
@@ -387,7 +471,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  
    if (mJSTree) mJSTree->EndUpdateBatch();
    SelectionChangedXPCOM();
-@@ -4916,24 +4972,36 @@ nsresult nsMsgDBView::CollapseByIndex(ns
+@@ -4916,24 +4996,36 @@ nsresult nsMsgDBView::CollapseByIndex(ns
  
    flags |= nsMsgMessageFlags::Elided;
  
@@ -438,7 +522,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  nsresult nsMsgDBView::OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
-@@ -5068,8 +5136,12 @@ nsMsgViewIndex nsMsgDBView::GetIndexForT
+@@ -5068,8 +5160,12 @@ nsMsgViewIndex nsMsgDBView::GetIndexForT
        while (lowIndex < GetSize() && m_levels[lowIndex]) lowIndex++;
      }
    }
@@ -451,7 +535,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  nsMsgViewIndex nsMsgDBView::GetInsertIndexHelper(
-@@ -5254,11 +5326,16 @@ bool nsMsgDBView::WantsThisThread(nsIMsg
+@@ -5254,11 +5350,16 @@ bool nsMsgDBView::WantsThisThread(nsIMsg
  
  nsMsgViewIndex nsMsgDBView::FindParentInThread(
      nsMsgKey parentKey, nsMsgViewIndex startOfThreadViewIndex) {
@@ -470,7 +554,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  
      if (NS_FAILED(m_db->GetMsgHdrForKey(parentKey, getter_AddRefs(msgHdr))))
        break;
-@@ -5272,8 +5349,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
+@@ -5272,8 +5373,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
  nsresult nsMsgDBView::ListIdsInThreadOrder(nsIMsgThread* threadHdr,
                                             nsMsgKey parentKey, uint32_t level,
                                             nsMsgViewIndex* viewIndex,
@@ -480,7 +564,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    nsresult rv =
        threadHdr->EnumerateMessages(parentKey, getter_AddRefs(msgEnumerator));
    NS_ENSURE_SUCCESS(rv, rv);
-@@ -5325,8 +5403,28 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
+@@ -5325,8 +5427,28 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
      rv = ListIdsInThreadOrder(threadHdr, msgKey, level + 1, viewIndex,
                                pNumListed);
      NS_ENSURE_SUCCESS(rv, rv);
@@ -509,7 +593,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  void nsMsgDBView::InsertEmptyRows(nsMsgViewIndex viewIndex, int32_t numRows) {
-@@ -5622,8 +5720,13 @@ nsMsgViewIndex nsMsgDBView::GetThreadRoo
+@@ -5622,8 +5744,13 @@ nsMsgViewIndex nsMsgDBView::GetThreadRoo
        while (lowIndex < GetSize() && m_levels[lowIndex]) lowIndex++;
      }
    }
