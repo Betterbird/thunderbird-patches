@@ -8,7 +8,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
-%lecho% "<!ENTITY folderContextStartupFolder.label \"Папка автозапуску\">" >> chrome\uk\locale\uk\messenger\messenger.dtd
+%lecho% "<!ENTITY folderContextStartupFolder.label \"Тека автозапуску\">" >> chrome\uk\locale\uk\messenger\messenger.dtd
 
 :: Original strings:
 :: quick-filter-bar-untagged-button =
