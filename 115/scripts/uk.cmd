@@ -49,20 +49,20 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option =" >> localization\uk\messenger\preferences\preferences.ftl
 %lecho% "    .label = Звичайний текст або HTML"     >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = Якщо не використовується форматування стилів, використовується звичайний текст. В іншому випадку використовується лише HTML." >> localization\uk\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-description = Якщо у повідомленні не використовується стиль, надіслати звичайний текст. В іншому випадку надіслати HTML із резервним варіантом у вигляді звичайного тексту." >> localization\uk\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\uk\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = Звичайний текст або HTML"        >> localization\uk\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\uk\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
-:: Strings from https://hg.mozilla.org/l10n-central/de/file/2f346846f995f942b61562fed125b0cc98e82a13/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Не вдалося відкрити файл поштового буфера %%S."            >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Не вдається створити файл блокування %%S. Для коректної роботи Movemail необхідно, щоб у каталозі черги повідомлень створювалися файли блокування. На більшості систем це найкраще налаштувати, встановивши для каталогу черги повідомлень права доступу 01777." >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Файл блокування %%S не може бути видалений."                                 >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Файл черги %%S не може бути скорочений/стиснутий." >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailSpoolFileNotFound=Файл черги повідомлень не може бути знайдений."                >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Файл черги %%S не вдалося проаналізувати. Файл може бути пошкодженим або містити некоректні дані." >> chrome\uk\locale\de\messenger\localMsgs.properties
+:: Strings from https://hg.mozilla.org/l10n-central/uk/file/86e0abeb9aaa97dfe5ab5199249171b957b725dd/mail/chrome/messenger/localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Неможливо відкрити файл поштового буфера %S."            >> chrome\uk\locale\de\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Неможливо створити блокуючий файл %S. Для роботи Movemail необхідне створення таких файлів в каталозі поштового буфера. Для більшості систем досить встановити цьому каталогу має права 01777." >> chrome\uk\locale\de\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Неможливо стерти блокуючий файл %S."                                 >> chrome\uk\locale\de\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Неможливо зменшити файл буфера %S." >> chrome\uk\locale\de\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=Неможливо знайти локальний файл поштового буфера."                >> chrome\uk\locale\de\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Не вдалося розібрати файл буфера %S. Файл може бути пошкоджений або недійсний." >> chrome\uk\locale\de\messenger\localMsgs.properties
 %lecho% "serverType-movemail=Unix Movemail"                                                                     >> chrome\uk\locale\de\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="   >> localization\uk\messenger\accountManager.ftl
@@ -159,10 +159,10 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 %lecho% "quick-filter-bar-negate ="                                                                                                                >> localization\uk\messenger\about3Pane.ftl
 %lecho% "    .title = Натискання правої кнопки миші або одночасне натискання клавіш Ctrl та Enter на кнопці призводить до скасування дії."                                             >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      Для фільтра тексту та тегів будь-яка відхилена кнопка створює умову "І"."                                                    >> localization\uk\messenger\about3Pane.ftl
+%lecho% "      Для фільтра тексту та тегів будь-яка відхилена кнопка створює умову 'І'."                                                    >> localization\uk\messenger\about3Pane.ftl
 %lecho% "      Коли фільтр за тегами інвертований (відкинутий), вибір кнопки тега додає відповідні повідомлення до списку повідомлень без тегів."    >> localization\uk\messenger\about3Pane.ftl
 %lecho% "      Приклади:"                                                                                                                         >> localization\uk\messenger\about3Pane.ftl
 %lecho% "      • [Зірка] та [Теги] відхилені: Показати всі повідомлення, які не відмічені зірочкою і не мають тегів."         >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      • [Тема] відкинута, а [тіло] вибрано: Показати всі повідомлення, в яких "тема" не містить "слово", а "тіло" містить "слово"." >> localization\uk\messenger\about3Pane.ftl
+%lecho% "      • [Тема] відкинута, а [тіло] вибрано: Показати всі повідомлення, в яких 'тема' не містить 'слово', а 'тіло' містить 'слово'." >> localization\uk\messenger\about3Pane.ftl
 %lecho% "      • [Будь-який з] з вимкненою опцією [Важливі] та вибраними опціями [Робота] і [Особисте]."                                      >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      Показати всі теговані повідомлення, які НЕ мають тегу "Важливі" І які мають тег "Робота" або "Особисті"." >> localization\uk\messenger\about3Pane.ftl
+%lecho% "      Показати всі теговані повідомлення, які НЕ мають тегу 'Важливі' І які мають тег 'Робота' або 'Особисті'." >> localization\uk\messenger\about3Pane.ftl
