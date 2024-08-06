@@ -15,6 +15,7 @@ wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2
 wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2/linux-x86_64/xpi/zh-CN.xpi
 wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2/linux-x86_64/xpi/cs.xpi
 wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2/linux-x86_64/xpi/sq.xpi
+wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2/linux-x86_64/xpi/uk.xpi
 
 7z -y x de.xpi
 7z -y x en-GB.xpi
@@ -29,3 +30,4 @@ wget http://ftp.mozilla.org/pub/thunderbird/candidates/115.6.0-candidates/build2
 7z -y x zh-CN.xpi
 7z -y x cs.xpi
 7z -y x sq.xpi
+7z -y x uk.xpi
