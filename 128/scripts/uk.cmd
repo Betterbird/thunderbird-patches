@@ -170,22 +170,35 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: New in 128:
 
 :: Threading on menu:
-%lecho% "mail-context-unthread-message ="         >> localization\uk\messenger\messenger.ftl
-%lecho% "    .label = Видалити з ланцюжка"           >> localization\uk\messenger\messenger.ftl
-%lecho% "    .accesskey = U"                      >> localization\uk\messenger\messenger.ftl
-%lecho% "mail-context-reset-message-threading ="  >> localization\uk\messenger\messenger.ftl
+:: mail-context-unthread-message =
+::     .label = Unthread Message
+::     .accesskey = U
+:: mail-context-reset-message-threading =
+::     .label = Restore Original Threading
+::     .accesskey = R
+%lecho% "mail-context-unthread-message ="                >> localization\uk\messenger\messenger.ftl
+%lecho% "    .label = Видалити з ланцюжка"               >> localization\uk\messenger\messenger.ftl
+%lecho% "    .accesskey = U"                             >> localization\uk\messenger\messenger.ftl
+%lecho% "mail-context-reset-message-threading ="         >> localization\uk\messenger\messenger.ftl
 %lecho% "    .label = Повернути до початкового ланцюжка" >> localization\uk\messenger\messenger.ftl
-%lecho% "    .accesskey = R"                      >> localization\uk\messenger\messenger.ftl
+%lecho% "    .accesskey = R"                             >> localization\uk\messenger\messenger.ftl
 
 :: Disable account:
-%lecho% "account-disabled ="          >> localization\uk\messenger\messenger.ftl
+:: account-disabled =
+::   .label = Account disabled
+%lecho% "account-disabled ="                    >> localization\uk\messenger\messenger.ftl
 %lecho% "  .label = Обліковий запис відключено" >> localization\uk\messenger\messenger.ftl
 
 :: Calendar past events:
+:: calendar-event-listing-interval-past =
+::   .label = Events in the Past (after 1970)
 %lecho% "calendar-event-listing-interval-past ="      >> localization\uk\calendar\calendar-event-listing.ftl
-%lecho% "  .label = Події минулого (після 1970 року)"  >> localization\uk\calendar\calendar-event-listing.ftl
+%lecho% "  .label = Події минулого (після 1970 року)" >> localization\uk\calendar\calendar-event-listing.ftl
 
 :: Search AB via display name and nickname.
-%lecho% "quick-filter-bar-match-addressbook ="                                                               >> localization\uk\messenger\about3Pane.ftl
-%lecho% "    .label = Порівняти з контактами"                                                                    >> localization\uk\messenger\about3Pane.ftl
+:: quick-filter-bar-match-addressbook =
+::     .label = Match Address Book
+::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
+%lecho% "quick-filter-bar-match-addressbook =" >> localization\uk\messenger\about3Pane.ftl
+%lecho% "    .label = Порівняти з контактами"  >> localization\uk\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Зіставлення за ім'ям для відображення (починається з) або псевдонімом (точним) з ваших контактів" >> localization\uk\messenger\about3Pane.ftl
