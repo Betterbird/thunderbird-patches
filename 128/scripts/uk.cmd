@@ -174,7 +174,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .label = Видалити з ланцюжка"           >> localization\uk\messenger\messenger.ftl
 %lecho% "    .accesskey = U"                      >> localization\uk\messenger\messenger.ftl
 %lecho% "mail-context-reset-message-threading ="  >> localization\uk\messenger\messenger.ftl
-%lecho% "    .label = "Повернути до початкового ланцюжка" >> localization\uk\messenger\messenger.ftl
+%lecho% "    .label = Повернути до початкового ланцюжка" >> localization\uk\messenger\messenger.ftl
 %lecho% "    .accesskey = R"                      >> localization\uk\messenger\messenger.ftl
 
 :: Disable account:
