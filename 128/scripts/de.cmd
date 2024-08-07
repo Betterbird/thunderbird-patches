@@ -170,6 +170,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: New in 128:
 
 :: Threading on menu:
+:: mail-context-unthread-message =
+::     .label = Unthread Message
+::     .accesskey = U
+:: mail-context-reset-message-threading =
+::     .label = Restore Original Threading
+::     .accesskey = R
 %lecho% "mail-context-unthread-message ="         >> localization\de\messenger\messenger.ftl
 %lecho% "    .label = Unthread Message"           >> localization\de\messenger\messenger.ftl
 %lecho% "    .accesskey = U"                      >> localization\de\messenger\messenger.ftl
@@ -178,14 +184,21 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .accesskey = R"                      >> localization\de\messenger\messenger.ftl
 
 :: Disable account:
+:: account-disabled =
+::   .label = Account disabled
 %lecho% "account-disabled ="          >> localization\de\messenger\messenger.ftl
 %lecho% "  .label = Account disabled" >> localization\de\messenger\messenger.ftl
 
 :: Calendar past events:
+:: calendar-event-listing-interval-past =
+::   .label = Events in the Past (after 1970)
 %lecho% "calendar-event-listing-interval-past ="      >> localization\de\calendar\calendar-event-listing.ftl
 %lecho% "  .label = Events in the Past (after 1970)"  >> localization\de\calendar\calendar-event-listing.ftl
 
 :: Search AB via display name and nickname.
+:: quick-filter-bar-match-addressbook =
+::     .label = Match Address Book
+::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
 %lecho% "quick-filter-bar-match-addressbook ="                                                               >> localization\de\messenger\about3Pane.ftl
 %lecho% "    .label = Match Address Book"                                                                    >> localization\de\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books" >> localization\de\messenger\about3Pane.ftl
