@@ -1,0 +1,212 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1723109776 -7200
+# Node ID cb5dead87b07f3027206fb8b50f18e3357d082ef
+# Parent  25712bf3c85f778a7738387921831043dc85906d
+Bug 1908761 - Simplify and improve handling of secondary sorts in DBViewWrapper. r=aleca,babolivier
+
+Ported to 115 by Betterbird. Note that hunks from
+https://github.com/Betterbird/thunderbird-patches/blob/main/128/features/feature-1908761-secondary-sort-grouped-by.patch
+have already been integrated.
+
+diff --git a/mail/modules/DBViewWrapper.jsm b/mail/modules/DBViewWrapper.jsm
+--- a/mail/modules/DBViewWrapper.jsm
++++ b/mail/modules/DBViewWrapper.jsm
+@@ -18,8 +18,33 @@ const { VirtualFolderHelper } = ChromeUt
+ var MSG_VIEW_FLAG_DUMMY = 0x20000000;
+ 
+ var nsMsgViewIndex_None = 0xffffffff;
+ 
++// Taken from 128.
++function getSortStatusFromView(dbView) {
++  const primarySort = [
++    dbView.sortType,
++    dbView.sortOrder,
++    dbView.curCustomColumn,
++  ];
++  const secondarySort = [
++    dbView.secondarySortType,
++    dbView.secondarySortOrder,
++    dbView.secondaryCustomColumn,
++  ];
++  // Ignore secondary sort, if it is for the same column, or byNone.
++  if (
++    secondarySort[0] == Ci.nsMsgViewSortType.byNone ||
++    (secondarySort[0] != Ci.nsMsgViewSortType.byCustom &&
++      secondarySort[0] == primarySort[0]) ||
++    (secondarySort[0] == Ci.nsMsgViewSortType.byCustom &&
++      secondarySort[2] == primarySort[2])
++  ) {
++    return [primarySort];
++  }
++  return [primarySort, secondarySort];
++}
++
+ /**
+  * Helper singleton for DBViewWrapper that tells instances when something
+  *  interesting is happening to the folder(s) they care about.  The rationale
+  *  for this is to:
+@@ -1123,15 +1148,9 @@ DBViewWrapper.prototype = {
+       this.listener.messenger,
+       this.listener.msgWindow,
+       this.listener.threadPaneCommandUpdater
+     );
+-    // Excluding Group By views, use the least-specific sort so we can clock
+-    // them back through to build up the correct sort order,
+-    const index =
+-      viewFlags & Ci.nsMsgViewFlagsType.kGroupBySort
+-        ? 0
+-        : this._sort.length - 1;
+-    let [sortType, sortOrder, sortCustomCol] = this._getSortDetails(index);
++    let [sortType, sortOrder, sortCustomCol] = this._getSortDetails(0);
+     let outCount = {};
+     // when the underlying folder is a single real folder (virtual or no), we
+     //  tell the view about the underlying folder.
+     if (this.isSingleFolder) {
+@@ -1185,20 +1204,9 @@ DBViewWrapper.prototype = {
+     // we all know it's a tree view, make sure the interface is available
+     //  so no one else has to do this.
+     dbView.QueryInterface(Ci.nsITreeView);
+ 
+-    // If Grouped By, the view has already been opened with the most specific
+-    // sort (groups themselves are always sorted by date).
+-    if (!(viewFlags & Ci.nsMsgViewFlagsType.kGroupBySort)) {
+-      // clock through the rest of the sorts, if there are any
+-      for (let iSort = this._sort.length - 2; iSort >= 0; iSort--) {
+-        [sortType, sortOrder, sortCustomCol] = this._getSortDetails(iSort);
+-        if (sortCustomCol) {
+-          dbView.curCustomColumn = sortCustomCol;
+-        }
+-        dbView.sort(sortType, sortOrder);
+-      }
+-    }
++    this._sort = getSortStatusFromView(dbView);
+ 
+     return dbView;
+   },
+ 
+@@ -1644,55 +1652,15 @@ DBViewWrapper.prototype = {
+   },
+ 
+   sortAscending() {
+     if (!this.isSortedAscending) {
+-      this.magicSort(this._sort[0][0], Ci.nsMsgViewSortOrder.ascending);
++      this.sort(this._sort[0][0], Ci.nsMsgViewSortOrder.ascending);
+     }
+   },
+   sortDescending() {
+     if (!this.isSortedDescending) {
+-      this.magicSort(this._sort[0][0], Ci.nsMsgViewSortOrder.descending);
+-    }
+-  },
+-
+-  /**
+-   * Explicit sort command.  We ignore all previous sort state and only apply
+-   *  what you tell us.  If you want implied secondary sort, use |magicSort|.
+-   * You must use this sort command, and never directly call the sort commands
+-   *  on the underlying db view!  If you do not, make sure to fight us every
+-   *   step of the way, because we will keep clobbering your manually applied
+-   *   sort.
+-   * For secondary and multiple custom column support, a byCustom aSortType and
+-   *  aSecondaryType must be the column name string.
+-   */
+-  sort(aSortType, aSortOrder, aSecondaryType, aSecondaryOrder) {
+-    // For sort changes, do not make a random selection if there is not
+-    // actually anything selected; some views do this (looking at xfvf).
+-    if (this.dbView.selection && this.dbView.selection.count == 0) {
+-      this.dbView.selection.currentIndex = -1;
++      this.sort(this._sort[0][0], Ci.nsMsgViewSortOrder.descending);
+     }
+-
+-    this._sort = [[aSortType, aSortOrder]];
+-    if (aSecondaryType != null && aSecondaryOrder != null) {
+-      this._sort.push([aSecondaryType, aSecondaryOrder]);
+-    }
+-    // make sure the sort won't make the view angry...
+-    this._ensureValidSort();
+-    // if we are not in a view update, invoke the sort.
+-    if (this._viewUpdateDepth == 0 && this.dbView) {
+-      for (let iSort = this._sort.length - 1; iSort >= 0; iSort--) {
+-        // apply them in the reverse order
+-        let [sortType, sortOrder, sortCustomCol] = this._getSortDetails(iSort);
+-        if (sortCustomCol) {
+-          this.dbView.curCustomColumn = sortCustomCol;
+-        }
+-        this.dbView.sort(sortType, sortOrder);
+-      }
+-      // (only generate the event since we're not in a update batch)
+-      this.listener.onSortChanged();
+-    }
+-    // (if we are in a view update, then a new view will be created when the
+-    //  update ends, and it will just use the new sort order anyways.)
+   },
+ 
+   /**
+    * Logic that compensates for custom column identifiers being provided as
+@@ -1722,9 +1690,9 @@ DBViewWrapper.prototype = {
+    *  way this used to be implemented!
+    * For secondary and multiple custom column support, a byCustom aSortType must
+    *  be the column name string.
+    */
+-  magicSort(aSortType, aSortOrder) {
++  sort(aSortType, aSortOrder) {
+     if (this.dbView) {
+       // For sort changes, do not make a random selection if there is not
+       // actually anything selected; some views do this (looking at xfvf).
+       if (this.dbView.selection && this.dbView.selection.count == 0) {
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -2191,8 +2191,17 @@ nsMsgDBView::Open(nsIMsgFolder* folder, 
+     SetMRUTimeForFolder(m_viewFolder);
+ 
+     RestoreSortInfo();
+ 
++    // For newly created folders initialize m_sortColumns with the current sort,
++    // which UpdateSortInfo() will turn into the next secondary sort.
++    if (!m_sortColumns.Length()) {
++      MsgViewSortColumnInfo sortColumnInfo;
++      sortColumnInfo.mSortType = sortType;
++      sortColumnInfo.mSortOrder = sortOrder;
++      m_sortColumns.AppendElement(sortColumnInfo);
++    }
++
+     // Determine if we are in a news folder or not. If yes, we'll show lines
+     // instead of size, and special icons in the thread pane.
+     nsCOMPtr<nsIMsgIncomingServer> server;
+     rv = folder->GetServer(getter_AddRefs(server));
+@@ -3997,10 +4006,14 @@ void nsMsgDBView::UpdateSortInfo(nsMsgVi
+     }
+ 
+     PushSort(sortColumnInfo);
+   } else {
+-    // For primary sort, remember the sort order on a per column basis.
+-    if (m_sortColumns.Length()) m_sortColumns[0].mSortOrder = sortOrder;
++    // Since m_sortType may not be in sync with m_sortColumns, update this in
++    // any case.
++    if (m_sortColumns.Length()) {
++      m_sortColumns[0].mSortType = sortType;
++      m_sortColumns[0].mSortOrder = sortOrder;
++    }
+   }
+ 
+   if (m_sortColumns.Length() > 1) {
+     m_secondarySort = m_sortColumns[1].mSortType;
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -54,8 +54,14 @@ nsMsgSearchDBView::Open(nsIMsgFolder* fo
+   nsresult rv =
+       nsMsgDBView::Open(folder, sortType, sortOrder, viewFlags, pCount);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
++  // For other view types this will happen in OpenWithHdrs called by
++  // RebuildView.
++  if (m_viewFlags & nsMsgViewFlagsType::kGroupBySort) {
++    SaveSortInfo(sortType, sortOrder);
++  }
++
+   nsCOMPtr<nsIPrefBranch> prefBranch(
+       do_GetService(NS_PREFSERVICE_CONTRACTID, &rv));
+   NS_ENSURE_SUCCESS(rv, rv);
+   prefBranch->GetBoolPref("mail.strict_threading", &gReferenceOnlyThreading);
