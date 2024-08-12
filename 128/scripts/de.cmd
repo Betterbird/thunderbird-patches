@@ -186,8 +186,8 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Disable account:
 :: account-disabled =
 ::   .label = Account disabled
-%lecho% "account-disabled ="           >> localization\de\messenger\messenger.ftl
-%lecho% "  .label = Konto deaktiviert" >> localization\de\messenger\messenger.ftl
+%lecho% "account-disabled ="           >> localization\de\messenger\accountSettings.ftl
+%lecho% "  .label = Konto deaktiviert" >> localization\de\messenger\accountSettings.ftl
 
 :: Calendar past events:
 :: calendar-event-listing-interval-past =

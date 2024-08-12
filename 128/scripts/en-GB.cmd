@@ -106,8 +106,8 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .accesskey = R"                      >> localization\en-GB\messenger\messenger.ftl
 
 :: Disable account:
-%lecho% "account-disabled ="          >> localization\en-GB\messenger\messenger.ftl
-%lecho% "  .label = Account disabled" >> localization\en-GB\messenger\messenger.ftl
+%lecho% "account-disabled ="          >> localization\en-GB\messenger\accountSettings.ftl
+%lecho% "  .label = Account disabled" >> localization\en-GB\messenger\accountSettings.ftl
 
 :: Calendar past events:
 %lecho% "calendar-event-listing-interval-past ="      >> localization\en-GB\calendar\calendar-event-listing.ftl
