@@ -57,13 +57,13 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/uk/file/86e0abeb9aaa97dfe5ab5199249171b957b725dd/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Неможливо відкрити файл поштового буфера %%S."     >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Неможливо створити блокуючий файл %%S. Для роботи Movemail необхідне створення таких файлів в каталозі поштового буфера. Для більшості систем досить встановити цьому каталогу має права 01777." >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Неможливо стерти блокуючий файл %%S."                 >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Неможливо зменшити файл буфера %%S." >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailSpoolFileNotFound=Неможливо знайти локальний файл поштового буфера." >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Не вдалося розібрати файл буфера %%S. Файл може бути пошкоджений або недійсний." >> chrome\uk\locale\de\messenger\localMsgs.properties
-%lecho% "serverType-movemail=Unix Movemail"                                           >> chrome\uk\locale\de\messenger\messenger.properties
+%lecho% "movemailCantOpenSpoolFile=Неможливо відкрити файл поштового буфера %%S."     >> chrome\uk\locale\uk\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Неможливо створити блокуючий файл %%S. Для роботи Movemail необхідне створення таких файлів в каталозі поштового буфера. Для більшості систем досить встановити цьому каталогу має права 01777." >> chrome\uk\locale\uk\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock=Неможливо стерти блокуючий файл %%S."                 >> chrome\uk\locale\uk\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Неможливо зменшити файл буфера %%S." >> chrome\uk\locale\uk\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=Неможливо знайти локальний файл поштового буфера." >> chrome\uk\locale\uk\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Не вдалося розібрати файл буфера %%S. Файл може бути пошкоджений або недійсний." >> chrome\uk\locale\uk\messenger\localMsgs.properties
+%lecho% "serverType-movemail=Unix Movemail"                                           >> chrome\uk\locale\uk\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="         >> localization\uk\messenger\accountManager.ftl
 %lecho% "    .label = Додати обліковий запис Movemail…" >> localization\uk\messenger\accountManager.ftl
