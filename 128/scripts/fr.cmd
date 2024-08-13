@@ -200,5 +200,5 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .label = Match Address Book
 ::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
 %lecho% "quick-filter-bar-match-addressbook ="                                                                        >> localization\fr\messenger\about3Pane.ftl
-%lecho% "    .label = Correspondre aux carnets d’adresses"                                                            >> localization\fr\messenger\about3Pane.ftl
+%lecho% "    .label = Correspondre au carnet d’adresses"                                                              >> localization\fr\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Correspondre au nom à afficher (commence par) ou pseudonyme (est) des carnets d’adresses" >> localization\fr\messenger\about3Pane.ftl
