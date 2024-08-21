@@ -1,0 +1,134 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1724245015 -7200
+# Parent  5319bcb14b09e04448f8d3b129aa5050d1b8a53e
+Bug 216235 - Skip moz-cite-prefix in spell check and fix other inconsistencies between inline and "normal" spell check.
+
+nsComposeTxtSrvFilter::Skip() and mozInlineSpellChecker::ShouldSpellCheckNode(). Both should ignore:
+  blockquote - cite
+  div,pre - moz-signature
+  div - moz-forward-container
+  div - moz-cite-prefix
+  span - _moz_quote for plaintext quotes
+Note that table - moz-email-headers-table doesn't need to be checked separately since it is skipped via the moz-forward-container.
+
+diff --git a/editor/spellchecker/nsComposeTxtSrvFilter.cpp b/editor/spellchecker/nsComposeTxtSrvFilter.cpp
+--- a/editor/spellchecker/nsComposeTxtSrvFilter.cpp
++++ b/editor/spellchecker/nsComposeTxtSrvFilter.cpp
+@@ -27,30 +27,42 @@ bool nsComposeTxtSrvFilter::Skip(nsINode
+   if (!mIsForMail) {
+     return false;
+   }
+ 
+-  // For nodes that are blockquotes, we must make sure
+-  // their type is "cite"
+-  if (aNode->IsHTMLElement(nsGkAtoms::blockquote)) {
+-    return aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::type,
+-                                           nsGkAtoms::cite, eIgnoreCase);
++  // This code must match mozInlineSpellChecker::ShouldSpellCheckNode().
++  if (aNode->IsHTMLElement(nsGkAtoms::blockquote) &&
++      aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::type,
++                                      nsGkAtoms::cite, eIgnoreCase)) {
++    // blockquote - cite
++    return true;
++  }
++  if (aNode->IsAnyOfHTMLElements(nsGkAtoms::pre, nsGkAtoms::div) &&
++      aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
++                                      nsGkAtoms::mozsignature,
++                                      eIgnoreCase)) {
++    // div,pre - moz-signature
++    return true;
+   }
+-
+-  if (aNode->IsHTMLElement(nsGkAtoms::span)) {
+-    if (aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::mozquote,
+-                                        nsGkAtoms::_true, eIgnoreCase)) {
+-      return true;
+-    }
+-
+-    return aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
+-                                           nsGkAtoms::mozsignature,
+-                                           eCaseMatters);
++  if (aNode->IsHTMLElement(nsGkAtoms::div) &&
++      aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
++                                      nsGkAtoms::mozfwcontainer,
++                                      eIgnoreCase)) {
++    // div - moz-forward-container
++    return true;
+   }
+-
+-  if (aNode->IsHTMLElement(nsGkAtoms::table)) {
+-    return aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
+-                                           u"moz-email-headers-table"_ns,
+-                                           eCaseMatters);
++  if (aNode->IsHTMLElement(nsGkAtoms::div) &&
++      aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
++                                      nsGkAtoms::mozciteprefix,
++                                      eIgnoreCase)) {
++    // div - moz-cite-prefix
++    return true;
++  }
++  if (aNode->IsHTMLElement(nsGkAtoms::span) &&
++      aNode->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
++                                      nsGkAtoms::mozquote,
++                                      eIgnoreCase)) {
++    // span - _moz_quote (for plaintext quotes)
++    return true;
+   }
+ 
+   return false;
+ }
+diff --git a/extensions/spellcheck/src/mozInlineSpellChecker.cpp b/extensions/spellcheck/src/mozInlineSpellChecker.cpp
+--- a/extensions/spellcheck/src/mozInlineSpellChecker.cpp
++++ b/extensions/spellcheck/src/mozInlineSpellChecker.cpp
+@@ -1118,20 +1118,37 @@ bool mozInlineSpellChecker::ShouldSpellC
+     while (parent) {
+       if (parent->IsHTMLElement(nsGkAtoms::blockquote) &&
+           parent->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::type,
+                                            nsGkAtoms::cite, eIgnoreCase)) {
++        // blockquote - cite
+         return false;
+       }
+       if (parent->IsAnyOfHTMLElements(nsGkAtoms::pre, nsGkAtoms::div) &&
+           parent->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
+                                            nsGkAtoms::mozsignature,
+                                            eIgnoreCase)) {
++        // div,pre - moz-signature
+         return false;
+       }
+       if (parent->IsHTMLElement(nsGkAtoms::div) &&
+           parent->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
+                                            nsGkAtoms::mozfwcontainer,
+                                            eIgnoreCase)) {
++        // div - moz-forward-container
++        return false;
++      }
++      if (parent->IsHTMLElement(nsGkAtoms::div) &&
++          parent->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
++                                           nsGkAtoms::mozciteprefix,
++                                           eIgnoreCase)) {
++        // div - moz-cite-prefix
++        return false;
++      }
++      if (parent->IsHTMLElement(nsGkAtoms::span) &&
++          parent->AsElement()->AttrValueIs(kNameSpaceID_None, nsGkAtoms::_class,
++                                           nsGkAtoms::mozquote,
++                                           eIgnoreCase)) {
++        // span - _moz_quote (for plaintext quotes)
+         return false;
+       }
+ 
+       parent = parent->GetParent();
+diff --git a/xpcom/ds/StaticAtoms.py b/xpcom/ds/StaticAtoms.py
+--- a/xpcom/ds/StaticAtoms.py
++++ b/xpcom/ds/StaticAtoms.py
+@@ -46,8 +46,9 @@ STATIC_ATOMS = [
+     Atom("moztype", "_moz-type"),
+     Atom("mozdirty", "_moz_dirty"),
+     Atom("mozdisallowselectionprint", "mozdisallowselectionprint"),
+     Atom("mozdonotsend", "moz-do-not-send"),
++    Atom("mozciteprefix", "moz-cite-prefix"),  # Used by MailNews.
+     Atom("mozfwcontainer", "moz-forward-container"),  # Used by MailNews.
+     Atom("mozgeneratedcontentbefore", "_moz_generated_content_before"),
+     Atom("mozgeneratedcontentafter", "_moz_generated_content_after"),
+     Atom("mozgeneratedcontentmarker", "_moz_generated_content_marker"),
