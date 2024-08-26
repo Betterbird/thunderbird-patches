@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1721334316 -7200
-# Parent  a844f207844b2f152d51579ddba8baa7204740d9
+# Date 1724705678 -7200
+# Parent  6be8b4c324a8b309f84c6b02ecceef250a9c4f19
 Feature: QuickFilter search for textFilter matches of Display Name and Nickname contact emails in address books.
 
 Based on https://github.com/Betterbird/thunderbird-patches/blob/main/128/unused/feature-460737-quickfilter-search-by-displayname-nickname-in-addresses.patch
@@ -201,7 +201,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
              term.attrib = tfDef.attrib;
              value = term.value;
              value.attrib = tfDef.attrib;
-@@ -1256,16 +1280,125 @@ export var MessageTextFilter = {
+@@ -1256,16 +1280,139 @@ export var MessageTextFilter = {
              term.booleanAnd = firstClause || (!firstClause && haveNegation);
              term.beginsGrouping = firstClause ? 1 : 0;
              aTerms.push(term);
@@ -239,26 +239,33 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +      return null;
 +    }
 +
-+    // The fine code in `nsIAbDirectory.search()` can't handle a closing `)` in
-+    // the search value, it actually throws next time through the loop after executing
-+    // https://searchfox.org/comm-central/rev/03e5119a09c3feee0c67484fe23705f9723e6e73/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs#361-364
-+    // We have better chances when removing it.
-+    let sv = searchVal.replace(/\).*/, "");
-+    // Looks like `nsIAbDirectory.search()` does a `decodeURIComponent()`
-+    // on the value.
-+    sv = encodeURIComponent(sv);
++    // Looks like `nsIAbDirectory.search()` does a `decodeURIComponent()` on the value:
++    // https://searchfox.org/comm-central/rev/711e05a96e02a6086ebef3096219549190343364/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs#358
++    // Also required here:
++    // https://searchfox.org/comm-central/rev/711e05a96e02a6086ebef3096219549190343364/mailnews/addrbook/modules/QueryStringToExpression.sys.mjs#18
++    // Curiously enough, `encodeURIComponent()` doesn't replace "()". So do it here.
++    const sv = encodeURIComponent(searchVal)
++      .replace(/\(/g, "%28")
++      .replace(/\)/g, "%29");
 +    // See `createBooleanConditionString()` for operators:
 +    // "=": Ci.nsIAbBooleanConditionTypes.Is
 +    // bw: Ci.nsIAbBooleanConditionTypes.BeginsWith
-+    const searchString = `(DisplayName,bw,${sv})(NickName,=,${sv})`;
++    // https://searchfox.org/comm-central/rev/5fc342efb04b403770acbf8b658a8c168dfa07e2/mailnews/addrbook/public/nsIAbDirectory.idl#186
++    // calls for: (BOOL1(FIELD1,OP1,VALUE1)..(FIELDn,OPn,VALUEn)(BOOL2(FIELD1,OP1,VALUE1)...)...).
++    // LDAP search requires the `or( ... )`, local AB search works without it.
++    const searchString = `(or(DisplayName,bw,${sv})(NickName,=,${sv}))`;
 +
 +    let emailAddresses = [];
-+    let error = false;
++    let allError = true;
 +    const doSearch = async () => {
 +      for (const addrbook of MailServices.ab.directories) {
 +        await new Promise(resolve => {
 +          const searchListener = {
 +            onSearchFoundCard(card) {
++              // console.info(
++              //   `Search of AB ${addrbook.dirName} with ${searchString} yielded:`,
++              //   card.emailAddresses
++              // );
 +              emailAddresses = emailAddresses.concat(card.emailAddresses);
 +            },
 +            onSearchFinished() {
@@ -269,8 +276,11 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +          // the search may throw.
 +          try {
 +            addrbook.search(searchString, "", searchListener);
++            allError = false;
 +          } catch (ex) {
-+            error = true;
++            console.warn(
++              `Search of AB ${addrbook.dirName} with ${searchString} yielded error`
++            );
 +            resolve();
 +          }
 +        });
@@ -278,14 +288,18 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
 +    };
 +
 +    await doSearch();
-+    if (error) {
-+      console.warn(`AB search with ${searchString} yielded error`);
-+      this.emailAddressesByDisplayNameNickName = [];
-+      return null;
-+    }
-+    console.info(`AB search with ${searchString} yielded`, emailAddresses);
++
 +    // Tricky code to give a unique result.
 +    this.emailAddressesByDisplayNameNickName = [...new Set(emailAddresses)];
++    console.info(
++      `AB search with ${searchString} yielded`,
++      this.emailAddressesByDisplayNameNickName
++    );
++
++    if (allError) {
++      return null;
++    }
++
 +    if (this.emailAddressesByDisplayNameNickName.length > 100) {
 +      console.warn("Too many search conditions; search value is too general");
 +      this.emailAddressesByDisplayNameNickName = [];
@@ -329,7 +343,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
      const states = Object.assign({}, this._defaultStates);
      return {
        text: null,
-@@ -1327,14 +1460,24 @@ export var MessageTextFilter = {
+@@ -1327,14 +1474,24 @@ export var MessageTextFilter = {
        const state = aMuxer.getFilterValueForMutation(MessageTextFilter.name);
        const filterDef = MessageTextFilter.textFilterDefsByDomId[this.id];
        state.states[filterDef.name] = !this.pressed ? null : !this.inverted;
@@ -354,7 +368,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  
      for (const name in this.textFilterDefs) {
        const textFilter = this.textFilterDefs[name];
-@@ -1429,8 +1572,15 @@ export var MessageTextFilter = {
+@@ -1429,8 +1586,15 @@ export var MessageTextFilter = {
  
      // Toggle the expanded filters visibility.
      aDocument.getElementById("quick-filter-bar-filter-text-bar").hidden =
@@ -370,7 +384,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
  
    /**
     * In order to do our upsell we need to know when we are not getting any
-@@ -1462,14 +1612,27 @@ export var MessageTextFilter = {
+@@ -1462,14 +1626,27 @@ export var MessageTextFilter = {
     */
    isTextFilterActive(states) {
      return Object.entries(states).some(
@@ -398,7 +412,7 @@ diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterM
     *
     * @type {Object<string, boolean>}
     */
-@@ -1485,8 +1648,9 @@ export var MessageTextFilter = {
+@@ -1485,8 +1662,9 @@ export var MessageTextFilter = {
     *
     * @type {Object<string, object>}
     */
