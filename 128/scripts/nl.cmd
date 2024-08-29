@@ -192,8 +192,8 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Calendar past events:
 :: calendar-event-listing-interval-past =
 ::   .label = Events in the Past (after 1970)
-%lecho% "calendar-event-listing-interval-past ="               >> localization\nl\calendar\calendar-event-listing.ftl
-%lecho% "  .label = Gebeurtenissen in het verleden (na 1970)"  >> localization\nl\calendar\calendar-event-listing.ftl
+%lecho% "calendar-event-listing-interval-past ="     >> localization\nl\calendar\calendar-event-listing.ftl
+%lecho% "  .label = Gebeurtenissen in het verleden"  >> localization\nl\calendar\calendar-event-listing.ftl
 
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =
