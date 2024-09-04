@@ -293,6 +293,8 @@ if [ "$NOCLOBBER" = "noclobber" ]; then
     fi
   elif [ "$UNAME" = "Darwin" ] && [ -d obj-x86_64-apple-darwin ]; then
     touch obj-x86_64-apple-darwin/CLOBBER
+  elif [ "$UNAME" = "Darwin" ] && [ -d obj-aarch64-apple-darwin ]; then
+    touch obj-aarch64-apple-darwin/CLOBBER
   elif [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-mingw32 ]; then
     touch obj-x86_64-pc-mingw32/CLOBBER
   fi
