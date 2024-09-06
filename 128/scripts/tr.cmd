@@ -163,10 +163,10 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "      Metin ve etiket filtresi için, olumsuzlanan herhangi bir düğme bir VE koşulu oluşturur."             >> localization\tr\messenger\about3Pane.ftl
 %lecho% "      Etiket filtresi negatif olduğunda, bir etiket düğmesi seçildiğinde ilgili mesajlar listeye eklenir." >> localization\tr\messenger\about3Pane.ftl
 %lecho% "      Örnekler:"                                                                                           >> localization\tr\messenger\about3Pane.ftl
-%lecho% "      • Reddedilen [Takip Edilen] ve [Etiketlenen]:‹ Takip Edilen › VE ‹ Etiketlenmeyen iletiler ›."       >> localization\tr\messenger\about3Pane.ftl
-%lecho% "      • [Konu] reddedildi ve [Mesaj gövdesi] seçildi: ‹ Konu › kısmında « kelime » bulunmayan ve ‹ Mesaj Gövdesi › kısmında « kelime » bulunan mesajlar." >> localization\tr\messenger\about3Pane.ftl
+%lecho% "      • Reddedilen [Takip Edilen] ve [Etiketlenen]: ‹ Takip Edilen › VE ‹ Etiketlenmeyen iletiler ›."      >> localization\tr\messenger\about3Pane.ftl
+%lecho% "      • [Konu] reddedildi ve [Mesaj gövdesi] seçildi: ‹ Konu › kısmında « kelime » bulunmayan ve ‹ Mesaj Gövdesi › kısmında « kelime » bulunan mesajlar." >> localization\tr\messenger\about3Pane.ftl
 %lecho% "      • [En az bir], [Önemli] olumsuzlanmış ve [Çalışma] ve [Kişisel] seçili:"                             >> localization\tr\messenger\about3Pane.ftl
-%lecho% "      ‹ Önemli › etiketi olmayan VE ‹ İş › etiketi VEYA ‹ Kişisel › etiketi olan etiketli mesajlar."       >> localization\tr\messenger\about3Pane.ftl
+%lecho% "      ‹ Önemli › etiketi olmayan VE ‹ İş › etiketi VEYA ‹ Kişisel › etiketi olan etiketli mesajlar."       >> localization\tr\messenger\about3Pane.ftl
 
 :: New in 128:
 
