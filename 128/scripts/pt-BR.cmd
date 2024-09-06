@@ -191,7 +191,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 
 :: Calendar past events:
 :: calendar-event-listing-interval-past =
-::   .label = Events in the Past (after 1970)
+::   .label = Events in the Past
 %lecho% "calendar-event-listing-interval-past =" >> localization\pt-BR\calendar\calendar-event-listing.ftl
 %lecho% "  .label = Eventos do passado"          >> localization\pt-BR\calendar\calendar-event-listing.ftl
 

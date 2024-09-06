@@ -194,7 +194,7 @@ sed -i -e 's/label = Organisator/label = Organisieren/' localization\de\messenge
 
 :: Calendar past events:
 :: calendar-event-listing-interval-past =
-::   .label = Events in the Past (after 1970)
+::   .label = Events in the Past
 %lecho% "calendar-event-listing-interval-past =" >> localization\de\calendar\calendar-event-listing.ftl
 %lecho% "  .label = Termine der Vergangenheit"   >> localization\de\calendar\calendar-event-listing.ftl
 
