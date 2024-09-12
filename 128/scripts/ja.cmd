@@ -189,11 +189,13 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "account-disabled ="          >> localization\ja\messenger\accountSettings.ftl
 %lecho% "  .label = アカウントを無効化する" >> localization\ja\messenger\accountSettings.ftl
 
-:: Calendar past events:
+:: Calendar past/all events:
 :: calendar-event-listing-interval-past =
 ::   .label = Events in the Past
 %lecho% "calendar-event-listing-interval-past =" >> localization\ja\calendar\calendar-event-listing.ftl
 %lecho% "  .label = 過去のイベント"                 >> localization\ja\calendar\calendar-event-listing.ftl
+%lecho% "calendar-event-listing-interval-all ="  >> localization\ja\calendar\calendar-event-listing.ftl
+%lecho% "  .label = すべてのイベント"                >> localization\ja\calendar\calendar-event-listing.ftl
 
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =

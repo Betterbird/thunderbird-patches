@@ -189,11 +189,13 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "account-disabled ="                    >> localization\uk\messenger\accountSettings.ftl
 %lecho% "  .label = Обліковий запис відключено" >> localization\uk\messenger\accountSettings.ftl
 
-:: Calendar past events:
+:: Calendar past/all events:
 :: calendar-event-listing-interval-past =
 ::   .label = Events in the Past
 %lecho% "calendar-event-listing-interval-past =" >> localization\uk\calendar\calendar-event-listing.ftl
 %lecho% "  .label = Події минулого"              >> localization\uk\calendar\calendar-event-listing.ftl
+%lecho% "calendar-event-listing-interval-all ="  >> localization\uk\calendar\calendar-event-listing.ftl
+%lecho% "  .label = Усі події"                   >> localization\uk\calendar\calendar-event-listing.ftl
 
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =
