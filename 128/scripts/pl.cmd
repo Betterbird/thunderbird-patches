@@ -176,31 +176,31 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: mail-context-reset-message-threading =
 ::     .label = Restore Original Threading
 ::     .accesskey = R
-%lecho% "mail-context-unthread-message ="         >> localization\pl\messenger\messenger.ftl
-%lecho% "    .label = Unthread Message"           >> localization\pl\messenger\messenger.ftl
-%lecho% "    .accesskey = U"                      >> localization\pl\messenger\messenger.ftl
-%lecho% "mail-context-reset-message-threading ="  >> localization\pl\messenger\messenger.ftl
-%lecho% "    .label = Restore Original Threading" >> localization\pl\messenger\messenger.ftl
-%lecho% "    .accesskey = R"                      >> localization\pl\messenger\messenger.ftl
+%lecho% "mail-context-unthread-message ="             >> localization\pl\messenger\messenger.ftl
+%lecho% "    .label = Usuń wiadomość z wątku"         >> localization\pl\messenger\messenger.ftl
+%lecho% "    .accesskey = U"                          >> localization\pl\messenger\messenger.ftl
+%lecho% "mail-context-reset-message-threading ="      >> localization\pl\messenger\messenger.ftl
+%lecho% "    .label = Przywróć oryginalne wątkowanie" >> localization\pl\messenger\messenger.ftl
+%lecho% "    .accesskey = P"                          >> localization\pl\messenger\messenger.ftl
 
 :: Disable account:
 :: account-disabled =
 ::   .label = Account disabled
-%lecho% "account-disabled ="          >> localization\pl\messenger\accountSettings.ftl
-%lecho% "  .label = Account disabled" >> localization\pl\messenger\accountSettings.ftl
+%lecho% "account-disabled ="           >> localization\pl\messenger\accountSettings.ftl
+%lecho% "  .label = Konto zablokowane" >> localization\pl\messenger\accountSettings.ftl
 
 :: Calendar past/all events:
 :: calendar-event-listing-interval-past =
 ::   .label = Events in the Past
 %lecho% "calendar-event-listing-interval-past =" >> localization\pl\calendar\calendar-event-listing.ftl
-%lecho% "  .label = Events in the Past"          >> localization\pl\calendar\calendar-event-listing.ftl
+%lecho% "  .label = Wydarzenia w przeszłości"    >> localization\pl\calendar\calendar-event-listing.ftl
 %lecho% "calendar-event-listing-interval-all ="  >> localization\pl\calendar\calendar-event-listing.ftl
-%lecho% "  .label = All Events"                  >> localization\pl\calendar\calendar-event-listing.ftl
+%lecho% "  .label = Wszystkie wydarzenia"        >> localization\pl\calendar\calendar-event-listing.ftl
 
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =
 ::     .label = Match Address Book
 ::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
-%lecho% "quick-filter-bar-match-addressbook ="                                                               >> localization\pl\messenger\about3Pane.ftl
-%lecho% "    .label = Match Address Book"                                                                    >> localization\pl\messenger\about3Pane.ftl
-%lecho% "    .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books" >> localization\pl\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-match-addressbook ="      >> localization\pl\messenger\about3Pane.ftl
+%lecho% "    .label = Dopasuj z książki adresowej"  >> localization\pl\messenger\about3Pane.ftl
+%lecho% "    .tooltiptext = Dopasuj na podstawie Wyświetlanej nazwy (zaczyna się od) lub Pseudonimu (dokładne dopasowanie) z twoich książek adresowych" >> localization\pl\messenger\about3Pane.ftl
