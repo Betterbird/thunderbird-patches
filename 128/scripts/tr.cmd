@@ -32,7 +32,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
 %lecho% "menuitem-recent-files ="               >> localization\tr\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Son dosya(lar)…"          >> localization\tr\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Son dosya…"               >> localization\tr\messenger\messengercompose\messengercompose.ftl
 %lecho% "context-menuitem-recent-files ="       >> localization\tr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = En son dosya(lar)ı ekle…" >> localization\tr\messenger\messengercompose\messengercompose.ftl
 
@@ -49,8 +49,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option ="    >> localization\tr\messenger\preferences\preferences.ftl
 %lecho% "    .label = HTML veya düz metin"       >> localization\tr\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = Mesajda herhangi bir stil kullanılmıyorsa düz metin formatında gönderin. Aksi takdirde, o formatta gönderin HTML." >> localization\tr\messenger\preferences\preferences.ftl
-
+%lecho% "compose-send-plain-or-html-description = İletide herhangi bir biçem kullanılmıyorsa düz metin gönder. Aksi takdirde yalnızca HTML gönder." >> localization\tr\messenger\preferences\preferences.ftl
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\tr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = HTML veya düz metin"       >> localization\tr\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\tr\messenger\messengercompose\messengercompose.ftl
@@ -123,12 +122,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: menu-view-layout-stacked =
 ::     .label = Stacked View
 ::     .accesskey = S
-%lecho% "menu-view-layout-widethread ="     >> localization\tr\messenger\menubar.ftl
-%lecho% "    .label = Geniş mesaj listesi"  >> localization\tr\messenger\menubar.ftl
-%lecho% "    .accesskey = m"                >> localization\tr\messenger\menubar.ftl
-%lecho% "menu-view-layout-stacked ="        >> localization\tr\messenger\menubar.ftl
-%lecho% "    .label = Üst üste bindirilmiş" >> localization\tr\messenger\menubar.ftl
-%lecho% "    .accesskey = S"                >> localization\tr\messenger\menubar.ftl
+%lecho% "menu-view-layout-widethread ="             >> localization\tr\messenger\menubar.ftl
+%lecho% "    .label = Geniş mesaj listesi görünümü" >> localization\tr\messenger\menubar.ftl
+%lecho% "    .accesskey = m"                        >> localization\tr\messenger\menubar.ftl
+%lecho% "menu-view-layout-stacked ="                >> localization\tr\messenger\menubar.ftl
+%lecho% "    .label = Üst üste bindirilmiş görünüm" >> localization\tr\messenger\menubar.ftl
+%lecho% "    .accesskey = S"                        >> localization\tr\messenger\menubar.ftl
 
 :: Original strings:
 :: other-action-msg-edit-headers =
@@ -177,12 +176,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: mail-context-reset-message-threading =
 ::     .label = Restore Original Threading
 ::     .accesskey = R
-%lecho% "mail-context-unthread-message ="             >> localization\tr\messenger\messenger.ftl
-%lecho% "    .label = Mesajı tartışmadan kaldır"      >> localization\tr\messenger\messenger.ftl
-%lecho% "    .accesskey = l"                          >> localization\tr\messenger\messenger.ftl
-%lecho% "mail-context-reset-message-threading ="      >> localization\tr\messenger\messenger.ftl
-%lecho% "    .label = Orijinal tartışmayı geri yükle" >> localization\tr\messenger\messenger.ftl
-%lecho% "    .accesskey = R"                          >> localization\tr\messenger\messenger.ftl
+%lecho% "mail-context-unthread-message ="         >> localization\tr\messenger\messenger.ftl
+%lecho% "    .label = Mesajı diziden kaldır"      >> localization\tr\messenger\messenger.ftl
+%lecho% "    .accesskey = k"                      >> localization\tr\messenger\messenger.ftl
+%lecho% "mail-context-reset-message-threading ="  >> localization\tr\messenger\messenger.ftl
+%lecho% "    .label = Orijinal diziyi geri yükle" >> localization\tr\messenger\messenger.ftl
+%lecho% "    .accesskey = O"                      >> localization\tr\messenger\messenger.ftl
 
 :: Disable account:
 :: account-disabled =
