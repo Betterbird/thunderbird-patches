@@ -74,9 +74,9 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .accesskey = M"                    >> localization\tr\messenger\menubar.ftl
 
 :: Unread/seleted status
-%lecho% "unreadMsgStatus=Non lus : %%S"        >> chrome\tr\locale\tr\messenger\messenger.properties
-%lecho% "selectedMsgStatus=Sélectionnés : %%S" >> chrome\tr\locale\tr\messenger\messenger.properties
-%lecho% "totalMsgStatus=Total : %%S"           >> chrome\tr\locale\tr\messenger\messenger.properties
+%lecho% "unreadMsgStatus=Okunmamış: %%S" >> chrome\tr\locale\tr\messenger\messenger.properties
+%lecho% "selectedMsgStatus=Seçildi: %%S" >> chrome\tr\locale\tr\messenger\messenger.properties
+%lecho% "totalMsgStatus=Toplam: %%S"     >> chrome\tr\locale\tr\messenger\messenger.properties
 
 :: Original strings:
 :: vertical-tabs-label =
