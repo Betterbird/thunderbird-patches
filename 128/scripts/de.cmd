@@ -192,14 +192,6 @@ sed -i -e 's/label = Organisator/label = Organisieren/' localization\de\messenge
 %lecho% "account-disabled ="           >> localization\de\messenger\accountSettings.ftl
 %lecho% "  .label = Konto deaktiviert" >> localization\de\messenger\accountSettings.ftl
 
-:: Calendar past/all events:
-:: calendar-event-listing-interval-past =
-::   .label = Events in the Past
-%lecho% "calendar-event-listing-interval-past =" >> localization\de\calendar\calendar-event-listing.ftl
-%lecho% "  .label = Vergangene Termine"          >> localization\de\calendar\calendar-event-listing.ftl
-%lecho% "calendar-event-listing-interval-all ="  >> localization\de\calendar\calendar-event-listing.ftl
-%lecho% "  .label = Alle Termine"                >> localization\de\calendar\calendar-event-listing.ftl
-
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =
 ::     .label = Match Address Book
