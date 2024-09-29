@@ -1,0 +1,184 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1727643340 -7200
+# Node ID 96dd56129a64d687efefbecb25c55fd55de95b5f
+# Parent  787fe5dad4a8461c482249fc3d7568a7b18bf2c1
+Bug 1913600 - Adjust drag'n'drop handling of compose window after bug 1851536. r=mkmelin
+
+Since https://phabricator.services.mozilla.com/D193762 has landed, multiple selected contacts with display names that are dragged into the compose window are treated as attachments. This patch excludes dragged items containing the "text/x-moz-address" flavor from being checked for valid attachments and handles them directly.
+
+Differential Revision: https://phabricator.services.mozilla.com/D222539
+
+diff --git a/mail/components/addrbook/test/browser/browser_drag_drop.js b/mail/components/addrbook/test/browser/browser_drag_drop.js
+--- a/mail/components/addrbook/test/browser/browser_drag_drop.js
++++ b/mail/components/addrbook/test/browser/browser_drag_drop.js
+@@ -83,16 +83,24 @@ async function doDragToComposeWindow(sou
+     Ci.nsIDragService.DRAGDROP_ACTION_NONE
+   );
+ 
+   cardsList.selectedIndices = sourceIndices;
++  const transitionPromise = BrowserTestUtils.waitForTransition(composeDocument);
+   const [result, dataTransfer] = EventUtils.synthesizeDragOver(
+     cardsList.getRowAtIndex(sourceIndices[0]),
+     toAddrInput,
+     null,
+     null,
+     abWindow,
+     composeWindow
+   );
++  await transitionPromise;
++  // Test that dragged contacts are not incorrectly recognized as attachments.
++  Assert.ok(
++    !composeDocument
++      .getElementById("dropAttachmentOverlay")
++      .classList.contains("show")
++  );
+   EventUtils.synthesizeDropAfterDragOver(
+     result,
+     dataTransfer,
+     toAddrInput,
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -10353,14 +10353,12 @@ var envelopeDragObserver = {
+    * Loop through all the valid data type flavors and return a list of valid
+    * attachments to handle the various drag&drop actions.
+    *
+    * @param {Event} event - The drag-and-drop event being performed.
+-   * @param {boolean} isDropping - If the action was performed from the onDrop
+-   *   method and it needs to handle pills creation.
+    *
+    * @returns {nsIMsgAttachment[]} - The array of valid attachments.
+    */
+-  getValidAttachments(event, isDropping) {
++  getValidAttachments(event) {
+     const attachments = [];
+     const dt = event.dataTransfer;
+     const dataList = [];
+ 
+@@ -10467,20 +10465,8 @@ var envelopeDragObserver = {
+             "application/x-moz-file-promise"
+           );
+           break;
+         }
+-        // Process address: Drop it into recipient field.
+-        case "text/x-moz-address": {
+-          // Process the drop only if the message body wasn't the target and we
+-          // called this method from the onDrop() method.
+-          if (event.target.baseURI != "about:blank?compose" && isDropping) {
+-            DropRecipient(event.target, data);
+-            // Prevent the default behaviour which drops the address text into
+-            // the widget.
+-            event.preventDefault();
+-          }
+-          break;
+-        }
+       }
+ 
+       // Create the attachment and add it to attachments array.
+       if (isValidAttachment) {
+@@ -10592,9 +10578,9 @@ var envelopeDragObserver = {
+     // We can later explore adding some UI choice to allow controlling the
+     // outcome of this drop action, but users can still copy and paste the image
+     // in the editor to cirumvent this potential issue.
+     const editor = GetCurrentEditor();
+-    const attachments = this.getValidAttachments(event, true);
++    const attachments = this.getValidAttachments(event);
+ 
+     for (const attachment of attachments) {
+       if (!attachment?.url) {
+         continue;
+@@ -10651,9 +10637,25 @@ var envelopeDragObserver = {
+       this.appendImagesInline(event.dataTransfer);
+       return;
+     }
+ 
+-    const attachments = this.getValidAttachments(event, true);
++    // Handle address book entries directly, as they may also contain flavors
++    // that qualify as attachments.
++    if (event.dataTransfer.mozTypesAt(0).contains("text/x-moz-address")) {
++      if (event.target.baseURI != "about:blank?compose") {
++        // Process address: Drop it into recipient field.
++        DropRecipient(
++          event.target,
++          event.dataTransfer.mozGetDataAt("text/x-moz-address", 0)
++        );
++        // Prevent the default behaviour which drops the address text into
++        // the widget.
++        event.preventDefault();
++      }
++      return;
++    }
++
++    const attachments = this.getValidAttachments(event);
+ 
+     // Interrupt if we don't have anything to attach.
+     if (!attachments.length) {
+       return;
+@@ -10730,10 +10732,13 @@ var envelopeDragObserver = {
+       event.preventDefault();
+       this.detectHoveredOverlay(event.target.id);
+       return;
+     }
+-
+-    if (DROP_FLAVORS.some(f => event.dataTransfer.types.includes(f))) {
++    // Excluding dragged address book entries, check for valid attachments.
++    if (
++      !event.dataTransfer.mozTypesAt(0).contains("text/x-moz-address") &&
++      DROP_FLAVORS.some(f => event.dataTransfer.types.includes(f))
++    ) {
+       // Show the drop overlay only if we dragged files or supported types.
+       const attachments = this.getValidAttachments(event);
+       if (attachments.length) {
+         // We're dragging files that can potentially be attached or added
+@@ -10804,10 +10809,8 @@ var envelopeDragObserver = {
+               (!event.dataTransfer.files.length ||
+                 this.isNotDraggingOnlyImages(event.dataTransfer) ||
+                 !gMsgCompose.composeHTML)
+           );
+-      } else {
+-        DragAddressOverTargetControl(event);
+       }
+     }
+ 
+     this.detectHoveredOverlay(event.target.id);
+diff --git a/mailnews/addrbook/content/abDragDrop.js b/mailnews/addrbook/content/abDragDrop.js
+--- a/mailnews/addrbook/content/abDragDrop.js
++++ b/mailnews/addrbook/content/abDragDrop.js
+@@ -90,35 +90,4 @@ const abResultsPaneObserver = {
+     event.dataTransfer.addElement(event.target);
+     event.stopPropagation();
+   },
+ };
+-
+-function DragAddressOverTargetControl() {
+-  var dragSession = Cc["@mozilla.org/widget/dragservice;1"]
+-    .getService(Ci.nsIDragService)
+-    .getCurrentSession();
+-
+-  if (!dragSession.isDataFlavorSupported("text/x-moz-address")) {
+-    return;
+-  }
+-
+-  var trans = Cc["@mozilla.org/widget/transferable;1"].createInstance(
+-    Ci.nsITransferable
+-  );
+-  trans.init(getLoadContext());
+-  trans.addDataFlavor("text/x-moz-address");
+-
+-  var canDrop = true;
+-
+-  for (var i = 0; i < dragSession.numDropItems; ++i) {
+-    dragSession.getData(trans, i);
+-    var dataObj = {};
+-    var bestFlavor = {};
+-    try {
+-      trans.getAnyTransferData(bestFlavor, dataObj);
+-    } catch (ex) {
+-      canDrop = false;
+-      break;
+-    }
+-  }
+-  dragSession.canDrop = canDrop;
+-}
