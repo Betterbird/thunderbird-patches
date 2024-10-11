@@ -186,6 +186,117 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.h b/mailnews/base/src/nsMs
    virtual nsresult AddHdr(nsIMsgDBHdr* msgHdr,
                            nsMsgViewIndex* resultIndex = nullptr) override;
    virtual nsresult OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -242,8 +242,10 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+     m_curFolderHasCachedHits = false;
+     // Since we've gotten a hit for a new folder, the searches for
+     // any previous folders are done, so deal with stale cached hits
+     // for those folders now.
++    // Note that if the search is suppressed, we don't get hits and
++    // don't get here.
+     UpdateCacheAndViewForPrevSearchedFolders(aFolder);
+     m_curFolderGettingHits = aFolder;
+     m_hdrHits.Clear();
+     m_curFolderStartKeyIndex = m_keys.Length();
+@@ -276,15 +278,17 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::OnSearchDone(nsresult status) {
+-  // This batch began in OnNewSearch.
+-  if (mJSTree) mJSTree->EndUpdateBatch();
++  if (!m_doingQuickSearch) {
++    // This batch began in OnNewSearch.
++    if (mJSTree) mJSTree->EndUpdateBatch();
++  }
+ 
+   NS_ENSURE_TRUE(m_viewFolder, NS_ERROR_NOT_INITIALIZED);
+ 
+   // Handle any non verified hits we haven't handled yet.
+-  if (NS_SUCCEEDED(status) && !m_doingQuickSearch &&
++  if (NS_SUCCEEDED(status) && !m_doingQuickSearch && !m_usingCachedHits &&
+       status != NS_MSG_SEARCH_INTERRUPTED)
+     UpdateCacheAndViewForPrevSearchedFolders(nullptr);
+ 
+   m_doingSearch = false;
+@@ -343,8 +347,9 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+   int32_t oldSize = GetSize();
+ 
+   RemovePendingDBListeners();
+   m_doingSearch = true;
++  m_usingCachedHits = false;
+   m_totalMessagesInView = 0;
+   m_folders.Clear();
+   m_keys.Clear();
+   m_levels.Clear();
+@@ -366,8 +371,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+   nsCOMPtr<nsIMsgSearchSession> searchSession =
+       do_QueryReferent(m_searchSession);
+   // Just ignore.
+   NS_ENSURE_TRUE(searchSession, NS_OK);
++
++  searchSession->SuppressSearch(false);
++
+   nsCOMPtr<nsIMsgDBService> msgDBService =
+       do_GetService("@mozilla.org/msgDatabase/msgDBService;1");
+   searchSession->CountSearchScopes(&scopeCount);
+ 
+@@ -423,14 +431,15 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+         nsCOMPtr<nsIMsgEnumerator> cachedHits;
+         searchDB->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
+         bool hasMore;
+         if (cachedHits) {
+-          cachedHits->HasMoreElements(&hasMore);
+-          if (hasMore) {
++          nsresult rv = cachedHits->HasMoreElements(&hasMore);
++          if (NS_SUCCEEDED(rv) && hasMore) {
++            m_usingCachedHits = true;
+             mozilla::DebugOnly<nsMsgKey> prevKey = nsMsgKey_None;
+             while (hasMore) {
+               nsCOMPtr<nsIMsgDBHdr> header;
+-              nsresult rv = cachedHits->GetNext(getter_AddRefs(header));
++              rv = cachedHits->GetNext(getter_AddRefs(header));
+               if (header && NS_SUCCEEDED(rv)) {
+                 nsMsgKey msgKey;
+                 header->GetMessageKey(&msgKey);
+                 NS_ASSERTION(prevKey == nsMsgKey_None || msgKey > prevKey,
+@@ -444,8 +453,9 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+               }
+ 
+               cachedHits->HasMoreElements(&hasMore);
+             }
++            searchSession->SuppressSearch(true);
+           }
+         }
+       }
+     }
+@@ -473,9 +483,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+     }
+   }
+ 
+   // Prevent updates for every message found. This batch ends in OnSearchDone.
+-  if (mJSTree) mJSTree->BeginUpdateBatch();
++  if (!m_doingQuickSearch) {
++    if (mJSTree) mJSTree->BeginUpdateBatch();
++  }
+ 
+   return NS_OK;
+ }
+ 
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+@@ -63,7 +63,8 @@ class nsMsgXFVirtualFolderDBView : publi
+   bool m_curFolderHasCachedHits;
+   bool m_doingSearch;
+   // Are we doing a quick search on top of the virtual folder search?
+   bool m_doingQuickSearch;
++  bool m_usingCachedHits;
+ };
+ 
+ #endif
 diff --git a/mailnews/db/msgdb/public/nsIMsgDatabase.idl b/mailnews/db/msgdb/public/nsIMsgDatabase.idl
 --- a/mailnews/db/msgdb/public/nsIMsgDatabase.idl
 +++ b/mailnews/db/msgdb/public/nsIMsgDatabase.idl
@@ -252,7 +363,17 @@ diff --git a/mailnews/search/public/nsIMsgSearchSession.idl b/mailnews/search/pu
 diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
 --- a/mailnews/search/src/nsMsgSearchSession.cpp
 +++ b/mailnews/search/src/nsMsgSearchSession.cpp
-@@ -204,8 +204,13 @@ nsMsgSearchSession::AddAllScopes(nsMsgSe
+@@ -30,8 +30,9 @@ nsMsgSearchSession::nsMsgSearchSession()
+   m_handlingError = false;
+   m_expressionTree = nullptr;
+   m_searchPaused = false;
+   m_iListener = -1;
++  m_suppressed = false;
+ }
+ 
+ nsMsgSearchSession::~nsMsgSearchSession() {
+   InterruptSearch();
+@@ -204,8 +205,13 @@ nsMsgSearchSession::AddAllScopes(nsMsgSe
    // don't think this is needed.
    return NS_ERROR_NOT_IMPLEMENTED;
  }
@@ -266,7 +387,7 @@ diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/ns
    nsresult rv = Initialize();
    NS_ENSURE_SUCCESS(rv, rv);
  
-@@ -220,8 +225,14 @@ NS_IMETHODIMP nsMsgSearchSession::Search
+@@ -220,8 +226,14 @@ NS_IMETHODIMP nsMsgSearchSession::Search
    m_iListener = -1;
  
    m_msgWindowWeak = do_GetWeakReference(aWindow);
