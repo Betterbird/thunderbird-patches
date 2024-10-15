@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1728340499 -7200
-# Parent  71919cd321c03a3d5f160dbdcb480616366b4307
+# Date 1728986971 -7200
+# Parent  90d5d002f7373ce0e76685adc579a2034d23584a
 Bug 1911916 - Continuation: Transfer env addr/date from source to copy.
 
 diff --git a/mailnews/base/public/nsIMsgHdr.idl b/mailnews/base/public/nsIMsgHdr.idl
@@ -52,12 +52,14 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
        return NS_ERROR_FAILURE;  // DB is missing storeToken.
      }
      uint64_t offset;
-@@ -787,8 +788,16 @@ nsMsgDBFolder::GetMsgInputStream(nsIMsgD
+@@ -787,8 +788,18 @@ nsMsgDBFolder::GetMsgInputStream(nsIMsgD
                     .get());
    }
  
    NS_ENSURE_SUCCESS(rv, rv);
 +
++  // Excuse the hackery, but MboxMsgInputStream is not set up for
++  // QueryInterface.
 +  if (storeType.EqualsLiteral("mbox")) {
 +    MboxMsgInputStream* mboxStream =
 +        static_cast<MboxMsgInputStream*>(*aInputStream);
@@ -69,6 +71,33 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
  }
  
  // path coming in is the root path without the leaf name,
+diff --git a/mailnews/base/src/nsQuarantinedOutputStream.h b/mailnews/base/src/nsQuarantinedOutputStream.h
+--- a/mailnews/base/src/nsQuarantinedOutputStream.h
++++ b/mailnews/base/src/nsQuarantinedOutputStream.h
+@@ -43,8 +43,11 @@ class nsQuarantinedOutputStream : public
+   explicit nsQuarantinedOutputStream(nsIOutputStream* target)
+       : mTarget(target) {}
+   nsQuarantinedOutputStream() = delete;
+ 
++  // The stream we'll be appending to if it all succeeds.
++  nsCOMPtr<nsIOutputStream> mTarget;
++
+  protected:
+   virtual ~nsQuarantinedOutputStream();
+ 
+   // Set up mTempFile and mTempStream (called at
+@@ -56,11 +59,8 @@ class nsQuarantinedOutputStream : public
+   // The temporary file and stream we're writing to.
+   nsCOMPtr<nsIFile> mTempFile;
+   nsCOMPtr<nsIOutputStream> mTempStream;
+ 
+-  // The stream we'll be appending to if it all succeeds.
+-  nsCOMPtr<nsIOutputStream> mTarget;
+-
+   enum {
+     eUninitialized,  // No temp file yet.
+     eOpen,           // We're up and running.
+     eClosed,         // The file has been closed.
 diff --git a/mailnews/db/msgdb/public/nsMsgHdr.h b/mailnews/db/msgdb/public/nsMsgHdr.h
 --- a/mailnews/db/msgdb/public/nsMsgHdr.h
 +++ b/mailnews/db/msgdb/public/nsMsgHdr.h
@@ -124,30 +153,47 @@ diff --git a/mailnews/db/msgdb/src/nsMsgHdr.cpp b/mailnews/db/msgdb/src/nsMsgHdr
 diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
 --- a/mailnews/local/src/nsLocalMailFolder.cpp
 +++ b/mailnews/local/src/nsLocalMailFolder.cpp
-@@ -49,8 +49,9 @@
+@@ -49,8 +49,11 @@
  #include "nsIURIMutator.h"
  #include "mozilla/Components.h"
  #include "mozilla/UniquePtr.h"
  #include "StoreIndexer.h"
++#include "mozilla/Preferences.h"
 +#include "MboxMsgOutputStream.h"
++#include "nsQuarantinedOutputStream.h"
  
  #include <algorithm>
  #include <functional>
  
-@@ -2050,8 +2051,18 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
+@@ -2050,8 +2053,33 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
    // by the time we get here, m_curCopyIndex is 1 relative because
    // WriteStartOfNewMessage increments it
    if (messageIndex < (int32_t)mCopyState->m_messages.Length()) {
      mCopyState->m_message = mCopyState->m_messages[messageIndex];
-+    nsAutoCString storeType;
-+    mCopyState->m_msgStore->GetStoreType(storeType);
-+    if (storeType.EqualsLiteral("mbox")) {
-+      nsCString envAddr;
-+      mCopyState->m_message->GetEnvAddr(envAddr);
-+      PRTime envDate;
-+      mCopyState->m_message->GetEnvDate(&envDate);
-+      static_cast<MboxMsgOutputStream*>(mCopyState->m_fileStream.get())
-+          ->SetEnvelopeDetails(envAddr, envDate);
++    // This shouldn't happen, but better safe than sorry.
++    if (mCopyState->m_message) {
++      // Excuse the hackery, but these classes are not set up for
++      // QueryInterface.
++      nsAutoCString storeType;
++      mCopyState->m_msgStore->GetStoreType(storeType);
++      if (storeType.EqualsLiteral("mbox")) {
++        nsCString envAddr;
++        mCopyState->m_message->GetEnvAddr(envAddr);
++        PRTime envDate;
++        mCopyState->m_message->GetEnvDate(&envDate);
++        if (mozilla::Preferences::GetBool("mailnews.downloadToTempFile",
++                                          false)) {
++          static_cast<MboxMsgOutputStream*>(
++              (static_cast<nsQuarantinedOutputStream*>(
++                   mCopyState->m_fileStream.get())
++                   ->mTarget)
++                  .get())
++              ->SetEnvelopeDetails(envAddr, envDate);
++        } else {
++          static_cast<MboxMsgOutputStream*>(mCopyState->m_fileStream.get())
++              ->SetEnvelopeDetails(envAddr, envDate);
++        }
++      }
 +    }
    } else {
      mCopyState->m_message = nullptr;
