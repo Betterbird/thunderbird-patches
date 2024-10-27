@@ -2,7 +2,7 @@ mkdir %~1
 cd %~1
 
 :: Unpack original
-7z e ..\betterbird-%~2.en-US.win64.installer.exe core/omni.ja
+7z e ..\betterbird-%~2.en-US.win64.installer-unsigned.exe core/omni.ja
 move omni.ja ..\omni.ja
 7z x ..\omni.ja
 del ..\omni.ja
@@ -44,10 +44,14 @@ call ..\%~1.cmd
 7z a -r -tzip -m0=Copy omni.ja *.*
 
 cd ..
-copy betterbird-%~2.en-US.win64.installer.exe betterbird-%~2.%~1.win64.installer.exe
+copy betterbird-%~2.en-US.win64.installer-unsigned.exe betterbird-%~2.%~1.win64.installer.exe
 mkdir core
 mv %~1\omni.ja core\omni.ja
 7z u betterbird-%~2.%~1.win64.installer.exe core\omni.ja
+
+:: Sign
+C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "Set-AuthenticodeSignature -FilePath betterbird-%~2.%~1.win64.installer.exe -Certificate (Get-ChildItem -Path Cert:\CurrentUser\My\ -CodeSigningCert)"
+
 :: Keep omni.ja for later
 mkdir omni-win
 rm omni-win\omni-%~1.ja
