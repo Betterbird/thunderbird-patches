@@ -1,0 +1,134 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1730060120 -3600
+# Node ID e89bb85fe6306ef274e8d820fc148df833563b39
+# Parent  d76c37ed4b4e5a5685a9201f78910226a553df18
+Bug 1919144 - Don't open a compose window if no account is set up yet. r=leftmostcat
+
+Differential Revision: https://phabricator.services.mozilla.com/D225026
+
+diff --git a/mail/components/MessengerContentHandler.sys.mjs b/mail/components/MessengerContentHandler.sys.mjs
+--- a/mail/components/MessengerContentHandler.sys.mjs
++++ b/mail/components/MessengerContentHandler.sys.mjs
+@@ -309,17 +309,20 @@ export class MessengerContentHandler {
+                   Ci.nsIMutableArray
+                 );
+                 args.appendElement(argstring);
+                 args.appendElement(cmdLine);
+-                getOrOpen3PaneWindow().then(win =>
++                getOrOpen3PaneWindow().then(win => {
++                  if (!MailServices.accounts.defaultAccount) {
++                    return; // No account yet; can't compose.
++                  }
+                   Services.ww.openWindow(
+                     win,
+                     "chrome://messenger/content/messengercompose/messengercompose.xhtml",
+                     "_blank",
+                     "chrome,dialog=no,all",
+                     args
+-                  )
+-                );
++                  );
++                });
+                 break;
+               }
+               default:
+                 throw Components.Exception("", Cr.NS_ERROR_ABORT);
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -106,17 +106,21 @@ nsMsgComposeService::OpenComposeWindowWi
+   NS_ENSURE_ARG_POINTER(params);
+ 
+   nsresult rv;
+ 
+-  NS_ENSURE_ARG_POINTER(params);
+-
+   // Use default identity if no identity has been specified
+   nsCOMPtr<nsIMsgIdentity> identity;
+   params->GetIdentity(getter_AddRefs(identity));
+   if (!identity) {
+     GetDefaultIdentity(getter_AddRefs(identity));
+     params->SetIdentity(identity);
+   }
++  if (!identity) {
++    // Failed to get even a default identity.
++    // Can't compose without identity (need to set up account first).
++    // If we don't have an account, the 3pane will already be showing setup.
++    return GetTo3PaneWindow();
++  }
+ 
+   // Create a new window.
+   nsCOMPtr<nsIWindowWatcher> wwatch(do_GetService(NS_WINDOWWATCHER_CONTRACTID));
+   if (!wwatch) return NS_ERROR_FAILURE;
+@@ -277,8 +281,25 @@ nsMsgComposeService::GetOrigWindowSelect
+ 
+   return rv;
+ }
+ 
++nsresult nsMsgComposeService::GetTo3PaneWindow() {
++  nsresult rv;
++  nsCOMPtr<nsIWindowMediator> windowMediator =
++      do_GetService(NS_WINDOWMEDIATOR_CONTRACTID, &rv);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsCOMPtr<mozIDOMWindowProxy> domWindow;
++  rv = windowMediator->GetMostRecentBrowserWindow(getter_AddRefs(domWindow));
++  NS_ENSURE_SUCCESS(rv, NS_ERROR_ABORT);
++  nsCOMPtr<nsPIDOMWindowOuter> outerWin = nsPIDOMWindowOuter::From(domWindow);
++  if (outerWin) {
++    outerWin->Focus(mozilla::dom::CallerType::System);
++    return NS_OK;
++  }
++  return NS_ERROR_ABORT;
++}
++
+ MOZ_CAN_RUN_SCRIPT_FOR_DEFINITION NS_IMETHODIMP
+ nsMsgComposeService::OpenComposeWindow(
+     const nsACString& msgComposeWindowURL, nsIMsgDBHdr* origMsgHdr,
+     const nsACString& originalMsgURI, MSG_ComposeType type,
+@@ -288,8 +309,14 @@ nsMsgComposeService::OpenComposeWindow(
+   nsresult rv;
+ 
+   nsCOMPtr<nsIMsgIdentity> identity = aIdentity;
+   if (!identity) GetDefaultIdentity(getter_AddRefs(identity));
++  if (!identity) {
++    // Failed to get even a default identity.
++    // Can't compose without identity (need to set up account first).
++    // If we don't have an account, the 3pane will already be showing setup.
++    return GetTo3PaneWindow();
++  }
+ 
+   /* Actually, the only way to implement forward inline is to simulate a
+      template message. Maybe one day when we will have more time we can change
+      that
+@@ -1278,8 +1305,15 @@ nsMsgComposeService::Handle(nsICommandLi
+       uristr.Truncate();
+     }
+   }
+   if (composeShouldHandle) {
++    nsCOMPtr<nsIMsgIdentity> identity;
++    GetDefaultIdentity(getter_AddRefs(identity));
++    if (!identity) {
++      // No account yet; can't compose.
++      return NS_OK;
++    }
++
+     aCmdLine->RemoveArguments(found, end);
+ 
+     nsCOMPtr<nsIWindowWatcher> wwatch(
+         do_GetService(NS_WINDOWWATCHER_CONTRACTID));
+diff --git a/mailnews/compose/src/nsMsgComposeService.h b/mailnews/compose/src/nsMsgComposeService.h
+--- a/mailnews/compose/src/nsMsgComposeService.h
++++ b/mailnews/compose/src/nsMsgComposeService.h
+@@ -29,8 +29,10 @@ class nsMsgComposeService : public nsIMs
+ 
+  private:
+   virtual ~nsMsgComposeService();
+ 
++  nsresult GetTo3PaneWindow();
++
+   nsresult LoadDraftOrTemplate(
+       const nsACString& aMsgURI, nsMimeOutputType aOutType,
+       nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+       nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, bool overrideComposeFormat,
