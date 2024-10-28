@@ -1,0 +1,159 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1730131327 -3600
+# Parent  82118f193b876a2b3fa38a0c0e5f7da90e07b6d3
+Debug total count display.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -2741,8 +2741,9 @@ var folderPane = {
+    * @param {nsIMsgFolder} folder
+    * @param {integer} newValue
+    */
+   changeTotalCount(folder, newValue) {
++    console.trace("=== changeTotalCount", folder.URI, newValue);
+     this._changeRows(folder, row => {
+       // Find the nearest visible ancestor and update it.
+       let collapsedAncestor = row.parentElement?.closest("li.collapsed");
+       while (collapsedAncestor) {
+@@ -4392,12 +4393,15 @@ class FolderTreeRow extends HTMLLIElemen
+    *
+    * @type {integer}
+    */
+   get totalCount() {
+-    return parseInt(this.totalCountLabel.textContent, 10) || 0;
++    let tc = parseInt(this.totalCountLabel.textContent, 10) || 0;
++    console.trace("=== get totalCount", this.uri, tc);
++    return tc;
+   }
+ 
+   set totalCount(value) {
++    console.trace("=== set totalCount", this.uri, value);
+     this.classList.toggle("total", value > 0);
+     this.totalCountLabel.textContent = value;
+     this.totalCountLabel.hidden = !folderPane.isTotalMsgCountVisible();
+     this.#updateAriaLabel();
+@@ -4585,11 +4589,13 @@ class FolderTreeRow extends HTMLLIElemen
+   }
+ 
+   updateTotalMessageCount() {
+     const folder = MailServices.folderLookup.getFolderForURL(this.uri);
+-    this.totalCount = folder.getTotalMessages(
++    const tc = folder.getTotalMessages(
+       this.classList.contains("collapsed")
+     );
++    this.totalCount = tc;
++    console.trace("=== updateTotalMessageCount", folder.URI, tc);
+     if (folderPane.isItemVisible("folderPaneFolderSize")) {
+       this.updateSizeCount(false, folder);
+     }
+   }
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -70,8 +70,11 @@
+ #include "mozilla/Utf8.h"
+ #include "nsIPromptService.h"
+ #include "nsEmbedCID.h"
+ 
++/* for logging to Error Console */
++#include "nsIScriptError.h"
++
+ using namespace mozilla;
+ 
+ extern LazyLogModule FILTERLOGMODULE;
+ extern LazyLogModule DBLog;
+@@ -662,8 +665,9 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
+           mInitializedFromCache = true;
+         }
+ 
+         folderInfo->GetNumMessages(&mNumTotalMessages);
++        DumpTotal("ReadDBFolderInfo");
+         folderInfo->GetNumUnreadMessages(&mNumUnreadMessages);
+         folderInfo->GetExpungedBytes(&mExpungedBytes);
+ 
+         nsCString utf8Name;
+@@ -1337,8 +1341,9 @@ NS_IMETHODIMP nsMsgDBFolder::ReadFromFol
+   element->GetCachedInt32("pendingUnreadMsgs", &mNumPendingUnreadMessages);
+   element->GetCachedInt32("pendingMsgs", &mNumPendingTotalMessages);
+   element->GetCachedInt64("expungedBytes", &mExpungedBytes);
+   element->GetCachedInt64("folderSize", &mFolderSize);
++  DumpTotal("ReadFromFolderCacheElem");
+ 
+ #ifdef DEBUG_bienvenu1
+   nsCString uri;
+   GetURI(uri);
+@@ -1413,8 +1418,9 @@ NS_IMETHODIMP nsMsgDBFolder::WriteToFold
+ NS_IMETHODIMP nsMsgDBFolder::WriteToFolderCacheElem(
+     nsIMsgFolderCacheElement* element) {
+   nsresult rv = NS_OK;
+ 
++  DumpTotal("WriteToFolderCacheElem");
+   element->SetCachedUInt32("flags", mFlags);
+   element->SetCachedInt32("totalMsgs", mNumTotalMessages);
+   element->SetCachedInt32("totalUnreadMsgs", mNumUnreadMessages);
+   element->SetCachedInt32("pendingUnreadMsgs", mNumPendingUnreadMessages);
+@@ -3969,12 +3975,14 @@ NS_IMETHODIMP nsMsgDBFolder::UpdateSumma
+   if (!mNotifyCountChanges) return NS_OK;
+ 
+   int32_t oldUnreadMessages = mNumUnreadMessages + mNumPendingUnreadMessages;
+   int32_t oldTotalMessages = mNumTotalMessages + mNumPendingTotalMessages;
++  DumpTotal("UpdateSummaryTotals - old");
+   // We need to read this info from the database
+   nsresult rv = ReadDBFolderInfo(force);
+ 
+   if (NS_SUCCEEDED(rv)) {
++    DumpTotal("UpdateSummaryTotals - new");
+     int32_t newUnreadMessages = mNumUnreadMessages + mNumPendingUnreadMessages;
+     int32_t newTotalMessages = mNumTotalMessages + mNumPendingTotalMessages;
+ 
+     // Need to notify listeners that total count changed.
+@@ -4022,16 +4030,34 @@ NS_IMETHODIMP nsMsgDBFolder::GetNumUnrea
+   *numUnread = total;
+   return NS_OK;
+ }
+ 
++void nsMsgDBFolder::DumpTotal(const char* where) {
++  nsCString uri;
++  GetURI(uri);
++  nsCString msg;
++  if (mNumPendingTotalMessages) {
++    msg = nsPrintfCString("=== %s: %s: total = %" PRIi32 ", pending = %" PRIi32,
++                          where, uri.get(), mNumTotalMessages,
++                          mNumPendingTotalMessages);
++  } else {
++    msg = nsPrintfCString("=== %s: %s: total = %" PRIi32, where, uri.get(),
++                          mNumTotalMessages);
++  }
++  MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                   NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                   nsIScriptError::infoFlag);
++}
++
+ NS_IMETHODIMP nsMsgDBFolder::GetTotalMessages(bool deep,
+                                               int32_t* totalMessages) {
+   NS_ENSURE_ARG_POINTER(totalMessages);
+ 
+   bool isServer = false;
+   nsresult rv = GetIsServer(&isServer);
+   NS_ENSURE_SUCCESS(rv, rv);
+   int32_t total = isServer ? 0 : mNumTotalMessages + mNumPendingTotalMessages;
++  DumpTotal("GetTotalMessages");
+ 
+   if (deep) {
+     if (total < 0)  // deep search never returns negative counts
+       total = 0;
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -125,8 +125,9 @@ class nsMsgDBFolder : public nsSupportsW
+                                   nsAString& aCompressedQuotesStr);
+   void decodeMsgSnippet(const nsACString& aEncodingType, bool aIsComplete,
+                         nsCString& aMsgSnippet);
+   void SetUserSortOrderInCache(uint32_t order, bool overwrite);
++  void DumpTotal(const char* where);
+ 
+   // helper routine to parse the URI and update member variables
+   nsresult parseURI(bool needServer = false);
+   nsresult GetBaseStringBundle(nsIStringBundle** aBundle);
