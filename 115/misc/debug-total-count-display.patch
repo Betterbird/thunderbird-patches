@@ -1,162 +1,9 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1730395132 -3600
-# Parent  82118f193b876a2b3fa38a0c0e5f7da90e07b6d3
+# Date 1730577088 -3600
+# Parent  61c5b3bffd42ae7c1b51d189f0369e9e054b1cbf
 Debug total count display.
 
-diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
---- a/mail/base/content/about3Pane.js
-+++ b/mail/base/content/about3Pane.js
-@@ -2741,8 +2741,9 @@ var folderPane = {
-    * @param {nsIMsgFolder} folder
-    * @param {integer} newValue
-    */
-   changeTotalCount(folder, newValue) {
-+    console.trace("=== changeTotalCount", folder.URI, newValue);
-     this._changeRows(folder, row => {
-       // Find the nearest visible ancestor and update it.
-       let collapsedAncestor = row.parentElement?.closest("li.collapsed");
-       while (collapsedAncestor) {
-@@ -4392,12 +4393,15 @@ class FolderTreeRow extends HTMLLIElemen
-    *
-    * @type {integer}
-    */
-   get totalCount() {
--    return parseInt(this.totalCountLabel.textContent, 10) || 0;
-+    let tc = parseInt(this.totalCountLabel.textContent, 10) || 0;
-+    console.trace("=== get totalCount", this.uri, tc);
-+    return tc;
-   }
- 
-   set totalCount(value) {
-+    console.trace("=== set totalCount", this.uri, value);
-     this.classList.toggle("total", value > 0);
-     this.totalCountLabel.textContent = value;
-     this.totalCountLabel.hidden = !folderPane.isTotalMsgCountVisible();
-     this.#updateAriaLabel();
-@@ -4585,11 +4589,13 @@ class FolderTreeRow extends HTMLLIElemen
-   }
- 
-   updateTotalMessageCount() {
-     const folder = MailServices.folderLookup.getFolderForURL(this.uri);
--    this.totalCount = folder.getTotalMessages(
-+    const tc = folder.getTotalMessages(
-       this.classList.contains("collapsed")
-     );
-+    this.totalCount = tc;
-+    console.trace("=== updateTotalMessageCount", folder.URI, tc);
-     if (folderPane.isItemVisible("folderPaneFolderSize")) {
-       this.updateSizeCount(false, folder);
-     }
-   }
-diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
---- a/mailnews/base/src/nsMsgDBFolder.cpp
-+++ b/mailnews/base/src/nsMsgDBFolder.cpp
-@@ -70,8 +70,11 @@
- #include "mozilla/Utf8.h"
- #include "nsIPromptService.h"
- #include "nsEmbedCID.h"
- 
-+/* for logging to Error Console */
-+#include "nsIScriptError.h"
-+
- using namespace mozilla;
- 
- extern LazyLogModule FILTERLOGMODULE;
- extern LazyLogModule DBLog;
-@@ -662,8 +665,9 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
-           mInitializedFromCache = true;
-         }
- 
-         folderInfo->GetNumMessages(&mNumTotalMessages);
-+        DumpTotal("ReadDBFolderInfo");
-         folderInfo->GetNumUnreadMessages(&mNumUnreadMessages);
-         folderInfo->GetExpungedBytes(&mExpungedBytes);
- 
-         nsCString utf8Name;
-@@ -1337,8 +1341,9 @@ NS_IMETHODIMP nsMsgDBFolder::ReadFromFol
-   element->GetCachedInt32("pendingUnreadMsgs", &mNumPendingUnreadMessages);
-   element->GetCachedInt32("pendingMsgs", &mNumPendingTotalMessages);
-   element->GetCachedInt64("expungedBytes", &mExpungedBytes);
-   element->GetCachedInt64("folderSize", &mFolderSize);
-+  DumpTotal("ReadFromFolderCacheElem");
- 
- #ifdef DEBUG_bienvenu1
-   nsCString uri;
-   GetURI(uri);
-@@ -1413,8 +1418,9 @@ NS_IMETHODIMP nsMsgDBFolder::WriteToFold
- NS_IMETHODIMP nsMsgDBFolder::WriteToFolderCacheElem(
-     nsIMsgFolderCacheElement* element) {
-   nsresult rv = NS_OK;
- 
-+  DumpTotal("WriteToFolderCacheElem");
-   element->SetCachedUInt32("flags", mFlags);
-   element->SetCachedInt32("totalMsgs", mNumTotalMessages);
-   element->SetCachedInt32("totalUnreadMsgs", mNumUnreadMessages);
-   element->SetCachedInt32("pendingUnreadMsgs", mNumPendingUnreadMessages);
-@@ -3969,12 +3975,14 @@ NS_IMETHODIMP nsMsgDBFolder::UpdateSumma
-   if (!mNotifyCountChanges) return NS_OK;
- 
-   int32_t oldUnreadMessages = mNumUnreadMessages + mNumPendingUnreadMessages;
-   int32_t oldTotalMessages = mNumTotalMessages + mNumPendingTotalMessages;
-+  DumpTotal("UpdateSummaryTotals - old");
-   // We need to read this info from the database
-   nsresult rv = ReadDBFolderInfo(force);
- 
-   if (NS_SUCCEEDED(rv)) {
-+    DumpTotal("UpdateSummaryTotals - new");
-     int32_t newUnreadMessages = mNumUnreadMessages + mNumPendingUnreadMessages;
-     int32_t newTotalMessages = mNumTotalMessages + mNumPendingTotalMessages;
- 
-     // Need to notify listeners that total count changed.
-@@ -4022,16 +4030,34 @@ NS_IMETHODIMP nsMsgDBFolder::GetNumUnrea
-   *numUnread = total;
-   return NS_OK;
- }
- 
-+void nsMsgDBFolder::DumpTotal(const char* where) {
-+  nsCString uri;
-+  GetURI(uri);
-+  nsCString msg;
-+  if (mNumPendingTotalMessages) {
-+    msg = nsPrintfCString("=== %s: %s: total = %" PRIi32 ", pending = %" PRIi32,
-+                          where, uri.get(), mNumTotalMessages,
-+                          mNumPendingTotalMessages);
-+  } else {
-+    msg = nsPrintfCString("=== %s: %s: total = %" PRIi32, where, uri.get(),
-+                          mNumTotalMessages);
-+  }
-+  MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
-+                   NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
-+                   nsIScriptError::infoFlag);
-+}
-+
- NS_IMETHODIMP nsMsgDBFolder::GetTotalMessages(bool deep,
-                                               int32_t* totalMessages) {
-   NS_ENSURE_ARG_POINTER(totalMessages);
- 
-   bool isServer = false;
-   nsresult rv = GetIsServer(&isServer);
-   NS_ENSURE_SUCCESS(rv, rv);
-   int32_t total = isServer ? 0 : mNumTotalMessages + mNumPendingTotalMessages;
-+  DumpTotal("GetTotalMessages");
- 
-   if (deep) {
-     if (total < 0)  // deep search never returns negative counts
-       total = 0;
-diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
---- a/mailnews/base/src/nsMsgDBFolder.h
-+++ b/mailnews/base/src/nsMsgDBFolder.h
-@@ -125,8 +125,9 @@ class nsMsgDBFolder : public nsSupportsW
-                                   nsAString& aCompressedQuotesStr);
-   void decodeMsgSnippet(const nsACString& aEncodingType, bool aIsComplete,
-                         nsCString& aMsgSnippet);
-   void SetUserSortOrderInCache(uint32_t order, bool overwrite);
-+  void DumpTotal(const char* where);
- 
-   // helper routine to parse the URI and update member variables
-   nsresult parseURI(bool needServer = false);
-   nsresult GetBaseStringBundle(nsIStringBundle** aBundle);
 diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 --- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 +++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
@@ -174,15 +21,47 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
    m_usingCachedHits = false;
    m_cacheEmpty = true;
    m_doingQuickSearch = false;
-@@ -334,8 +339,16 @@ nsMsgQuickSearchDBView::OnSearchDone(nsr
+@@ -290,19 +295,25 @@ nsMsgQuickSearchDBView::OnSearchHit(nsIM
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::OnSearchDone(nsresult status) {
+-  uint32_t folderFlags = 0;
+-  if (m_viewFolder) m_viewFolder->GetFlags(&folderFlags);
+   if (!m_doingQuickSearch) {
+     // This batch began in OnNewSearch.
+     if (mJSTree) mJSTree->EndUpdateBatch();
+   }
++
++  nsCString msg;
++  msg = nsPrintfCString("=== nsMsgQuickSearchDBView::OnSearchDone: status = %" PRIx32 ", total = %" PRIi64,
++                        status, m_origKeys.Length());
++  MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                   NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                   nsIScriptError::infoFlag);
++
+   // We're a single-folder virtual folder if viewFolder != folder, and that is
+   // the only case in which we want to be messing about with a results cache
+   // or unread counts.
+   if (!m_doingQuickSearch && !m_usingCachedHits && m_db && m_viewFolder &&
+-      m_viewFolder != m_folder) {
++      m_viewFolder != m_folder && status != NS_MSG_SEARCH_INTERRUPTED) {
+     nsTArray<nsMsgKey> keyArray;
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     uint32_t count = m_hdrHits.Count();
+@@ -334,8 +345,19 @@ nsMsgQuickSearchDBView::OnSearchDone(nsr
        bool isRead;
        m_db->IsRead(m_origKeys[i], &isRead);
        if (!isRead) numUnread++;
      }
 +
-+    nsCString msg;
-+    msg = nsPrintfCString("=== nsMsgQuickSearchDBView::OnSearchDone: total = %" PRIi64,
-+                          numTotal);
++    nsCOMPtr<nsIMsgFolder> folder;
++    virtDatabase->GetFolder(getter_AddRefs(folder));
++    nsCString uri;
++    if (folder) folder->GetURI(uri);
++    msg = nsPrintfCString("=== nsMsgQuickSearchDBView::OnSearchDone: %s, SetNumMessages(%" PRIi64 ")",
++                          uri.get(), numTotal);
 +    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                     NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                     nsIScriptError::infoFlag);
@@ -208,7 +87,22 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
    mSuppressMsgDisplay = false;
    m_doingSearch = false;
    m_doingQuickSearch = false;
-@@ -300,37 +305,49 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+@@ -282,8 +287,14 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+   if (!m_doingQuickSearch) {
+     // This batch began in OnNewSearch.
+     if (mJSTree) mJSTree->EndUpdateBatch();
+   }
++  nsCString msg;
++  msg = nsPrintfCString("=== nsMsgXFVirtualFolderDBView::OnSearchDone: status = %" PRIx32 ", total = %" PRIi32,
++                        status, m_totalMessagesInView);
++  MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                   NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                   nsIScriptError::infoFlag);
+ 
+   NS_ENSURE_TRUE(m_viewFolder, NS_ERROR_NOT_INITIALIZED);
+ 
+   // Handle any non verified hits we haven't handled yet.
+@@ -300,37 +311,52 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
    mDeleteModel = nsMsgImapDeleteModels::MoveToTrash;
    nsIMsgFolder* curFolder = m_folders.SafeObjectAt(0);
    if (curFolder) GetImapDeleteModel(curFolder);
@@ -233,7 +127,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 -        numUnread += unreadInThread;
 +  // The following should be necessary when `m_usingCachedHits` ist true,
 +  // but it won't hurt to adjust the counts which what we restored from cache.
-+  if (!m_doingQuickSearch) {
++  if (!m_doingQuickSearch && status != NS_MSG_SEARCH_INTERRUPTED) {
 +    nsCOMPtr<nsIMsgDatabase> virtDatabase;
 +    nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
 +    nsresult rv = m_viewFolder->GetDBFolderInfoAndDB(
@@ -260,9 +154,12 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 -      if (!(m_flags[i] & nsMsgMessageFlags::Read)) numUnread++;
      }
 +
-+    nsCString msg;
-+    msg = nsPrintfCString("=== nsMsgXFVirtualFolderDBView::OnSearchDone: total = %" PRIi32,
-+                          m_totalMessagesInView);
++    nsCOMPtr<nsIMsgFolder> folder;
++    virtDatabase->GetFolder(getter_AddRefs(folder));
++    nsCString uri;
++    if (folder) folder->GetURI(uri);
++    msg = nsPrintfCString("=== nsMsgXFVirtualFolderDBView::OnSearchDone: %s, SetNumMessages(%" PRIi32 ")",
++                          uri.get(), m_totalMessagesInView);
 +    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                     NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                     nsIScriptError::infoFlag);
@@ -283,7 +180,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
        !(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay)) {
      // Sort the results.
      m_sortValid = false;
-@@ -338,9 +355,9 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+@@ -338,9 +364,9 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
    }
  
    m_foldersSearchingOver.Clear();
@@ -387,3 +284,60 @@ diff --git a/mailnews/db/msgdb/src/nsDBFolderInfo.cpp b/mailnews/db/msgdb/src/ns
  }
  
  NS_IMETHODIMP nsDBFolderInfo::GetExpungedBytes(int64_t* result) {
+diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
+--- a/mailnews/search/src/nsMsgSearchSession.cpp
++++ b/mailnews/search/src/nsMsgSearchSession.cpp
+@@ -31,8 +31,9 @@ nsMsgSearchSession::nsMsgSearchSession()
+   m_expressionTree = nullptr;
+   m_searchPaused = false;
+   m_iListener = -1;
+   m_suppressed = false;
++  m_interrupted = false;
+ }
+ 
+ nsMsgSearchSession::~nsMsgSearchSession() {
+   InterruptSearch();
+@@ -211,8 +212,9 @@ NS_IMETHODIMP nsMsgSearchSession::Suppre
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgSearchSession::Search(nsIMsgWindow* aWindow) {
++  m_interrupted = false;
+   nsresult rv = Initialize();
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIMsgSearchNotify> listener;
+@@ -228,9 +230,9 @@ NS_IMETHODIMP nsMsgSearchSession::Search
+   m_msgWindowWeak = do_GetWeakReference(aWindow);
+ 
+   if (m_suppressed) {
+     m_suppressed = false;
+-    NotifyListenersDone(NS_OK);
++    NotifyListenersDone(m_interrupted ? NS_MSG_SEARCH_INTERRUPTED : NS_OK);
+     return NS_OK;
+   }
+ 
+   return BeginSearching();
+@@ -250,8 +252,9 @@ NS_IMETHODIMP nsMsgSearchSession::Interr
+     // another url
+   }
+   if (m_backgroundTimer) {
+     m_backgroundTimer->Cancel();
++    m_interrupted = true;
+     NotifyListenersDone(NS_MSG_SEARCH_INTERRUPTED);
+ 
+     m_backgroundTimer = nullptr;
+   }
+diff --git a/mailnews/search/src/nsMsgSearchSession.h b/mailnews/search/src/nsMsgSearchSession.h
+--- a/mailnews/search/src/nsMsgSearchSession.h
++++ b/mailnews/search/src/nsMsgSearchSession.h
+@@ -81,8 +81,9 @@ class nsMsgSearchSession : public nsIMsg
+   nsCString m_runningUrl;  // The url for the current search
+   nsCOMPtr<nsITimer> m_backgroundTimer;
+   bool m_searchPaused;
+   bool m_suppressed;
++  bool m_interrupted;
+   nsMsgSearchBoolExpression* m_expressionTree;
+ };
+ 
+ #endif
