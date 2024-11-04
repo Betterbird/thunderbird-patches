@@ -60,6 +60,7 @@ checkHash() {
   else
     echoLog "Hash check OK, hash matched ${update:1}."
   fi
+  rm "$tmpDir/sha256.txt"
 }
 
 backup() {
@@ -81,6 +82,7 @@ extract() {
   rm -rf "$installDir/betterbird"
   tar xjf "$tmpFile" -C "$installDir"
   echoLog "Extracted to $installDir/betterbird."
+  rm "$tmpFile"
 }
 
 createDesktopFile() {
