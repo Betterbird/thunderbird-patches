@@ -1,0 +1,236 @@
+# HG changeset patch
+# User Ben Campbell <benc@thunderbird.net>
+# Date 1730928960 -3600
+# Node ID e4fbff3c7f6c1ef106aef831d04e654cdd9a0d78
+# Parent  7a1dc9004c8797b94af0c1b04806432d0ca16c5f
+Bug 1926810 - Fail mbox reads if offset into mbox file doesn't start at a "From " separator. r=mkmelin
+
+This patch makes the Mbox reader much more fussy. Previously, it'd just start
+reading from where it was told to, and ignored a missing "From " separator
+line at the beginning of a message.
+This patch makes it much more strict, throwing a Read() error if that "From "
+line is not there.
+
+Differential Revision: https://phabricator.services.mozilla.com/D227315
+
+Depends on D227314
+
+diff --git a/mailnews/base/public/msgCore.h b/mailnews/base/public/msgCore.h
+--- a/mailnews/base/public/msgCore.h
++++ b/mailnews/base/public/msgCore.h
+@@ -170,8 +170,11 @@ class nsIMsgFolder;
+ #define NS_MSG_ERROR_INVALID_FOLDER_NAME NS_MSG_GENERATE_FAILURE(34)
+ 
+ #define NS_MSG_ERROR_UNEXPECTED_SIZE NS_MSG_GENERATE_FAILURE(35)
+ 
++// Mbox message doesn't start with "From " separator line.
++#define NS_MSG_ERROR_MBOX_MALFORMED NS_MSG_GENERATE_FAILURE(36)
++
+ /* Error codes for message compose are defined in
+    compose\src\nsMsgComposeStringBundle.h. Message compose use the same error
+    code space as other mailnews modules. To avoid any conflict, values between
+    12500 and 12999 are reserved.
+diff --git a/mailnews/base/src/MboxMsgInputStream.cpp b/mailnews/base/src/MboxMsgInputStream.cpp
+--- a/mailnews/base/src/MboxMsgInputStream.cpp
++++ b/mailnews/base/src/MboxMsgInputStream.cpp
+@@ -61,12 +61,19 @@ class MboxParser {
+    * Returns true when a complete message has been parsed and read out
+    * via Drain().
+    */
+   bool IsFinished() const {
+-    return Available() == 0 && (mState == eEOF || mState == eMessageComplete);
++    return Available() == 0 && (mState == eEOF || mState == eMessageComplete ||
++                                mState == eMalformed);
+   }
+ 
+   /**
++   * Returns true if the parser has decided the mbox is malformed and refuses
++   * to proceed (e.g. Missing a "From " line at the beginning).
++   */
++  bool IsMalformed() const { return mState == eMalformed; }
++
++  /**
+    * Returns true when the end of the mbox has been reached (and the last
+    * message has been completely read out via Drain()).
+    */
+   bool AtEOF() const { return Available() == 0 && mState == eEOF; }
+@@ -112,9 +119,10 @@ class MboxParser {
+     // Loop until we've used up all the data we can.
+     while (true) {
+       // If a message is complete (or the mbox is finished), then
+       // we stall.
+-      if (mState == eMessageComplete || mState == eEOF) {
++      if (mState == eMessageComplete || mState == eEOF ||
++          mState == eMalformed) {
+         break;
+       }
+ 
+       // Have the current state use up as much data as it needs.
+@@ -211,8 +219,9 @@ class MboxParser {
+     eCountQuoting,  // Line starts with one or more '>' chars.
+     eEmitQuoting,
+     eEmitBodyLine,
+     eMessageComplete,  // Message is complete (or ended prematurely).
++    eMalformed,        // Error. No initial "From " line was found.
+     eEOF,              // End of mbox.
+   } mState{eExpectFromLine};
+ 
+   // handle_<state>() functions consume as much data as they need, and
+@@ -220,19 +229,13 @@ class MboxParser {
+   // If they are given <MinChunk bytes, they are free to assume the end
+   // the mbox file has been reached.
+   span handle(span data) {
+     {
+-      const char* stateName[] = {"eExpectFromLine",
+-                                 "eDiscardFromLine",
+-                                 "eExpectHeaderLine",
+-                                 "eEmitHeaderLine",
+-                                 "eEmitSeparator",
+-                                 "eExpectBodyLine",
+-                                 "eCountQuoting",
+-                                 "eEmitQuoting",
+-                                 "eEmitBodyLine",
+-                                 "eMessageComplete",
+-                                 "eEOF"};
++      const char* stateName[] = {
++          "eExpectFromLine",  "eDiscardFromLine", "eExpectHeaderLine",
++          "eEmitHeaderLine",  "eEmitSeparator",   "eExpectBodyLine",
++          "eCountQuoting",    "eEmitQuoting",     "eEmitBodyLine",
++          "eMessageComplete", "eMalformed",       "eEOF"};
+       MOZ_LOG(gMboxLog, LogLevel::Verbose,
+               ("MboxParser - handle %s (%zu bytes: '%s')", stateName[mState],
+                data.Length(),
+                CEscapeString(nsDependentCSubstring(data), 80).get()));
+@@ -257,8 +260,10 @@ class MboxParser {
+       case eEmitBodyLine:
+         return handle_eEmitBodyLine(data);
+       case eMessageComplete:
+         return handle_eMessageComplete(data);
++      case eMalformed:
++        return handle_eMalformed(data);
+       case eEOF:
+         return handle_eEOF(data);
+       default:
+         MOZ_ASSERT_UNREACHABLE();  // should not happen
+@@ -338,12 +343,11 @@ class MboxParser {
+         ParseFromLine(span(data.begin(), eol), mEnvAddr, mEnvDate);
+       }
+       mState = eDiscardFromLine;
+     } else {
+-      MOZ_LOG(gMboxLog, LogLevel::Warning,
++      MOZ_LOG(gMboxLog, LogLevel::Error,
+               ("MboxParser - Missing 'From ' separator"));
+-      // Just jump straight to header phase.
+-      mState = eExpectHeaderLine;
++      mState = eMalformed;
+     }
+     return data;
+   }
+ 
+@@ -520,8 +524,11 @@ class MboxParser {
+     }
+     return data;
+   }
+ 
++  // Halt parsing, So this is a no-op.
++  span handle_eMalformed(span data) { return data; }
++
+   // All done, so this is a no-op.
+   span handle_eEOF(span data) {
+     MOZ_ASSERT(data.IsEmpty());
+     return data;
+@@ -870,8 +877,12 @@ nsresult MboxMsgInputStream::PumpData() 
+     mUsed += consumed;
+     mUnused -= consumed;
+   }
+ 
++  if (mParser->IsMalformed()) {
++    return NS_MSG_ERROR_MBOX_MALFORMED;
++  }
++
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP MboxMsgInputStream::ReadSegments(nsWriteSegmentFun writer,
+diff --git a/mailnews/base/test/gtest/Helpers.cpp b/mailnews/base/test/gtest/Helpers.cpp
+--- a/mailnews/base/test/gtest/Helpers.cpp
++++ b/mailnews/base/test/gtest/Helpers.cpp
+@@ -11,36 +11,44 @@
+ #include "mozilla/Buffer.h"
+ 
+ namespace testing {
+ 
+-void ExtractFromMbox(nsACString const& mbox, nsTArray<nsCString>& msgs,
+-                     size_t readSize) {
++// Parses all the messages in mbox returning them as an array.
++nsresult ExtractFromMbox(nsACString const& mbox, nsTArray<nsCString>& msgs,
++                         size_t readSize) {
+   // Open stream for raw mbox.
+   nsCOMPtr<nsIInputStream> raw;
+   nsresult rv = NS_NewByteInputStream(getter_AddRefs(raw), mozilla::Span(mbox),
+                                       NS_ASSIGNMENT_COPY);
+-  ASSERT_TRUE(NS_SUCCEEDED(rv));
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
+ 
+   msgs.Clear();
+   // Wrap with MboxMsgInputStream and read single message.
+   RefPtr<MboxMsgInputStream> rdr = new MboxMsgInputStream(raw, 0);
+ 
+   while (true) {
+     nsAutoCString got;
+     rv = Slurp(rdr, readSize, got);
+-    ASSERT_TRUE(NS_SUCCEEDED(rv));
++    if (NS_FAILED(rv)) {
++      return rv;
++    }
+     // Corner case: suppress dud message for empty mbox file.
+     if (!rdr->IsNullMessage()) {
+       msgs.AppendElement(got);
+     }
+     // Try and reuse the MboxMsgInputStream for the next message.
+     bool more;
+     rv = rdr->Continue(more);
+-    ASSERT_TRUE(NS_SUCCEEDED(rv));
++    if (NS_FAILED(rv)) {
++      return rv;
++    }
+     if (!more) {
+       break;
+     }
+   }
++  return NS_OK;
+ }
+ 
+ // Read all the data out of a stream into a string, reading readSize
+ // bytes at a time.
+@@ -49,9 +57,11 @@ nsresult Slurp(nsIInputStream* src, size
+   out.Truncate();
+   while (true) {
+     uint32_t n;
+     nsresult rv = src->Read(readbuf.Elements(), readbuf.Length(), &n);
+-    NS_ENSURE_SUCCESS(rv, rv);
++    if (NS_FAILED(rv)) {
++      return rv;
++    }
+     if (n == 0) {
+       break;  // EOF.
+     }
+     out.Append(readbuf.Elements(), n);
+diff --git a/mailnews/base/test/gtest/Helpers.h b/mailnews/base/test/gtest/Helpers.h
+--- a/mailnews/base/test/gtest/Helpers.h
++++ b/mailnews/base/test/gtest/Helpers.h
+@@ -23,10 +23,10 @@ namespace testing {
+  * parsing code like MboxMsgInputStream might have little biases which
+  * produce bad results at different read sizes, so this can be used to
+  * shake it out by asking for, say, a single byte at a time.
+  */
+-void ExtractFromMbox(nsACString const& mbox, nsTArray<nsCString>& msgs,
+-                     size_t readSize = 4096);
++nsresult ExtractFromMbox(nsACString const& mbox, nsTArray<nsCString>& msgs,
++                         size_t readSize = 4096);
+ 
+ /**
+  * Slurp just reads the src stream until EOF, returning the data in
+  * `out`.
