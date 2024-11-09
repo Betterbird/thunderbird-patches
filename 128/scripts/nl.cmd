@@ -196,3 +196,6 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "quick-filter-bar-match-addressbook ="                                                                    >> localization\nl\messenger\about3Pane.ftl
 %lecho% "    .label = Adresboek vergelijken"                                                                      >> localization\nl\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Vergelijken op weergegeven naam (start met), of schermnaam (exact) in de adresboeken" >> localization\nl\messenger\about3Pane.ftl
+
+:: String the negligent TB people forgot to ship:
+%lecho% "qr-export-oauth-warning = Sommige van uw accounts gebruiken een authenticatiemethode die mogelijk herauthenticatie op uw mobiele apparaat vereist. Mogelijk moet u tijdens dit proces uw wachtwoorden opnieuw invoeren." >> localization\nl\messenger\preferences\preferences.ftl
