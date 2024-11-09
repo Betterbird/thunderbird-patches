@@ -43,7 +43,7 @@ sed -i -e 's/en-US en-US\/locale\/pdfviewer/%~1 %~1\/locale\/pdfviewer/' chrome\
 call ..\%~1.cmd
 
 :: Pack the whole thing again
-7z a -r -tzip -m0=Copy omni.ja *.*
+7z a -r -tzip -m0=Copy omni.ja *
 
 cd ..
 mv betterbird-%~2.en-US.linux-x86_64.tar betterbird-%~2.%~1.linux-x86_64.tar
