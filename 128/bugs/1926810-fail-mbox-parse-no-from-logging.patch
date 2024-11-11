@@ -1,91 +1,55 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1731151564 -3600
-# Parent  1aab4b25d36e6ae3e721824d90ca545e9b958384
+# Date 1731331187 -3600
+# Parent  0371c35440fb95eefad96322ea788d7825c8bd42
 Bug 1926810 - Continuation: Log mbox errors to console.
 
-diff --git a/mailnews/base/src/MboxMsgInputStream.cpp b/mailnews/base/src/MboxMsgInputStream.cpp
---- a/mailnews/base/src/MboxMsgInputStream.cpp
-+++ b/mailnews/base/src/MboxMsgInputStream.cpp
-@@ -10,8 +10,13 @@
- #include "mozilla/Telemetry.h"
- #include "mozilla/Logging.h"
- #include <algorithm>
+diff --git a/mailnews/base/src/MboxMsgInputStream.h b/mailnews/base/src/MboxMsgInputStream.h
+--- a/mailnews/base/src/MboxMsgInputStream.h
++++ b/mailnews/base/src/MboxMsgInputStream.h
+@@ -88,8 +88,10 @@ class MboxMsgInputStream : public nsIInp
+    * If the "From " line contained a timestamp, it can be accessed here.
+    * Otherwise 0 will be returned.
+    */
+   PRTime EnvDate();
++  
++  nsresult MboxStatus() { return mStatus; }
+ 
+  protected:
+   virtual ~MboxMsgInputStream();
+ 
+diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+--- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
++++ b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+@@ -42,8 +42,12 @@
+ #include "prprf.h"
+ #include <cstdlib>  // for std::abs(int/long)
+ #include <cmath>    // for std::abs(float/double)
  
 +/* for logging to Error Console */
 +#include "nsIScriptError.h"
 +#include "nsPrintfCString.h"
-+#include "nsMsgUtils.h"
 +
- extern mozilla::LazyLogModule gMboxLog;
+ mozilla::LazyLogModule gMboxLog("mbox");
  using mozilla::LogLevel;
  
  /**
-@@ -714,8 +719,9 @@ MboxMsgInputStream::MboxMsgInputStream(n
-       mParser(new MboxParser()) {
-   // Ensure the first chunk is read and parsed.
-   // This should include the "From " line, so EnvAddr()/EnvDate()
-   // can be used right away.
-+  mRawTellStream = do_QueryInterface(mRawStream);
-   mStatus = PumpData();
- }
- 
- MboxMsgInputStream::~MboxMsgInputStream() { Close(); }
-@@ -854,8 +860,9 @@ NS_IMETHODIMP MboxMsgInputStream::Read(c
- // data (e.g. a "From " line falling between read boundaries).
- nsresult MboxMsgInputStream::PumpData() {
-   // Feed data to the parser until there's data available to output (or until
-   // message is completed).
-+  int64_t pos = 0;
-   while (mParser->Available() == 0 && !mParser->IsFinished()) {
-     while (mUnused < MboxParser::MinChunk) {
-       if (mUsed > 0) {
-         // Shift the unused portion to the front of the buffer.
-@@ -865,8 +872,9 @@ nsresult MboxMsgInputStream::PumpData() 
-       }
- 
-       uint32_t got;
-       size_t want = mBuf.Length() - (mUsed + mUnused);
-+      if (mRawTellStream) mRawTellStream->Tell(&pos);
-       nsresult rv = mRawStream->Read(mBuf.Elements() + mUnused, want, &got);
-       if (NS_FAILED(rv)) {
-         return rv;
-       }
-@@ -889,8 +897,14 @@ nsresult MboxMsgInputStream::PumpData() 
-   if (mParser->IsMalformed()) {
-     mozilla::Telemetry::ScalarAdd(
-         mozilla::Telemetry::ScalarID::TB_MAILS_MBOX_READ_ERRORS,
-         u"missing_from"_ns, 1);
+@@ -1351,8 +1355,18 @@ nsMsgBrkMBoxStore::GetMsgInputStream(nsI
+   NS_ENSURE_SUCCESS(rv, rv);
+   // Stream to return a single message, hiding all "From "-separator guff.
+   RefPtr<MboxMsgInputStream> msgStream =
+       new MboxMsgInputStream(rawMboxStream, aMaxAllowedSize);
++  if (msgStream->MboxStatus() == NS_MSG_ERROR_MBOX_MALFORMED) {
++    nsCString fileName(mboxFile->HumanReadablePath());
 +    nsCString msg;
-+    msg = nsPrintfCString(
-+        "Mbox parsing error at offset %" PRIi64 " (0x%" PRIx64 ")", pos, pos);
++    msg = nsPrintfCString("Mbox parsing error at offset %" PRIi64 " (0x%" PRIx64
++                          ") on %s",
++                          offset, offset, fileName.get());
 +    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                     NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                     nsIScriptError::errorFlag);
-     return NS_MSG_ERROR_MBOX_MALFORMED;
-   }
- 
++  }
+   msgStream.forget(aResult);
    return NS_OK;
-diff --git a/mailnews/base/src/MboxMsgInputStream.h b/mailnews/base/src/MboxMsgInputStream.h
---- a/mailnews/base/src/MboxMsgInputStream.h
-+++ b/mailnews/base/src/MboxMsgInputStream.h
-@@ -6,8 +6,9 @@
- #ifndef COMM_MAILNEWS_BASE_SRC_MBOXMSGINPUTSTREAM_H_
- #define COMM_MAILNEWS_BASE_SRC_MBOXMSGINPUTSTREAM_H_
+ }
  
- #include "nsIInputStream.h"
-+#include "nsITellableStream.h"
- #include "nsCOMPtr.h"
- #include "mozilla/Buffer.h"
- 
- class MboxParser;
-@@ -96,8 +97,9 @@ class MboxMsgInputStream : public nsIInp
-   nsresult PumpData();
- 
-   // The underlying mbox stream we're parsing.
-   nsCOMPtr<nsIInputStream> mRawStream;
-+  nsCOMPtr<nsITellableStream> mRawTellStream;
-   nsresult mStatus;
- 
-   // Our input buffer.
-   mozilla::Buffer<char> mBuf;
