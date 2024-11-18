@@ -1,8 +1,112 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1731841216 -3600
-# Parent  b0018f75f438dea26b2aea63f412e96f7d0e706b
+# Date 1731931301 -3600
+# Parent  03aa2bc54b9e409416852739564dc6361ddb166b
 
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -17,8 +17,9 @@
+ #include "nsServiceManagerUtils.h"
+ 
+ /* for logging to Error Console */
+ #include "nsIScriptError.h"
++#include "nsPrintfCString.h"
+ #include "nsMsgUtils.h"
+ 
+ nsMsgXFVirtualFolderDBView::nsMsgXFVirtualFolderDBView() {
+   mSuppressMsgDisplay = false;
+@@ -185,14 +186,27 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForFolder(
+     nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits) {
+   nsCOMPtr<nsIMsgDatabase> db;
+   nsresult rv = folder->GetMsgDatabaseLRU(getter_AddRefs(db));
++  nsCString baseUri;
++  folder->GetURI(baseUri);
+   if (NS_SUCCEEDED(rv) && db) {
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     nsTArray<nsMsgKey> badHits;
+     rv = db->RefreshCache(searchUri, newHits, badHits);
+     if (NS_SUCCEEDED(rv)) {
++      nsCString msg =
++
++          nsPrintfCString(
++              "Search folder %s: Cache for %s populated with new hits: %" PRIu64
++              ", removed: %" PRIu64,
++              searchUri.get(), baseUri.get(), newHits.Length(),
++              badHits.Length());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++
+       nsCOMPtr<nsIMsgDBHdr> badHdr;
+       for (nsMsgKey badKey : badHits) {
+         // ### of course, this isn't quite right, since we should be
+         // using FindHdr, and we shouldn't be expanding the threads.
+@@ -420,16 +434,25 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+     if (mJSTree) mJSTree->BeginUpdateBatch();
+   }
+ 
+   bool allScopesHaveCache = true;
++  nsAutoCString hits;
++  nsCString searchUri;
++  m_viewFolder->GetURI(searchUri);
+   for (int32_t i = 0; i < scopeCount; i++) {
+     nsMsgSearchScopeValue scopeId;
+     nsCOMPtr<nsIMsgFolder> searchFolder;
+     searchSession->GetNthSearchScope(i, &scopeId, getter_AddRefs(searchFolder));
+     if (searchFolder) {
++      nsCString baseURI;
++      searchFolder->GetURI(baseURI);
++      if (hits.IsEmpty()) {
++        hits = baseURI + ": "_ns;
++      } else {
++        hits += ", "_ns + baseURI + ": "_ns;
++      }
++      int32_t baseHits = 0;
+       nsCOMPtr<nsIMsgDatabase> searchDB;
+-      nsCString searchUri;
+-      m_viewFolder->GetURI(searchUri);
+       nsresult rv = searchFolder->GetMsgDatabaseLRU(getter_AddRefs(searchDB));
+       if (NS_SUCCEEDED(rv) && searchDB) {
+         if (msgDBService)
+           msgDBService->RegisterPendingListener(searchFolder, this);
+@@ -457,8 +480,9 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+                 prevKey = msgKey;
+ #endif
+                 AddHdrFromFolder(header, searchFolder);
+                 m_totalMessagesInView++;
++                baseHits++;
+               } else {
+                 break;
+               }
+ 
+@@ -470,8 +494,9 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+         } else {
+           allScopesHaveCache = false;
+         }
+       }
++      hits += nsPrintfCString("%" PRIi32, baseHits);
+     }
+   }
+ 
+   if (!m_doingQuickSearch && !allScopesHaveCache) {
+@@ -483,8 +508,14 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+ 
+   if (!m_doingQuickSearch && allScopesHaveCache) {
+     m_usingCachedHits = true;
+     searchSession->SuppressSearch(true);
++    nsCString msg = nsPrintfCString(
++        "Search folder %s: View populated with retrieved cache hits: %s",
++        searchUri.get(), hits.get());
++    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                     NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                     nsIScriptError::infoFlag);
+   } else {
+     // Reset the total count, it will be increased in
+     // `OnSearchHit()` which isn't called if we suppress the search.
+     m_totalMessagesInView = 0;
 diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
 --- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
 +++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
@@ -19,6 +123,18 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
  using namespace mozilla;
  
  #if defined(DEBUG_sspitzer_) || defined(DEBUG_seth_)
+@@ -4608,9 +4612,10 @@ nsMsgDatabase::GetCachedHits(const nsACS
+                 new nsMsgDBEnumerator(this, table, nullptr, nullptr));
+   return NS_OK;
+ }
+ 
+-NS_IMETHODIMP nsMsgDatabase::InvalidateCache(const nsACString& aSearchFolderUri) {
++NS_IMETHODIMP nsMsgDatabase::InvalidateCache(
++    const nsACString& aSearchFolderUri) {
+   // Mork doesn't offer a way to delete a table, and we can't update with
+   // something invalid which we would detect later. So just make it empty.
+   nsTArray<nsMsgKey> newHits;
+   nsTArray<nsMsgKey> staleHits;
 @@ -4736,8 +4741,35 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
  }
  NS_IMETHODIMP
