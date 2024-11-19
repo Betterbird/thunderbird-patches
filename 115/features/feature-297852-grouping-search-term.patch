@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1709828304 -3600
-# Parent  d8d0b3ac341031f05521a5af1ab497e486060165
+# Parent  83f5d396c7e3560d7a0e694ca8e36bfee03720f1
 Bug 297852 - Allow grouping in search term UI.
 
 This also does a general overhaul of searchTerm.js:
@@ -28,6 +28,8 @@ Bug 297852 - Allow grouping in search term UI: Fix issue when prepending term at
 Bug 297852 - Allow grouping in search term UI: disallow group after group.
 * * *
 Remove term flattening which destroys complex expressions. Add handy debug function to dump expression tree.
+* * *
+Bug 297852 - Allow grouping in search term UI: Rewrite ConstructExpressionTree() and replace recursion with loop processing to cater for multiple group ends.
 
 diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
 --- a/mail/base/content/SearchDialog.js
@@ -569,7 +571,7 @@ diff --git a/mailnews/base/content/virtualFolderProperties.xhtml b/mailnews/base
 diff --git a/mailnews/base/src/MsgIncomingServer.jsm b/mailnews/base/src/MsgIncomingServer.jsm
 --- a/mailnews/base/src/MsgIncomingServer.jsm
 +++ b/mailnews/base/src/MsgIncomingServer.jsm
-@@ -1165,10 +1165,10 @@ class MsgIncomingServer {
+@@ -1167,10 +1167,10 @@ class MsgIncomingServer {
        // Check if we're supposed to move junk mail to junk folder; if so, add
        // filter action to do so.
        let searchTerms = filter.searchTerms;
@@ -615,7 +617,7 @@ diff --git a/mailnews/base/src/VirtualFolderWrapper.jsm b/mailnews/base/src/Virt
 diff --git a/mailnews/base/src/nsMsgIncomingServer.cpp b/mailnews/base/src/nsMsgIncomingServer.cpp
 --- a/mailnews/base/src/nsMsgIncomingServer.cpp
 +++ b/mailnews/base/src/nsMsgIncomingServer.cpp
-@@ -1779,10 +1779,10 @@ nsresult nsMsgIncomingServer::ConfigureT
+@@ -1775,10 +1775,10 @@ nsresult nsMsgIncomingServer::ConfigureT
      uint32_t count = searchTerms.Length();
      if (count > 1)  // don't need to group a single term
      {
@@ -2389,7 +2391,7 @@ diff --git a/mailnews/search/src/nsMsgFilterList.cpp b/mailnews/search/src/nsMsg
 diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
 --- a/mailnews/search/src/nsMsgLocalSearch.cpp
 +++ b/mailnews/search/src/nsMsgLocalSearch.cpp
-@@ -316,8 +316,27 @@ nsresult nsMsgSearchOfflineMail::MatchTe
+@@ -316,27 +316,57 @@ nsresult nsMsgSearchOfflineMail::MatchTe
    return MatchTerms(msgToMatch, termList, defaultCharset, scope, db,
                      EmptyCString(), false, aExpressionTree, pResult);
  }
@@ -2404,8 +2406,11 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
 +  if (tree->m_term) {
 +    tree->m_term->GetTermAsString(term);
 +  }
-+  printf("=== %s op: %s %s\n", prefix, tree->m_boolOp ? "AND" : "OR",
-+         term.get());
++  if (term.Length()) {
++    printf("=== %p: %s term: %s\n", (void*)tree, prefix, term.get());
++  } else {
++    printf("=== %p: %s op: %s\n", (void*)tree, prefix, tree->m_boolOp ? "AND" : "OR");
++  }
 +  if (tree->m_leftChild)
 +    dumpExpressionTree(tree->m_leftChild, depth + 2, "left");
 +  if (tree->m_rightChild)
@@ -2417,7 +2422,14 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
      nsTArray<RefPtr<nsIMsgSearchTerm>> const& termList, uint32_t termCount,
      uint32_t& aStartPosInList, nsMsgSearchBoolExpression** aExpressionTree) {
    nsMsgSearchBoolExpression* finalExpression = *aExpressionTree;
-@@ -327,16 +346,17 @@ nsresult nsMsgSearchOfflineMail::Constru
++  nsMsgSearchBoolExpression** stack = (nsMsgSearchBoolExpression**)(moz_xmalloc(
++      termCount * sizeof(nsMsgSearchBoolExpression*)));
++  uint32_t stackLen = 0;
++#define PUSH() stack[stackLen++] = finalExpression;
++#define POP() finalExpression = stack[--stackLen];
+ 
+   if (!finalExpression) finalExpression = new nsMsgSearchBoolExpression();
+ 
    while (aStartPosInList < termCount) {
      nsIMsgSearchTerm* pTerm = termList[aStartPosInList];
      NS_ASSERTION(pTerm, "couldn't get term to match");
@@ -2428,37 +2440,63 @@ diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMs
 +    uint32_t endsGrouping;
      pTerm->GetBeginsGrouping(&beginsGrouping);
      pTerm->GetEndsGrouping(&endsGrouping);
++    // Short-circuit single term groups.
++    if (beginsGrouping == 1 && endsGrouping == 1) {
++      beginsGrouping = 0;
++      endsGrouping = 0;
++    }
  
 -    if (beginsGrouping) {
-+    // Shortcut for single term groups, no recursion required.
-+    if (beginsGrouping && !endsGrouping) {
-       // temporarily turn off the grouping for our recursive call
+-      // temporarily turn off the grouping for our recursive call
 -      pTerm->SetBeginsGrouping(false);
-+      pTerm->SetBeginsGrouping(0);
++    for (uint32_t i = 0; i < beginsGrouping; i++) {
        nsMsgSearchBoolExpression* innerExpression =
            new nsMsgSearchBoolExpression();
  
        // the first search term in the grouping is the one that holds the
-@@ -353,16 +373,17 @@ nsresult nsMsgSearchOfflineMail::Constru
-       ConstructExpressionTree(termList, termCount, aStartPosInList,
-                               &finalExpression->m_rightChild);
+@@ -348,28 +378,32 @@ nsresult nsMsgSearchOfflineMail::Constru
+       // now add this expression tree to our overall expression tree...
+       finalExpression = nsMsgSearchBoolExpression::AddExpressionTree(
+           finalExpression, innerExpression, booleanAnd);
  
-       // undo our damage
+-      // recursively process this inner expression
+-      ConstructExpressionTree(termList, termCount, aStartPosInList,
+-                              &finalExpression->m_rightChild);
++      PUSH();
+ 
+-      // undo our damage
 -      pTerm->SetBeginsGrouping(true);
-+      pTerm->SetBeginsGrouping(beginsGrouping);
++      // Start a new tree.
++      finalExpression = new nsMsgSearchBoolExpression();
++    }
  
-     } else {
-       finalExpression = nsMsgSearchBoolExpression::AddSearchTerm(
-           finalExpression, pTerm,
-           nullptr);  // add the term to the expression tree
+-    } else {
+-      finalExpression = nsMsgSearchBoolExpression::AddSearchTerm(
+-          finalExpression, pTerm,
+-          nullptr);  // add the term to the expression tree
++    finalExpression = nsMsgSearchBoolExpression::AddSearchTerm(
++        finalExpression, pTerm,
++        nullptr);  // add the term to the expression tree
  
 -      if (endsGrouping) break;
-+      // Only break if we're at the end of a group with more than one term.
-+      if (endsGrouping && !beginsGrouping) break;
++    for (uint32_t i = 0; i < endsGrouping; i++) {
++      nsMsgSearchBoolExpression* finishedGroup = finalExpression;
++      POP();
++      // Back-patch the initial leaf with the complete group.
++      delete finalExpression->m_rightChild;
++      finalExpression->m_rightChild = finishedGroup;
      }
  
      aStartPosInList++;
    }  // while we still have terms to process in this group
+ 
+   *aExpressionTree = finalExpression;
+ 
++  free(stack);
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgSearchOfflineMail::ProcessSearchTerm(
 diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
 --- a/mailnews/search/src/nsMsgSearchTerm.cpp
 +++ b/mailnews/search/src/nsMsgSearchTerm.cpp
