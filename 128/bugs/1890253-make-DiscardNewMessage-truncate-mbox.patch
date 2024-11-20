@@ -1,8 +1,14 @@
 # HG changeset patch
-# User ishikawa@yk.rim.or.jp
-# Date 1731874888 -3600
-# Parent  f9448048af87386a41bfdac3a51a143ef9535c48
-Bug 1890253 - Make DiscardNewMessage() truncate mbox to original size. Temporary fix. Adjusted by Betterbird.
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1732141165 -3600
+# Parent  da9bb194e221bcb1093ce9eda427f8ce18e272f5
+Bug 1890253 - Fix issues in nsMsgBrkMBoxStore::DiscardNewMessage() and nsParseNewMailState::MoveIncorporatedMessage().
+
+1. Make DiscardNewMessage() truncate mbox to original size. Temporary fix.
+   Inspired by https://phabricator.services.mozilla.com/D213510 by Chiaki Ishikawa, adjusted by Betterbird.
+
+2. Fix long-standing issue in nsParseNewMailState::MoveIncorporatedMessage():
+   Header is announced before message is present in the store.
 
 diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
 --- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
@@ -43,3 +49,32 @@ diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsg
  
  NS_IMETHODIMP
  nsMsgBrkMBoxStore::FinishNewMessage(nsIOutputStream* aOutputStream,
+diff --git a/mailnews/local/src/nsParseMailbox.cpp b/mailnews/local/src/nsParseMailbox.cpp
+--- a/mailnews/local/src/nsParseMailbox.cpp
++++ b/mailnews/local/src/nsParseMailbox.cpp
+@@ -2115,10 +2115,13 @@ nsresult nsParseNewMailState::MoveIncorp
+   NS_WARNING_ASSERTION(destMailDB && NS_SUCCEEDED(rv),
+                        "failed to open mail db parsing folder");
+   nsCOMPtr<nsIMsgDBHdr> newHdr;
+ 
++  // We don't add the header to the DB just yet, since the data isn't in the
++  // store and the storeToken is stale. Any listener won't be able to retrieve
++  // the message. Try a virtual folder based on body search.
+   if (destMailDB)
+-    rv = destMailDB->CopyHdrFromExistingHdr(m_new_key, mailHdr, true,
++    rv = destMailDB->CopyHdrFromExistingHdr(m_new_key, mailHdr, false,
+                                             getter_AddRefs(newHdr));
+   if (NS_SUCCEEDED(rv) && !newHdr) rv = NS_ERROR_UNEXPECTED;
+ 
+   if (NS_FAILED(rv)) {
+@@ -2127,8 +2130,10 @@ nsresult nsParseNewMailState::MoveIncorp
+     rv = AppendMsgFromStream(inputStream, newHdr, destIFolder);
+     if (NS_FAILED(rv))
+       destIFolder->ThrowAlertMsg("filterFolderWriteFailed", msgWindow);
+   }
++  if (destMailDB && NS_SUCCEEDED(rv))
++    rv = destMailDB->AddNewHdrToDB(newHdr, true);
+ 
+   if (NS_FAILED(rv)) {
+     if (destMailDB) destMailDB->Close(true);
+ 
