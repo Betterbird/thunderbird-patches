@@ -1,17 +1,21 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1729377980 -7200
-# Parent  9ade119cb0614e5f1e38319cac2196e7542ac239
+# Date 1732203105 -3600
+# Parent  6ebdfdf6f72156e5244a125a1435775fe3578c62
 Bug 1923520 - Fix caching for virtual folders.
 * * *
 Handle interrupted searches correctly.
 * * *
 Add console log when cache isn't used for virtual folder.
+* * *
+Add pref mailnews.virtual_folders.verbose to log caching actions for virtual folders.
+* * *
+Introduce folder flag for invalid cache of virtual folder.
 
 diff --git a/mailnews/base/content/virtualFolderProperties.js b/mailnews/base/content/virtualFolderProperties.js
 --- a/mailnews/base/content/virtualFolderProperties.js
 +++ b/mailnews/base/content/virtualFolderProperties.js
-@@ -260,8 +260,17 @@ function onOK(event) {
+@@ -260,8 +260,18 @@ function onOK(event) {
      // save the settings
      const virtualFolderWrapper = VirtualFolderHelper.wrapVirtualFolder(
        window.arguments[0].folder
@@ -25,14 +29,38 @@ diff --git a/mailnews/base/content/virtualFolderProperties.js b/mailnews/base/co
 +        .getFolderForURL(uri)
 +        ?.msgDatabase?.invalidateCache(gMsgFolder.URI);
 +    }
++    window.arguments[0].folder.clearFlag(Ci.nsMsgFolderFlags.CacheValid); 
      virtualFolderWrapper.searchTerms = gSearchTermSession.searchTerms;
      virtualFolderWrapper.searchFolders = gSearchFolderURIs;
      virtualFolderWrapper.onlineSearch = searchOnline;
      virtualFolderWrapper.cleanUpMessageDatabase();
+diff --git a/mailnews/base/public/nsMsgFolderFlags.idl b/mailnews/base/public/nsMsgFolderFlags.idl
+--- a/mailnews/base/public/nsMsgFolderFlags.idl
++++ b/mailnews/base/public/nsMsgFolderFlags.idl
+@@ -39,18 +39,17 @@ interface nsMsgFolderFlags : nsISupports
+    */
+   const nsMsgFolderFlagType Elided          = 0x00000010;
+   /// Whether this is a virtual search folder
+   const nsMsgFolderFlagType Virtual         = 0x00000020;
++  const nsMsgFolderFlagType CacheValid      = 0x00000040;
+ 
+   /** @name News Folder Flags
+    *  These flags only occur in folders which have
+    *  the nsMsgFolderFlags::Newsgroup bit set, and do
+    *  not have the nsMsgFolderFlags::Directory or
+    *  nsMsgFolderFlags::Elided bits set.
+    *  @{
+    */
+-  /// Used to be for folders representing a subscribed newsgroup (Subscribed).
+-  const nsMsgFolderFlagType Unused5         = 0x00000040;
+   /// Used to be for new newsgroups added by the `Check New Groups' command.
+   const nsMsgFolderFlagType Unused2         = 0x00000080;
+   /** @} */
+ 
 diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 --- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 +++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
-@@ -12,12 +12,18 @@
+@@ -12,12 +12,20 @@
  #include "nsIMsgHdr.h"
  #include "nsIDBFolderInfo.h"
  #include "nsMsgMessageFlags.h"
@@ -41,7 +69,9 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
 +
 +/* for logging to Error Console */
 +#include "nsIScriptError.h"
++#include "nsPrintfCString.h"
 +#include "nsMsgUtils.h"
++#include "mozilla/Preferences.h"
  
  nsMsgQuickSearchDBView::nsMsgQuickSearchDBView() {
    m_usingCachedHits = false;
@@ -51,7 +81,7 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
  
  nsMsgQuickSearchDBView::~nsMsgQuickSearchDBView() {}
  
-@@ -285,18 +291,20 @@ nsMsgQuickSearchDBView::OnSearchHit(nsIM
+@@ -285,21 +293,25 @@ nsMsgQuickSearchDBView::OnSearchHit(nsIM
  }
  
  NS_IMETHODIMP
@@ -75,8 +105,36 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
      nsTArray<nsMsgKey> keyArray;
      nsCString searchUri;
      m_viewFolder->GetURI(searchUri);
++    nsCString baseURI;
++    m_folder->GetURI(baseURI);
      uint32_t count = m_hdrHits.Count();
-@@ -353,8 +361,15 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+     // Build up message keys. The cache expects them to be sorted.
+     for (uint32_t i = 0; i < count; i++) {
+       nsMsgKey key;
+@@ -309,8 +321,22 @@ nsMsgQuickSearchDBView::OnSearchDone(nsr
+     keyArray.Sort();
+     nsTArray<nsMsgKey> staleHits;
+     nsresult rv = m_db->RefreshCache(searchUri, keyArray, staleHits);
+     NS_ENSURE_SUCCESS(rv, rv);
++
++    if (m_viewFolder) m_viewFolder->SetFlag(nsMsgFolderFlags::CacheValid);
++
++    if (mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose",
++                                      false)) {
++      nsCString msg = nsPrintfCString(
++          "Search folder %s: Cache for %s populated with new hits: %" PRIu64
++          ", removed: %" PRIu64,
++          searchUri.get(), baseURI.get(), keyArray.Length(),
++          staleHits.Length());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++    }
+     for (nsMsgKey staleKey : staleHits) {
+       nsCOMPtr<nsIMsgDBHdr> hdrDeleted;
+       m_db->GetMsgHdrForKey(staleKey, getter_AddRefs(hdrDeleted));
+       if (hdrDeleted) OnHdrDeleted(hdrDeleted, nsMsgKey_None, 0, this);
+@@ -353,47 +379,132 @@ nsMsgQuickSearchDBView::OnNewSearch() {
    m_keys.Clear();
    m_levels.Clear();
    m_flags.Clear();
@@ -92,17 +150,14 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
    // will call our GetRowCount()
    if (mTree) mTree->RowCountChanged(0, -oldSize);
    if (mJSTree) mJSTree->RowCountChanged(0, -oldSize);
-@@ -362,38 +377,78 @@ nsMsgQuickSearchDBView::OnNewSearch() {
++
++  nsAutoCString hits;
+   uint32_t folderFlags = 0;
    if (m_viewFolder) m_viewFolder->GetFlags(&folderFlags);
    // check if it's a virtual folder - if so, we should get the cached hits
    // from the db, and set a flag saying that we're using cached values.
    if (folderFlags & nsMsgFolderFlags::Virtual) {
 -    nsCOMPtr<nsIMsgEnumerator> cachedHits;
--    nsCString searchUri;
--    m_viewFolder->GetURI(searchUri);
--    m_db->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
--    if (cachedHits) {
--      bool hasMore;
 +    // Figure out how many search terms the virtual folder has.
 +    nsCOMPtr<nsIMsgDatabase> virtDatabase;
 +    nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
@@ -124,6 +179,21 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
 +    curSearchAsString.Cut(
 +        0, StringBeginsWith(curSearchAsString, "AND"_ns) ? 3 : 2);
 +    terms.Cut(0, StringBeginsWith(terms, "AND"_ns) ? 3 : 2);
++
++    // If the search session search string doesn't match the vf search str,
++    // then we're doing quick search, which means we don't want to invalidate
++    // cached results, or use cached results.
++    m_doingQuickSearch = !curSearchAsString.Equals(terms);
+     nsCString searchUri;
+-    m_viewFolder->GetURI(searchUri);
+-    m_db->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
+-    if (cachedHits) {
+-      bool hasMore;
++    nsCString baseURI;
++    if (!m_doingQuickSearch) {
++      // We're NOT doing quick search, so use cached hits.
++      m_viewFolder->GetURI(searchUri);
++      m_folder->GetURI(baseURI);
  
 -      m_usingCachedHits = true;
 -      cachedHits->HasMoreElements(&hasMore);
@@ -137,50 +207,74 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
 -          AddHdr(header);
 -        else
 -          break;
--        cachedHits->HasMoreElements(&hasMore);
-+    // If the search session search string doesn't match the vf search str,
-+    // then we're doing quick search, which means we don't want to invalidate
-+    // cached results, or use cached results.
-+    m_doingQuickSearch = !curSearchAsString.Equals(terms);
-+    if (!m_doingQuickSearch) {
-+      // We're NOT doing quick search, so use cached hits.
++      // If the cache is not deemed to be valid, don't use it.
 +      nsCOMPtr<nsIMsgEnumerator> cachedHits;
-+      nsCString searchUri;
-+      m_viewFolder->GetURI(searchUri);
-+      m_db->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
++      if (folderFlags & nsMsgFolderFlags::CacheValid) {
++        m_db->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
++      }
 +      if (cachedHits) {
 +        bool hasMore;
-+        nsresult rv = cachedHits->HasMoreElements(&hasMore);
-+        if (NS_SUCCEEDED(rv) && hasMore) {
-+          m_usingCachedHits = true;
-+          m_cacheEmpty = !hasMore;
-+          if (mTree) mTree->BeginUpdateBatch();
-+          if (mJSTree) mJSTree->BeginUpdateBatch();
-+          while (hasMore) {
-+            nsCOMPtr<nsIMsgDBHdr> header;
-+            rv = cachedHits->GetNext(getter_AddRefs(header));
-+            if (header && NS_SUCCEEDED(rv)) {
-+              nsMsgKey key;
-+              header->GetMessageKey(&key);
-+              AddHdr(header);
-+            } else
-+              break;
-+            cachedHits->HasMoreElements(&hasMore);
+         cachedHits->HasMoreElements(&hasMore);
++        m_usingCachedHits = true;
++        m_cacheEmpty = !hasMore;
++        if (mTree) mTree->BeginUpdateBatch();
++        if (mJSTree) mJSTree->BeginUpdateBatch();
++        int32_t baseHits = 0;
++        while (hasMore) {
++          nsCOMPtr<nsIMsgDBHdr> header;
++          rv = cachedHits->GetNext(getter_AddRefs(header));
++          if (!header && NS_SUCCEEDED(rv)) rv = NS_ERROR_NULL_POINTER;
++          if (NS_SUCCEEDED(rv)) {
++            do {
++              nsMsgKey msgKey;
++              rv = header->GetMessageKey(&msgKey);
++              if (NS_FAILED(rv)) break;
++              rv = AddHdr(header);
++              if (NS_FAILED(rv)) break;
++              baseHits++;
++            } while (false);
 +          }
-+          if (mTree) mTree->EndUpdateBatch();
-+          if (mJSTree) mJSTree->EndUpdateBatch();
-+
-+          if (searchSession) searchSession->SuppressSearch(true);
++          if (NS_FAILED(rv)) {
++            nsCString msg = nsPrintfCString(
++                "Search folder %s: Error 0x%x restoring cache for folder "
++                "%s, got to %" PRIu32 " headers",
++                searchUri.get(), (uint32_t)rv, baseURI.get(), baseHits);
++            MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                             NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                             nsIScriptError::errorFlag);
++            m_usingCachedHits = false;
++            break;
++          }
++          cachedHits->HasMoreElements(&hasMore);
 +        }
++        hits = baseURI + ": "_ns + nsPrintfCString("%" PRIi32, baseHits);
++        if (mTree) mTree->EndUpdateBatch();
++        if (mJSTree) mJSTree->EndUpdateBatch();
++
++        if (m_usingCachedHits && searchSession)
++          searchSession->SuppressSearch(true);
        }
 -      if (mTree) mTree->EndUpdateBatch();
 -      if (mJSTree) mJSTree->EndUpdateBatch();
 +    }
 +    if (!m_doingQuickSearch && !m_usingCachedHits) {
++      if (m_viewFolder && folderFlags & nsMsgFolderFlags::CacheValid)
++        m_viewFolder->ClearFlag(nsMsgFolderFlags::CacheValid);
 +      MsgLogToConsole4(
-+          u"Single-folder virtual view not using cache: First access, update or missing/empty cache. Searched folder needs to contribute search hits."_ns,
++          u"Single-folder virtual view not using cache: First access, update or invalid cache."_ns,
 +          NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +          nsIScriptError::infoFlag);
++    }
++
++    if (!m_doingQuickSearch && m_usingCachedHits &&
++        mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose",
++                                      false)) {
++      nsCString msg = nsPrintfCString(
++          "Search folder %s: View populated with retrieved cache hits: %s",
++          searchUri.get(), hits.get());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
      }
    }
  
@@ -209,20 +303,94 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.h b/mailnews/base/src/nsMs
 diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
 --- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
 +++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
-@@ -14,8 +14,12 @@
+@@ -4,8 +4,9 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "msgCore.h"
+ #include "nsMsgXFVirtualFolderDBView.h"
++#include "nsMsgFolderFlags.h"
+ #include "nsIMsgHdr.h"
+ #include "nsIMsgThread.h"
+ #include "nsIDBFolderInfo.h"
+ #include "nsIMsgCopyService.h"
+@@ -14,8 +15,14 @@
  #include "nsIMsgSearchTerm.h"
  #include "nsMsgMessageFlags.h"
  #include "nsServiceManagerUtils.h"
  
 +/* for logging to Error Console */
 +#include "nsIScriptError.h"
++#include "nsPrintfCString.h"
 +#include "nsMsgUtils.h"
++#include "mozilla/Preferences.h"
 +
  nsMsgXFVirtualFolderDBView::nsMsgXFVirtualFolderDBView() {
    mSuppressMsgDisplay = false;
    m_doingSearch = false;
    m_doingQuickSearch = false;
-@@ -239,8 +243,10 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+@@ -175,17 +182,31 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+   return NS_OK;
+ }
+ 
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForFolder(
+-    nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits) {
++    nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits, bool onDone) {
+   nsCOMPtr<nsIMsgDatabase> db;
+   nsresult rv = folder->GetMsgDatabaseLRU(getter_AddRefs(db));
++  nsCString baseURI;
++  folder->GetURI(baseURI);
+   if (NS_SUCCEEDED(rv) && db) {
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     nsTArray<nsMsgKey> badHits;
+     rv = db->RefreshCache(searchUri, newHits, badHits);
+     if (NS_SUCCEEDED(rv)) {
++      if (mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose",
++                                        false)) {
++        nsCString msg = nsPrintfCString(
++            "Search folder %s: Cache for %s populated with new hits: %" PRIu64
++            ", removed: %" PRIu64,
++            searchUri.get(), baseURI.get(), newHits.Length(), badHits.Length());
++        msg += onDone ? " (OnSearchDone)"_ns : " (OnSearchHit)"_ns;
++        MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                         NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                         nsIScriptError::infoFlag);
++      }
++
+       nsCOMPtr<nsIMsgDBHdr> badHdr;
+       for (nsMsgKey badKey : badHits) {
+         // ### of course, this isn't quite right, since we should be
+         // using FindHdr, and we shouldn't be expanding the threads.
+@@ -208,9 +229,10 @@ void nsMsgXFVirtualFolderDBView::UpdateC
+     for (uint32_t i = 0; i < count; i++)
+       m_hdrHits[i]->GetMessageKey(&newHits[i]);
+ 
+     newHits.Sort();
+-    UpdateCacheAndViewForFolder(m_curFolderGettingHits, newHits);
++    UpdateCacheAndViewForFolder(m_curFolderGettingHits, newHits,
++                                curSearchFolder == nullptr);
+     m_foldersSearchingOver.RemoveObject(m_curFolderGettingHits);
+   }
+ 
+   while (m_foldersSearchingOver.Count() > 0) {
+@@ -222,13 +244,15 @@ void nsMsgXFVirtualFolderDBView::UpdateC
+     } else {
+       // This must be a folder that had no hits with the current search.
+       // So all cached hits, if any, need to be removed.
+       nsTArray<nsMsgKey> noHits;
+-      UpdateCacheAndViewForFolder(m_foldersSearchingOver[0], noHits);
++      UpdateCacheAndViewForFolder(m_foldersSearchingOver[0], noHits,
++                                  curSearchFolder == nullptr);
+       m_foldersSearchingOver.RemoveObjectAt(0);
+     }
+   }
+ }
++
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::OnSearchHit(nsIMsgDBHdr* aMsgHdr,
+                                         nsIMsgFolder* aFolder) {
+   NS_ENSURE_ARG(aMsgHdr);
+@@ -239,8 +263,10 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
      m_curFolderHasCachedHits = false;
      // Since we've gotten a hit for a new folder, the searches for
      // any previous folders are done, so deal with stale cached hits
@@ -233,7 +401,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
      m_curFolderGettingHits = aFolder;
      m_hdrHits.Clear();
      m_curFolderStartKeyIndex = m_keys.Length();
-@@ -273,15 +279,17 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+@@ -273,19 +299,22 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
  }
  
  NS_IMETHODIMP
@@ -254,7 +422,12 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
      if (mJSTree) mJSTree->BeginUpdateBatch();
      UpdateCacheAndViewForPrevSearchedFolders(nullptr);
      if (mJSTree) mJSTree->EndUpdateBatch();
-@@ -296,37 +304,42 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
++    m_viewFolder->SetFlag(nsMsgFolderFlags::CacheValid);
+   }
+ 
+   m_doingSearch = false;
+   // We want to set imap delete model once the search is over because setting
+@@ -296,37 +325,42 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
    mDeleteModel = nsMsgImapDeleteModels::MoveToTrash;
    nsIMsgFolder* curFolder = m_folders.SafeObjectAt(0);
    if (curFolder) GetImapDeleteModel(curFolder);
@@ -322,7 +495,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
        !(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay)) {
      // Sort the results.
      m_sortValid = false;
-@@ -334,17 +347,18 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+@@ -334,17 +368,18 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
    }
  
    m_foldersSearchingOver.Clear();
@@ -342,7 +515,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
    m_folders.Clear();
    m_keys.Clear();
    m_levels.Clear();
-@@ -366,8 +380,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -366,8 +401,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
    nsCOMPtr<nsIMsgSearchSession> searchSession =
        do_QueryReferent(m_searchSession);
    // Just ignore.
@@ -354,64 +527,136 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
        do_GetService("@mozilla.org/msgDatabase/msgDBService;1");
    searchSession->CountSearchScopes(&scopeCount);
  
-@@ -402,8 +419,9 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -376,8 +414,10 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+   nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+   nsresult rv = m_viewFolder->GetDBFolderInfoAndDB(
+       getter_AddRefs(dbFolderInfo), getter_AddRefs(virtDatabase));
+   NS_ENSURE_SUCCESS(rv, rv);
++  uint32_t folderFlags = 0;
++  m_viewFolder->GetFlags(&folderFlags);
+ 
+   nsCString terms;
+   dbFolderInfo->GetCharProperty("searchStr", terms);
+   nsTArray<RefPtr<nsIMsgSearchTerm>> searchTerms;
+@@ -402,56 +442,108 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
      if (mTree) mTree->BeginUpdateBatch();
      if (mJSTree) mJSTree->BeginUpdateBatch();
    }
  
 +  bool allScopesHaveCache = true;
++  nsAutoCString hits;
++  nsCString searchUri;
++  m_viewFolder->GetURI(searchUri);
    for (int32_t i = 0; i < scopeCount; i++) {
      nsMsgSearchScopeValue scopeId;
      nsCOMPtr<nsIMsgFolder> searchFolder;
      searchSession->GetNthSearchScope(i, &scopeId, getter_AddRefs(searchFolder));
-@@ -423,14 +441,14 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
-         nsCOMPtr<nsIMsgEnumerator> cachedHits;
-         searchDB->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
-         bool hasMore;
-         if (cachedHits) {
--          cachedHits->HasMoreElements(&hasMore);
--          if (hasMore) {
-+          nsresult rv = cachedHits->HasMoreElements(&hasMore);
-+          if (NS_SUCCEEDED(rv) && hasMore) {
-             mozilla::DebugOnly<nsMsgKey> prevKey = nsMsgKey_None;
-             while (hasMore) {
-               nsCOMPtr<nsIMsgDBHdr> header;
--              nsresult rv = cachedHits->GetNext(getter_AddRefs(header));
-+              rv = cachedHits->GetNext(getter_AddRefs(header));
-               if (header && NS_SUCCEEDED(rv)) {
-                 nsMsgKey msgKey;
-                 header->GetMessageKey(&msgKey);
-                 NS_ASSERTION(prevKey == nsMsgKey_None || msgKey > prevKey,
-@@ -438,20 +456,41 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
- #ifdef DEBUG
-                 prevKey = msgKey;
- #endif
-                 AddHdrFromFolder(header, searchFolder);
-+                m_totalMessagesInView++;
-               } else {
-                 break;
-               }
+     if (searchFolder) {
+       nsCOMPtr<nsIMsgDatabase> searchDB;
+-      nsCString searchUri;
+-      m_viewFolder->GetURI(searchUri);
+       nsresult rv = searchFolder->GetMsgDatabaseLRU(getter_AddRefs(searchDB));
++      int32_t baseHits = 0;
+       if (NS_SUCCEEDED(rv) && searchDB) {
+         if (msgDBService)
+           msgDBService->RegisterPendingListener(searchFolder, this);
  
-               cachedHits->HasMoreElements(&hasMore);
-             }
-+          } else {
-+            allScopesHaveCache = false;
+         m_foldersSearchingOver.AppendObject(searchFolder);
++
+         // Ignore cached hits in quick search case.
+         if (m_doingQuickSearch) continue;
+ 
++        nsCString baseURI;
++        searchFolder->GetURI(baseURI);
++        if (hits.IsEmpty()) {
++          hits = baseURI + ": "_ns;
++        } else {
++          hits += ", "_ns + baseURI + ": "_ns;
++        }
++
+         nsCOMPtr<nsIMsgEnumerator> cachedHits;
+-        searchDB->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
+-        bool hasMore;
++        if (folderFlags & nsMsgFolderFlags::CacheValid) {
++          searchDB->GetCachedHits(searchUri, getter_AddRefs(cachedHits));
++        }
+         if (cachedHits) {
++          bool hasMore;
+           cachedHits->HasMoreElements(&hasMore);
+-          if (hasMore) {
+-            mozilla::DebugOnly<nsMsgKey> prevKey = nsMsgKey_None;
+-            while (hasMore) {
+-              nsCOMPtr<nsIMsgDBHdr> header;
+-              nsresult rv = cachedHits->GetNext(getter_AddRefs(header));
+-              if (header && NS_SUCCEEDED(rv)) {
++          while (hasMore) {
++            nsCOMPtr<nsIMsgDBHdr> header;
++            rv = cachedHits->GetNext(getter_AddRefs(header));
++            if (!header && NS_SUCCEEDED(rv)) rv = NS_ERROR_NULL_POINTER;
++            if (NS_SUCCEEDED(rv)) {
++              do {
+                 nsMsgKey msgKey;
+-                header->GetMessageKey(&msgKey);
+-                NS_ASSERTION(prevKey == nsMsgKey_None || msgKey > prevKey,
+-                             "cached Hits not sorted");
+-#ifdef DEBUG
+-                prevKey = msgKey;
+-#endif
+-                AddHdrFromFolder(header, searchFolder);
+-              } else {
+-                break;
+-              }
++                rv = header->GetMessageKey(&msgKey);
++                if (NS_FAILED(rv)) break;
++                rv = AddHdrFromFolder(header, searchFolder);
++                if (NS_FAILED(rv)) break;
++                m_totalMessagesInView++;
++                baseHits++;
++              } while (false);
++            }
++            if (NS_FAILED(rv)) {
++              nsCString msg = nsPrintfCString(
++                  "Search folder %s: Error 0x%x restoring cache for folder "
++                  "%s, got to %" PRIu32 " headers",
++                  searchUri.get(), (uint32_t)rv, baseURI.get(), baseHits);
++              MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                               NS_LITERAL_STRING_FROM_CSTRING(__FILE__),
++                               __LINE__, nsIScriptError::errorFlag);
++              allScopesHaveCache = false;
++              break;
++            }
+ 
+-              cachedHits->HasMoreElements(&hasMore);
+-            }
++            cachedHits->HasMoreElements(&hasMore);
            }
 +        } else {
 +          allScopesHaveCache = false;
          }
        }
++      hits += nsPrintfCString("%" PRIi32, baseHits);
      }
    }
  
 +  if (!m_doingQuickSearch && !allScopesHaveCache) {
++    if (folderFlags & nsMsgFolderFlags::CacheValid)
++      m_viewFolder->ClearFlag(nsMsgFolderFlags::CacheValid);
 +    MsgLogToConsole4(
-+        u"Cross-folder virtual view not using cache: First access, update or missing/empty cache. All searched folders need to contribute search hits."_ns,
++        u"Cross-folder virtual view not using cache: First access, update or invalid cache."_ns,
 +        NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +        nsIScriptError::infoFlag);
 +  }
 +
 +  if (!m_doingQuickSearch && allScopesHaveCache) {
++    if (mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose",
++                                      false)) {
++      nsCString msg = nsPrintfCString(
++          "Search folder %s: View populated with retrieved cache hits: %s",
++          searchUri.get(), hits.get());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++    }
 +    m_usingCachedHits = true;
 +    searchSession->SuppressSearch(true);
 +  } else {
@@ -424,7 +669,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
      if (mTree) mTree->EndUpdateBatch();
      if (mJSTree) mJSTree->EndUpdateBatch();
    }
-@@ -473,9 +512,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -473,9 +565,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
      }
    }
  
@@ -440,7 +685,19 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
 --- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
 +++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
-@@ -61,7 +61,8 @@ class nsMsgXFVirtualFolderDBView : publi
+@@ -46,9 +46,10 @@ class nsMsgXFVirtualFolderDBView : publi
+   virtual nsresult OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey parentKey,
+                                bool ensureListed) override;
+   void UpdateCacheAndViewForPrevSearchedFolders(nsIMsgFolder* curSearchFolder);
+   void UpdateCacheAndViewForFolder(nsIMsgFolder* folder,
+-                                   nsTArray<nsMsgKey> const& newHits);
++                                   nsTArray<nsMsgKey> const& newHits,
++                                   bool onDone);
+   void RemovePendingDBListeners();
+ 
+  protected:
+   virtual nsresult GetMessageEnumerator(nsIMsgEnumerator** enumerator) override;
+@@ -61,7 +62,8 @@ class nsMsgXFVirtualFolderDBView : publi
    bool m_curFolderHasCachedHits;
    bool m_doingSearch;
    // Are we doing a quick search on top of the virtual folder search?
@@ -499,6 +756,21 @@ diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMa
  }
  
  // Creates a new child nsIMsgFolder locally, with no IMAP traffic.
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -113,8 +113,11 @@ pref("mailnews.sort_threads_by_root", fa
+ 
+ // Reversed threading when ordered by date descending.
+ pref("mailnews.reversed_threading", false);
+ 
++// Virtual folder verbosity.
++pref("mailnews.virtual_folders.verbose", false);
++
+ // default view flags for new folders
+ // both flags are int values reflecting nsMsgViewFlagsType values
+ // as defined in nsIMsgDBView.idl (kNone = 0, kThreadedDisplay = 1 etc.)
+ 
 diff --git a/mailnews/search/public/nsIMsgSearchSession.idl b/mailnews/search/public/nsIMsgSearchSession.idl
 --- a/mailnews/search/public/nsIMsgSearchSession.idl
 +++ b/mailnews/search/public/nsIMsgSearchSession.idl
