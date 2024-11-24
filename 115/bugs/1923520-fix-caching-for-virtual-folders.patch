@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1732229333 -3600
-# Parent  a582b7db17c9a447b8926cc251e137ac8d63a080
+# Date 1732406840 -3600
+# Parent  cd6cd91e60cdef4c7f24c2273e27063bb0125808
 Bug 1923520 - Fix caching for virtual folders.
 * * *
 Handle interrupted searches correctly.
@@ -57,6 +57,135 @@ diff --git a/mailnews/base/public/nsMsgFolderFlags.idl b/mailnews/base/public/ns
    const nsMsgFolderFlagType Unused2         = 0x00000080;
    /** @} */
  
+diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsgAccountManager.cpp
+--- a/mailnews/base/src/nsMsgAccountManager.cpp
++++ b/mailnews/base/src/nsMsgAccountManager.cpp
+@@ -2334,12 +2334,32 @@ class VFChangeListenerEvent : public moz
+   nsCOMPtr<nsIMsgFolder> mFolder;
+   nsCOMPtr<nsIMsgDatabase> mDB;
+ };
+ 
++class VFChangeListenerCommit : public mozilla::Runnable {
++ public:
++  VFChangeListenerCommit(VirtualFolderChangeListener* vfChangeListener,
++                         nsIMsgDatabase* db)
++      : mozilla::Runnable("VFChangeListenerCommit"),
++        mVFChangeListener(vfChangeListener),
++        mDB(db) {}
++
++  NS_IMETHOD Run() {
++    if (mVFChangeListener) mVFChangeListener->ProcessCommitEvent(mDB);
++    return NS_OK;
++  }
++
++ private:
++  RefPtr<VirtualFolderChangeListener> mVFChangeListener;
++  nsCOMPtr<nsIMsgDatabase> mDB;
++};
++
+ NS_IMPL_ISUPPORTS(VirtualFolderChangeListener, nsIDBChangeListener)
+ 
+ VirtualFolderChangeListener::VirtualFolderChangeListener()
+-    : m_searchOnMsgStatus(false), m_batchingEvents(false) {}
++    : m_searchOnMsgStatus(false),
++      m_batchingEvents(false),
++      m_batchingCommits(false) {}
+ 
+ nsresult VirtualFolderChangeListener::Init() {
+   nsCOMPtr<nsIMsgDatabase> msgDB;
+   nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+@@ -2462,8 +2482,9 @@ VirtualFolderChangeListener::OnHdrProper
+     dbFolderInfo->ChangeNumMessages(totalDelta);
+     nsCString searchUri;
+     m_virtualFolder->GetURI(searchUri);
+     msgDB->UpdateHdrInCache(searchUri, aHdrChanged, totalDelta == 1);
++    PostCommitEvent(msgDB);
+   }
+ 
+   PostUpdateEvent(m_virtualFolder, virtDatabase);
+ 
+@@ -2546,8 +2567,9 @@ NS_IMETHODIMP VirtualFolderChangeListene
+     if (totalDelta) {
+       nsCString searchUri;
+       m_virtualFolder->GetURI(searchUri);
+       msgDB->UpdateHdrInCache(searchUri, aHdrChanged, totalDelta == 1);
++      PostCommitEvent(msgDB);
+     }
+ 
+     PostUpdateEvent(m_virtualFolder, virtDatabase);
+   } else if (oldMatch && (aOldFlags & nsMsgMessageFlags::New) &&
+@@ -2595,8 +2617,9 @@ NS_IMETHODIMP VirtualFolderChangeListene
+ 
+     nsCString searchUri;
+     m_virtualFolder->GetURI(searchUri);
+     msgDB->UpdateHdrInCache(searchUri, aHdrDeleted, false);
++    PostCommitEvent(msgDB);
+ 
+     PostUpdateEvent(m_virtualFolder, virtDatabase);
+   }
+   return rv;
+@@ -2636,8 +2659,9 @@ NS_IMETHODIMP VirtualFolderChangeListene
+     }
+     nsCString searchUri;
+     m_virtualFolder->GetURI(searchUri);
+     msgDB->UpdateHdrInCache(searchUri, aNewHdr, true);
++    PostCommitEvent(msgDB);
+     dbFolderInfo->ChangeNumMessages(1);
+     PostUpdateEvent(m_virtualFolder, virtDatabase);
+   }
+   return rv;
+@@ -2686,8 +2710,20 @@ void VirtualFolderChangeListener::Proces
+   virtFolder->UpdateSummaryTotals(true);  // force update from db.
+   virtDB->Commit(nsMsgDBCommitType::kLargeCommit);
+ }
+ 
++nsresult VirtualFolderChangeListener::PostCommitEvent(nsIMsgDatabase* db) {
++  if (m_batchingCommits) return NS_OK;
++  m_batchingCommits = true;
++  nsCOMPtr<nsIRunnable> event = new VFChangeListenerCommit(this, db);
++  return NS_DispatchToCurrentThread(event);
++}
++
++void VirtualFolderChangeListener::ProcessCommitEvent(nsIMsgDatabase* db) {
++  m_batchingCommits = false;
++  db->Commit(nsMsgDBCommitType::kLargeCommit);
++}
++
+ nsresult nsMsgAccountManager::GetVirtualFoldersFile(nsCOMPtr<nsIFile>& aFile) {
+   nsCOMPtr<nsIFile> profileDir;
+   nsresult rv = NS_GetSpecialDirectory(NS_APP_USER_PROFILE_50_DIR,
+                                        getter_AddRefs(profileDir));
+diff --git a/mailnews/base/src/nsMsgAccountManager.h b/mailnews/base/src/nsMsgAccountManager.h
+--- a/mailnews/base/src/nsMsgAccountManager.h
++++ b/mailnews/base/src/nsMsgAccountManager.h
+@@ -45,8 +45,17 @@ class VirtualFolderChangeListener final 
+   nsresult PostUpdateEvent(nsIMsgFolder* folder, nsIMsgDatabase* db);
+   /// Handles event posted to event queue to batch notifications.
+   void ProcessUpdateEvent(nsIMsgFolder* folder, nsIMsgDatabase* db);
+ 
++  /**
++   * Posts an event to commit the db.
++   * We post the event to avoid committing each time we're called
++   * in a synchronous loop.
++   */
++  nsresult PostCommitEvent(nsIMsgDatabase* db);
++  /// Handles event posted to event queue to batch notifications.
++  void ProcessCommitEvent(nsIMsgDatabase* db);
++
+   void DecrementNewMsgCount();
+ 
+   // folder we're listening to db changes on behalf of.
+   nsCOMPtr<nsIMsgFolder> m_virtualFolder;
+@@ -54,8 +63,9 @@ class VirtualFolderChangeListener final 
+   nsCOMPtr<nsIMsgFolder> m_folderWatching;
+   nsCOMPtr<nsIMsgSearchSession> m_searchSession;
+   bool m_searchOnMsgStatus;
+   bool m_batchingEvents;
++  bool m_batchingCommits;
+ 
+  private:
+   ~VirtualFolderChangeListener() {}
+ };
 diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 --- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
 +++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
@@ -401,7 +530,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
      m_curFolderGettingHits = aFolder;
      m_hdrHits.Clear();
      m_curFolderStartKeyIndex = m_keys.Length();
-@@ -276,17 +302,21 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+@@ -276,19 +302,22 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
  }
  
  NS_IMETHODIMP
@@ -417,17 +546,17 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
  
    // Handle any non verified hits we haven't handled yet.
 -  if (NS_SUCCEEDED(status) && !m_doingQuickSearch &&
--      status != NS_MSG_SEARCH_INTERRUPTED)
 +  if (NS_SUCCEEDED(status) && !m_doingQuickSearch && !m_usingCachedHits &&
-+      status != NS_MSG_SEARCH_INTERRUPTED) {
+       status != NS_MSG_SEARCH_INTERRUPTED) {
+     if (mJSTree) mJSTree->BeginUpdateBatch();
      UpdateCacheAndViewForPrevSearchedFolders(nullptr);
+     if (mJSTree) mJSTree->EndUpdateBatch();
 +    m_viewFolder->SetFlag(nsMsgFolderFlags::CacheValid);
-+  }
+   }
  
    m_doingSearch = false;
    // We want to set imap delete model once the search is over because setting
-   // next message after deletion will happen before deleting the message and
-@@ -296,37 +326,42 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+@@ -299,37 +328,42 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
    mDeleteModel = nsMsgImapDeleteModels::MoveToTrash;
    nsIMsgFolder* curFolder = m_folders.SafeObjectAt(0);
    if (curFolder) GetImapDeleteModel(curFolder);
@@ -495,7 +624,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
        !(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay)) {
      // Sort the results.
      m_sortValid = false;
-@@ -334,17 +369,18 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+@@ -337,17 +371,18 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
    }
  
    m_foldersSearchingOver.Clear();
@@ -515,7 +644,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
    m_folders.Clear();
    m_keys.Clear();
    m_levels.Clear();
-@@ -366,8 +402,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -369,8 +404,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
    nsCOMPtr<nsIMsgSearchSession> searchSession =
        do_QueryReferent(m_searchSession);
    // Just ignore.
@@ -527,7 +656,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
        do_GetService("@mozilla.org/msgDatabase/msgDBService;1");
    searchSession->CountSearchScopes(&scopeCount);
  
-@@ -376,8 +415,10 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -379,8 +417,10 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
    nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
    nsresult rv = m_viewFolder->GetDBFolderInfoAndDB(
        getter_AddRefs(dbFolderInfo), getter_AddRefs(virtDatabase));
@@ -538,7 +667,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
    nsCString terms;
    dbFolderInfo->GetCharProperty("searchStr", terms);
    nsTArray<RefPtr<nsIMsgSearchTerm>> searchTerms;
-@@ -402,56 +443,107 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -405,56 +445,107 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
      if (mTree) mTree->BeginUpdateBatch();
      if (mJSTree) mJSTree->BeginUpdateBatch();
    }
@@ -668,7 +797,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
      if (mTree) mTree->EndUpdateBatch();
      if (mJSTree) mJSTree->EndUpdateBatch();
    }
-@@ -473,9 +565,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+@@ -476,9 +567,11 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
      }
    }
  
@@ -738,6 +867,38 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                            nsTArray<nsMsgKey> const& aNewHits,
                                            nsTArray<nsMsgKey>& aStaleHits) {
    nsCOMPtr<nsIMdbTable> table;
+@@ -4701,9 +4709,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
+   Commit(nsMsgDBCommitType::kLargeCommit);
+   return NS_OK;
+ }
+ 
+-// search sorted table
++// Search sorted table. Returns -1 if entry already in table.
+ mdb_pos nsMsgDatabase::FindInsertIndexInSortedTable(nsIMdbTable* table,
+                                                     mdb_id idToInsert) {
+   mdb_pos searchPos = 0;
+   uint32_t rowCount;
+@@ -4716,9 +4724,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+     searchPos = (lo + hi - 1) / 2;
+     table->PosToOid(GetEnv(), searchPos, &outOid);
+     if (outOid.mOid_Id == idToInsert) {
+       NS_ASSERTION(false, "id shouldn't be in table");
+-      return hi;
++      return -1;
+     }
+     if (outOid.mOid_Id > idToInsert)
+       hi = searchPos;
+     else  // if (outOid.mOid_Id <  idToInsert)
+@@ -4744,8 +4752,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
+     } else {
+       mdbOid rowId;
+       hdrRow->GetOid(m_mdbEnv, &rowId);
+       mdb_pos insertPos = FindInsertIndexInSortedTable(table, rowId.mOid_Id);
++      if (insertPos == -1) return NS_OK;
+       uint32_t rowCount;
+       table->GetCount(m_mdbEnv, &rowCount);
+       table->AddRow(m_mdbEnv, hdrRow);
+       mdb_pos newPos;
 diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
 --- a/mailnews/imap/src/nsImapMailFolder.cpp
 +++ b/mailnews/imap/src/nsImapMailFolder.cpp
