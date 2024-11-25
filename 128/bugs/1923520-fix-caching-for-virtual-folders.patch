@@ -94,47 +94,63 @@ diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsg
  nsresult VirtualFolderChangeListener::Init() {
    nsCOMPtr<nsIMsgDatabase> msgDB;
    nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
-@@ -2481,8 +2501,9 @@ VirtualFolderChangeListener::OnHdrProper
+@@ -2480,9 +2500,13 @@ VirtualFolderChangeListener::OnHdrProper
+   if (totalDelta) {
      dbFolderInfo->ChangeNumMessages(totalDelta);
      nsCString searchUri;
      m_virtualFolder->GetURI(searchUri);
++    // Paranoia, just making sure the database is open.
++    rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
++    NS_ENSURE_SUCCESS(rv, rv);
      msgDB->UpdateHdrInCache(searchUri, aHdrChanged, totalDelta == 1);
 +    PostCommitEvent(msgDB);
    }
  
    PostUpdateEvent(m_virtualFolder, virtDatabase);
  
-@@ -2565,8 +2586,9 @@ NS_IMETHODIMP VirtualFolderChangeListene
+@@ -2564,9 +2588,13 @@ NS_IMETHODIMP VirtualFolderChangeListene
+ 
      if (totalDelta) {
        nsCString searchUri;
        m_virtualFolder->GetURI(searchUri);
++      // Paranoia, just making sure the database is open.
++      rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
++      NS_ENSURE_SUCCESS(rv, rv);
        msgDB->UpdateHdrInCache(searchUri, aHdrChanged, totalDelta == 1);
 +      PostCommitEvent(msgDB);
      }
  
      PostUpdateEvent(m_virtualFolder, virtDatabase);
    } else if (oldMatch && (aOldFlags & nsMsgMessageFlags::New) &&
-@@ -2614,8 +2636,9 @@ NS_IMETHODIMP VirtualFolderChangeListene
+@@ -2613,9 +2641,13 @@ NS_IMETHODIMP VirtualFolderChangeListene
+     }
  
      nsCString searchUri;
      m_virtualFolder->GetURI(searchUri);
++    // Paranoia, just making sure the database is open.
++    rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
++    NS_ENSURE_SUCCESS(rv, rv);
      msgDB->UpdateHdrInCache(searchUri, aHdrDeleted, false);
 +    PostCommitEvent(msgDB);
  
      PostUpdateEvent(m_virtualFolder, virtDatabase);
    }
    return rv;
-@@ -2655,8 +2678,9 @@ NS_IMETHODIMP VirtualFolderChangeListene
+@@ -2654,9 +2686,13 @@ NS_IMETHODIMP VirtualFolderChangeListene
+       m_virtualFolder->SetNumNewMessages(numNewMessages + 1);
      }
      nsCString searchUri;
      m_virtualFolder->GetURI(searchUri);
++    // Paranoia, just making sure the database is open.
++    rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
++    NS_ENSURE_SUCCESS(rv, rv);
      msgDB->UpdateHdrInCache(searchUri, aNewHdr, true);
 +    PostCommitEvent(msgDB);
      dbFolderInfo->ChangeNumMessages(1);
      PostUpdateEvent(m_virtualFolder, virtDatabase);
    }
    return rv;
-@@ -2705,8 +2729,20 @@ void VirtualFolderChangeListener::Proces
+@@ -2705,8 +2741,20 @@ void VirtualFolderChangeListener::Proces
    virtFolder->UpdateSummaryTotals(true);  // force update from db.
    virtDB->Commit(nsMsgDBCommitType::kLargeCommit);
  }
@@ -850,12 +866,102 @@ diff --git a/mailnews/db/msgdb/public/nsIMsgDatabase.idl b/mailnews/db/msgdb/pub
 diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
 --- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
 +++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
-@@ -4901,8 +4901,16 @@ nsMsgDatabase::GetCachedHits(const nsACS
+@@ -34,8 +34,15 @@
+ #include "nsIWeakReferenceUtils.h"
+ #include "mozilla/Components.h"
+ #include "mozilla/mailnews/MimeHeaderParser.h"
+ #include "mozilla/intl/LocaleService.h"
++#include "nsIThread.h"
++
++/* for logging to Error Console */
++#include "nsIScriptError.h"
++#include "nsPrintfCString.h"
++#include "nsMsgUtils.h"
++#include "mozilla/Preferences.h"
+ 
+ using namespace mozilla::mailnews;
+ using namespace mozilla;
+ 
+@@ -4874,14 +4881,71 @@ nsresult nsMsgDatabase::GetSearchResults
+   mdb_kind kindToken;
+   mdb_count numTables;
+   mdb_bool mustBeUnique;
+   NS_ENSURE_TRUE(m_mdbStore, NS_ERROR_NULL_POINTER);
++  bool log =
++      mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose", false);
++  nsCString msg;
+ 
+   nsresult err = m_mdbStore->StringToToken(
+       GetEnv(), PromiseFlatCString(searchFolderUri).get(), &kindToken);
++  NS_ENSURE_SUCCESS(err, err);
++
++  nsCOMPtr<nsIMsgFolder> folder;
++  GetFolder(getter_AddRefs(folder));
++  nsCString uri;
++  if (folder) folder->GetURI(uri);
+   err = m_mdbStore->GetTableKind(GetEnv(), m_hdrRowScopeToken, kindToken,
+                                  &numTables, &mustBeUnique, table);
+-  if ((!*table || NS_FAILED(err)) && createIfMissing) {
++  NS_ENSURE_SUCCESS(err, err);
++
++  int32_t count = 0;
++  if (!*table) {
++    if (log) {
++      msg = nsPrintfCString("No table returned for %s, env=%p", uri.get(),
++                            (void*)GetEnv());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++    }
++
++    // Total hackery. Sometimes the table exists but isn't returned.
++    // Spin the event loop to wait. We've see cases where the table was
++    // returned after 346 or 869 iterations, go figure!!
++    nsCOMPtr<nsIThread> thread(do_GetCurrentThread());
++    while (count++ < 2000 && !*table) {
++      NS_ProcessNextEvent(thread, true);
++      m_mdbStore->GetTableKind(GetEnv(), m_hdrRowScopeToken, kindToken,
++                               &numTables, &mustBeUnique, table);
++      NS_ENSURE_SUCCESS(err, err);
++    }
++  }
++
++  if (log) {
++    if (*table) {
++      if (count) {
++        nsCString msg = nsPrintfCString(
++            "Table returned for %s after spinning event loop %" PRIi32 " times",
++            uri.get(), count);
++        MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                         NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                         nsIScriptError::infoFlag);
++      } else {
++        nsCString msg = nsPrintfCString("Table returned for %s", uri.get());
++        MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                         NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                         nsIScriptError::infoFlag);
++      }
++    } else {
++      msg = nsPrintfCString(
++          "No table returned for %s after spinning event loop", uri.get());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++    }
++  }
++
++  if (!*table && createIfMissing) {
+     err = m_mdbStore->NewTable(GetEnv(), m_hdrRowScopeToken, kindToken, true,
+                                nullptr, table);
+   }
+ 
+@@ -4901,8 +4965,17 @@ nsMsgDatabase::GetCachedHits(const nsACS
                  new nsMsgDBEnumerator(this, table, nullptr, nullptr));
    return NS_OK;
  }
  
-+NS_IMETHODIMP nsMsgDatabase::InvalidateCache(const nsACString& aSearchFolderUri) {
++NS_IMETHODIMP nsMsgDatabase::InvalidateCache(
++    const nsACString& aSearchFolderUri) {
 +  // Mork doesn't offer a way to delete a table, and we can't update with
 +  // something invalid which we would detect later. So just make it empty.
 +  nsTArray<nsMsgKey> newHits;
@@ -867,7 +973,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                            nsTArray<nsMsgKey> const& aNewHits,
                                            nsTArray<nsMsgKey>& aStaleHits) {
    nsCOMPtr<nsIMdbTable> table;
-@@ -4980,9 +4988,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
+@@ -4980,9 +5053,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
    Commit(nsMsgDBCommitType::kLargeCommit);
    return NS_OK;
  }
@@ -878,7 +984,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                                      mdb_id idToInsert) {
    mdb_pos searchPos = 0;
    uint32_t rowCount;
-@@ -4995,9 +5003,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+@@ -4995,9 +5068,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
      searchPos = (lo + hi - 1) / 2;
      table->PosToOid(GetEnv(), searchPos, &outOid);
      if (outOid.mOid_Id == idToInsert) {
@@ -889,7 +995,46 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
      if (outOid.mOid_Id > idToInsert) {
        hi = searchPos;
      } else {
-@@ -5025,8 +5033,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
+@@ -5009,8 +5082,38 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+ 
+ NS_IMETHODIMP
+ nsMsgDatabase::UpdateHdrInCache(const nsACString& aSearchFolderUri,
+                                 nsIMsgDBHdr* aHdr, bool aAdd) {
++  if (mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose",
++                                    false)) {
++    nsCString msg;
++    nsMsgKey key2;
++    aHdr->GetMessageKey(&key2);
++    PRTime date;
++    aHdr->GetDate(&date);
++    char dateBuf[64];
++    PRExplodedTime exploded;
++    PR_ExplodeTime(date, PR_GMTParameters, &exploded);
++    PR_FormatTimeUSEnglish(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S %Y",
++                           &exploded);
++    nsCOMPtr<nsIMsgFolder> folder;
++    GetFolder(getter_AddRefs(folder));
++    nsCString uri;
++    if (folder) folder->GetURI(uri);
++    if (aAdd) {
++      msg = nsPrintfCString(
++          "Search %s, folder %s: Adding key=%" PRIu32 ", date=%s",
++          PromiseFlatCString(aSearchFolderUri).get(), uri.get(), key2, dateBuf);
++    } else {
++      msg = nsPrintfCString(
++          "Search %s, folder %s: Deleting key=%" PRIu32 ", date=%s",
++          PromiseFlatCString(aSearchFolderUri).get(), uri.get(), key2, dateBuf);
++    }
++    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                     NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                     nsIScriptError::infoFlag);
++  }
++
+   nsCOMPtr<nsIMdbTable> table;
+   nsresult err =
+       GetSearchResultsTable(aSearchFolderUri, true, getter_AddRefs(table));
+   NS_ENSURE_SUCCESS(err, err);
+@@ -5025,8 +5128,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
      } else {
        mdbOid rowId;
        hdrRow->GetOid(m_mdbEnv, &rowId);
