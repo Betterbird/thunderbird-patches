@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1732536419 -3600
+# Date 1732616313 -3600
 # Parent  2f1bc6f21a1d672a4ac8fa92f1e308f3f0e27d3d
 Bug 1923520 - Fix caching for virtual folders.
 * * *
@@ -866,24 +866,22 @@ diff --git a/mailnews/db/msgdb/public/nsIMsgDatabase.idl b/mailnews/db/msgdb/pub
 diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
 --- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
 +++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
-@@ -36,8 +36,16 @@
- #include "nsMailDirServiceDefs.h"
+@@ -37,8 +37,14 @@
  #include "mozilla/Components.h"
  #include "mozilla/mailnews/MimeHeaderParser.h"
  #include "mozilla/intl/LocaleService.h"
-+#include "nsIThread.h"
-+#include "nsThreadUtils.h"
-+
+ 
 +/* for logging to Error Console */
 +#include "nsIScriptError.h"
 +#include "nsPrintfCString.h"
 +#include "nsMsgUtils.h"
 +#include "mozilla/Preferences.h"
- 
++
  using namespace mozilla::mailnews;
  using namespace mozilla;
  
-@@ -4585,14 +4593,71 @@ nsresult nsMsgDatabase::GetSearchResults
+ #if defined(DEBUG_sspitzer_) || defined(DEBUG_seth_)
+@@ -4585,14 +4591,46 @@ nsresult nsMsgDatabase::GetSearchResults
    mdb_kind kindToken;
    mdb_count numTables;
    mdb_bool mustBeUnique;
@@ -905,46 +903,15 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
 -  if ((!*table || NS_FAILED(err)) && createIfMissing) {
 +  NS_ENSURE_SUCCESS(err, err);
 +
-+  int32_t count = 0;
-+  if (!*table) {
-+    if (log) {
-+      msg = nsPrintfCString("No table returned for %s, env=%p", uri.get(),
-+                            (void*)GetEnv());
++  if (log) {
++    if (*table) {
++      msg = nsPrintfCString("Table returned for %s", uri.get());
 +      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                       nsIScriptError::infoFlag);
-+    }
-+
-+    // Total hackery. Sometimes the table exists but isn't returned.
-+    // Spin the event loop to wait. We've see cases where the table was
-+    // returned after 346 or 869 iterations, go figure!!
-+    nsCOMPtr<nsIThread> thread(do_GetCurrentThread());
-+    while (count++ < 2000 && !*table) {
-+      NS_ProcessNextEvent(thread, true);
-+      m_mdbStore->GetTableKind(GetEnv(), m_hdrRowScopeToken, kindToken,
-+                               &numTables, &mustBeUnique, table);
-+      NS_ENSURE_SUCCESS(err, err);
-+    }
-+  }
-+
-+  if (log) {
-+    if (*table) {
-+      if (count) {
-+        nsCString msg = nsPrintfCString(
-+            "Table returned for %s after spinning event loop %" PRIi32 " times",
-+            uri.get(), count);
-+        MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
-+                         NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
-+                         nsIScriptError::infoFlag);
-+      } else {
-+        nsCString msg = nsPrintfCString("Table returned for %s", uri.get());
-+        MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
-+                         NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
-+                         nsIScriptError::infoFlag);
-+      }
 +    } else {
-+      msg = nsPrintfCString(
-+          "No table returned for %s after spinning event loop", uri.get());
++      msg = nsPrintfCString("No table returned for %s, env=%p", uri.get(),
++                            (void*)GetEnv());
 +      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                       nsIScriptError::infoFlag);
@@ -952,11 +919,17 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
 +  }
 +
 +  if (!*table && createIfMissing) {
++    if (log) {
++      msg = nsPrintfCString("Creating new empty table for %s", uri.get());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
++                       nsIScriptError::infoFlag);
++    }
      err = m_mdbStore->NewTable(GetEnv(), m_hdrRowScopeToken, kindToken, true,
                                 nullptr, table);
    }
  
-@@ -4609,8 +4674,17 @@ nsMsgDatabase::GetCachedHits(const nsACS
+@@ -4609,8 +4647,17 @@ nsMsgDatabase::GetCachedHits(const nsACS
                  new nsMsgDBEnumerator(this, table, nullptr, nullptr));
    return NS_OK;
  }
@@ -974,7 +947,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                            nsTArray<nsMsgKey> const& aNewHits,
                                            nsTArray<nsMsgKey>& aStaleHits) {
    nsCOMPtr<nsIMdbTable> table;
-@@ -4702,9 +4776,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
+@@ -4702,9 +4749,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
    Commit(nsMsgDBCommitType::kLargeCommit);
    return NS_OK;
  }
@@ -985,7 +958,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                                      mdb_id idToInsert) {
    mdb_pos searchPos = 0;
    uint32_t rowCount;
-@@ -4717,9 +4791,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+@@ -4717,9 +4764,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
      searchPos = (lo + hi - 1) / 2;
      table->PosToOid(GetEnv(), searchPos, &outOid);
      if (outOid.mOid_Id == idToInsert) {
@@ -996,7 +969,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
      if (outOid.mOid_Id > idToInsert) {
        hi = searchPos;
      } else {
-@@ -4730,8 +4804,38 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+@@ -4730,8 +4777,38 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
  }
  NS_IMETHODIMP
  nsMsgDatabase::UpdateHdrInCache(const nsACString& aSearchFolderUri,
@@ -1035,7 +1008,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
    nsresult err =
        GetSearchResultsTable(aSearchFolderUri, true, getter_AddRefs(table));
    NS_ENSURE_SUCCESS(err, err);
-@@ -4746,8 +4850,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
+@@ -4746,8 +4823,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
      } else {
        mdbOid rowId;
        hdrRow->GetOid(m_mdbEnv, &rowId);
