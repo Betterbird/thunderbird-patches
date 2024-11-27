@@ -6,7 +6,7 @@
 # Configuration
 lang="en-US"  # Language options: en-US, de, fr, es-AR, ja, it, pt-BR.
 version="release"  # Version options: previous, release, latest, future. Only 'release' is guaranteed to work.
-shaFile="https://www.betterbird.eu/downloads/sha256-115.txt"  # Name of sha256 file
+shaFile="https://www.betterbird.eu/downloads/sha256-128.txt"  # Name of sha256 file
 tmpDir="$HOME/tmp/betterbird"
 tmpFile="$tmpDir/download.tar.bz2"
 installDir="/opt"
