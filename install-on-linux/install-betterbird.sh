@@ -10,7 +10,7 @@ shaFile="https://www.betterbird.eu/downloads/sha256-128.txt"  # Name of sha256 f
 tmpDir="$HOME/tmp/betterbird"
 tmpFile="$tmpDir/download.tar.bz2"
 installDir="/opt"
-desktopFile="/usr/share/applications/betterbird.desktop"  # Do not change this configuration without reading comment in registerMIME().
+desktopFile="/usr/share/applications/eu.betterbird.Betterbird.desktop"  # Do not change this configuration without reading comment in registerMIME().
 backupDir="/opt/betterbird_backup_$(date +%Y%m%d%H%M)"
 logFile="/var/log/betterbird/update.log"
 
