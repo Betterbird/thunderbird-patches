@@ -99,7 +99,7 @@ registerMIME() {
   # This environment variable tells the desktop environment where to find desktop files.
   # Example: export XDG_DATA_DIRS="/desktop/file/directory:$XDG_DATA_DIRS"
   # For more details, see: https://specifications.freedesktop.org/menu-spec/latest/ar01s02.html
-  xdg-mime default betterbird.desktop x-scheme-handler/mailto
+  xdg-mime default eu.betterbird.Betterbird.desktop x-scheme-handler/mailto
   echoLog "MIME handler for x-scheme-handler/mailto registered."
 
   # Query the current default application set for handling mailto: links.
