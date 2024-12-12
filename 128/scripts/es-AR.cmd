@@ -196,6 +196,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "quick-filter-bar-match-addressbook ="                                                                                >> localization\es-AR\messenger\about3Pane.ftl
 %lecho% "    .label = Concordar con la libreta de direcciones"                                                                >> localization\es-AR\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Concordar con nombre para mostrar (comienza por) o apodo (exacto) de las libretas de direcciones" >> localization\es-AR\messenger\about3Pane.ftl
-
-:: String the negligent TB people forgot to ship:
-%lecho% "qr-export-oauth-warning = Algunas de sus cuentas usan un método de autentificación que podría necesitar que se vuelva a autentificar en su dispositivo móvil. Es posible que tenga que introducir sus contraseñas nuevamente durante este proceso." >> localization\es-AR\messenger\preferences\preferences.ftl

@@ -199,6 +199,3 @@ sed -i -e 's/label = Organisator/label = Organisieren/' localization\de\messenge
 %lecho% "quick-filter-bar-match-addressbook ="                                                                  >> localization\de\messenger\about3Pane.ftl
 %lecho% "    .label = Adressbuch vergleichen"                                                                   >> localization\de\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Anzeigename (beginnt mit) oder Spitzname (exakt) aus den Adressbüchern vergleichen" >> localization\de\messenger\about3Pane.ftl
-
-:: String the negligent TB people forgot to ship:
-%lecho% "qr-export-oauth-warning = Einige Ihrer Konten verwenden eine Authentifizierungsmethode, für die möglicherweise eine erneute Authentifizierung auf Ihrem Mobilgerät erforderlich ist. Möglicherweise müssen Sie während dieses Vorgangs Ihre Passwörter erneut eingeben." >> localization\de\messenger\preferences\preferences.ftl

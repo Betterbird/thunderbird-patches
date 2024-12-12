@@ -196,6 +196,3 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "quick-filter-bar-match-addressbook ="                                        >> localization\ja\messenger\about3Pane.ftl
 %lecho% "    .label = アドレス帳と一致"                                                   >> localization\ja\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = アドレス帳の表示名（で始まるもの）、またはニックネーム（完全）と一致したもの" >> localization\ja\messenger\about3Pane.ftl
-
-:: String the negligent TB people forgot to ship:
-%lecho% "qr-export-oauth-warning = 一部のアカウントは、モバイル端末での再認証が必要な認証方式を使用しています。設定する過程でパスワード入力を求められることがあります。" >> localization\ja\messenger\preferences\preferences.ftl
