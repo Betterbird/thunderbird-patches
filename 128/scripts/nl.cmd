@@ -196,3 +196,6 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "quick-filter-bar-match-addressbook ="                                                                    >> localization\nl\messenger\about3Pane.ftl
 %lecho% "    .label = Adresboek vergelijken"                                                                      >> localization\nl\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Vergelijken op weergegeven naam (start met), of schermnaam (exact) in de adresboeken" >> localization\nl\messenger\about3Pane.ftl
+
+:: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
+sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization\nl\messenger\preferences\preferences.ftl

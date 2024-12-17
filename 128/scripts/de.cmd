@@ -199,3 +199,6 @@ sed -i -e 's/label = Organisator/label = Organisieren/' localization\de\messenge
 %lecho% "quick-filter-bar-match-addressbook ="                                                                  >> localization\de\messenger\about3Pane.ftl
 %lecho% "    .label = Adressbuch vergleichen"                                                                   >> localization\de\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Anzeigename (beginnt mit) oder Spitzname (exakt) aus den Adressbüchern vergleichen" >> localization\de\messenger\about3Pane.ftl
+
+:: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
+sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization\de\messenger\preferences\preferences.ftl

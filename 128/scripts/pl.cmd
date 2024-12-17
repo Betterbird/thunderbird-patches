@@ -196,3 +196,6 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "quick-filter-bar-match-addressbook ="      >> localization\pl\messenger\about3Pane.ftl
 %lecho% "    .label = Dopasuj z książki adresowej"  >> localization\pl\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = Dopasuj na podstawie Wyświetlanej nazwy (zaczyna się od) lub Pseudonimu (dokładne dopasowanie) z twoich książek adresowych" >> localization\pl\messenger\about3Pane.ftl
+
+:: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
+sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization\pl\messenger\preferences\preferences.ftl
