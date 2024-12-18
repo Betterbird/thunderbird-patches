@@ -199,3 +199,4 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 
 :: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization\it\messenger\preferences\preferences.ftl
+sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get-app\1Thunderbird\2/' localization\it\messenger\preferences\preferences.ftl
