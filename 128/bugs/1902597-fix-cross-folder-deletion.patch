@@ -1,0 +1,310 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1735858875 -3600
+# Node ID 27e24e99bc18dec46849350b8ddf482248c91f5f
+# Parent  6a0daf8e3be69e6fb29e34b848990b58a21bb66b
+Bug 1902597 - Fix message deletion in cross-folder search views. r=mkmelin
+
+- Refactor and fix `nsMsgSearchDBView::DeleteMessages()` to apply the correct deletion method for messages from different accounts.
+- Enable undeleting of messages marked as deleted.
+- Mark messages as read before deleting them (see bug 1859677)
+- Update `m_totalMessagesInView` correctly when messages are moved or marked as deleted.
+
+Differential Revision: https://phabricator.services.mozilla.com/D215380
+
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -1237,10 +1237,9 @@ nsMsgDBView::GetRowProperties(int32_t in
+ 
+   if (flags & nsMsgMessageFlags::Attachment)
+     properties.AppendLiteral(" attach");
+ 
+-  if ((mDeleteModel == nsMsgImapDeleteModels::IMAPDelete) &&
+-      (flags & nsMsgMessageFlags::IMAPDeleted))
++  if ((flags & nsMsgMessageFlags::IMAPDeleted))
+     properties.AppendLiteral(" imapdeleted");
+ 
+   nsCString imageSize;
+   msgHdr->GetStringProperty("imageSize", imageSize);
+@@ -1374,10 +1373,9 @@ nsMsgDBView::GetCellProperties(int32_t a
+ 
+   if (flags & nsMsgMessageFlags::Attachment)
+     properties.AppendLiteral(" attach");
+ 
+-  if ((mDeleteModel == nsMsgImapDeleteModels::IMAPDelete) &&
+-      (flags & nsMsgMessageFlags::IMAPDeleted))
++  if ((flags & nsMsgMessageFlags::IMAPDeleted))
+     properties.AppendLiteral(" imapdeleted");
+ 
+   nsCString imageSize;
+   msgHdr->GetStringProperty("imageSize", imageSize);
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -17,8 +17,9 @@
+ #include "nsIPrefBranch.h"
+ #include "nsMsgMessageFlags.h"
+ #include "nsIMsgSearchSession.h"
+ #include "nsServiceManagerUtils.h"
++#include "nsIMsgImapMailFolder.h"
+ 
+ static bool gReferenceOnlyThreading;
+ 
+ nsMsgSearchDBView::nsMsgSearchDBView() {
+@@ -947,16 +948,10 @@ NS_IMETHODIMP nsMsgSearchDBView::ApplyCo
+ 
+ nsresult nsMsgSearchDBView::DeleteMessages(
+     nsIMsgWindow* window, nsTArray<nsMsgViewIndex> const& selection,
+     bool deleteStorage) {
+-  uint32_t hdrCount = 0;
+-  nsresult rv = GetFoldersAndHdrsForSelection(selection, &hdrCount);
++  nsresult rv = GetFoldersAndHdrsForSelection(selection);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  m_totalMessagesInView -= hdrCount;
+-
+-  if (mDeleteModel != nsMsgImapDeleteModels::MoveToTrash) deleteStorage = true;
+-
+-  if (mDeleteModel != nsMsgImapDeleteModels::IMAPDelete) m_deletingRows = true;
+ 
+   // Remember the deleted messages in case the user undoes the delete,
+   // and we want to restore the hdr to the view, even if it no
+   // longer matches the search criteria.
+@@ -965,26 +960,17 @@ nsresult nsMsgSearchDBView::DeleteMessag
+     (void)GetMsgHdrForViewIndex(viewIndex, getter_AddRefs(msgHdr));
+     if (msgHdr) {
+       RememberDeletedMsgHdr(msgHdr);
+     }
+-
+-    // If we are deleting rows, save off the view indices.
+-    if (m_deletingRows) {
+-      mIndicesToNoteChange.AppendElement(viewIndex);
+-    }
+   }
+-  rv = deleteStorage ? ProcessRequestsInAllFolders(window)
+-                     : ProcessRequestsInOneFolder(window);
+-  if (NS_FAILED(rv)) m_deletingRows = false;
+-
+-  return rv;
++  return ProcessNextFolder(window);
+ }
+ 
+ nsresult nsMsgSearchDBView::CopyMessages(
+     nsIMsgWindow* window, nsTArray<nsMsgViewIndex> const& selection,
+     bool isMove, nsIMsgFolder* destFolder) {
+   GetFoldersAndHdrsForSelection(selection);
+-  return ProcessRequestsInOneFolder(window);
++  return ProcessNextFolder(window);
+ }
+ 
+ nsresult nsMsgSearchDBView::PartitionSelectionByFolder(
+     nsTArray<nsMsgViewIndex> const& selection,
+@@ -1022,20 +1008,17 @@ nsresult nsMsgSearchDBView::PartitionSel
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgSearchDBView::GetFoldersAndHdrsForSelection(
+-    nsTArray<nsMsgViewIndex> const& selection, uint32_t* hdrCount) {
++    nsTArray<nsMsgViewIndex> const& selection) {
+   nsresult rv = NS_OK;
+   mCurIndex = 0;
+   m_uniqueFoldersSelected.Clear();
+   m_hdrsForEachFolder.Clear();
+ 
+   AutoTArray<RefPtr<nsIMsgDBHdr>, 1> messages;
+   rv = GetHeadersFromSelection(selection, messages);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  if (hdrCount) {
+-    *hdrCount = messages.Length();
+-  }
+ 
+   // Build unique folder list based on headers selected by the user.
+   for (nsIMsgDBHdr* hdr : messages) {
+     nsCOMPtr<nsIMsgFolder> curFolder;
+@@ -1095,64 +1078,92 @@ nsMsgSearchDBView::OnStopCopy(nsresult a
+   if (NS_SUCCEEDED(aStatus)) {
+     mCurIndex++;
+     if ((int32_t)mCurIndex < m_uniqueFoldersSelected.Count()) {
+       nsCOMPtr<nsIMsgWindow> msgWindow(do_QueryReferent(mMsgWindowWeak));
+-      ProcessRequestsInOneFolder(msgWindow);
++      ProcessNextFolder(msgWindow);
+     }
+   }
+ 
+   return NS_OK;
+ }
+ 
+ // End nsIMsgCopyServiceListener methods.
+ 
+-nsresult nsMsgSearchDBView::ProcessRequestsInOneFolder(nsIMsgWindow* window) {
++nsresult nsMsgSearchDBView::ProcessNextFolder(nsIMsgWindow* window) {
+   nsresult rv = NS_OK;
+ 
+   // Folder operations like copy/move are not implemented for .eml files.
+-  if (m_uniqueFoldersSelected.Count() == 0) return NS_ERROR_NOT_IMPLEMENTED;
++  if (m_uniqueFoldersSelected.Count() == 0) {
++    return NS_ERROR_NOT_IMPLEMENTED;
++  }
+ 
+   nsIMsgFolder* curFolder = m_uniqueFoldersSelected[mCurIndex];
+   NS_ASSERTION(curFolder, "curFolder is null");
+   nsTArray<RefPtr<nsIMsgDBHdr>> const& msgs = m_hdrsForEachFolder[mCurIndex];
+ 
+-  // called for delete with trash, copy and move
+-  if (mCommand == nsMsgViewCommandType::deleteMsg)
+-    curFolder->DeleteMessages(msgs, window, false /* delete storage */,
+-                              false /* is move*/, this, true /*allowUndo*/);
+-  else {
++  // Set to default in case it is non-imap folder.
++  mDeleteModel = nsMsgImapDeleteModels::MoveToTrash;
++  nsCOMPtr<nsIMsgImapMailFolder> imapFolder = do_QueryInterface(curFolder);
++  if (imapFolder) {
++    GetImapDeleteModel(curFolder);
++  }
++
++  const bool mCommandIsDelete = mCommand == nsMsgViewCommandType::deleteMsg ||
++                                mCommand == nsMsgViewCommandType::deleteNoTrash;
++  m_deletingRows = !(
++      (mCommandIsDelete && mDeleteModel == nsMsgImapDeleteModels::IMAPDelete) ||
++      mCommand == nsMsgViewCommandType::copyMessages);
++  if (m_deletingRows) {
++    m_totalMessagesInView -= msgs.Length();
++    SetSuppressChangeNotifications(true);
++  }
++
++  if (mCommandIsDelete) {
++    const bool deleteStorage =
++        mCommand == nsMsgViewCommandType::deleteNoTrash ||
++        mDeleteModel == nsMsgImapDeleteModels::DeleteNoTrash;
++    if (!deleteStorage) {
++      curFolder->MarkMessagesRead(msgs, true);
++    }
++    rv =
++        curFolder->DeleteMessages(msgs, window, deleteStorage,
++                                  false /* is move*/, this, true /*allowUndo*/);
++    if (NS_SUCCEEDED(rv) && deleteStorage) {
++      mCurIndex++;
++      if ((int32_t)mCurIndex < m_uniqueFoldersSelected.Count()) {
++        rv = ProcessNextFolder(window);
++      }
++    }
++  } else {
+     NS_ASSERTION(!(curFolder == mDestFolder),
+                  "The source folder and the destination folder are the same");
+-    if (NS_SUCCEEDED(rv) && curFolder != mDestFolder) {
++    if (curFolder != mDestFolder) {
+       nsCOMPtr<nsIMsgCopyService> copyService =
+           do_GetService("@mozilla.org/messenger/messagecopyservice;1", &rv);
+       if (NS_SUCCEEDED(rv)) {
+         if (mCommand == nsMsgViewCommandType::moveMessages)
+-          copyService->CopyMessages(curFolder, msgs, mDestFolder,
+-                                    true /* isMove */, this, window,
+-                                    true /*allowUndo*/);
++          rv = copyService->CopyMessages(curFolder, msgs, mDestFolder,
++                                         true /* isMove */, this, window,
++                                         true /*allowUndo*/);
+         else if (mCommand == nsMsgViewCommandType::copyMessages)
+-          copyService->CopyMessages(curFolder, msgs, mDestFolder,
+-                                    false /* isMove */, this, window,
+-                                    true /*allowUndo*/);
++          rv = copyService->CopyMessages(curFolder, msgs, mDestFolder,
++                                         false /* isMove */, this, window,
++                                         true /*allowUndo*/);
+       }
+     }
+   }
+ 
+-  return rv;
+-}
+-
+-nsresult nsMsgSearchDBView::ProcessRequestsInAllFolders(nsIMsgWindow* window) {
+-  uint32_t numFolders = m_uniqueFoldersSelected.Count();
+-  for (uint32_t folderIndex = 0; folderIndex < numFolders; folderIndex++) {
+-    nsIMsgFolder* curFolder = m_uniqueFoldersSelected[folderIndex];
+-    NS_ASSERTION(curFolder, "curFolder is null");
+-    curFolder->DeleteMessages(
+-        m_hdrsForEachFolder[folderIndex], window, true /* delete storage */,
+-        false /* is move*/, nullptr /*copyServListener*/, false /*allowUndo*/);
++  // If something went wrong deleting or moving messages, so that
++  // OnDeleteCompleted may not be called, reset these here as well.
++  if (NS_FAILED(rv)) {
++    m_deletingRows = false;
++    SetSuppressChangeNotifications(false);
+   }
+ 
+-  return NS_OK;
++  // Reset to default.
++  mDeleteModel = nsMsgImapDeleteModels::MoveToTrash;
++
++  return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgSearchDBView::Sort(nsMsgViewSortTypeValue sortType,
+                                       nsMsgViewSortOrderValue sortOrder) {
+@@ -1524,4 +1535,15 @@ nsMsgSearchDBView::SetViewFlags(nsMsgVie
+   }
+   NS_ENSURE_SUCCESS(rv, rv);
+   return nsMsgDBView::SetViewFlags(aViewFlags);
+ }
++
++NS_IMETHODIMP
++nsMsgSearchDBView::OnDeleteCompleted(bool aSucceeded) {
++  if (m_deletingRows) {
++    SetSuppressChangeNotifications(false);
++    m_deletingRows = false;
++    if (mTree) mTree->Invalidate();
++    if (mJSTree) mJSTree->Invalidate();
++  }
++  return NS_OK;
++}
+diff --git a/mailnews/base/src/nsMsgSearchDBView.h b/mailnews/base/src/nsMsgSearchDBView.h
+--- a/mailnews/base/src/nsMsgSearchDBView.h
++++ b/mailnews/base/src/nsMsgSearchDBView.h
+@@ -87,8 +87,10 @@ class nsMsgSearchDBView : public nsMsgGr
+       nsTArray<nsMsgViewIndex> const& selection) override;
+ 
+   NS_IMETHOD SetViewFlags(nsMsgViewFlagsTypeValue aViewFlags) override;
+ 
++  NS_IMETHOD OnDeleteCompleted(bool aSucceeded) override;
++
+  protected:
+   virtual ~nsMsgSearchDBView();
+   virtual void InternalClose() override;
+   virtual nsresult HashHdr(nsIMsgDBHdr* msgHdr, nsString& aHashKey) override;
+@@ -117,10 +119,14 @@ class nsMsgSearchDBView : public nsMsgGr
+   virtual void RemoveRows(nsMsgViewIndex viewIndex, int32_t numRows) override;
+   virtual nsMsgViewIndex FindHdr(
+       nsIMsgDBHdr* msgHdr, nsMsgViewIndex startIndex = nsMsgViewIndex_None,
+       bool allowDummy = false) override;
++
++  // Functions for copy, move, and delete operations.
+   nsresult GetFoldersAndHdrsForSelection(
+-      nsTArray<nsMsgViewIndex> const& selection, uint32_t* hdrCount = nullptr);
++      nsTArray<nsMsgViewIndex> const& selection);
++  nsresult ProcessNextFolder(nsIMsgWindow* window);
++
+   nsresult GroupSearchResultsByFolder();
+   nsresult PartitionSelectionByFolder(
+       nsTArray<nsMsgViewIndex> const& selection,
+       mozilla::UniquePtr<nsTArray<uint32_t>[]>& indexArrays,
+@@ -140,8 +146,9 @@ class nsMsgSearchDBView : public nsMsgGr
+   // Augments the existing arrays in nsMsgDBView (m_keys, m_flags and m_levels),
+   // and is kept in sync with them.
+   nsCOMArray<nsIMsgFolder> m_folders;
+ 
++  // Used for copy, move, and delete operations.
+   nsTArray<nsTArray<RefPtr<nsIMsgDBHdr>>> m_hdrsForEachFolder;
+   nsCOMArray<nsIMsgFolder> m_uniqueFoldersSelected;
+   uint32_t mCurIndex;
+ 
+@@ -150,10 +157,8 @@ class nsMsgSearchDBView : public nsMsgGr
+   nsMsgViewCommandTypeValue mCommand;
+   nsCOMPtr<nsIMsgFolder> mDestFolder;
+   nsWeakPtr m_searchSession;
+ 
+-  nsresult ProcessRequestsInOneFolder(nsIMsgWindow* window);
+-  nsresult ProcessRequestsInAllFolders(nsIMsgWindow* window);
+   // these are for doing threading of the search hits
+ 
+   // used for assigning thread id's to xfview threads.
+   nsMsgKey m_nextThreadId;
