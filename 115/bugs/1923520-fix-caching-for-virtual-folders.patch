@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1732616313 -3600
+# Date 1735945894 -3600
 # Parent  2f1bc6f21a1d672a4ac8fa92f1e308f3f0e27d3d
 Bug 1923520 - Fix caching for virtual folders.
 * * *
@@ -15,21 +15,32 @@ Introduce folder flag for invalid cache of virtual folder.
 diff --git a/mailnews/base/content/virtualFolderProperties.js b/mailnews/base/content/virtualFolderProperties.js
 --- a/mailnews/base/content/virtualFolderProperties.js
 +++ b/mailnews/base/content/virtualFolderProperties.js
-@@ -256,8 +256,18 @@ function onOK(event) {
-     // save the settings
-     let virtualFolderWrapper = VirtualFolderHelper.wrapVirtualFolder(
-       window.arguments[0].folder
+@@ -253,11 +253,26 @@ function onOK(event) {
+       gSearchTermSession.searchTerms,
+       gSearchTermSession
      );
+     // save the settings
+-    let virtualFolderWrapper = VirtualFolderHelper.wrapVirtualFolder(
+-      window.arguments[0].folder
+-    );
++    const virtualFolderWrapper =
++      VirtualFolderHelper.wrapVirtualFolder(gMsgFolder);
 +    // The cache is stored on the base search folder indexed by the
 +    // search folder URI. Not a bad choice, so when repairing the
 +    // base folder, the cache gets thrown away.
-+    const searchFolderURIs = gSearchFolderURIs.split("|");
-+    for (const uri of searchFolderURIs) {
-+      MailServices.folderLookup
-+        .getFolderForURL(uri)
-+        ?.msgDatabase?.invalidateCache(gMsgFolder.URI);
++    for (const searchFolder of virtualFolderWrapper.searchFolders) {
++      try {
++        const db = searchFolder.msgDatabase;
++        if (db) {
++          db.invalidateCache(gMsgFolder.URI);
++        }
++      } catch (ex) {
++        console.error(
++          `No database for ${searchFolder.URI}, failed with ${ex.message}`
++        );
++      }
 +    }
-+    window.arguments[0].folder.clearFlag(Ci.nsMsgFolderFlags.CacheValid); 
++    gMsgFolder.clearFlag(Ci.nsMsgFolderFlags.CacheValid);
      virtualFolderWrapper.searchTerms = gSearchTermSession.searchTerms;
      virtualFolderWrapper.searchFolders = gSearchFolderURIs;
      virtualFolderWrapper.onlineSearch = searchOnline;
@@ -256,7 +267,7 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
      // Build up message keys. The cache expects them to be sorted.
      for (uint32_t i = 0; i < count; i++) {
        nsMsgKey key;
-@@ -312,8 +324,22 @@ nsMsgQuickSearchDBView::OnSearchDone(nsr
+@@ -312,18 +324,36 @@ nsMsgQuickSearchDBView::OnSearchDone(nsr
      keyArray.Sort();
      nsTArray<nsMsgKey> staleHits;
      nsresult rv = m_db->RefreshCache(searchUri, keyArray, staleHits);
@@ -279,7 +290,23 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
        nsCOMPtr<nsIMsgDBHdr> hdrDeleted;
        m_db->GetMsgHdrForKey(staleKey, getter_AddRefs(hdrDeleted));
        if (hdrDeleted) OnHdrDeleted(hdrDeleted, nsMsgKey_None, 0, this);
-@@ -356,47 +382,132 @@ nsMsgQuickSearchDBView::OnNewSearch() {
+     }
++  }
+ 
++  // The following should be necessary when `m_usingCachedHits` is true,
++  // but it won't hurt to adjust the counts which what we restored from cache.
++  if (!m_doingQuickSearch && status != NS_MSG_SEARCH_INTERRUPTED) {
+     nsCOMPtr<nsIMsgDatabase> virtDatabase;
+     nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+-    rv = m_viewFolder->GetDBFolderInfoAndDB(getter_AddRefs(dbFolderInfo),
+-                                            getter_AddRefs(virtDatabase));
++    nsresult rv = m_viewFolder->GetDBFolderInfoAndDB(
++        getter_AddRefs(dbFolderInfo), getter_AddRefs(virtDatabase));
+     NS_ENSURE_SUCCESS(rv, rv);
+     uint32_t numUnread = 0;
+     size_t numTotal = m_origKeys.Length();
+ 
+@@ -356,47 +386,132 @@ nsMsgQuickSearchDBView::OnNewSearch() {
    m_keys.Clear();
    m_levels.Clear();
    m_flags.Clear();
@@ -595,7 +622,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 -        uint32_t unreadInThread;
 -        thread->GetNumUnreadChildren(&unreadInThread);
 -        numUnread += unreadInThread;
-+  // The following should be necessary when `m_usingCachedHits` ist true,
++  // The following should be necessary when `m_usingCachedHits` is true,
 +  // but it won't hurt to adjust the counts which what we restored from cache.
 +  if (!m_doingQuickSearch && status != NS_MSG_SEARCH_INTERRUPTED) {
 +    nsCOMPtr<nsIMsgDatabase> virtDatabase;
@@ -881,37 +908,50 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
  using namespace mozilla;
  
  #if defined(DEBUG_sspitzer_) || defined(DEBUG_seth_)
-@@ -4585,14 +4591,46 @@ nsresult nsMsgDatabase::GetSearchResults
+@@ -4581,19 +4587,57 @@ nsMsgDatabase::GetNewList(nsTArray<nsMsg
+ 
+ nsresult nsMsgDatabase::GetSearchResultsTable(const nsACString& searchFolderUri,
+                                               bool createIfMissing,
+                                               nsIMdbTable** table) {
++  mdb_scope scopeToken;
    mdb_kind kindToken;
    mdb_count numTables;
    mdb_bool mustBeUnique;
    NS_ENSURE_TRUE(m_mdbStore, NS_ERROR_NULL_POINTER);
+-
 +  bool log =
 +      mozilla::Preferences::GetBool("mailnews.virtual_folders.verbose", false);
 +  nsCString msg;
- 
++
++  m_mdbStore->StringToToken(GetEnv(), "ns:msg:db:row:scope:results:all", &scopeToken);
    nsresult err = m_mdbStore->StringToToken(
        GetEnv(), PromiseFlatCString(searchFolderUri).get(), &kindToken);
+-  err = m_mdbStore->GetTableKind(GetEnv(), m_hdrRowScopeToken, kindToken,
 +  NS_ENSURE_SUCCESS(err, err);
 +
 +  nsCOMPtr<nsIMsgFolder> folder;
 +  GetFolder(getter_AddRefs(folder));
 +  nsCString uri;
 +  if (folder) folder->GetURI(uri);
-   err = m_mdbStore->GetTableKind(GetEnv(), m_hdrRowScopeToken, kindToken,
++  err = m_mdbStore->GetTableKind(GetEnv(), scopeToken, kindToken,
                                   &numTables, &mustBeUnique, table);
 -  if ((!*table || NS_FAILED(err)) && createIfMissing) {
+-    err = m_mdbStore->NewTable(GetEnv(), m_hdrRowScopeToken, kindToken, true,
 +  NS_ENSURE_SUCCESS(err, err);
 +
 +  if (log) {
 +    if (*table) {
-+      msg = nsPrintfCString("Table returned for %s", uri.get());
++      msg =
++          nsPrintfCString("Search Folder %s: Table returned for %s",
++                          PromiseFlatCString(searchFolderUri).get(), uri.get());
 +      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                       nsIScriptError::infoFlag);
 +    } else {
-+      msg = nsPrintfCString("No table returned for %s, env=%p", uri.get(),
-+                            (void*)GetEnv());
++      msg =
++          nsPrintfCString("Search Folder %s: No table returned for %s, env=%p",
++                          PromiseFlatCString(searchFolderUri).get(), uri.get(),
++                          (void*)GetEnv());
 +      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
 +                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                       nsIScriptError::infoFlag);
@@ -925,11 +965,12 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
 +                       NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__,
 +                       nsIScriptError::infoFlag);
 +    }
-     err = m_mdbStore->NewTable(GetEnv(), m_hdrRowScopeToken, kindToken, true,
++    err = m_mdbStore->NewTable(GetEnv(), scopeToken, kindToken, true,
                                 nullptr, table);
    }
  
-@@ -4609,8 +4647,17 @@ nsMsgDatabase::GetCachedHits(const nsACS
+   return *table ? err : NS_ERROR_FAILURE;
+@@ -4609,8 +4653,17 @@ nsMsgDatabase::GetCachedHits(const nsACS
                  new nsMsgDBEnumerator(this, table, nullptr, nullptr));
    return NS_OK;
  }
@@ -947,7 +988,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                            nsTArray<nsMsgKey> const& aNewHits,
                                            nsTArray<nsMsgKey>& aStaleHits) {
    nsCOMPtr<nsIMdbTable> table;
-@@ -4702,9 +4749,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
+@@ -4702,9 +4755,9 @@ NS_IMETHODIMP nsMsgDatabase::RefreshCach
    Commit(nsMsgDBCommitType::kLargeCommit);
    return NS_OK;
  }
@@ -958,7 +999,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
                                                      mdb_id idToInsert) {
    mdb_pos searchPos = 0;
    uint32_t rowCount;
-@@ -4717,9 +4764,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+@@ -4717,9 +4770,9 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
      searchPos = (lo + hi - 1) / 2;
      table->PosToOid(GetEnv(), searchPos, &outOid);
      if (outOid.mOid_Id == idToInsert) {
@@ -969,7 +1010,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
      if (outOid.mOid_Id > idToInsert) {
        hi = searchPos;
      } else {
-@@ -4730,8 +4777,38 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
+@@ -4730,8 +4783,38 @@ mdb_pos nsMsgDatabase::FindInsertIndexIn
  }
  NS_IMETHODIMP
  nsMsgDatabase::UpdateHdrInCache(const nsACString& aSearchFolderUri,
@@ -1008,7 +1049,7 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
    nsresult err =
        GetSearchResultsTable(aSearchFolderUri, true, getter_AddRefs(table));
    NS_ENSURE_SUCCESS(err, err);
-@@ -4746,8 +4823,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
+@@ -4746,8 +4829,9 @@ nsMsgDatabase::UpdateHdrInCache(const ns
      } else {
        mdbOid rowId;
        hdrRow->GetOid(m_mdbEnv, &rowId);
@@ -1018,23 +1059,6 @@ diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsM
        table->GetCount(m_mdbEnv, &rowCount);
        table->AddRow(m_mdbEnv, hdrRow);
        mdb_pos newPos;
-diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
---- a/mailnews/imap/src/nsImapMailFolder.cpp
-+++ b/mailnews/imap/src/nsImapMailFolder.cpp
-@@ -352,9 +352,12 @@ NS_IMETHODIMP nsImapMailFolder::AddSubfo
-   nsCOMPtr<nsIMsgImapMailFolder> imapChild = do_QueryInterface(*aChild);
-   if (imapChild) {
-     imapChild->SetHierarchyDelimiter(m_hierarchyDelimiter);
-   }
--  NotifyFolderAdded(*aChild);
-+  // This was added in bug 470151, but it appears wrong since for
-+  // virtual folders we're notifying without the virtual folder flag
-+  // wreaking havoc.
-+  // NotifyFolderAdded(*aChild);
-   return rv;
- }
- 
- // Creates a new child nsIMsgFolder locally, with no IMAP traffic.
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
