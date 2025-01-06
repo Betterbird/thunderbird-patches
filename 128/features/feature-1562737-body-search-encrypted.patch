@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1722673911 -7200
-# Parent  7dc3893c19dff9aa6a25ef900cab8dee86998777
+# Parent  fc91f572ffa7d18665fdf997ac7a4061985a6ab6
 Bug 1562737 - Body search in PGP encrypted messages.
 
 Short history of this patch (in the 91 version):
@@ -17,6 +17,8 @@ In the latest version, turning `m_listContext` into a local variable is reverted
 original state with no re-entrancy protection. At time of writing (13th Nov. 2022) no crashes are observed.
 * * *
 Bug 1562737 - Body search in S/MIME encrypted messages.
+* * *
+Adjust nsMsgBodyHandler.cpp/h to 'Bug 1919290 - Type checking for output and image closure parameters in C MIME code'.
 
 diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
 --- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
@@ -31,7 +33,7 @@ diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/
    this.xferEncoding = ENCODING_DEFAULT;
    this.matchedPgpDelimiter = 0;
    this.exitCode = null;
-@@ -160,8 +161,9 @@ MimeDecryptHandler.prototype = {
+@@ -161,8 +162,9 @@ MimeDecryptHandler.prototype = {
      this.returnStatus = null;
      this.dataLength = 0;
      this.decryptedData = "";
@@ -41,7 +43,7 @@ diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/
      this.matchedPgpDelimiter = 0;
      this.dataIsBase64 = null;
      this.base64Cache = "";
-@@ -212,8 +214,14 @@ MimeDecryptHandler.prototype = {
+@@ -213,8 +215,14 @@ MimeDecryptHandler.prototype = {
          this.cacheData(lazy.EnigmailData.decodeQuotedPrintable(data));
        } else {
          this.cacheData(data);
@@ -72,7 +74,7 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
    nsMsgBodyHandler(nsIMsgSearchScopeTerm*, nsIMsgDBHdr* msg);
  
    // We can also create a body handler when doing arbitrary header
-@@ -65,17 +68,30 @@ class nsMsgBodyHandler {
+@@ -65,17 +68,31 @@ class nsMsgBodyHandler {
    bool m_partIsHtml;   // true if the Content-type header claims text/html
    bool m_base64part;   // true if the current part is in base64
    bool m_isMultipart;  // true if the message is a multipart/* message
@@ -97,7 +99,8 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
    static void Base64Decode(nsCString& buf);
 +  void DecryptPGP(const nsCString& aEncrypted, nsCString& aDecrypted);
 +  void DecryptSMIME(const nsCString& aEncrypted, nsCString& aDecrypted);
-+  static int OutputFunctionPGP(const char* buf, int32_t buf_size, void* arg);
++  static int OutputFunctionPGP(const char* buf, int32_t buf_size,
++                               int32_t outputClosureType, void* outputClosure);
 +  static void OutputFunctionSMIME(void* arg, const char* buf,
 +                                  unsigned long length);
 +  void GetRelevantTextParts(const nsCString& aInput, nsCString& aOutput);
@@ -106,7 +109,7 @@ diff --git a/mailnews/search/public/nsMsgBodyHandler.h b/mailnews/search/public/
 diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMsgBodyHandler.cpp
 --- a/mailnews/search/src/nsMsgBodyHandler.cpp
 +++ b/mailnews/search/src/nsMsgBodyHandler.cpp
-@@ -4,11 +4,19 @@
+@@ -4,11 +4,20 @@
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  
  #include "msgCore.h"
@@ -120,13 +123,14 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 +#include "nsICMSDecoder.h"
 +#include "nsMsgI18N.h"
 +#include "mozilla/Utf8.h"
++#include "mime_closure.h"
 +
 +#include "nsMsgBodyHandler2.cpp"
  
  nsMsgBodyHandler::nsMsgBodyHandler(nsIMsgSearchScopeTerm* scope,
                                     nsIMsgDBHdr* msg) {
    m_scope = scope;
-@@ -53,8 +61,11 @@ void nsMsgBodyHandler::Initialize()
+@@ -53,8 +62,11 @@ void nsMsgBodyHandler::Initialize()
    m_base64part = false;
    m_partIsQP = false;
    m_isMultipart = false;
@@ -138,7 +142,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
    m_inMessageAttachment = false;
  }
  
-@@ -83,9 +94,9 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
+@@ -83,9 +95,9 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
  
    if (outLength < 0) return -1;  // eof out
  
@@ -149,7 +153,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
      outLength = buf.Length();
      m_base64part = false;
    }
-@@ -95,8 +106,19 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
+@@ -95,8 +107,19 @@ int32_t nsMsgBodyHandler::GetNextLine(ns
      StripHtml(buf);
      outLength = buf.Length();
    }
@@ -169,7 +173,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
    return outLength;
  }
  
-@@ -219,40 +241,55 @@ int32_t nsMsgBodyHandler::ApplyTransform
+@@ -219,40 +242,55 @@ int32_t nsMsgBodyHandler::ApplyTransform
        } else {
          // Avoid spurious failures
          eatThisLine = false;
@@ -229,7 +233,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
        size_t bufLength = buf.Length();
        if (!m_partIsQP || bufLength == 0 || !StringEndsWith(buf, "="_ns)) {
          // Replace newline in HTML with a space.
-@@ -260,8 +297,10 @@ int32_t nsMsgBodyHandler::ApplyTransform
+@@ -260,8 +298,10 @@ int32_t nsMsgBodyHandler::ApplyTransform
        } else {
          // Strip the soft line break.
          buf.SetLength(bufLength - 1);
@@ -240,15 +244,16 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
      buf.Append(line);
      eatThisLine = true;
      return buf.Length();
-@@ -295,8 +334,125 @@ void nsMsgBodyHandler::StripHtml(nsCStri
+@@ -295,8 +335,126 @@ void nsMsgBodyHandler::StripHtml(nsCStri
      pBufInOut.Adopt(pBuf);
    }
  }
  
 +/* static */
 +int nsMsgBodyHandler::OutputFunctionPGP(const char* buf, int32_t buf_size,
-+                                        void* arg) {
-+  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(arg);
++                                        int32_t outputClosureType,
++                                        void* outputClosure) {
++  nsMsgBodyHandler* self = reinterpret_cast<nsMsgBodyHandler*>(outputClosure);
 +  self->mDecrypted.Assign(buf, buf_size);
 +  return 0;
 +}
@@ -275,8 +280,8 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
 +  // Use a boundary which won't be found 100%.
 +  decryptor->SetContentType(
 +      "multipart/encrypted; boundary=$$none$$none$$none$$none$$none"_ns);
-+  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunctionPGP, this,
-+                             nullptr, nullptr);
++  decryptor->SetMimeCallback(nsMsgBodyHandler::OutputFunctionPGP,
++                             MimeClosure::isMimeObject, this, nullptr, nullptr);
 +  decryptor->Write(aEncrypted.get(), aEncrypted.Length());
 +  decryptor->Finish();
 +  decryptor->RemoveMimeCallback();
@@ -366,7 +371,7 @@ diff --git a/mailnews/search/src/nsMsgBodyHandler.cpp b/mailnews/search/src/nsMs
   * Determines the MIME type, if present, from the current line.
   *
   * m_partIsHtml, m_isMultipart, m_partIsText, m_base64part, and boundary are
-@@ -326,26 +482,58 @@ void nsMsgBodyHandler::SniffPossibleMIME
+@@ -326,26 +484,58 @@ void nsMsgBodyHandler::SniffPossibleMIME
          m_partIsQP = false;
          m_pastPartHeaders = false;
          m_partIsHtml = false;
