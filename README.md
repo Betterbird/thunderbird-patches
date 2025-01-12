@@ -40,7 +40,8 @@ the [Thunderbird documentation](https://developer.thunderbird.net/thunderbird-de
 is incomplete:
 1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
 1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`
-1. Install Mercurial: `echo 'export PATH="'"$(python3 -m site --user-base)"'/bin:$PATH"' >> ~/.zshenv` and `python3 -m pip install --user mercurial==6.1.4`
+1. If necessary, add Xcode to the PATH: Add `export PATH=/opt/homebrew/bin:$PATH` to `.zshrc` in the home directory.
+1. Install Mercurial: `echo 'export PATH="'"$(python3 -m site --user-base)"'/bin:$PATH"' >> ~/.zshenv` and `python3 -m pip install --user mercurial`
 1. In a new shell: `hg version`
 1. Install Rust: `brew install rustup`
 1. In a new shell: `rustup-init` and `rustup override set 1.XX.0`, see `NN/NN.sh` for the required version
