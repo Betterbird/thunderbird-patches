@@ -60,7 +60,7 @@ sed -i -e 's/label = Organisator/label = Organizátor/' localization\cs\messenge
 %lecho% "    .accesskey = O"                     >> localization\cs\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
-:: Strings from https://hg.mozilla.org/l10n-central/de/file/2f346846f995f942b61562fed125b0cc98e82a13/mail/chrome/messenger/localMsgs.properties
+:: Strings from https://hg.mozilla.org/l10n-central/cs/file/eb8791bb6298abbcd98b015418c950139bab57a1/mail/chrome/messenger/localMsgs.properties
 %lecho% "movemailCantOpenSpoolFile=Nelze otevřít soubor %%S s příchozí poštou."   >> chrome\cs\locale\cs\messenger\localMsgs.properties
 %lecho% "movemailCantCreateLock=Nelze vytvořit soubor %%S se zámkem. Aby movemail pracoval, je potřeba v adresáři s příchozí poštou vytvořit soubor se zámkem. Na většině systémech se toho dosáhne nastavením práva na adresář s frontou na hodnotu 01777." >> chrome\cs\locale\cs\messenger\localMsgs.properties
 %lecho% "movemailCantDeleteLock=Nelze smazat soubor %%S se zámkem."               >> chrome\cs\locale\cs\messenger\localMsgs.properties
