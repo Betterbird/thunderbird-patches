@@ -8,7 +8,8 @@ lang="en-US"  # Language options: en-US, de, fr, es-AR, ja, it, pt-BR.
 version="release"  # Version options: previous, release, latest, future. Only 'release' is guaranteed to work.
 shaFile="https://www.betterbird.eu/downloads/sha256-128.txt"  # Name of sha256 file
 tmpDir="$HOME/tmp/betterbird"
-tmpFile="$tmpDir/download.tar.bz2"
+tmpFile=""  # Will be filled by script.
+tmpLocFile="$tmpDir/download.txt"
 installDir="/opt"
 desktopFile="/usr/share/applications/eu.betterbird.Betterbird.desktop"  # Do not change this configuration without reading comment in registerMIME().
 backupDir="/opt/betterbird_backup_$(date +%Y%m%d%H%M)"
@@ -43,9 +44,22 @@ checkIfBetterbirdIsRunning() {
 }
 
 downloadUpdate() {
-  echoLog "Starting download..."
   mkdir -p "$tmpDir"
-  rm -f "$tmpFile"
+  wget -q -O "$tmpLocFile" "https://www.betterbird.eu/downloads/getloc.php?os=linux&lang=$lang&version=$version"
+  read -r fileToDownload < "$tmpLocFile"
+  fileToDownload=$(basename "$fileToDownload")
+  echoLog "Download found: $fileToDownload."
+  tmpFile="$tmpDir/$fileToDownload"
+
+  # Delete old downloads.
+  find "$tmpDir" -type f ! -name "$fileToDownload" -delete
+
+  if [ -f "$tmpFile" ]; then
+    echoLog "$tmpFile already present. Exiting."
+    exit 0;
+  fi
+
+  echoLog "Starting download..."
   wget -q -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
   echoLog "Downloaded archive."
 }
@@ -82,7 +96,6 @@ extract() {
   rm -rf "$installDir/betterbird"
   tar xjf "$tmpFile" -C "$installDir"
   echoLog "Extracted to $installDir/betterbird."
-  rm "$tmpFile"
 }
 
 createDesktopFile() {
