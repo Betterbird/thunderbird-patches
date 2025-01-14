@@ -96,6 +96,8 @@ the corresponding Thunderbird release. This downloads a lot less data and is hen
 
 ## Bug Reporting / Support
 
+**Please do not file support requests or general questions at GitHub.** Contact the Betterbird team via e-mail instead.
+
 Read [www.betterbird.eu/support/](https://www.betterbird.eu//support/). Here is an abridged version:
 
 1. Thunderbird has 14.000+ bugs which won't be fixed as part of Betterbird.
