@@ -1,0 +1,101 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1736972032 -3600
+# Parent  ef00fd6ce238f84c17f3c593087f0a6dc391a2aa
+Bug 1941911 - Backout bug 1926462 to fix bug 1941911: New messages in Inbox not alerted any more.
+
+diff --git a/mailnews/base/src/MailNotificationManager.sys.mjs b/mailnews/base/src/MailNotificationManager.sys.mjs
+--- a/mailnews/base/src/MailNotificationManager.sys.mjs
++++ b/mailnews/base/src/MailNotificationManager.sys.mjs
+@@ -31,11 +31,10 @@ export class MailNotificationManager {
+     this._systemAlertAvailable = true;
+     this._unreadChatCount = 0;
+     this._unreadMailCount = 0;
+     this._unreadMailExtra = "";
+-    // @type {Map<string, number>} - A map of folder URIs and the date of the
+-    //   newest message a notification has been shown for.
+-    this._folderNewestNotifiedTime = new Map();
++    // @type {Map<nsIMsgFolder, number>} - A map of folder and its last biff time.
++    this._folderBiffTime = new Map();
+     // @type {Set<nsIMsgFolder>} - A set of folders to show alert for.
+     this._pendingFolders = new Set();
+ 
+     this._logger = console.createInstance({
+@@ -210,9 +209,8 @@ export class MailNotificationManager {
+     if (!title || !body) {
+       return;
+     }
+     this._showAlert(firstNewMsgHdr, title, body);
+-    this._saveNotificationTime(folder, newMsgKeys);
+     this._animateDockIcon();
+   }
+ 
+   /**
+@@ -236,9 +234,9 @@ export class MailNotificationManager {
+         // Drafts|Trash|SentMail|Templates|Junk|Archive|Queue or Virtual.
+         continue;
+       }
+ 
+-      if (this._getNewMsgKeysNotNotified(folder).length > 0) {
++      if (folder.getNumNewMessages(false) > 0) {
+         return folder;
+       }
+     }
+     return null;
+@@ -408,51 +406,29 @@ export class MailNotificationManager {
+       "chrome,dialog,titlebar=no,alert=yes",
+       args
+     );
+     this._customizedAlertShown = true;
+-    this._saveNotificationTime(folder, newMsgKeys);
++    this._folderBiffTime.set(folder, Date.now());
+   }
+ 
+   /**
+-   * Get all NEW messages from a folder that are newer than the newest message
+-   * in the folder we had a notification about.
++   * Get all NEW messages from a folder that we received after last biff time.
+    *
+    * @param {nsIMsgFolder} folder - The message folder to check.
+-   * @returns {nsMsgKey[]} An array of message keys.
++   * @returns {number[]} An array of message keys.
+    */
+   _getNewMsgKeysNotNotified(folder) {
+-    if (folder.getNumNewMessages(false) == 0) {
+-      return [];
+-    }
+-
+     const msgDb = folder.msgDatabase;
+-    const newestNotifiedTime =
+-      this._folderNewestNotifiedTime.get(folder.URI) || 0;
++    const lastBiffTime = this._folderBiffTime.get(folder) || 0;
+     return msgDb
+       .getNewList()
+       .slice(-folder.getNumNewMessages(false))
+       .filter(key => {
+         const msgHdr = msgDb.getMsgHdrForKey(key);
+-        return msgHdr.dateInSeconds > newestNotifiedTime;
++        return msgHdr.dateInSeconds * 1000 > lastBiffTime;
+       });
+   }
+ 
+-  /**
+-   * Record the time of the newest new message in the folder, so that we never
+-   * notify about it again.
+-   *
+-   * @param {nsIMsgFolder} folder
+-   * @param {nsMsgKey[]} newMsgKeys - As returned by _getNewMsgKeysNotNotified.
+-   */
+-  _saveNotificationTime(folder, newMsgKeys) {
+-    let newestNotifiedTime = 0;
+-    for (const msgKey of newMsgKeys) {
+-      const msgHdr = folder.msgDatabase.getMsgHdrForKey(msgKey);
+-      newestNotifiedTime = Math.max(newestNotifiedTime, msgHdr.dateInSeconds);
+-    }
+-    this._folderNewestNotifiedTime.set(folder.URI, newestNotifiedTime);
+-  }
+-
+   async _updateUnreadCount() {
+     if (this._updatingUnreadCount) {
+       // _updateUnreadCount can be triggered faster than we finish rendering the
+       // badge. When that happens, set a flag and return.
