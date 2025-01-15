@@ -5,7 +5,7 @@
 rm setup.exe
 
 :: Create a ZIP file (larger).
-7z a -tzip BetterbirdPortable-%~2.%~1.win64.zip core BetterbirdLauncher.exe vcruntime140.dll
+7z a -tzip BetterbirdPortable-%~2.%~1.win64.zip core BetterbirdLauncher.exe vcruntime140.dll vcruntime140_1.dll
 
 :: Create a self-extracting 7z executable.
 :: 7z a -sfx BetterbirdPortable-%~2.%~1.win64.exe core BetterbirdLauncher.exe vcruntime140.dll
