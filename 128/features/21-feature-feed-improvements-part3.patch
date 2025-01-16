@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
-# Date 1736027849 -3600
-# Parent  6e0e1868d953c4a0c3a890d88d409baac5f29785
+# Date 1736396031 25200
+# Parent  23fc9e7f1f1959c524eb4d4f71aba14e7edd46e4
 Fix feed vandalization, Part III - getFavicon() fix
 - do not require places history to be enabled
 - improve getting favicons, handle edge cases
@@ -14,7 +14,26 @@ All uses require attribution to the Author.
 diff --git a/mail/base/content/widgets/folder-tree-row.mjs b/mail/base/content/widgets/folder-tree-row.mjs
 --- a/mail/base/content/widgets/folder-tree-row.mjs
 +++ b/mail/base/content/widgets/folder-tree-row.mjs
-@@ -424,9 +424,12 @@ class FolderTreeRow extends HTMLLIElemen
+@@ -402,9 +402,9 @@ class FolderTreeRow extends HTMLLIElemen
+    * Sets folder properties based on the folder for the row.
+    *
+    * @param {nsIMsgFolder} folder
+    */
+-  setFolderPropertiesFromFolder(folder) {
++  async setFolderPropertiesFromFolder(folder) {
+     if (folder.server.type != "rss") {
+       return;
+     }
+     const props = lazy.FeedUtils.getFolderProperties(folder);
+@@ -417,16 +417,19 @@ class FolderTreeRow extends HTMLLIElemen
+     }
+     if (props.includes("isFeedFolder")) {
+       if (!this.dataset.isFeedFolder) {
+         this.dataset.isFeedFolder = "true";
+-        lazy.FeedUtils.getFavicon(folder);
++        await lazy.FeedUtils.getFavicon(folder);
+       }
+       if (props.includes("hasError") || props.includes("isBusy")) {
          this.icon.style = "";
        } else {
          const urls = lazy.FeedUtils.getFeedUrlsInFolder(folder);
@@ -41,7 +60,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
  });
  
  export var FeedUtils = {
-@@ -912,10 +911,9 @@ export var FeedUtils = {
+@@ -880,10 +879,9 @@ export var FeedUtils = {
     */
    async getFavicon(folder, feedURL) {
      if (
@@ -53,7 +72,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
        return "";
      }
  
-@@ -936,53 +934,36 @@ export var FeedUtils = {
+@@ -904,53 +902,37 @@ export var FeedUtils = {
        url = feed.link && feed.link.startsWith("http") ? feed.link : url;
      }
  
@@ -90,6 +109,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
 +     * @returns {string} - Existing favicon url.
       */
      const fetchFavicon = async url => {
++      //this.log.debug(`getFavicon: fetch url ${url}`);
        const response = await fetch(url);
        if (!response.ok) {
          throw new Error(`No favicon for url ${url}`);
@@ -121,7 +141,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
      const discoverFaviconURL = async page => {
        const response = await fetch(page);
        if (!response.ok) {
-@@ -990,65 +971,55 @@ export var FeedUtils = {
+@@ -958,65 +940,60 @@ export var FeedUtils = {
        }
        if (!/^text\/html/i.test(response.headers.get("Content-Type"))) {
          throw new Error(`No page to get favicon from for ${page}`);
@@ -138,7 +158,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
 +      const head = content.split("<head>")[1]?.split("</head>")[0];
 +      if (head && !head.includes("<base")) {
 +        content = content.replace("<head>", `<head><base href="${page}">`);
-+        FeedUtils.log.debug("discoverFaviconURL: added <base> to - " + page);
++        //FeedUtils.log.debug(`discoverFaviconURL: added <base> to ${page}`);
 +      }
 +
 +      const doc = new DOMParser().parseFromString(content, "text/html");
@@ -148,23 +168,26 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
 -      if (!iconLink) {
 -        throw new Error(`No iconLink discovered for page=${page}`);
 +      if (!iconLink || !iconLink.href) {
-+        throw new Error(`No iconLink or href discovered for page=${page}`);
++        throw new Error(`No iconLink or href discovered for ${page}`);
        }
++      let pageURL;
++      const iconURI = new URL(page);
        if (/^https?:/.test(iconLink.href)) {
-         return iconLink.href;
+-        return iconLink.href;
++        pageURL = iconLink.href;
++      } else if (/^\/\//.test(iconLink.href)) {
++        pageURL = iconURI.protocol + iconLink.href;
++      } else {
++        pageURL = iconURI.origin + iconLink.href.replace(/^[.]*/, "");
        }
 -      if (iconLink.href.at(0) != "/") {
 -        iconLink.href = "/" + iconLink.href;
-+      const iconURI = new URL(page);
-+      if (/^\/\//.test(iconLink.href)) {
-+        return iconURI.protocol + iconLink.href;
-       }
+-      }
 -      return new URL(page).origin + iconLink.href;
-+      return iconURI.origin + iconLink.href.replace(/^[.]*/, "");
++      //this.log.debug(`discoverFaviconURL: page url ${pageURL}`);
++      return pageURL;
      };
  
-+    this.log.debug("getFavicon: folder:feed url - " + folder.name + ":" + url);
-+
      const uri = Services.io.newURI(url);
 -    const iconURL = await fetchFavicon(uri.prePath + "/favicon.ico")
 -      .then(blobToBase64)
@@ -176,10 +199,10 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
 -          .catch(() => "");
 +    const iconURL = await discoverFaviconURL(uri.prePath)
 +      .then(fetchFavicon)
-+      .catch(e => {
-+        this.log.debug("getFavicon: Error - " + e);
-+        return fetchFavicon(uri.prePath + "/favicon.ico").catch(e => {
-+          this.log.debug("getFavicon: Error - " + e);
++      .catch(_exception => {
++        //this.log.debug(`getFavicon: ${exception}`);
++        return fetchFavicon(uri.prePath + "/favicon.ico").catch(_exception => {
++          //this.log.debug(`getFavicon: ${exception}`);
 +          return "";
 +        });
        });
@@ -187,8 +210,12 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
 -    if (!iconURL) {
 -      return "";
 -    }
++    const logString =
++      (folder ? `${folder.name}` : "") +
++      (!folder && feedURL ? `${feedURL}` : "");
 +    this.log.debug(
-+      "getFavicon: folder:favicon url - " + folder.name + ":" + iconURL
++      `getFavicon: ${logString}, favicon url ` +
++        (iconURL ? `${iconURL}` : "not found")
 +    );
  
 -    // setAndFetchFaviconForPage needs the url to be in the database first.
