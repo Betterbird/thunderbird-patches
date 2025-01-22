@@ -58,6 +58,9 @@ if [ "$UNAME" = "Linux" ]; then
     UNAME_ARCH="aarch64"
   fi
 fi
+if [ "$UNAME" = "Darwin" ]; then
+  UNAME_ARCH=$(uname -m)
+fi
 # Windows: Cater for newer and older MozillaBuild: MINGW32_NT-6.2 or MSYS_NT-10
 if [[ "$UNAME" == *"_NT-"* ]]; then
   UNAME="Windows"
@@ -256,11 +259,16 @@ if [ "$UNAME" = "Linux" ]; then
     echo "Copying mozconfig-Linux-aarch64"
     cp ../thunderbird-patches/$VERSION/mozconfig-Linux-aarch64 mozconfig
   fi
-elif [ "$UNAME" = "Darwin" ]; then
+elif [ "$UNAME" = "Darwin" ] && [ "$UNAME_ARCH" = "x86_64" ]; then
   echo
   echo "======================================================="
   echo "Copying mozconfig-Mac"
   cp ../thunderbird-patches/$VERSION/mozconfig-Mac mozconfig
+elif [ "$UNAME" = "Darwin" ] && [ "$UNAME_ARCH" = "arm64" ]; then
+  echo
+  echo "======================================================="
+  echo "Copying mozconfig-Mac-arm64"
+  cp ../thunderbird-patches/$VERSION/mozconfig-Mac-arm64 mozconfig
 elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
@@ -291,9 +299,9 @@ if [ "$NOCLOBBER" = "noclobber" ]; then
     elif [ "$UNAME_ARCH" = "aarch64" ] && [ -d obj-aarch64-unknown-linux-gnu ]; then
       touch obj-aarch64-unknown-linux-gnu/CLOBBER
     fi
-  elif [ "$UNAME" = "Darwin" ] && [ -d obj-x86_64-apple-darwin ]; then
+  elif [ "$UNAME" = "Darwin" ] && [ -d obj-x86_64-apple-darwin ] && [ "$UNAME_ARCH" = "x86_64" ]; then
     touch obj-x86_64-apple-darwin/CLOBBER
-  elif [ "$UNAME" = "Darwin" ] && [ -d obj-aarch64-apple-darwin ]; then
+  elif [ "$UNAME" = "Darwin" ] && [ -d obj-aarch64-apple-darwin ] && [ "$UNAME_ARCH" = "arm64" ]; then
     touch obj-aarch64-apple-darwin/CLOBBER
   elif [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-mingw32 ]; then
     touch obj-x86_64-pc-mingw32/CLOBBER
@@ -325,11 +333,16 @@ if [ "$UNAME" = "Linux" ]; then
     echo "Find your archive here"
     ls $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
   fi
-elif [ "$UNAME" = "Darwin" ]; then
+elif [ "$UNAME" = "Darwin" ] && [ "$UNAME_ARCH" = "x86_64" ]; then
   echo
   echo "======================================================="
   echo "Find your disk image here"
   ls $MOZILLA_DIR/obj-x86_64-apple-darwin/dist/*.mac.dmg
+elif [ "$UNAME" = "Darwin" ] && [ "$UNAME_ARCH" = "arm64" ]; then
+  echo
+  echo "======================================================="
+  echo "Find your disk image here"
+  ls $MOZILLA_DIR/obj-aarch64-apple-darwin/dist/*.mac.dmg
 elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
