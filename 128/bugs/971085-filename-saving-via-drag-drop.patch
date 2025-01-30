@@ -1,0 +1,306 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1738243222 -3600
+# Parent  ec6f1ea172f283ef8636a1bd783426d2b17801d1
+Bug 971085 - Align filenames when saving via drag&drop with SaveAsFile().
+
+Also restrict using the subject up to 77 characters and don't include the author in the filename any more.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -5309,8 +5309,9 @@ var threadPane = {
+   },
+ 
+   /**
+    * Handle threadPane drag events.
++   * This code is used when dragging a message from the message list.
+    */
+   _onDragStart(event) {
+     const row = event.target.closest(`tr[is^="thread-"]`);
+     if (!row || gViewWrapper.isExpandedGroupedByHeaderAtIndex(row.index)) {
+@@ -5329,61 +5330,26 @@ var threadPane = {
+       threadTree.selectedIndex = row.index;
+     }
+     const messageURIs = gDBView.getURIsForSelection();
+ 
+-    let noSubjectString = messengerBundle.GetStringFromName(
+-      "defaultSaveMessageAsFileName"
+-    );
+-    if (noSubjectString.endsWith(".eml")) {
+-      noSubjectString = noSubjectString.slice(0, -4);
+-    }
+-    const longSubjectTruncator = messengerBundle.GetStringFromName(
+-      "longMsgSubjectTruncator"
+-    );
+-    // Clip the subject string to 124 chars to avoid problems on Windows,
+-    // see NS_MAX_FILEDESCRIPTOR in m-c/widget/windows/nsDataObj.cpp .
+-    const maxUncutNameLength = 124;
+-    const maxCutNameLength = maxUncutNameLength - longSubjectTruncator.length;
+-    const messages = new Map();
+-
++    const filenames = [];
+     for (const [index, uri] of Object.entries(messageURIs)) {
+       const msgService = MailServices.messageServiceFromURI(uri);
+       const msgHdr = msgService.messageURIToMsgHdr(uri);
+-      let subject = msgHdr.mime2DecodedSubject || "";
+-      if (msgHdr.flags & Ci.nsMsgMessageFlags.HasRe) {
+-        subject = "Re: " + subject;
+-      }
+-
+-      let uniqueFileName;
+-      // If there is no subject, use a default name.
+-      // If subject needs to be truncated, add a truncation character to indicate it.
+-      if (!subject) {
+-        uniqueFileName = noSubjectString;
+-      } else {
+-        uniqueFileName =
+-          subject.length <= maxUncutNameLength
+-            ? subject
+-            : subject.substr(0, maxCutNameLength) + longSubjectTruncator;
+-      }
+-      let msgFileName = validateFileName(uniqueFileName);
+-      let msgFileNameLowerCase = msgFileName.toLocaleLowerCase();
+-
+-      // @see https://github.com/eslint/eslint/issues/17807
+-      // eslint-disable-next-line no-constant-condition
+-      while (true) {
+-        if (!messages.has(msgFileNameLowerCase)) {
+-          messages.set(msgFileNameLowerCase, 1);
+-          break;
+-        } else {
+-          const number = messages.get(msgFileNameLowerCase);
+-          messages.set(msgFileNameLowerCase, number + 1);
+-          const postfix = "-" + number;
+-          msgFileName = msgFileName + postfix;
+-          msgFileNameLowerCase = msgFileNameLowerCase + postfix;
+-        }
+-      }
+-
+-      msgFileName = msgFileName + ".eml";
++      // Code taken from SaveAsFile() in mailCommands.js.
++      const nameBase = top.window.GenerateFilenameFromMsgHdr(msgHdr);
++      let msgFileName = top.window.GenerateValidFilename(nameBase, ".eml");
++
++      let number = 2;
++      while (filenames.includes(msgFileName)) {
++        // should be unlikely
++        msgFileName = top.window.GenerateValidFilename(
++          nameBase + "-" + number,
++          ".eml"
++        );
++        number++;
++      }
++      filenames.push(msgFileName);
+ 
+       // When dragging messages to the filesystem:
+       // - Windows fetches application/x-moz-file-promise-url and writes it to
+       //     a file.
+@@ -5412,9 +5378,9 @@ var threadPane = {
+         index
+       );
+       event.dataTransfer.mozSetDataAt(
+         "application/x-moz-file-promise-dest-filename",
+-        msgFileName.replace(/(.{74}).*(.{10})$/u, "$1...$2"),
++        msgFileName,
+         index
+       );
+     }
+ 
+diff --git a/mail/base/content/mailCommands.js b/mail/base/content/mailCommands.js
+--- a/mail/base/content/mailCommands.js
++++ b/mail/base/content/mailCommands.js
+@@ -21,8 +21,12 @@ ChromeUtils.defineESModuleGetters(this, 
+ const { getMimeTreeFromUrl, getMessageFromUrl } = ChromeUtils.importESModule(
+   "chrome://openpgp/content/modules/MimeTree.sys.mjs"
+ );
+ 
++const messengerBundle = Services.strings.createBundle(
++  "chrome://messenger/locale/messenger.properties"
++);
++
+ function GetNextNMessages(folder) {
+   if (folder) {
+     var newsFolder = folder.QueryInterface(Ci.nsIMsgNewsFolder);
+     if (newsFolder) {
+@@ -525,10 +529,12 @@ function SaveAsFile(uris) {
+     filenames.push(name);
+   }
+ 
+   if (uris.length == 1) {
++    // This will prompt for a file.
+     messenger.saveAs(uris[0], true, null, filenames[0]);
+   } else {
++    // This will prompt for a directory.
+     messenger.saveMessages(filenames, uris);
+   }
+ }
+ 
+@@ -559,11 +565,38 @@ function GenerateFilenameFromMsgHdr(msgH
+   } else {
+     filename = msgHdr.mime2DecodedSubject;
+   }
+ 
+-  filename += " - ";
+-  filename += msgHdr.mime2DecodedAuthor + " - ";
+-  filename += MakeIS8601ODateString(new Date(msgHdr.date / 1000));
++  if (!filename) {
++    filename = messengerBundle.GetStringFromName(
++      "defaultSaveMessageAsFileName"
++    );
++    if (filename.endsWith(".eml")) {
++      filename = filename.slice(0, -4);
++    }
++  }
++
++  // Make sure this isn't too long. A good heuristic that fits all platforms
++  // doesn't exist.
++  // On Windows we can hit the MAX_PATH limit of 260 characters, so we need
++  // to use less to cater for the path.
++  // On Mac the limit is 255, names are stored as UTF-16.
++  // On Linux it can be 255 bytes, so assuming 3-byte code points for CJK languages
++  // we're down to 85.
++  // Since we know that we're appending 22 characters, " - 2025-01-29 1231.eml",
++  // let's go for (255 - 22) / 3 = 77 for all platforms.
++  // We could allow more characters for Mac and encode to UTF-8 to see how many
++  // bytes result, but long filenames are annoying and who says that the full
++  // subject needs to be used.
++  if (filename.length > 77) {
++    const longSubjectTruncator = messengerBundle.GetStringFromName(
++      "longMsgSubjectTruncator"
++    );
++    const maxCutNameLength = 77 - longSubjectTruncator.length;
++    filename = filename.substr(0, maxCutNameLength) + longSubjectTruncator;
++  }
++
++  filename += " - " + MakeIS8601ODateString(new Date(msgHdr.date / 1000));
+ 
+   return filename;
+ }
+ 
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -930,8 +930,9 @@ function messageFlavorDataProvider() {}
+ 
+ messageFlavorDataProvider.prototype = {
+   QueryInterface: ChromeUtils.generateQI(["nsIFlavorDataProvider"]),
+ 
++  // This code is used when dragging a message from a "Search Messages" panel.
+   getFlavorData(aTransferable, aFlavor) {
+     if (aFlavor !== "application/x-moz-file-promise") {
+       return;
+     }
+@@ -945,9 +946,11 @@ messageFlavorDataProvider.prototype = {
+       Ci.nsISupportsString
+     );
+     const fileUri = Services.io.newURI(fileUriStr.data);
+     const fileUrl = fileUri.QueryInterface(Ci.nsIURL);
+-    const fileName = fileUrl.fileName.replace(/(.{74}).*(.{10})$/u, "$1...$2");
++    // No need to truncate the filename here since that was already done
++    // on drag start.
++    const fileName = fileUrl.fileName;
+ 
+     const destDirPrimitive = {};
+     aTransferable.getTransferData(
+       "application/x-moz-file-promise-dir",
+diff --git a/mail/base/content/threadPane.js b/mail/base/content/threadPane.js
+--- a/mail/base/content/threadPane.js
++++ b/mail/base/content/threadPane.js
+@@ -65,8 +65,9 @@ function ChangeSelectionWithoutContentLo
+   }
+   event.stopPropagation();
+ }
+ 
++// This code is used when dragging a message from a "Search Messages" panel.
+ function ThreadPaneOnDragStart(aEvent) {
+   if (aEvent.target.localName != "treechildren") {
+     return;
+   }
+@@ -76,60 +77,28 @@ function ThreadPaneOnDragStart(aEvent) {
+     return;
+   }
+ 
+   gFolderDisplay.hintAboutToDeleteMessages();
+-  const messengerBundle = document.getElementById("bundle_messenger");
+-  let noSubjectString = messengerBundle.getString(
+-    "defaultSaveMessageAsFileName"
+-  );
+-  if (noSubjectString.endsWith(".eml")) {
+-    noSubjectString = noSubjectString.slice(0, -4);
+-  }
+-  const longSubjectTruncator = messengerBundle.getString(
+-    "longMsgSubjectTruncator"
+-  );
+-  // Clip the subject string to 124 chars to avoid problems on Windows,
+-  // see NS_MAX_FILEDESCRIPTOR in m-c/widget/windows/nsDataObj.cpp .
+-  const maxUncutNameLength = 124;
+-  const maxCutNameLength = maxUncutNameLength - longSubjectTruncator.length;
+-  const messages = new Map();
++
++  const filenames = [];
+   for (const [index, msgUri] of messageUris.entries()) {
+     const msgService = MailServices.messageServiceFromURI(msgUri);
+     const msgHdr = msgService.messageURIToMsgHdr(msgUri);
+-    let subject = msgHdr.mime2DecodedSubject || "";
+-    if (msgHdr.flags & Ci.nsMsgMessageFlags.HasRe) {
+-      subject = "Re: " + subject;
+-    }
++    // Code taken from SaveAsFile() in mailCommands.js.
++    const mainWindow = Services.wm.getMostRecentWindow("mail:3pane");
++    const nameBase = mainWindow.GenerateFilenameFromMsgHdr(msgHdr);
++    let msgFileName = mainWindow.GenerateValidFilename(nameBase, ".eml");
+ 
+-    let uniqueFileName;
+-    // If there is no subject, use a default name.
+-    // If subject needs to be truncated, add a truncation character to indicate it.
+-    if (!subject) {
+-      uniqueFileName = noSubjectString;
+-    } else {
+-      uniqueFileName =
+-        subject.length <= maxUncutNameLength
+-          ? subject
+-          : subject.substr(0, maxCutNameLength) + longSubjectTruncator;
++    let number = 2;
++    while (filenames.includes(msgFileName)) {
++      // should be unlikely
++      msgFileName = mainWindow.GenerateValidFilename(
++        nameBase + "-" + number,
++        ".eml"
++      );
++      number++;
+     }
+-    let msgFileName = validateFileName(uniqueFileName);
+-    let msgFileNameLowerCase = msgFileName.toLocaleLowerCase();
+-
+-    // @see https://github.com/eslint/eslint/issues/17807
+-    // eslint-disable-next-line no-constant-condition
+-    while (true) {
+-      if (!messages[msgFileNameLowerCase]) {
+-        messages[msgFileNameLowerCase] = 1;
+-        break;
+-      } else {
+-        const postfix = "-" + messages[msgFileNameLowerCase];
+-        messages[msgFileNameLowerCase]++;
+-        msgFileName = msgFileName + postfix;
+-        msgFileNameLowerCase = msgFileNameLowerCase + postfix;
+-      }
+-    }
+-
+-    msgFileName = msgFileName + ".eml";
++    filenames.push(msgFileName);
+ 
+     const msgUrl = msgService.getUrlForUri(msgUri);
+     const separator = msgUrl.spec.includes("?") ? "&" : "?";
+ 
+@@ -146,9 +115,9 @@ function ThreadPaneOnDragStart(aEvent) {
+       index
+     );
+     aEvent.dataTransfer.mozSetDataAt(
+       "application/x-moz-file-promise-dest-filename",
+-      msgFileName.replace(/(.{74}).*(.{10})$/u, "$1...$2"),
++      msgFileName,
+       index
+     );
+   }
+   aEvent.dataTransfer.effectAllowed = "copyMove";
