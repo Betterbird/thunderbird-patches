@@ -1,10 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1738263295 -3600
-# Parent  ec6f1ea172f283ef8636a1bd783426d2b17801d1
+# Parent  c31f25e74d934d133ee8413a66bf54a329c246cd
 Bug 971085 - Align filenames when saving via drag&drop with SaveAsFile().
 
 Also restrict using the subject up to 77 characters and don't include the author in the filename any more.
+
+Align messageFlavorDataProvider.getFlavorData() and ThreadPaneOnDragStart() with equivalent code in
+threadPane._flavorDataProvider.getFlavorData() and threadPane._onDragStart().
 
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
@@ -185,7 +188,7 @@ diff --git a/mail/base/content/mailCommands.js b/mail/base/content/mailCommands.
 diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
 --- a/mail/base/content/messenger.js
 +++ b/mail/base/content/messenger.js
-@@ -930,8 +930,9 @@ function messageFlavorDataProvider() {}
+@@ -930,50 +930,38 @@ function messageFlavorDataProvider() {}
  
  messageFlavorDataProvider.prototype = {
    QueryInterface: ChromeUtils.generateQI(["nsIFlavorDataProvider"]),
@@ -195,19 +198,62 @@ diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
      if (aFlavor !== "application/x-moz-file-promise") {
        return;
      }
-@@ -945,9 +946,11 @@ messageFlavorDataProvider.prototype = {
-       Ci.nsISupportsString
+-    const fileUriPrimitive = {};
++    const fileName = {};
+     aTransferable.getTransferData(
+-      "application/x-moz-file-promise-url",
+-      fileUriPrimitive
++      "application/x-moz-file-promise-dest-filename",
++      fileName
      );
-     const fileUri = Services.io.newURI(fileUriStr.data);
-     const fileUrl = fileUri.QueryInterface(Ci.nsIURL);
--    const fileName = fileUrl.fileName.replace(/(.{74}).*(.{10})$/u, "$1...$2");
-+    // No need to truncate the filename here since that was already done
-+    // on drag start.
-+    const fileName = fileUrl.fileName;
++    fileName.value.QueryInterface(Ci.nsISupportsString);
  
-     const destDirPrimitive = {};
+-    const fileUriStr = fileUriPrimitive.value.QueryInterface(
+-      Ci.nsISupportsString
+-    );
+-    const fileUri = Services.io.newURI(fileUriStr.data);
+-    const fileUrl = fileUri.QueryInterface(Ci.nsIURL);
+-    const fileName = fileUrl.fileName.replace(/(.{74}).*(.{10})$/u, "$1...$2");
+-
+-    const destDirPrimitive = {};
++    const destDir = {};
      aTransferable.getTransferData(
        "application/x-moz-file-promise-dir",
+-      destDirPrimitive
++      destDir
+     );
+-    const destDirectory = destDirPrimitive.value.QueryInterface(Ci.nsIFile);
+-    const file = destDirectory.clone();
+-    file.append(fileName);
++    destDir.value.QueryInterface(Ci.nsIFile);
+ 
+-    const messageUriPrimitive = {};
+-    aTransferable.getTransferData("text/x-moz-message", messageUriPrimitive);
+-    const messageUri = messageUriPrimitive.value.QueryInterface(
+-      Ci.nsISupportsString
+-    );
++    const file = destDir.value.clone();
++    file.append(fileName.value.data);
++
++    const messageURI = {};
++    aTransferable.getTransferData("text/plain", messageURI);
++    messageURI.value.QueryInterface(Ci.nsISupportsString);
+ 
+     const messenger = Cc["@mozilla.org/messenger;1"].createInstance(
+       Ci.nsIMessenger
+     );
+-    messenger.saveAs(
+-      messageUri.data,
+-      true,
+-      null,
+-      decodeURIComponent(file.path),
+-      true
+-    );
++    messenger.saveAs(messageURI.value.data, true, null, file.path, true);
+   },
+ };
+ 
+ var TabsInTitlebar = {
 diff --git a/mail/base/content/threadPane.js b/mail/base/content/threadPane.js
 --- a/mail/base/content/threadPane.js
 +++ b/mail/base/content/threadPane.js
@@ -221,7 +267,7 @@ diff --git a/mail/base/content/threadPane.js b/mail/base/content/threadPane.js
    if (aEvent.target.localName != "treechildren") {
      return;
    }
-@@ -76,60 +77,28 @@ function ThreadPaneOnDragStart(aEvent) {
+@@ -76,69 +77,49 @@ function ThreadPaneOnDragStart(aEvent) {
      return;
    }
  
@@ -276,7 +322,8 @@ diff --git a/mail/base/content/threadPane.js b/mail/base/content/threadPane.js
      }
 -    let msgFileName = validateFileName(uniqueFileName);
 -    let msgFileNameLowerCase = msgFileName.toLocaleLowerCase();
--
++    filenames.push(msgFileName);
+ 
 -    // @see https://github.com/eslint/eslint/issues/17807
 -    // eslint-disable-next-line no-constant-condition
 -    while (true) {
@@ -290,14 +337,38 @@ diff --git a/mail/base/content/threadPane.js b/mail/base/content/threadPane.js
 -        msgFileNameLowerCase = msgFileNameLowerCase + postfix;
 -      }
 -    }
--
++    // When dragging messages to the filesystem:
++    // - Windows fetches application/x-moz-file-promise-url and writes it to
++    //     a file.
++    // - Linux uses the flavor data provider, if a single message is dragged.
++    //     If multiple messages are dragged AND text/x-moz-url exists, it
++    //     fetches application/x-moz-file-promise-url and writes it to a file.
++    // - MacOS always uses the flavor data provider.
+ 
 -    msgFileName = msgFileName + ".eml";
-+    filenames.push(msgFileName);
- 
-     const msgUrl = msgService.getUrlForUri(msgUri);
-     const separator = msgUrl.spec.includes("?") ? "&" : "?";
- 
-@@ -146,9 +115,9 @@ function ThreadPaneOnDragStart(aEvent) {
+-
+-    const msgUrl = msgService.getUrlForUri(msgUri);
+-    const separator = msgUrl.spec.includes("?") ? "&" : "?";
+-
++    // text/plain should be unnecessary, but getFlavorData can't get at
++    // text/x-moz-message for some reason.
++    aEvent.dataTransfer.mozSetDataAt("text/plain", msgUri, index);
+     aEvent.dataTransfer.mozSetDataAt("text/x-moz-message", msgUri, index);
+-    aEvent.dataTransfer.mozSetDataAt("text/x-moz-url", msgUrl.spec, index);
++    aEvent.dataTransfer.mozSetDataAt(
++      "text/x-moz-url",
++      msgService.getUrlForUri(msgUri).spec,
++      index
++    );
+     aEvent.dataTransfer.mozSetDataAt(
+       "application/x-moz-file-promise-url",
+-      msgUrl.spec + separator + "fileName=" + encodeURIComponent(msgFileName),
++      msgService.getUrlForUri(msgUri).spec,
+       index
+     );
+     aEvent.dataTransfer.mozSetDataAt(
+       "application/x-moz-file-promise",
+@@ -146,9 +127,9 @@ function ThreadPaneOnDragStart(aEvent) {
        index
      );
      aEvent.dataTransfer.mozSetDataAt(
