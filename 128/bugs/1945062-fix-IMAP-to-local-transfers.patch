@@ -1,0 +1,183 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1740396191 -3600
+# Node ID ea2c3aed54223e36250e9b87e0e7dedcfd86f2f1
+# Parent  fef61346775ec912b3da94b91a26d6de67aec15d
+Bug 1945062 - Improve status display and performance on IMAP to Local Folders transfers. r=mkmelin
+
+Improve imap to LF move performance by not imap deleting each message individually
+after it is copied to transfer buffer. This was not actually useful for bulk copies
+and was added in bug 1828372 for consistency with moves into imap folders where it
+is useful. This also prevents moved messages from "coming back" after TB restart.
+No longer show a progress count when doing transfers to LF since this happens
+so fast (a file to file stream) that the count display change is not visible or
+useful. Replaces the progress count with "Moving/Copying messages to <foldername>".
+Note: Final activity and status still displays "X messages moved/copied from
+<foldername> to <foldername>".
+When imap has offline storage, no status was being displayed at all on imap to LF
+folder transfers.
+While testing, discovered an incorrect assertion put in at bug 399475.
+
+Differential Revision: https://phabricator.services.mozilla.com/D238367
+
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -1918,36 +1918,8 @@ NS_IMETHODIMP nsMsgLocalMailFolder::GetN
+   return rv;
+ }
+ 
+ nsresult nsMsgLocalMailFolder::WriteStartOfNewMessage() {
+-  // If moving, delete the message in source folder that was just copied.
+-  // It will have index one less than the current index.
+-  // But only do this if source folder is imap.
+-  // Could be optimized (DeleteMessages() operate on non-array)?
+-  nsresult rv;
+-  uint32_t idx = mCopyState->m_curCopyIndex;
+-  if (mCopyState->m_isMove && idx) {
+-    nsCOMPtr<nsIMsgFolder> srcFolder =
+-        do_QueryInterface(mCopyState->m_srcSupport, &rv);
+-    if (NS_SUCCEEDED(rv) && srcFolder) {
+-      // Delete source messages as we go only if they come from
+-      // an imap folder.
+-      nsCString protocolType;
+-      if (NS_SUCCEEDED(srcFolder->GetURI(protocolType))) {
+-        if (StringHead(protocolType, 5).LowerCaseEqualsLiteral("imap:")) {
+-          // Create "array" of one message header to delete
+-          idx--;
+-          if (idx < mCopyState->m_messages.Length()) {
+-            // Above check avoids a possible MOZ_CRASH after error recovery.
+-            RefPtr<nsIMsgDBHdr> msg = mCopyState->m_messages[idx];
+-            srcFolder->DeleteMessages({msg}, mCopyState->m_msgWindow, true,
+-                                      true, nullptr, mCopyState->m_allowUndo);
+-          }
+-        }
+-      }
+-    }
+-  }
+-
+   // CopyFileMessage() and CopyMessages() from servers other than pop3
+   if (mCopyState->m_parseMsgState) {
+     // Make sure the parser knows where the "From " separator is.
+     // A hack for Bug 1734847.
+@@ -2033,20 +2005,31 @@ nsresult nsMsgLocalMailFolder::InitCopyM
+   return rv;
+ }
+ 
+ // nsICopyMessageListener.beginCopy()
++// Called for imap to Local Folders transfers and Local Folders to Local Folders
++// transfers between accounts. Messages only and folder transfers are both
++// handled here.
+ NS_IMETHODIMP nsMsgLocalMailFolder::BeginCopy() {
+   if (!mCopyState) return NS_ERROR_NULL_POINTER;
++  if (mCopyState->m_curCopyIndex < 2) {
++    // Show the status only on the first and/or 2nd message transferred. When
++    // IMAP to Local Folders transfer, index starts at 0; when transfer between
++    // Local Folders on different accounts, index starts at 1 when transferring
++    // multiple messages and for single message transfer, index is 0.
++    DisplayMoveCopyStatusMsg();
++  }
+ 
+   if (!mCopyState->m_copyingMultipleMessages) {
+     nsresult rv = InitCopyMsgHdrAndFileStream();
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+   // The output stream may or may not be set already, depending upon all kinds
+-  // of inscrutable conditions. This needs cleaning up (see Bug 1731177).
+-  if (!mCopyState->m_fileStream) {
+-    return NS_OK;
+-  }
++  // of inscrutable conditions. This needs cleaning up (see Bug 1731177). E.g.,
++  // when transfering from imap folder without offline store requiring each
++  // message to be fetched from server and streamed to Local Folders storage,
++  // m_fileStream is null.
++  if (!mCopyState->m_fileStream) return NS_OK;
+ 
+   int32_t messageIndex = (mCopyState->m_copyingMultipleMessages)
+                              ? mCopyState->m_curCopyIndex - 1
+                              : mCopyState->m_curCopyIndex;
+@@ -2062,9 +2045,8 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
+   // The flags of the source message can get changed when it is deleted, so
+   // save them here.
+   if (mCopyState->m_message)
+     mCopyState->m_message->GetFlags(&(mCopyState->m_flags));
+-  DisplayMoveCopyStatusMsg();
+   if (mCopyState->m_listener)
+     mCopyState->m_listener->OnProgress(mCopyState->m_curCopyIndex,
+                                        mCopyState->m_totalMsgCount);
+   // if we're copying more than one message, StartMessage will handle this.
+@@ -2986,59 +2968,48 @@ nsMsgLocalMailFolder::OnStopRunningUrl(n
+   }
+   return nsMsgDBFolder::OnStopRunningUrl(aUrl, aExitCode);
+ }
+ 
++// Just show that copy/move is in-progress to destination folder. File to file
++// transfer is too fast to show full progress status, e.g., "copying x of y".
++// Same for the progress bargraph, don't update it.
+ nsresult nsMsgLocalMailFolder::DisplayMoveCopyStatusMsg() {
+   nsresult rv = NS_OK;
+   if (mCopyState) {
+     if (!mCopyState->m_statusFeedback) {
+       // get msgWindow from undo txn
+       nsCOMPtr<nsIMsgWindow> msgWindow;
+       if (mCopyState->m_undoMsgTxn)
+         mCopyState->m_undoMsgTxn->GetMsgWindow(getter_AddRefs(msgWindow));
+-      if (!msgWindow) return NS_OK;  // not a fatal error.
+-
++      if (!msgWindow) {
++        // Probably a folder move or copy with no undo txn. use top-most window.
++        nsCOMPtr<nsIMsgMailSession> mailSession =
++            do_GetService("@mozilla.org/messenger/services/session;1", &rv);
++        if (NS_SUCCEEDED(rv))
++          mailSession->GetTopmostMsgWindow(getter_AddRefs(msgWindow));
++        if (!msgWindow) return NS_OK;  // not a fatal error but no stat display
++      }
+       msgWindow->GetStatusFeedback(
+           getter_AddRefs(mCopyState->m_statusFeedback));
+     }
+-
+     if (!mCopyState->m_stringBundle) {
+       nsCOMPtr<nsIStringBundleService> bundleService =
+           mozilla::components::StringBundle::Service();
+       NS_ENSURE_TRUE(bundleService, NS_ERROR_UNEXPECTED);
+       rv = bundleService->CreateBundle(
+-          "chrome://messenger/locale/localMsgs.properties",
++          "chrome://messenger/locale/imapMsgs.properties",
+           getter_AddRefs(mCopyState->m_stringBundle));
+       NS_ENSURE_SUCCESS(rv, rv);
+     }
+     if (mCopyState->m_statusFeedback && mCopyState->m_stringBundle) {
+       nsString folderName;
+       GetName(folderName);
+-      nsAutoString numMsgSoFarString;
+-      numMsgSoFarString.AppendInt((mCopyState->m_copyingMultipleMessages)
+-                                      ? mCopyState->m_curCopyIndex
+-                                      : 1);
+-
+-      nsAutoString totalMessagesString;
+-      totalMessagesString.AppendInt(mCopyState->m_totalMsgCount);
+       nsString finalString;
+-      AutoTArray<nsString, 3> stringArray = {numMsgSoFarString,
+-                                             totalMessagesString, folderName};
++      // Use imap strings for this. They have correct text and formatting.
+       rv = mCopyState->m_stringBundle->FormatStringFromName(
+-          (mCopyState->m_isMove) ? "movingMessagesStatus"
+-                                 : "copyingMessagesStatus",
+-          stringArray, finalString);
+-      int64_t nowMS = PR_IntervalToMilliseconds(PR_IntervalNow());
+-
+-      // only update status/progress every half second
+-      if (nowMS - mCopyState->m_lastProgressTime < 500 &&
+-          mCopyState->m_curCopyIndex < mCopyState->m_totalMsgCount)
+-        return NS_OK;
+-
+-      mCopyState->m_lastProgressTime = nowMS;
++          (mCopyState->m_isMove) ? "imapMovingMessages" : "imapCopyingMessages",
++          {folderName}, finalString);
+       mCopyState->m_statusFeedback->ShowStatusString(finalString);
+-      mCopyState->m_statusFeedback->ShowProgress(
+-          mCopyState->m_curCopyIndex * 100 / mCopyState->m_totalMsgCount);
+     }
+   }
+   return rv;
+ }
