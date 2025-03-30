@@ -1,0 +1,74 @@
+# HG changeset patch
+# User Kai Engert <kaie@kuix.de>
+# Date 1743290332 -3600
+# Node ID 2b46b7764bc31ab5882a626f23d44d0ac679d76f
+# Parent  4f5658770433dfd6e27f3befffe83a7374512fcd
+Bug 1943021 - Fix viewing of attached signed OpenPGP messages. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D239493
+
+diff --git a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
+@@ -111,9 +111,8 @@ function MimeVerify(protocol) {
+  *
+  * @implements {nsIStreamListener}
+  */
+ MimeVerify.prototype = {
+-  dataCount: 0,
+   foundMsg: false,
+   startMsgStr: "",
+   window: null,
+   msgUriSpec: null,
+@@ -155,10 +154,10 @@ MimeVerify.prototype = {
+     this.mimeSvc = request.QueryInterface(Ci.nsIPgpMimeProxy);
+     this.msgUriSpec = EnigmailVerify.lastMsgUri;
+     this.mimePartNumber = this.mimeSvc.mimePart;
+     this.uri = this.mimeSvc.messageURI;
++    this.outputRaw = this.uri && /[&?]outputformat=raw/.test(this.uri.spec);
+ 
+-    this.dataCount = 0;
+     this.foundMsg = false;
+     this.backgroundJob = false;
+     this.startMsgStr = "";
+     this.boundary = "";
+@@ -187,16 +186,20 @@ MimeVerify.prototype = {
+   onDataAvailable(req, stream, offset, count) {
+     if (count > 0) {
+       this.inStream.init(stream);
+       const data = this.inStream.read(count);
+-      this.onTextData(data);
++      if (this.outputRaw) {
++        // Don't go through signature extraction/processing, collect
++        // all data. We reuse variable signedData.
++        this.signedData += data;
++      } else {
++        this.onTextData(data);
++      }
+     }
+   },
+ 
+   /** @param {string} data */
+   onTextData(data) {
+-    this.dataCount += data.length;
+-
+     this.keepData += data;
+     if (this.readMode === 0) {
+       // header data
+       let i = this.findNextMimePart();
+@@ -453,8 +456,15 @@ MimeVerify.prototype = {
+     ) {
+       return;
+     }
+ 
++    if (this.outputRaw) {
++      // Return all collected data, without signature processing.
++      this.returnData(this.signedData);
++      this.exitCode = 0;
++      return;
++    }
++
+     if (this.readMode < 4) {
+       // we got incomplete data; simply return what we got
+       this.returnData(
+         this.signedData.length > 0 ? this.signedData : this.keepData
