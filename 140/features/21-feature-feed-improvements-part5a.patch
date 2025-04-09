@@ -1,0 +1,207 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1737433340 25200
+# Parent  fc61962b6a0216d7f05349ca8470fd28b4068c53
+Implement Bug 458606
+- html render prefs for feed messages are now separated from non-feed messages
+  and are set separately in the View or More Actions menus
+- a feed message can be in any folder type, ie an IMAP folder
+- no cpp code was harmed in the implementation
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -31,8 +31,9 @@ var FeedMessageHandler = {
+   gShowSummary: true,
+   // Current state (toggle, global overrides).
+   gShowFeedSummary: true,
+   gToggle: false,
++  gPriorDisplayedIsFeedMessage: null,
+   kSelectOverrideWebPage: 0,
+   kSelectOverrideSummary: 1,
+   kSelectFeedDefault: 2,
+   kOpenWebPage: 0,
+@@ -120,27 +121,37 @@ var FeedMessageHandler = {
+     ]),
+   },
+ 
+   init() {
+-    if (window.gMessageListeners) {
+-      gMessageListeners.push(this.messageListener);
++    if (window.document.URL != "about:message") {
++      return;
+     }
++    FeedUtils.log.debug(
++      "FeedMessageHandler.init: window " + window.document.URL
++    );
++
++    // We are in about:message.
++    gMessageListeners.push(this.messageListener);
+ 
+-    if ("getMessagePaneBrowser" in window) {
+-      // We are in about:message.
+-      this.browser = getMessagePaneBrowser();
+-      this.filter = Cc[
+-        "@mozilla.org/appshell/component/browser-status-filter;1"
+-      ].createInstance(Ci.nsIWebProgress);
+-      this.filter.addProgressListener(
+-        this.progressListener,
+-        Ci.nsIWebProgress.NOTIFY_ALL
+-      );
+-      this.browser.webProgress.addProgressListener(
+-        this.filter,
+-        Ci.nsIWebProgress.NOTIFY_ALL
+-      );
+-    }
++    window.addEventListener("load", () => {
++      Services.prefs.addObserver("mailnews.display.html_as", this);
++    });
++    window.addEventListener("unload", () => {
++      Services.prefs.removeObserver("mailnews.display.html_as", this);
++    });
++
++    this.browser = getMessagePaneBrowser();
++    this.filter = Cc[
++      "@mozilla.org/appshell/component/browser-status-filter;1"
++    ].createInstance(Ci.nsIWebProgress);
++    this.filter.addProgressListener(
++      this.progressListener,
++      Ci.nsIWebProgress.NOTIFY_ALL
++    );
++    this.browser.webProgress.addProgressListener(
++      this.filter,
++      Ci.nsIWebProgress.NOTIFY_ALL
++    );
+   },
+ 
+   /*
+    * Thunderbird 2 rss messages with 'Show article summary' not selected means
+@@ -168,12 +179,18 @@ var FeedMessageHandler = {
+    *
+    * @returns {void}
+    */
+   setShowSummary(msgHdr, toggle) {
++    const isFeedMessage = FeedUtils.isFeedMessage(gMessage);
+     let showSummary;
+ 
++    FeedUtils.log.debug(
++      `setShowSummary: isFeedMessage ${isFeedMessage}, toggle ${toggle}`
++    );
++    this.setHTMLRenderState(isFeedMessage);
++
+     // Not a feed message, always show summary (the message).
+-    if (!FeedUtils.isFeedMessage(gMessage)) {
++    if (!isFeedMessage) {
+       showSummary = true;
+     } else {
+       // Notified of a summary reload when toggling, reset toggle and return.
+       if (!toggle && this.gToggle) {
+@@ -263,8 +280,105 @@ var FeedMessageHandler = {
+     return showSummary;
+   },
+ 
+   /**
++   * Run the html render preferences function depending on whether the message
++   * is a feed or non feed, if the message type has changed.
++   *
++   * @param {boolean} isFeedMessage - True if feed.
++   * @returns {void}
++   */
++  setHTMLRenderState(isFeedMessage) {
++    FeedUtils.log.debug(
++      `setHTMLRenderState: isFeedMessage ${isFeedMessage}, gPrior ${this.gPriorDisplayedIsFeedMessage}`
++    );
++    if (this.gPriorDisplayedIsFeedMessage === isFeedMessage) {
++      // No change in message type.
++      return;
++    }
++
++    const renderFunc = this.getHTMLRenderPref(isFeedMessage, false);
++    if (renderFunc) {
++      top.window[`${renderFunc}`]();
++    }
++    FeedUtils.log.log(
++      `setHTMLRenderState: isFeedMessage ${isFeedMessage}, html render prefs updated ${renderFunc}`
++    );
++    // Delay for a tick so the observer does not update on a change in render
++    // prefs due to a message type selection change.
++    setTimeout(() => {
++      this.gPriorDisplayedIsFeedMessage = isFeedMessage;
++    });
++  },
++
++  /**
++   * Get or update the html render preferences function depending on whether
++   * the message is a feed or non feed.
++   *
++   * @param {boolean} isFeedMessage - True if feed.
++   * @param {boolean} isUpdate - True to clear and update the applicable pref.
++   * @returns {void}
++   */
++  getHTMLRenderPref(isFeedMessage, isUpdate) {
++    const renderFuncPref = isFeedMessage
++      ? "rss.display.html_as.settings_function"
++      : "mailnews.display.html_as.settings_function";
++    const menuItemsGroupName = isFeedMessage
++      ? "viewFeedBodyHTMLGroup"
++      : "bodyPlaintextVsHTMLPref";
++
++    FeedUtils.log.debug(
++      `getHTMLRenderPref: isFeedMessage ${isFeedMessage}, isUpdate ${isUpdate}`
++    );
++    if (isUpdate) {
++      Services.prefs.clearUserPref(renderFuncPref);
++    }
++
++    if (Services.prefs.prefHasUserValue(renderFuncPref)) {
++      return Services.prefs.getCharPref(renderFuncPref);
++    }
++
++    // Call InitViewBodyMenu() to get the preferred render function.
++    top.InitViewBodyMenu();
++    const menuItems = top.document.getElementsByAttribute(
++      "name",
++      menuItemsGroupName
++    );
++    const checkedMenuItem = Array.from(menuItems).filter(menuItem =>
++      menuItem.hasAttribute("checked")
++    )[0];
++    let renderFunc;
++    if (checkedMenuItem) {
++      renderFunc = checkedMenuItem.getAttribute("oncommand").split("(")[0];
++      Services.prefs.setCharPref(renderFuncPref, renderFunc);
++    }
++    FeedUtils.log.log(
++      `getHTMLRenderPref: isFeedMessage ${isFeedMessage}, set html render function pref to ${renderFunc}`
++    );
++    return renderFunc;
++  },
++
++  observe(subject, topic, prefName) {
++    if (topic == "nsPref:changed") {
++      // Must observe the pref that always changes in a render update.
++      if (prefName == "mailnews.display.html_as") {
++        const isFeedMessage = FeedUtils.isFeedMessage(gMessage);
++        FeedUtils.log.debug(
++          `observe: ${prefName} change, isFeedMessage ${isFeedMessage}, gPrior ${FeedMessageHandler.gPriorDisplayedIsFeedMessage}`
++        );
++        if (FeedMessageHandler.gPriorDisplayedIsFeedMessage === isFeedMessage) {
++          // Pref changed manually via menu and not by message type change.
++          // Do update on a delay as we must wait for all the render prefs to
++          // be set before getting the new checked menu and render function.
++          setTimeout(() => {
++            FeedMessageHandler.getHTMLRenderPref(isFeedMessage, true);
++          });
++        }
++      }
++    }
++  },
++
++  /**
+    * Load a web page for feed messages. Use MsgHdrToMimeMessage() to get
+    * the content-base url from the message headers. We cannot rely on
+    * currentHeaderData; it has not yet been streamed at our entry point in
+    * displayMessageChanged(), and in the case of a collapsed message pane it

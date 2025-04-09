@@ -1,0 +1,705 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1737433340 25200
+# Parent  1448e16990437e650eac10fc138c3fb016e27ae4
+Fix more feed vandalism:
+- reenable messagepane summary/webpage toggle
+- make several menuitems work again
+- load progress feedback enhancements
+- restore loadWebPageOnSelect pref
+- fix error when displaying feed message in a non feed account folder
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
+--- a/mail/base/content/SearchDialog.js
++++ b/mail/base/content/SearchDialog.js
+@@ -1453,34 +1453,8 @@ function saveAsVirtualFolder() {
+   );
+ }
+ 
+ function MsgOpenSelectedMessages() {
+-  // Toggle message body (feed summary) and content-base url in message pane or
+-  // load in browser, per pref, otherwise open summary or web page in new window
+-  // or tab, per that pref.
+-  if (
+-    gFolderDisplay.treeSelection &&
+-    gFolderDisplay.treeSelection.count == 1 &&
+-    gFolderDisplay.selectedMessageIsFeed
+-  ) {
+-    const msgHdr = gFolderDisplay.selectedMessage;
+-    if (
+-      document.documentElement.getAttribute("windowtype") == "mail:3pane" &&
+-      FeedMessageHandler.onOpenPref ==
+-        FeedMessageHandler.kOpenToggleInMessagePane
+-    ) {
+-      const showSummary = FeedMessageHandler.shouldShowSummary(msgHdr, true);
+-      FeedMessageHandler.setContent(msgHdr, showSummary);
+-      return;
+-    }
+-    if (
+-      FeedMessageHandler.onOpenPref == FeedMessageHandler.kOpenLoadInBrowser
+-    ) {
+-      setTimeout(FeedMessageHandler.loadWebPage, 20, msgHdr, { browser: true });
+-      return;
+-    }
+-  }
+-
+   // This is somewhat evil. If we're in a 3pane window, we'd have a tabmail
+   // element and would pass it in here, ensuring that if we open tabs, we use
+   // this tabmail to open them. If we aren't, then we wouldn't, so
+   // displayMessages would look for a 3pane window and open tabs there.
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -7,8 +7,11 @@
+ 
+ // msgViewNavigation.js
+ /* globals CrossFolderNavigation */
+ 
++// FeedUtils.sys.mjs
++/* globals FeedUtils */
++
+ // about3pane.js
+ /* globals ThreadPaneColumns */
+ 
+ var { MailServices } = ChromeUtils.importESModule(
+@@ -107,8 +110,33 @@ var commandController = {
+         commandController.doCommand("cmd_forwardInline", event);
+       }
+     },
+     cmd_openMessage(event) {
++      // Feed message: Toggle message body (feed summary) and content-base url
++      // in message pane or load in browser, per pref, otherwise open summary or
++      // web page in new window or tab, per mail.openMessageBehavior pref.
++      const msgHdr = gDBView.hdrForFirstSelectedMessage;
++      if (FeedUtils.isFeedMessage(msgHdr)) {
++        const win = window.messageBrowser?.contentWindow ?? window;
++        if (
++          win.FeedMessageHandler.onOpenPref ==
++          win.FeedMessageHandler.kOpenToggleInMessagePane
++        ) {
++          win.FeedMessageHandler.setShowSummary(msgHdr, true);
++          win.FeedMessageHandler.setContent(msgHdr);
++          return;
++        }
++        if (
++          win.FeedMessageHandler.onOpenPref ==
++          win.FeedMessageHandler.kOpenLoadInBrowser
++        ) {
++          setTimeout(win.FeedMessageHandler.loadWebPage, 20, msgHdr, {
++            browser: true,
++          });
++          return;
++        }
++      }
++
+       const forceTab = event?.button == 1;
+       MailUtils.displayMessages(
+         gDBView.getSelectedMsgHdrs(),
+         gViewWrapper,
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -122,8 +122,10 @@ function updateCheckedStateForIgnoreAndW
+ 
+   const tab = document.getElementById("tabmail")?.currentTabInfo;
+   if (["mail3PaneTab", "mailMessageTab"].includes(tab?.mode.name)) {
+     message = tab.message;
++  } else {
++    message = document.getElementById("messageBrowser")?.contentWindow.gMessage;
+   }
+ 
+   const folder = message?.folder;
+ 
+@@ -245,8 +247,15 @@ function initSearchMessagesMenu() {
+ function InitGoMessagesMenu() {
+   document.commandDispatcher.updateCommands("create-menu-go");
+ }
+ 
++function getAboutMessage() {
++  return (
++    document.getElementById("tabmail")?.currentAboutMessage ||
++    document.getElementById("messageBrowser")?.contentWindow
++  );
++}
++
+ /**
+  * This is called every time the view menu popup is displayed (in the main menu
+  * bar or in the appmenu).  It is responsible for updating the menu items'
+  * state to reflect reality.
+@@ -278,8 +287,11 @@ function view_init(event) {
+   } else if (tab?.mode.name == "mailMessageTab") {
+     message = tab.message;
+     messagePaneVisible = true;
+     threadPaneHeaderVisible = false;
++  } else {
++    // Standalone window.
++    message = document.getElementById("messageBrowser")?.contentWindow.gMessage;
+   }
+ 
+   const isFeed = FeedUtils.isFeedMessage(message);
+ 
+@@ -648,20 +660,25 @@ function InitMessageMenu() {
+   if (winType == "mail:3pane") {
+     document.getElementById("openMessageWindowMenuitem").hidden = isFeed;
+   }
+ 
+-  // Initialize the Open Feed Message handler menu
+-  const index = FeedMessageHandler.onOpenPref;
+-  document
+-    .getElementById("menu_openFeedMessage")
+-    .children[index].setAttribute("checked", true);
+-
+   const openRssMenu = document.getElementById("openFeedMessage");
+   openRssMenu.hidden = !isFeed;
+   if (winType != "mail:3pane") {
+     openRssMenu.hidden = true;
+   }
+ 
++  // Initialize the Open Feed Message handler menu
++  if (!openRssMenu.hidden) {
++    const win = getAboutMessage();
++    if (win) {
++      const index = win.FeedMessageHandler.onOpenPref;
++      document
++        .getElementById("menu_openFeedMessage")
++        .children[index]?.setAttribute("checked", true);
++    }
++  }
++
+   // Disable mark menu when we're not in a folder.
+   document.getElementById("markMenu").disabled = !folder || folder.isServer;
+ 
+   document.commandDispatcher.updateCommands("create-menu-message");
+@@ -764,8 +781,10 @@ function InitViewBodyMenu() {
+ 
+   const tab = document.getElementById("tabmail")?.currentTabInfo;
+   if (["mail3PaneTab", "mailMessageTab"].includes(tab?.mode.name)) {
+     message = tab.message;
++  } else {
++    message = document.getElementById("messageBrowser")?.contentWindow.gMessage;
+   }
+   const html_as = Services.prefs.getIntPref("mailnews.display.html_as");
+   const prefer_plaintext = Services.prefs.getBoolPref(
+     "mailnews.display.prefer_plaintext"
+@@ -839,13 +858,16 @@ function InitViewBodyMenu() {
+       "bodyFeedGlobalWebPage",
+       "bodyFeedGlobalSummary",
+       "bodyFeedPerFolderPref",
+     ];
+-    const checked = FeedMessageHandler.onSelectPref;
++    const win = getAboutMessage();
++    const checked = win?.FeedMessageHandler.onSelectPref;
+     for (const [index, id] of viewRssMenuItemIds.entries()) {
+       document.getElementById(id).setAttribute("checked", index == checked);
+     }
+-    const hideOptions = checked == FeedMessageHandler.kSelectOverrideWebPage;
++    // The gShowFeedSummary in the win.FeedMessageHandler shows the correct
++    // current state of display.
++    const hideOptions = !win?.FeedMessageHandler.gShowFeedSummary;
+     AllowHTML_menuitem.hidden = hideOptions;
+     Sanitized_menuitem.hidden = hideOptions;
+     AsPlaintext_menuitem.hidden = hideOptions;
+     document.getElementById("viewFeedSummarySeparator").hidden = hideOptions;
+diff --git a/mail/base/content/msgHdrView.inc.xhtml b/mail/base/content/msgHdrView.inc.xhtml
+--- a/mail/base/content/msgHdrView.inc.xhtml
++++ b/mail/base/content/msgHdrView.inc.xhtml
+@@ -264,9 +264,9 @@
+             </menupopup>
+           </menu>
+           <menu id="otherActionsFeedBodyAs"
+                 class="menu-iconic"
+-                label="&bodyMenu.label;">
++                label="&bodyMenuFeed.label;">
+             <menupopup id="hdrFeedBodyAsDropdown"
+                        onpopupshowing="InitOtherActionsViewBodyMenu(true);">
+               <menuitem id="otherActionsMenu_bodyFeedGlobalWebPage"
+                         type="radio"
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -677,15 +677,8 @@ var messageProgressListener = {
+         listener.onBeforeShowHeaderPane();
+       }
+     }
+ 
+-    // Load feed web page if so configured. This entry point works for
+-    // messagepane loads in 3pane folder tab, 3pane message tab, and the
+-    // standalone message window.
+-    if (!FeedMessageHandler.shouldShowSummary(gMessage, false)) {
+-      FeedMessageHandler.setContent(gMessage, false);
+-    }
+-
+     ShowMessageHeaderPane();
+     // WARNING: This is the ONLY routine inside of the message Header Sink
+     // that should trigger a reflow!
+     ClearHeaderView(gExpandedHeaderView);
+@@ -2603,16 +2596,16 @@ function InitOtherActionsViewBodyMenu(is
+     const checked = FeedMessageHandler.onSelectPref;
+     for (const [index, id] of viewRssMenuItemIds.entries()) {
+       document.getElementById(id).setAttribute("checked", index == checked);
+     }
+-    // Unlike the global menu we use the variable here to possibly have the
+-    // value relevant to the current mode if the per folder option is selected.
+-    AllowHTML_menuitem.hidden = !FeedMessageHandler.gShowSummary;
+-    Sanitized_menuitem.hidden = !FeedMessageHandler.gShowSummary;
+-    AsPlaintext_menuitem.hidden = !FeedMessageHandler.gShowSummary;
++    // The property containing the current display state (summary v. web page)
++    // is gShowFeedSummary.
++    AllowHTML_menuitem.hidden = !FeedMessageHandler.gShowFeedSummary;
++    Sanitized_menuitem.hidden = !FeedMessageHandler.gShowFeedSummary;
++    AsPlaintext_menuitem.hidden = !FeedMessageHandler.gShowFeedSummary;
+     document.getElementById(
+       "otherActionsMenu_viewFeedSummarySeparator"
+-    ).hidden = !FeedMessageHandler.gShowSummary;
++    ).hidden = !FeedMessageHandler.gShowFeedSummary;
+   }
+ }
+ 
+ /**
+diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/messenger.css
+--- a/mail/themes/shared/mail/messenger.css
++++ b/mail/themes/shared/mail/messenger.css
+@@ -1078,8 +1078,27 @@ findbar {
+     min-width: 100px;
+   }
+ }
+ 
++/* Match busy indicator in folder pane */
++#messagepane[loading] {
++  content-visibility: hidden;
++  background-image: var(--icon-clock);
++  background-position: center center;
++  background-repeat: no-repeat;
++  background-size: 48px;
++
++  --icon-color: var(--button-primary-background-color);
++  -moz-context-properties: fill, stroke;
++  fill: color-mix(in srgb, var(--icon-color) 20%, transparent);
++  stroke: var(--icon-color);
++
++  @media (prefers-reduced-motion: no-preference) {
++    background-image: url("chrome://global/skin/icons/loading.svg");
++    fill: var(--icon-color);
++  }
++}
++
+ /* Panel toolbarbuttons */
+ 
+ .panelTitle {
+   font-weight: bold;
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -2,10 +2,10 @@
+  * This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-/* globals ReloadMessage, getMessagePaneBrowser, openContentTab,
+-           GetNumSelectedMessages, gMessageNotificationBar */
++/* globals getBrowser, getMessagePaneBrowser, gMessageListeners, gMessage,
++   gMessageNotificationBar, openContentTab */
+ 
+ var { XPCOMUtils } = ChromeUtils.importESModule(
+   "resource://gre/modules/XPCOMUtils.sys.mjs"
+ );
+@@ -25,13 +25,13 @@ var { openLinkExternally } = ChromeUtils
+ ChromeUtils.defineESModuleGetters(this, {
+   MsgHdrToMimeMessage: "resource:///modules/gloda/MimeMessage.sys.mjs",
+ });
+ 
+-// This global is for SeaMonkey compatibility.
+-var gShowFeedSummary;
+-
+ var FeedMessageHandler = {
++  // Preference.
+   gShowSummary: true,
++  // Current state (toggle, global overrides).
++  gShowFeedSummary: true,
+   gToggle: false,
+   kSelectOverrideWebPage: 0,
+   kSelectOverrideSummary: 1,
+   kSelectFeedDefault: 2,
+@@ -50,9 +50,15 @@ var FeedMessageHandler = {
+   },
+ 
+   set onSelectPref(val) {
+     Services.prefs.setIntPref("rss.show.summary", val);
+-    ReloadMessage();
++  },
++
++  /**
++   * Load web page on threadpane select.
++   */
++  get loadWebPageOnSelectPref() {
++    return Services.prefs.getIntPref("rss.message.loadWebPageOnSelect");
+   },
+ 
+   /**
+    * How to load message on open (enter/dbl click in threadpane, contextmenu).
+@@ -64,55 +70,147 @@ var FeedMessageHandler = {
+   set onOpenPref(val) {
+     Services.prefs.setIntPref("rss.show.content-base", val);
+   },
+ 
++  messageListener: {
++    onStartHeaders() {
++      FeedMessageHandler.setShowSummary(gMessage, false);
++    },
++    onEndHeaders() {
++      if (FeedMessageHandler.isLegacyFeedMsg()) {
++        FeedMessageHandler.setLoadingState(true);
++      }
++      // Load feed web page if so configured. This entry point works for
++      // messagepane loads in 3pane folder tab, 3pane message tab, and the
++      // standalone message window.
++      if (!FeedMessageHandler.gShowFeedSummary) {
++        FeedMessageHandler.setContent(gMessage);
++      } else {
++        FeedMessageHandler.setLoadingState(false);
++      }
++    },
++  },
++
++  progressListener: {
++    visibilityHidden: false,
++    onStateChange(webProgress, request, stateFlags, _status) {
++      if (!this.visibilityHidden || !webProgress?.isTopLevel) {
++        return;
++      }
++      let location;
++      try {
++        request.QueryInterface(Ci.nsIChannel);
++        location = request?.URI?.spec;
++      } catch (ex) {}
++
++      // Only web page loads need messagepane to be made visible again.
++      if (!location?.startsWith("http")) {
++        return;
++      }
++
++      if (
++        stateFlags & Ci.nsIWebProgressListener.STATE_STOP &&
++        stateFlags & Ci.nsIWebProgressListener.STATE_IS_NETWORK
++      ) {
++        FeedMessageHandler.browser.toggleAttribute("loading", false);
++      }
++    },
++    QueryInterface: ChromeUtils.generateQI([
++      "nsIWebProgressListener",
++      "nsISupportsWeakReference",
++    ]),
++  },
++
++  init() {
++    if (window.gMessageListeners) {
++      gMessageListeners.push(this.messageListener);
++    }
++
++    if ("getMessagePaneBrowser" in window) {
++      // We are in about:message.
++      this.browser = getMessagePaneBrowser();
++      this.filter = Cc[
++        "@mozilla.org/appshell/component/browser-status-filter;1"
++      ].createInstance(Ci.nsIWebProgress);
++      this.filter.addProgressListener(
++        this.progressListener,
++        Ci.nsIWebProgress.NOTIFY_ALL
++      );
++      this.browser.webProgress.addProgressListener(
++        this.filter,
++        Ci.nsIWebProgress.NOTIFY_ALL
++      );
++    }
++  },
++
++  /*
++   * Thunderbird 2 rss messages with 'Show article summary' not selected means
++   * the message body is constructed to show web page in an iframe, and the
++   * summary is not ever available.
++   */
++  isLegacyFeedMsg() {
++    const contentDoc = this.browser?.contentDocument;
++    const rssIframe = contentDoc?.getElementById("_mailrssiframe");
++    if (rssIframe) {
++      this.gShowFeedSummary = false;
++      FeedUtils.log.warn(
++        "isLegacyFeedMsg: no summary for this legacy feed message."
++      );
++    }
++    return Boolean(rssIframe);
++  },
++
+   /**
+    * Determine whether to show a feed message summary or load a web page in the
+    * message pane.
+    *
+-   * @param {nsIMsgDBHdr} aMsgHdr - The message.
+-   * @param {boolean} aToggle - true if in toggle mode, false otherwise.
++   * @param {nsIMsgDBHdr} msgHdr - The message.
++   * @param {boolean} toggle - true if in toggle mode, false otherwise.
+    *
+-   * @returns {boolean} - true if summary is to be displayed, false if web page.
++   * @returns {void}
+    */
+-  shouldShowSummary(aMsgHdr, aToggle) {
++  setShowSummary(msgHdr, toggle) {
++    let showSummary;
++
+     // Not a feed message, always show summary (the message).
+-    if (!FeedUtils.isFeedMessage(aMsgHdr)) {
+-      return true;
+-    }
++    if (!FeedUtils.isFeedMessage(gMessage)) {
++      showSummary = true;
++    } else {
++      // Notified of a summary reload when toggling, reset toggle and return.
++      if (!toggle && this.gToggle) {
++        showSummary = !(this.gToggle = false);
++      } else {
++        if (this.isLegacyFeedMsg()) {
++          return;
++        }
++        this.gToggle = toggle;
++        if (toggle) {
++          // Toggle mode, flip value.
++          this.gShowSummary = showSummary = !this.gShowSummary;
++        } else {
++          this.gShowSummary = showSummary = this.showSummaryPreference(msgHdr);
+ 
+-    // Notified of a summary reload when toggling, reset toggle and return.
+-    if (!aToggle && this.gToggle) {
+-      return !(this.gToggle = false);
++          // Auto load web page in browser on select, per pref;
++          // setShowSummary() is always called first to 1) test if feed,
++          // 2) get summary pref; so do it here.
++          if (this.loadWebPageOnSelectPref) {
++            setTimeout(FeedMessageHandler.loadWebPage, 20, msgHdr, {
++              browser: true,
++            });
++          }
++        }
++      }
++      this.setLoadingState(!showSummary);
+     }
+ 
+-    let showSummary = true;
+-    this.gToggle = aToggle;
++    this.gShowFeedSummary = showSummary;
++  },
+ 
+-    // Thunderbird 2 rss messages with 'Show article summary' not selected,
+-    // ie message body constructed to show web page in an iframe, can't show
+-    // a summary - notify user.
+-    const browser = getMessagePaneBrowser();
+-    const contentDoc = browser ? browser.contentDocument : null;
+-    const rssIframe = contentDoc
+-      ? contentDoc.getElementById("_mailrssiframe")
+-      : null;
+-    if (rssIframe) {
+-      if (this.gToggle || this.onSelectPref == this.kSelectOverrideSummary) {
+-        this.gToggle = false;
+-      }
+-
+-      return false;
+-    }
+-
+-    if (aToggle) {
+-      // Toggle mode, flip value.
+-      return (gShowFeedSummary = this.gShowSummary = !this.gShowSummary);
+-    }
+-
+-    const wintype = document.documentElement.getAttribute("windowtype");
+-    const tabMail = document.getElementById("tabmail");
+-    const messageTab = tabMail && tabMail.currentTabInfo.mode.type == "message";
++  showSummaryPreference(msgHdr) {
++    let showSummary;
++    const wintype = top.document.documentElement.getAttribute("windowtype");
++    const tabMail = top.gTabmail;
++    const messageTab = tabMail?.currentTabInfo.mode.name == "mailMessageTab";
+     const messageWindow = wintype == "mail:messageWindow";
+ 
+     switch (this.onSelectPref) {
+       case this.kSelectOverrideWebPage:
+@@ -121,16 +219,19 @@ var FeedMessageHandler = {
+       case this.kSelectOverrideSummary:
+         showSummary = true;
+         break;
+       case this.kSelectFeedDefault: {
+-        // Get quickmode per feed folder pref from feed subscriptions. If the feed
+-        // message is not in a feed account folder (hence the folder is not in
+-        // the feeds database), err on the side of showing the summary.
++        // Get quickmode per feed folder pref from feed subscriptions. If the
++        // feed message is not in a feed account folder (hence the folder is
++        // not in the feeds database), err on the side of showing the summary.
+         // For the former, toggle or global override is necessary; for the
+         // latter, a show summary checkbox toggle in Subscribe dialog will set
+         // one on the path to bliss.
+-        const folder = aMsgHdr.folder;
++        const folder = msgHdr.folder;
+         showSummary = true;
++        if (!this.FeedAccountTypes.includes(folder.server.type)) {
++          break;
++        }
+         const ds = FeedUtils.getSubscriptionsDS(folder.server);
+         for (const sub of ds.data) {
+           if (sub.destFolder == folder.URI) {
+             showSummary = sub.quickMode;
+@@ -140,10 +241,8 @@ var FeedMessageHandler = {
+         break;
+       }
+     }
+ 
+-    gShowFeedSummary = this.gShowSummary = showSummary;
+-
+     if (messageWindow || messageTab) {
+       // Message opened in either standalone window or tab, due to either
+       // message open pref (we are here only if the pref is 0 or 1) or
+       // contextmenu open.
+@@ -172,20 +271,19 @@ var FeedMessageHandler = {
+    * is not streamed.
+    *
+    * @param {nsIMsgDBHdr} aMessageHdr - The message.
+    * @param {object} aWhere - name value=true pair, where name is in:
+-   *                                    'messagepane', 'browser', 'tab', 'window'.
++   *                          'messagepane', 'browser', 'tab', 'window'.
+    * @returns {void}
+    */
+   loadWebPage(aMessageHdr, aWhere) {
+-    MsgHdrToMimeMessage(aMessageHdr, null, function (aMsgHdr, aMimeMsg) {
++    MsgHdrToMimeMessage(aMessageHdr, null, (aMsgHdr, aMimeMsg) => {
+       if (
+-        aMimeMsg &&
+-        aMimeMsg.headers["content-base"] &&
++        aMimeMsg?.headers["content-base"] &&
+         aMimeMsg.headers["content-base"][0]
+       ) {
+-        let url = aMimeMsg.headers["content-base"],
+-          uri;
++        let url = aMimeMsg.headers["content-base"];
++        let uri;
+         try {
+           // The message and headers are stored as a string of UTF-8 bytes
+           // and we need to convert that cpp |string| to js UTF-16 explicitly
+           // for idn and non-ascii urls with this api.
+@@ -200,57 +298,59 @@ var FeedMessageHandler = {
+         //TODO browser currently only used from SearchDialog for kOpenLoadInBrowser
+         if (aWhere.browser) {
+           openLinkExternally(uri, { addToHistory: false });
+         } else if (aWhere.messagepane) {
+-          const browser = getMessagePaneBrowser();
+           // Load about:blank in the browser before (potentially) switching
+           // to a remote process. This prevents sandbox flags being carried
+           // over to the web document.
+-          MailE10SUtils.loadAboutBlank(browser);
+-          MailE10SUtils.loadURI(browser, url);
++          MailE10SUtils.loadAboutBlank(this.browser);
++          MailE10SUtils.loadURI(this.browser, url);
+         } else if (aWhere.tab) {
+           openContentTab(url, "tab", null);
+         } else if (aWhere.window) {
+           openContentTab(url, "window", null);
+         }
+       } else {
++        FeedMessageHandler.setLoadingState(false);
+         FeedUtils.log.warn(
+           "loadWebPage: could not get Content-Base header url for this message"
+         );
+       }
+     });
+   },
+ 
++  setLoadingState(isLoading) {
++    isLoading = isLoading ?? !this.gShowFeedSummary;
++    this.progressListener.visibilityHidden = isLoading;
++    this.browser.toggleAttribute("loading", isLoading);
++  },
++
+   /**
+    * Display summary or load web page for feed messages. Caller should already
+    * know if the message is a feed message.
+    *
+-   * @param {nsIMsgDBHdr} aMsgHdr - The message.
+-   * @param {boolean} aShowSummary - true if summary is to be displayed,
+-   *                                 false if web page.
++   * @param {nsIMsgDBHdr} msgHdr  - The message.
+    * @returns {void}
+    */
+-  setContent(aMsgHdr, aShowSummary) {
+-    if (aShowSummary) {
++  setContent(msgHdr) {
++    if (this.gShowFeedSummary) {
+       // Only here if toggling to summary in 3pane.
+-      if (this.gToggle && window.gDBView && GetNumSelectedMessages() == 1) {
+-        ReloadMessage();
++      if (this.gToggle && window.gDBView?.numSelected == 1) {
++        top.gTabmail.currentAboutMessage.ReloadMessage();
+       }
+     } else {
+-      const browser = getMessagePaneBrowser();
+-      if (browser && browser.contentDocument && browser.contentDocument.body) {
+-        browser.contentDocument.body.hidden = true;
+-      }
+       // If in a non rss folder, hide possible remote content bar on a web
+       // page load, as it doesn't apply.
+       gMessageNotificationBar.clearMsgNotifications();
+ 
+-      this.loadWebPage(aMsgHdr, { messagepane: true });
++      this.loadWebPage(msgHdr, { messagepane: true });
+       this.gToggle = false;
+     }
+   },
+ };
+ 
++window.addEventListener("aboutMessageLoaded", () => FeedMessageHandler.init());
++
+ function openSubscriptionsDialog(aFolder) {
+   // Check for an existing feed subscriptions window and focus it.
+   const subscriptionsWindow = Services.wm.getMostRecentWindow(
+     "Mail:News-BlogSubscriptions"
+@@ -289,20 +389,12 @@ function openComposeWindowForRSSArticle(
+   aFormat,
+   aIdentity,
+   aMsgWindow
+ ) {
+-  // Ensure right content is handled for web pages in window/tab.
+-  const tabmail = document.getElementById("tabmail");
+-  const is3pane =
+-    tabmail && tabmail.selectedTab && tabmail.selectedTab.mode
+-      ? tabmail.selectedTab.mode.type == "folder"
+-      : false;
+-  const showingwebpage =
+-    "FeedMessageHandler" in window &&
+-    !is3pane &&
+-    FeedMessageHandler.onOpenPref == FeedMessageHandler.kOpenWebPage;
+-
+-  if (gShowFeedSummary && !showingwebpage) {
++  const win =
++    document.getElementById("tabmail")?.currentAboutMessage ||
++    document.getElementById("messageBrowser")?.contentWindow;
++  if (win.FeedMessageHandler.gShowFeedSummary) {
+     // The user is viewing the summary.
+     MailServices.compose.OpenComposeWindow(
+       aMsgComposeWindow,
+       aMsgHdr,
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -763,8 +763,13 @@ pref("rss.show.summary", 1);
+ // 2 - toggle load summary and content-base url in message pane
+ // 3 - load content-base url in browser
+ pref("rss.show.content-base", 0);
+ 
++// Feed message additional web page display.
++// 0 - no action
++// 1 - load web page in default browser, on select
++pref("rss.message.loadWebPageOnSelect", 0);
++
+ // Feed auto updates / "Pause Updates"
+ // true  = If updating a feed results in an error code, disable the feed until next manual check or application restart.
+ // false = Keep feed automatic updates scheduled, even if the feed source responds with an error code.
+ pref("rss.disable_feeds_on_update_failure", true);

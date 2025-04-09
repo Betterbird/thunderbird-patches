@@ -1,0 +1,685 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740081430 25200
+# Parent  a6284379e50b29634e5bb3d762a50f4464038777
+Fix feed vandalization, Part II - fetching favicon
+- Do not get favicons in feed download processing path, errors fail the cycle.
+- Check for favicons on folderpane folder init/create, only once in a session.
+- Fix busy status on folders in subscribe mode.
+- Modernize downloadFeed().
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/widgets/folder-tree-row.mjs b/mail/base/content/widgets/folder-tree-row.mjs
+--- a/mail/base/content/widgets/folder-tree-row.mjs
++++ b/mail/base/content/widgets/folder-tree-row.mjs
+@@ -410,27 +410,31 @@ class FolderTreeRow extends HTMLLIElemen
+   setFolderPropertiesFromFolder(folder) {
+     if (folder.server.type != "rss") {
+       return;
+     }
+-    const urls = lazy.FeedUtils.getFeedUrlsInFolder(folder);
+-    if (urls) {
+-      this.dataset.isFeedFolder = "true";
+-    } else {
+-      delete this.dataset.isFeedFolder;
+-    }
+     const props = lazy.FeedUtils.getFolderProperties(folder);
+     for (const property of ["hasError", "isBusy", "isPaused"]) {
+       if (props.includes(property)) {
+         this.dataset[property] = "true";
+       } else {
+         delete this.dataset[property];
+       }
+     }
+-    if (!urls || props.includes("hasError") || props.includes("isBusy")) {
+-      this.icon.style = "";
++    if (props.includes("isFeedFolder")) {
++      if (!this.dataset.isFeedFolder) {
++        this.dataset.isFeedFolder = "true";
++        lazy.FeedUtils.getFavicon(folder);
++      }
++      if (props.includes("hasError") || props.includes("isBusy")) {
++        this.icon.style = "";
++      } else {
++        const urls = lazy.FeedUtils.getFeedUrlsInFolder(folder);
++        const url = urls[0];
++        this.icon.style = `background-image: url("page-icon:${url}"); fill: unset;`;
++      }
+     } else {
+-      const url = urls[0];
+-      this.icon.style = `background-image: url("page-icon:${url}");`;
++      this.icon.style = "";
++      delete this.dataset.isFeedFolder;
+     }
+   }
+ 
+   /**
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -496,9 +496,9 @@ Feed.prototype = {
+     for (const id in ds.data) {
+       const item = ds.data[id];
+       if (item.feedURLs.includes(this.url)) {
+         item.valid = false;
+-        this.addLog("debug", `invalidateItems: item ${id}`);
++        this.addLog("log", `invalidateItems: item ${id}`);
+       }
+     }
+     this.addLog("groupEnd", `invalidateItems: for feed ${this.url}`);
+     ds.saveSoon();
+@@ -533,22 +533,22 @@ Feed.prototype = {
+         // Don't immediately purge items in active feeds; do so for deleted feeds.
+         continue;
+       }
+ 
+-      this.addLog("debug", `removeInvalidItems: item ${id}`);
++      this.addLog("log", `removeInvalidItems: item ${id}`);
+       // Detach the item from this feed (it could be shared by multiple feeds).
+       item.feedURLs = item.feedURLs.filter(url => url != this.url);
+       if (item.feedURLs.length > 0) {
+         this.addLog(
+-          "debug",
++          "log",
+           `removeInvalidItems: ${id} is from more than one feed; only the reference to this feed is removed`
+         );
+       } else {
+         delete ds.data[id];
+         removed++;
+       }
+     }
+-    this.addLog("debug", `removeInvalidItems: removed ${removed} item(s)`);
++    this.addLog("log", `removeInvalidItems: removed ${removed} item(s)`);
+     this.addLog("groupEnd", `removeInvalidItems: for feed ${this.url}`);
+     ds.saveSoon();
+   },
+ 
+@@ -560,8 +560,15 @@ Feed.prototype = {
+     try {
+       this.folder = this.server.rootMsgFolder
+         .QueryInterface(Ci.nsIMsgLocalMailFolder)
+         .createLocalSubfolder(this.folderName);
++
++      lazy.FeedUtils.setStatus(
++        this.folder,
++        this.folder.URI,
++        "code",
++        lazy.FeedUtils.kNewsBlogFeedIsBusy
++      );
+     } catch (exception) {
+       // An error creating.
+       this.addLog(
+         "warn",
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -83,9 +83,9 @@ FeedItem.prototype = {
+     messageID.replace(/>/g, "%3E");
+     messageID.replace(/@/g, "%40");
+     messageID = "<" + messageID.trim() + "@localhost.localdomain>";
+ 
+-    this.feed.addLog("debug", `normalizeMessageID: ${messageID}`);
++    this.feed.addLog("log", `normalizeMessageID: ${messageID}`);
+     return messageID;
+   },
+ 
+   get contentBase() {
+@@ -121,10 +121,10 @@ FeedItem.prototype = {
+       };
+       ds.data[this.id] = resource;
+       if (!this.content) {
+         this.feed.addLog(
+-          "debug",
+-          `store: no content; storing <description> or <title> for item.id ${this.id}`
++          "log",
++          `store: no content; storing <description> or <title> for item.identity ${this.identity}`
+         );
+         this.content = this.description || this.title;
+       }
+ 
+@@ -146,18 +146,18 @@ FeedItem.prototype = {
+   findStoredResource() {
+     // Checks to see if the item has already been stored in its feed's
+     // message folder.
+     this.feed.addLog(
+-      "debug",
+-      `findStoredResource: checking if stored - ${this.identity}`
++      "log",
++      `findStoredResource: checking if stored item.identity, ${this.identity}`
+     );
+ 
+     const server = this.feed.server;
+     const folder = this.feed.folder;
+ 
+     if (!folder) {
+       this.feed.addLog(
+-        "debug",
++        "log",
+         `findStoredResource: folder ${this.feed.folderName} doesn't exist; creating as child of ${server.rootMsgFolder.prettyName}`
+       );
+       this.feed.createFolder();
+       return null;
+@@ -165,13 +165,19 @@ FeedItem.prototype = {
+ 
+     const ds = lazy.FeedUtils.getItemsDS(server);
+     const item = ds.data[this.id];
+     if (!item || !item.stored) {
+-      this.feed.addLog("debug", "findStoredResource: not stored");
++      this.feed.addLog(
++        "log",
++        `findStoredResource: item.id ${this.id} is not stored`
++      );
+       return null;
+     }
+ 
+-    this.feed.addLog("debug", "findStoredResource: already stored");
++    this.feed.addLog(
++      "log",
++      `findStoredResource: item.id ${this.id} is already stored`
++    );
+     return item;
+   },
+ 
+   markValid(resource) {
+@@ -209,9 +215,9 @@ FeedItem.prototype = {
+     // leading/trailing spaces to prevent mbox header folding issue at just
+     // the right subject length.
+     this.title = title.replace(/[\t\r\n]+/g, " ").trim();
+ 
+-    this.feed.addLog("debug", `writeToFolder: ${location}, ${this.title}`);
++    this.feed.addLog("log", `writeToFolder: ${location}, ${this.title}`);
+ 
+     // If the date looks like it's in W3C-DTF format, convert it into
+     // an IETF standard date.  Otherwise assume it's in IETF format.
+     if (this.mDate.search(/^\d\d\d\d/) != -1) {
+@@ -293,9 +299,9 @@ FeedItem.prototype = {
+         "\n" +
+         this.content;
+     }
+ 
+-    this.feed.addLog("debug", `writeToFolder: ${source.length} characters`);
++    this.feed.addLog("log", `writeToFolder: ${source.length} characters`);
+ 
+     // Get the folder and database storing the feed's messages and headers.
+     const folder = this.feed.folder.QueryInterface(Ci.nsIMsgLocalMailFolder);
+     const msgFolder = folder.QueryInterface(Ci.nsIMsgFolder);
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -3,8 +3,9 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import { MailServices } from "resource:///modules/MailServices.sys.mjs";
++import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";
+ 
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+@@ -44,8 +45,10 @@ export var FeedUtils = {
+   ATOM_03_NS: "http://purl.org/atom/ns#",
+   ATOM_IETF_NS: "http://www.w3.org/2005/Atom",
+   ATOM_THREAD_NS: "http://purl.org/syndication/thread/1.0",
+ 
++  // Delay time between batched feed downloads, 1.1 seconds.
++  FETCH_DELAY: 1.1 * 1000,
+   // Accept content mimetype preferences for feeds.
+   REQUEST_ACCEPT:
+     "application/atom+xml," +
+     "application/rss+xml;q=0.9," +
+@@ -203,18 +206,18 @@ export var FeedUtils = {
+ 
+   /**
+    * Download a feed url on biff or get new messages.
+    *
+-   * @param {nsIMsgFolder} aFolder - The folder.
+-   * @param {nsIUrlListener} aUrlListener - Feed url.
+-   * @param {boolean} aIsBiff - true if biff, false if manual get.
+-   * @param {nsIDOMWindow} aMsgWindow - The window.
++   * @param {nsIMsgFolder} folder - The folder.
++   * @param {nsIUrlListener} urlListener - Listener (unused).
++   * @param {boolean} isBiff - true if biff, false if manual get.
++   * @param {nsIDOMWindow} msgWindow - The window.
+    *
+-   * @returns {Promise<void>} When all feeds downloading have been set off.
++   * @returns {void}
+    */
+-  async downloadFeed(aFolder, aUrlListener, aIsBiff, aMsgWindow) {
++  downloadFeed(folder, urlListener, isBiff, msgWindow) {
+     FeedUtils.log.log(
+-      `downloadFeed: START isBiff ${aIsBiff}, isOffline ${Services.io.offline}`
++      `downloadFeed: START isBiff ${isBiff}, isOffline ${Services.io.offline}`
+     );
+     // User set.
+     if (Services.io.offline) {
+       return;
+@@ -238,41 +241,43 @@ export var FeedUtils = {
+       );
+       return;
+     }
+ 
+-    const forceDownload = !aIsBiff;
++    const forceDownload = !isBiff;
++    const rootFolder = FeedUtils.getFolderPrettyPath(folder);
++    let allFolders = folder.descendants;
+     let inStartup = false;
+-    if (aFolder.isServer) {
++    let folderType = "folder";
++    if (folder.isServer) {
++      folderType = "account";
+       // The lastUpdateTime is |null| only at session startup/initialization.
+       // Note: feed processing does not impact startup, as the biff poll
+       // will go off in about kBiffPollMinutes (1) and process each feed
+       // according to its own lastUpdatTime/update frequency.
+-      if (FeedUtils.getStatus(aFolder, aFolder.URI).lastUpdateTime === null) {
++      if (FeedUtils.getStatus(folder, folder.URI).lastUpdateTime === null) {
+         inStartup = true;
+       }
+ 
+-      FeedUtils.setStatus(aFolder, aFolder.URI, "lastUpdateTime", Date.now());
+-    }
+-
+-    let allFolders = aFolder.descendants;
+-    if (!aFolder.isServer) {
++      FeedUtils.setStatus(folder, folder.URI, "lastUpdateTime", Date.now());
++    } else {
+       // Add the base folder; it does not get returned by .descendants. Do not
+       // add the account folder as it doesn't have the feedUrl property or even
+       // a msgDatabase necessarily.
+-      allFolders.unshift(aFolder);
++      allFolders.unshift(folder);
+     }
+ 
+-    const rootFolder = FeedUtils.getFolderPrettyPath(aFolder);
+-    let folder, location;
+-    async function* feeder() {
+-      for (let i = 0; i < allFolders.length; i++) {
+-        folder = allFolders[i];
+-        location = FeedUtils.getFolderPrettyPath(folder);
++    const feeder = () => {
++      let folderCount = 0;
++      const feedsToFetch = [];
++      for (const subFolder of allFolders) {
++        const location = FeedUtils.getFolderPrettyPath(subFolder);
+         FeedUtils.log.log(
+-          `downloadFeed: folder ${i + 1} of ${allFolders.length}, ${location}`
++          `downloadFeed: folder ${++folderCount} of ${
++            allFolders.length
++          }, ${location}`
+         );
+ 
+-        const feedUrlArray = FeedUtils.getFeedUrlsInFolder(folder);
++        const feedUrlArray = FeedUtils.getFeedUrlsInFolder(subFolder);
+         // Continue if there are no feedUrls for the folder in the feeds
+         // database.  All folders in Trash are skipped.
+         if (!feedUrlArray) {
+           FeedUtils.log.log(`downloadFeed: no feeds subscribed in folder`);
+@@ -282,127 +287,102 @@ export var FeedUtils = {
+         FeedUtils.log.log(
+           `downloadFeed: feed url(s) subscribed in folder, ${feedUrlArray}`
+         );
+ 
+-        // We need to kick off a download for each feed.
+         const now = Date.now();
+         for (const url of feedUrlArray) {
+           // Check whether this feed should be updated; if forceDownload is true
+           // skip the per feed check.
+-          const status = FeedUtils.getStatus(folder, url);
+           if (!forceDownload) {
+             // Also skip if user paused, or error paused (but not inStartup;
+             // go check the feed again), or update interval hasn't expired.
++            const status = FeedUtils.getStatus(subFolder, url);
++            FeedUtils.log.log(
++              `downloadFeed: feed, enabled ${
++                status.enabled
++              }, minsSinceLastUpdate ${
++                Math.round((now - status.lastUpdateTime) / 60) / 1000
++              }, updateMinutes ${status.updateMinutes}, feed url ${url}`
++            );
+             if (
+               status.enabled === false ||
+               (status.enabled === null && !inStartup) ||
+               now - status.lastUpdateTime < status.updateMinutes * 60000
+             ) {
+-              FeedUtils.log.log(
+-                `downloadFeed: SKIP feed, enabled ${
+-                  status.enabled
+-                }, minsSinceLastUpdate ${
+-                  Math.round((now - status.lastUpdateTime) / 60) / 1000
+-                }, feed url ${url}`
+-              );
++              FeedUtils.log.log(`downloadFeed: SKIP feed url ${url}`);
+               continue;
+             }
+           }
+-          // Update feed icons only once every 24h, tops.
+-          if (
+-            forceDownload ||
+-            now - status.lastUpdateTime >= 24 * 60 * 60 * 1000
+-          ) {
+-            await FeedUtils.getFavicon(folder, url);
+-          }
+ 
+           // Create a feed object.
+-          const feed = new lazy.Feed(url, folder);
+-
+-          // init can be called multiple times. Checks if it should actually
+-          // init itself.
+-          FeedUtils.progressNotifier.init(aMsgWindow, false);
+-
+-          // Bump our pending feed download count. From now on, all feeds will
+-          // be resolved and finish with progressNotifier.downloaded(). Any
+-          // early returns must call downloaded() so mNumPendingFeedDownloads
+-          // is decremented and notification/status feedback is reset.
+-          FeedUtils.progressNotifier.mNumPendingFeedDownloads++;
++          const feed = new lazy.Feed(url, subFolder);
++          feedsToFetch.push(feed);
++          FeedUtils.log.log(`downloadFeed: QUEUE feed url ${url}`);
+ 
+           // If the current active count exceeds the max desired, exit from
+           // the current poll cycle. Only throttle for a background biff; for
+           // a user manual get messages, do them all.
+-          if (
+-            aIsBiff &&
+-            FeedUtils.progressNotifier.mNumPendingFeedDownloads >
+-              FeedUtils.MAX_CONCURRENT_FEEDS
+-          ) {
++          if (isBiff && feedsToFetch.length >= FeedUtils.MAX_CONCURRENT_FEEDS) {
+             FeedUtils.log.log(
+-              `downloadFeed: RETURN active feeds count is greater than the max ${FeedUtils.MAX_CONCURRENT_FEEDS}`
++              `downloadFeed: RETURN feed queue count is greater than the max ${FeedUtils.MAX_CONCURRENT_FEEDS}`
+             );
+-            FeedUtils.progressNotifier.downloaded(
+-              feed,
+-              FeedUtils.kNewsBlogFeedIsBusy
+-            );
+-            return;
++            return feedsToFetch;
+           }
+-
+-          // Set status info and download.
+-          FeedUtils.log.log(`downloadFeed: DOWNLOAD feed url ${url}`);
+-          FeedUtils.setStatus(
+-            folder,
+-            url,
+-            "code",
+-            FeedUtils.kNewsBlogFeedIsBusy
+-          );
+-          feed.download(true, FeedUtils.progressNotifier);
+-
+-          Services.tm.mainThread.dispatch(function () {
+-            try {
+-              const done = getFeed.next().done;
+-              if (done) {
+-                // Finished with all feeds in base aFolder and its subfolders.
+-                FeedUtils.log.log(
+-                  `downloadFeed: finished with folder ${rootFolder}`
+-                );
+-                folder = null;
+-                allFolders = null;
+-                FeedUtils.log.groupEnd(`downloadFeed: ${rootFolder}`);
+-              }
+-            } catch (exception) {
+-              FeedUtils.log.error(`downloadFeed: error ${exception}`);
+-              FeedUtils.progressNotifier.downloaded(
+-                feed,
+-                FeedUtils.kNewsBlogFeedIsBusy
+-              );
+-            }
+-          }, Ci.nsIThread.DISPATCH_NORMAL);
+-
+-          yield undefined;
+         }
+       }
++      return feedsToFetch;
++    };
++
++    FeedUtils.log.groupCollapsed(
++      `downloadFeed: ${folderType} ${rootFolder}, inStartup ${inStartup}`
++    );
++
++    const feedsToFetch = feeder();
++
++    // Finished with all feeds in base folder and its subfolders.
++    FeedUtils.log.groupEnd(
++      `downloadFeed: ${folderType} ${rootFolder}, inStartup ${inStartup}`
++    );
++    FeedUtils.log.log(
++      `downloadFeed: finished with ${folderType} ${rootFolder}`
++    );
++    FeedUtils.log.log(
++      `downloadFeed: found ${feedsToFetch.length} feed url(s) to download`
++    );
++
++    allFolders = null;
++
++    if (!feedsToFetch.length) {
++      return;
+     }
+ 
+-    FeedUtils.log.group(`downloadFeed: ${rootFolder}`);
+-    const getFeed = await feeder();
+-    try {
+-      const done = getFeed.next().done;
+-      if (done) {
+-        // Nothing to do.
+-        FeedUtils.log.log(
+-          `downloadFeed: nothing to do in folder ${rootFolder}`
++    // init() can be called multiple times. Checks if it should actually
++    // init itself.
++    FeedUtils.progressNotifier.init(msgWindow, false);
++
++    // Set our pending feed download count. From now on, all feeds will
++    // be resolved and finish with progressNotifier.downloaded(). Any
++    // early returns must call downloaded() so mNumPendingFeedDownloads
++    // is decremented and notification/status feedback is reset.
++    FeedUtils.progressNotifier.mNumPendingFeedDownloads += feedsToFetch.length;
++
++    const fetcher = async feedsToFetchArray => {
++      for (const feedToFetch of feedsToFetchArray) {
++        // Set status info and download.
++        FeedUtils.setStatus(
++          feedToFetch.folder,
++          feedToFetch.url,
++          "code",
++          FeedUtils.kNewsBlogFeedIsBusy
+         );
+-        folder = null;
+-        allFolders = null;
+-        FeedUtils.log.groupEnd(`downloadFeed: ${rootFolder}`);
++        feedToFetch.download(true, FeedUtils.progressNotifier);
++        await new Promise(resolve =>
++          setTimeout(resolve, FeedUtils.FETCH_DELAY)
++        );
+       }
+-    } catch (exception) {
+-      FeedUtils.log.error(`downloadFeed: error ${exception}`);
+-      FeedUtils.progressNotifier.downloaded(
+-        { folder: aFolder, url: "" },
+-        FeedUtils.kNewsBlogFeedIsBusy
+-      );
+-    }
++    };
++
++    fetcher(feedsToFetch);
+   },
+ 
+   /**
+    * Subscribe a new feed url.
+@@ -727,37 +707,59 @@ export var FeedUtils = {
+     return false;
+   },
+ 
+   /**
+-   * Return properties for nsITreeView getCellProperties, for a tree row item in
+-   * folderpane or subscribe dialog tree.
++   * Return special properties feed account folders in folderpane or
++   * subscribe dialog tree.
+    *
+-   * @param {nsIMsgFolder} aFolder - Folder or a feed url's parent folder.
+-   * @param {string} aFeedUrl - Feed url for a feed row, null for folder.
++   * @param {nsIMsgFolder} folder - Folder or a feed url's parent folder.
++   * @param {string} feedUrl - Feed url for a feed row, null for folder.
+    *
+    * @returns {string} - Space separated properties.
+    */
+-  getFolderProperties(aFolder, aFeedUrl) {
+-    const folder = aFolder;
+-    const feedUrls = aFeedUrl ? [aFeedUrl] : this.getFeedUrlsInFolder(aFolder);
+-    if (!feedUrls && !folder.isServer) {
++  getFolderProperties(folder, feedUrl) {
++    const location = this.getFolderPrettyPath(folder);
++    let properties;
++    if (folder.isServer) {
++      const serverEnabled = this.getStatus(
++        folder.server.rootFolder,
++        folder.server.rootFolder.URI
++      ).enabled;
++      properties = !serverEnabled ? " isPaused" : "";
++      this.log.debug(
++        `getFolderProperties: ${location}, properties '${properties}'`
++      );
++
++      return properties;
++    }
++
++    properties = feedUrl ? " isFeed-true" : " isFeedFolder-true";
++
++    // For a subcribe which creates a folder or adds to a folder, the
++    // feed url will not yet be added to the database. Get the busy
++    // code on the folder (instead of urls) if status has been set busy
++    // elsewhere.
++    const code = this.getStatus(folder, folder.URI).code;
++    if (!feedUrl && code == FeedUtils.kNewsBlogFeedIsBusy) {
++      properties += " isBusy";
++      this.log.debug(
++        `getFolderProperties: ${location}, properties '${properties}'`
++      );
++
++      return properties;
++    }
++
++    const feedUrls = feedUrl ? [feedUrl] : this.getFeedUrlsInFolder(folder);
++    if (!feedUrls) {
+       return "";
+     }
+ 
+-    const serverEnabled = this.getStatus(
+-      folder.server.rootFolder,
+-      folder.server.rootFolder.URI
+-    ).enabled;
+-    if (folder.isServer) {
+-      return !serverEnabled ? " isPaused" : "";
+-    }
+-
+-    let properties = aFeedUrl ? " isFeed-true" : " isFeedFolder-true";
+     let hasError,
+       isBusy,
+       numPaused = 0;
+-    for (const feedUrl of feedUrls) {
+-      const feedStatus = this.getStatus(folder, feedUrl);
++
++    for (const url of feedUrls) {
++      const feedStatus = this.getStatus(folder, url);
+       if (
+         feedStatus.code == FeedUtils.kNewsBlogInvalidFeed ||
+         feedStatus.code == FeedUtils.kNewsBlogRequestFailure ||
+         feedStatus.code == FeedUtils.kNewsBlogBadCertError ||
+@@ -775,8 +777,11 @@ export var FeedUtils = {
+ 
+     properties += hasError ? " hasError" : "";
+     properties += isBusy ? " isBusy" : "";
+     properties += numPaused == feedUrls.length ? " isPaused" : "";
++    this.log.debug(
++      `getFolderProperties: ${location}, properties '${properties}'`
++    );
+ 
+     return properties;
+   },
+ 
+@@ -1128,8 +1133,10 @@ export var FeedUtils = {
+ 
+       origDS.saveSoon();
+       destDS.saveSoon();
+     }
++    Services.obs.notifyObservers(aFolder, "folder-properties-changed");
++    Services.obs.notifyObservers(aOrigFolder, "folder-properties-changed");
+   },
+ 
+   /**
+    * When subscribing to feeds by dnd on, or adding a url to, the account
+@@ -1835,8 +1842,9 @@ export var FeedUtils = {
+       );
+       let logLevel = "log";
+       if (this.mSubscribeMode) {
+         if (aErrorCode == FeedUtils.kNewsBlogSuccess) {
++          FeedUtils.setStatus(feed.folder, feed.folder.URI, "code", "");
+           // Add the feed to the databases.
+           FeedUtils.addFeed(feed);
+ 
+           // Nice touch: notify so the window ca select the folder that now
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -1701,8 +1701,16 @@ var FeedSubscriptions = {
+     this.updateStatusItem("statusText", message);
+     this.updateStatusItem("progressMeter", "?");
+     document.getElementById("addFeed").disabled = true;
+     this.mActionMode = mode;
++    if (parse && feed.folder) {
++      FeedUtils.setStatus(
++        feed.folder,
++        feed.folder.URI,
++        "code",
++        FeedUtils.kNewsBlogFeedIsBusy
++      );
++    }
+     feed.download(parse, this.mFeedDownloadCallback);
+     return true;
+   },
+ 
+@@ -1917,9 +1925,9 @@ var FeedSubscriptions = {
+   },
+ 
+   mFeedDownloadCallback: {
+     mSubscribeMode: true,
+-    async downloaded(feed, aErrorCode) {
++    downloaded(feed, aErrorCode) {
+       // Offline check is done in the context of 3pane, return to the subscribe
+       // window once the modal prompt is dispatched.
+       window.focus();
+ 
+@@ -1982,19 +1990,8 @@ var FeedSubscriptions = {
+ 
+         // Add the feed to the databases.
+         FeedUtils.addFeed(feed);
+ 
+-        // Set isBusy status, and clear it after getting favicon. This makes
+-        // sure the folder icon is redrawn to reflect what we got.
+-        FeedUtils.setStatus(
+-          feed.folder,
+-          feed.url,
+-          "code",
+-          FeedUtils.kNewsBlogFeedIsBusy
+-        );
+-        await FeedUtils.getFavicon(feed.folder, feed.url);
+-        FeedUtils.setStatus(feed.folder, feed.url, "code", aErrorCode);
+-
+         // Now add the feed to our view.  If adding, the current selection will
+         // be a folder; if updating it will be a feed.  No need to rebuild the
+         // entire view, that is too jarring.
+         let curIndex = win.mView.selection.currentIndex;
+@@ -2125,8 +2122,10 @@ var FeedSubscriptions = {
+       win.mActionMode = null;
+       win.clearStatusInfo();
+       const code = feed.url.startsWith("http") ? aErrorCode : null;
+       win.updateStatusItem("statusText", message, code);
++      FeedUtils.setStatus(feed.folder, feed.url, "code", aErrorCode);
++      FeedUtils.setStatus(feed.folder, feed.folder.URI, "code", "");
+     },
+ 
+     // This gets called after the RSS parser finishes storing a feed item to
+     // disk.  aCurrentFeedItems is an integer corresponding to how many feed

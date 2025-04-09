@@ -1,0 +1,240 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1719305838 -7200
+# Parent  de8bbedcc10fcd2d6547bec6947e54ef6ea08af6
+Bug 323067 - No indicator of currently sorted column when column header is icon only
+
+Add a sort indicator to icon columns and add a secondary sort indicator to all columns.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+* * *
+Group-by-sort fixes to show date as secondary sort.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -4098,8 +4098,25 @@ var threadPaneHeader = {
+     if (event.target.id != "menu_threadPaneSortPopup") {
+       return;
+     }
+ 
++    const isSortTypeValidForGrouping = [
++      Ci.nsMsgViewSortType.byAccount,
++      Ci.nsMsgViewSortType.byAttachments,
++      Ci.nsMsgViewSortType.byAuthor,
++      Ci.nsMsgViewSortType.byCorrespondent,
++      Ci.nsMsgViewSortType.byDate,
++      Ci.nsMsgViewSortType.byFlagged,
++      Ci.nsMsgViewSortType.byLocation,
++      Ci.nsMsgViewSortType.byPriority,
++      Ci.nsMsgViewSortType.byReceived,
++      Ci.nsMsgViewSortType.byRecipient,
++      Ci.nsMsgViewSortType.byStatus,
++      Ci.nsMsgViewSortType.bySubject,
++      Ci.nsMsgViewSortType.byTags,
++      Ci.nsMsgViewSortType.byCustom,
++    ].includes(gViewWrapper.primarySortType);
++
+     // Update menuitem to reflect sort key.
+     for (const menuitem of event.target.querySelectorAll(`[name="sortby"]`)) {
+       const sortKey = menuitem.getAttribute("value");
+       menuitem.setAttribute(
+@@ -4124,8 +4141,11 @@ var threadPaneHeader = {
+       .querySelector(`[value="unthreaded"]`)
+       .setAttribute("checked", gViewWrapper.showUnthreaded);
+     event.target
+       .querySelector(`[value="group"]`)
++      .setAttribute("disabled", !isSortTypeValidForGrouping);
++    event.target
++      .querySelector(`[value="group"]`)
+       .setAttribute("checked", gViewWrapper.showGroupedBySort);
+   },
+ 
+   /**
+@@ -5986,8 +6006,43 @@ var threadPane = {
+       ?.classList.add(
+         "sorting",
+         gViewWrapper.isSortedAscending ? "ascending" : "descending"
+       );
++
++    let secondaryColumn = gViewWrapper.getSortColumnId(
++      gViewWrapper.dbView.secondarySortType,
++      gViewWrapper.dbView.secondaryCustomColumn
++    );
++    let secondarySortOrder =
++      gViewWrapper.dbView.secondarySortOrder == Ci.nsMsgViewSortOrder.ascending
++        ? "ascending"
++        : "descending";
++
++    this.treeTable
++      .querySelector(".sortingSecondary")
++      ?.classList.remove("sortingSecondary", "ascending", "descending");
++
++    if (gViewWrapper.showGroupedBySort) {
++      // No secondary sorts within grouped view. Rather, it is always
++      // byDate ascending *unless* the pre Grouped secondary sort was by
++      // Date descending.
++      secondaryColumn = "dateCol";
++      secondarySortOrder =
++        gViewWrapper.dbView.secondarySortType == Ci.nsMsgViewSortType.byDate
++          ? secondarySortOrder
++          : "ascending";
++    }
++
++    // Don't add secondary sort indicator in these cases:
++    // "Order received" is unique, dates will be "mostly" unique,
++    // no need to clutter the UI with unnecessary secondary indicators.
++    if (["idCol", "dateCol", "receivedCol"].includes(column)) {
++      return;
++    }
++
++    this.treeTable
++      .querySelector(`#${secondaryColumn} button`)
++      ?.classList.add("sortingSecondary", secondarySortOrder);
+   },
+ 
+   /**
+    * Prompt the user to confirm applying the current columns state to the chosen
+diff --git a/mail/modules/DBViewWrapper.sys.mjs b/mail/modules/DBViewWrapper.sys.mjs
+--- a/mail/modules/DBViewWrapper.sys.mjs
++++ b/mail/modules/DBViewWrapper.sys.mjs
+@@ -1633,10 +1633,9 @@ DBViewWrapper.prototype = {
+       this._viewUpdateDepth = 0;
+     }
+   },
+ 
+-  get primarySortColumnId() {
+-    const sortType = this.primarySortType;
++  getSortColumnId(sortType, customColumn) {
+     const defaultSortType = "dateCol";
+ 
+     // Handle special cases first.
+     if (sortType == Ci.nsMsgViewSortType.byNone) {
+@@ -1646,16 +1645,15 @@ DBViewWrapper.prototype = {
+       return defaultSortType;
+     }
+ 
+     if (sortType == Ci.nsMsgViewSortType.byCustom) {
+-      const curCustomColumn = this.dbView.curCustomColumn;
+       if (
+-        ThreadPaneColumns.getCustomColumns().some(c => c.id == curCustomColumn)
++        ThreadPaneColumns.getCustomColumns().some(c => c.id == customColumn)
+       ) {
+-        return curCustomColumn;
++        return customColumn;
+       }
+       dump(
+-        `primarySortColumnId: custom sort type but no handler for column: ${curCustomColumn} \n`
++        `getSortColumnId: custom sort type but no handler for column: ${customColumn} \n`
+       );
+       return defaultSortType;
+     }
+ 
+@@ -1665,12 +1663,19 @@ DBViewWrapper.prototype = {
+     if (column) {
+       return column.id;
+     }
+ 
+-    dump(`primarySortColumnId: unsupported sort type: ${sortType} \n`);
++    dump(`getSortColumnId: unsupported sort type: ${sortType} \n`);
+     return defaultSortType;
+   },
+ 
++  get primarySortColumnId() {
++    return this.getSortColumnId(
++      this.primarySortType,
++      this.dbView.curCustomColumn
++    );
++  },
++
+   /**
+    * @returns {nsMsgViewSortType} the primary sort type.
+    */
+   get primarySortType() {
+diff --git a/mail/themes/shared/mail/tree-listbox.css b/mail/themes/shared/mail/tree-listbox.css
+--- a/mail/themes/shared/mail/tree-listbox.css
++++ b/mail/themes/shared/mail/tree-listbox.css
+@@ -13,8 +13,10 @@
+   --indicator-border: transparent;
+   --indicator-inline-start: 2px;
+   --table-header-cell-icon-width: 24px;
+   --table-header-cell-icon-min-width: 24px;
++  --table-header-cell-sortingSecondary-position: center,13px;
++  --table-header-cell-icon-sort-indicator-position: 11px;
+   --table-row-cell-img-margin-inline-start: 6px;
+   --table-row-cell-button-margin-inline-start: 4px;
+   --tree-card-block: 2px;
+   --tree-card-inline: 8px;
+@@ -28,11 +30,16 @@
+     --list-item-min-height: 18px;
+     --list-item-buttons-size: 18px;
+     --indicator-width: 3px;
+     --indicator-inline-start: 1px;
+-    --table-header-cell-icon-width: 18px;
+-    --table-header-cell-icon-min-width: 18px;
++    --table-header-cell-icon-width: 22px;
++    --table-header-cell-icon-min-width: 22px;
+     --table-header-cell-icon-button-padding: 0;
++    --table-header-cell-sortingSecondary-position: center,11px;
++    --table-header-cell-icon-sort-indicator-position: 13px;
++    --table-header-cell-icon-sort-indicator-size: 8px;
++    --table-header-cell-icon-sort-indicator-color: var(--layout-color-0);
++    --table-header-cell-icon-sortingSecondary-position: center,13px;
+     --table-row-cell-img-margin-inline-start: 3px;
+     --table-row-cell-button-margin-inline-start: 1px;
+     --tree-card-block: 1px;
+     --tree-card-inline: 6px;
+@@ -46,8 +53,10 @@
+   &[uidensity="touch"] {
+     --list-item-min-height: 32px;
+     --table-header-cell-icon-width: 33px;
+     --table-header-cell-icon-min-width: 33px;
++    --table-header-cell-sortingSecondary-position: center,16px;
++    --table-header-cell-icon-sort-indicator-position: 18px;
+     --table-row-cell-img-margin-inline-start: 11px;
+     --table-row-cell-button-margin-inline-start: 9px;
+     --tree-card-block: 3px;
+     --tree-card-inline: 8px;
+@@ -585,11 +594,36 @@ th[is="tree-view-table-header-cell"] {
+       }
+     }
+   }
+ 
+-  th[data-type="icon"] &.sorting {
+-    background-image: none;
+-    padding-inline-end: var(--tree-header-cell-padding);
++  &.sortingSecondary {
++    background-image: var(--icon-nav-up-sm), var(--icon-nav-up-sm);
++    background-position-y: var(--table-header-cell-sortingSecondary-position);
++    padding-inline-end: 18px;
++
++    @media (-moz-platform: linux) {
++      background-image: var(--icon-nav-down-sm), var(--icon-nav-down-sm);
++    }
++
++    &.descending {
++      background-image: var(--icon-nav-down-sm), var(--icon-nav-down-sm);
++
++      @media (-moz-platform: linux) {
++        background-image: var(--icon-nav-up-sm), var(--icon-nav-up-sm);
++      }
++    }
++  }
++
++  th[data-type="icon"] &.sorting,
++  th[data-type="icon"] &.sortingSecondary {
++    padding-inline: 0 12px;
++    stroke: var(--table-header-cell-icon-sort-indicator-color, currentColor);
++    background-size: var(--table-header-cell-icon-sort-indicator-size);
++    background-position-x: var(--table-header-cell-icon-sort-indicator-position);
++  }
++  th[data-type="icon"] &.sortingSecondary {
++    background-position-y: var(--table-header-cell-icon-sortingSecondary-position,
++                           var(--table-header-cell-sortingSecondary-position));
+   }
+ }
+ 
+ th[is="tree-view-table-column-picker"] {

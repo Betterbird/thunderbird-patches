@@ -1,0 +1,80 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740081430 25200
+# Parent  e9b03bdcdd9b5f216f4079644ffa0be26c5debf0
+Bug 1771275 - servers are misconfigured, but handle this case cleanly.
+- Also make If-Modified-Since an overridable property of FeedUtils object.
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -177,10 +177,13 @@ Feed.prototype = {
+     // Some servers, if sent If-Modified-Since, will send 304 if subsequently
+     // not sent If-Modified-Since, as in the case of an unsubscribe and new
+     // subscribe.  Send start of century date to force a download; some servers
+     // will 304 on older dates (such as epoch 1970).
+-    const lastModified = this.lastModified || "Sat, 01 Jan 2000 00:00:00 GMT";
+-    this.request.setRequestHeader("If-Modified-Since", lastModified);
++    // NOTE: some misconfigured servers return 304 if sent "If-Modified-Since".
++    const lastModified = this.lastModified || lazy.FeedUtils.IF_MODIFIED_SINCE;
++    if (lastModified) {
++      this.request.setRequestHeader("If-Modified-Since", lastModified);
++    }
+ 
+     // Only order what you're going to eat...
+     this.request.responseType = "document";
+     this.request.overrideMimeType("text/xml");
+@@ -265,8 +268,14 @@ Feed.prototype = {
+       if (request.status == 304) {
+         // If the http status code is 304, the feed has not been modified
+         // since we last downloaded it and does not need to be parsed.
+         error = lazy.FeedUtils.kNewsBlogNoNewItems;
++        feed.addLog(
++          "log",
++          `onDownloadError: request.status 304, server Last-Modified is ${request.getResponseHeader(
++            "Last-Modified"
++          )}`
++        );
+       } else {
+         const [errType, errName] =
+           lazy.FeedUtils.createTCPErrorFromFailedXHR(request);
+         feed.addLog(
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -46,8 +46,12 @@ export var FeedUtils = {
+   ATOM_THREAD_NS: "http://purl.org/syndication/thread/1.0",
+ 
+   // Delay time between batched feed downloads, 1.1 seconds.
+   FETCH_DELAY: 1.1 * 1000,
++
++  // Send request with If-Modified-Since header.
++  IF_MODIFIED_SINCE: "Sat, 01 Jan 2000 00:00:00 GMT",
++
+   // Accept content mimetype preferences for feeds.
+   REQUEST_ACCEPT:
+     "application/atom+xml," +
+     "application/rss+xml;q=0.9," +
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -2285,8 +2285,19 @@ var FeedSubscriptions = {
+ 
+         // Update lastUpdateTime if successful. But only if parsing/downloading
+         // in subscribe mode.
+         if (win.mActionMode == win.kSubscribeMode) {
++          if (aErrorCode == FeedUtils.kNewsBlogNoNewItems && !feed.folder) {
++            // In the rare case of a subscribe (new add) to the root folder
++            // (not existing folder) and an error of kNewsBlogNoNewItems, the new
++            // folder creation process won't run (folder name derived when feed
++            // is parsed). So create a folder here.
++            // This case happens for a misconfigured server not handling the
++            // If-Modified-Since header - but we will create a folder and store
++            // the feed.
++            feed.createFolder();
++          }
++
+           const options = feed.options;
+           options.updates.lastUpdateTime = Date.now();
+           feed.options = options;
+         }

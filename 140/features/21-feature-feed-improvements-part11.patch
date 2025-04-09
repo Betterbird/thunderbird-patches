@@ -1,0 +1,627 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740081430 25200
+# Parent  c0b8fc8ddec7caaf3497374c4781321ba8b170f8
+Feed enhancements
+- Bug 1871741 - Use "published" before "updated" for atom feeds date.
+- Bug 270275 - Doesn't recognise when articles have been modified since original download.
+- Bug 1939390 - RSS feed items do not update when their title changes.
+
+- Refactor date testing/fixup (regex was wrong, also ensure date is RFC5322 non-obs).
+
+Features:
+- For Atom feeds, the user may choose to store all articles with an identical <id> tag
+  whenever the publisher updates the <updated> tag. This option will enable bypassing
+  duplicate article detection.
+  The usefulness of this option is dependent on the publisher updating the tag
+  when content meaningfully changes. Ideally, the original article will contain
+  only the <published> date; with subsequent changes in content signified with an
+  <updated> date in addition to <published>.
+Caveats:
+1. The publisher may change <updated> to reflect non meaningful changes in the
+   article's entry, such as media content ratings.
+2. If the update interval is 100 minutes, the publisher may change the entry and
+   <updated> in the file numerous times within that interval; only the most recent
+   can be downloaded. This may mean the original is not downloaded before an updated
+   version is published.
+3. All subsequent updated articles will be threaded to the first article received
+   with the unique <id>.
+4. The default is OFF, meaning the current behavior of storing an article only
+   upon first encounter with a unique <id> is unchanged.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd b/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd
+--- a/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd
++++ b/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd
+@@ -29,8 +29,11 @@
+ 
+ <!ENTITY quickMode.label             "Show the article summary instead of loading the web page">
+ <!ENTITY quickMode.accesskey         "h">
+ 
++<!ENTITY storeOnUpdated.label        "Store &lt;updated&gt; items">
++<!ENTITY storeOnUpdated.accesskey    "u">
++
+ <!ENTITY autotagEnable.label         "Automatically create tags from feed &lt;category&gt; names">
+ <!ENTITY autotagEnable.accesskey     "o">
+ <!ENTITY autotagUsePrefix.label      "Prefix tags with:">
+ <!ENTITY autotagUsePrefix.accesskey  "P">
+diff --git a/mail/themes/shared/mail/feedSubscribe.css b/mail/themes/shared/mail/feedSubscribe.css
+--- a/mail/themes/shared/mail/feedSubscribe.css
++++ b/mail/themes/shared/mail/feedSubscribe.css
+@@ -86,8 +86,12 @@ label:has(:disabled) {
+   opacity: 0.4;
+   cursor: default;
+ }
+ 
++label:has([hidden]) {
++  display: none;
++}
++
+ [collapsed] {
+   visibility: hidden;
+ }
+ 
+@@ -135,9 +139,10 @@ label:has(:disabled) {
+   min-width: 0;
+ }
+ 
+ #locationValidate,
+-#createSubFolderLabel {
++#createSubFolderLabel,
++#storeOnUpdatedLabel {
+   margin-inline: 4px;
+ }
+ 
+ #selectFolder {
+@@ -149,9 +154,9 @@ label:has(:disabled) {
+   grid-gap: 8px;
+   padding-block: 4px;
+ }
+ 
+-#updateBox {
++#updateBox, #summaryBox {
+   display: inline-flex;
+   align-items: center;
+   flex-wrap: wrap;
+   border: none;
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -68,8 +68,10 @@ export function Feed(aFeedUrl, aFolder) 
+ Feed.prototype = {
+   url: null,
+   description: null,
+   author: null,
++  // Updated date for Atom feeds.
++  updated: null,
+   request: null,
+   server: null,
+   downloadCallback: null,
+   resource: null,
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -69,9 +69,49 @@ FeedItem.prototype = {
+     return this.mDate;
+   },
+ 
+   set date(aVal) {
+-    this.mDate = aVal;
++    this.mDate = this.validateDate(aVal);
++  },
++
++  /**
++   * The parser will always pass a string. If it found no value, it will pass
++   * the current time.
++   *
++   * @param {string} aVal - The date string.
++   * @returns {string} - Validated RFC5322 date string.
++   */
++  validateDate(aVal) {
++    if (lazy.FeedUtils.isValidRFC5322Date(aVal)) {
++      return aVal;
++    }
++
++    if (aVal.search(/^\d\d\d\d/) != -1) {
++      // If the date looks like it's in ISO8601/W3C-DTF/RFC3339 format,
++      // convert it into an IETF RFC5322 standard date.
++      return lazy.FeedUtils.getValidRFC5322Date(new Date(aVal));
++    }
++
++    // If the date is invalid, users will see the beginning of the epoch
++    // unless we reset it here, so they'll see the current time instead.
++    // This is typical aggregator behavior.
++    if (!isNaN(parseInt(aVal))) {
++      // It's an integer, so maybe it's a timestamp.
++      const d = new Date(parseInt(aVal) * 1000);
++      const now = new Date();
++      const yeardiff = now.getFullYear() - d.getFullYear();
++      this.feed.addLog(
++        "debug",
++        `date: check Timestamp, date ${d.toString()},year diff ${yeardiff}`
++      );
++      if (yeardiff >= 0 && yeardiff < 3) {
++        // It's quite likely the correct date.
++        aVal = d.toString();
++      }
++    }
++
++    // Fix up possible valid date above, otherwise use the current time.
++    return lazy.FeedUtils.getValidRFC5322Date(aVal);
+   },
+ 
+   get identity() {
+     return this.feed.name + ": " + this.title + " (" + this.id + ")";
+@@ -188,8 +228,9 @@ FeedItem.prototype = {
+     this.feed.addLog(
+       "log",
+       `findStoredResource: item.id ${this.id} is already stored`
+     );
++
+     return item;
+   },
+ 
+   markValid(resource) {
+@@ -229,27 +270,19 @@ FeedItem.prototype = {
+     this.title = title.replace(/[\t\r\n]+/g, " ").trim();
+ 
+     this.feed.addLog("log", `writeToFolder: ${location}, ${this.title}`);
+ 
+-    // If the date looks like it's in W3C-DTF format, convert it into
+-    // an IETF standard date.  Otherwise assume it's in IETF format.
+-    if (this.mDate.search(/^\d\d\d\d/) != -1) {
+-      this.mDate = new Date(this.mDate).toUTCString();
+-    }
+-
+-    // If there is an inreplyto value, create the headers.
+-    const inreplytoHdrsStr = this.inReplyTo
+-      ? "References: " +
+-        this.inReplyTo +
+-        "\n" +
+-        "In-Reply-To: " +
+-        this.inReplyTo +
+-        "\n"
+-      : "";
+-
+     // Support multiple authors in From.
+     const fromStr = this.createHeaderStrFromArray("From: ", this.author);
+ 
++    const messageID = this.normalizeMessageID(this.id);
++
++    // For <updated> ATOM messages.
++    const resentHdrsStr = this.createResentHeadersStr(fromStr, messageID);
++
++    // If there is an |inReplyTo| value, for ATOM threading, create the headers.
++    const inreplytoHdrsStr = this.createInReplyToHeadersStr();
++
+     // If there are keywords (categories), create the headers.
+     const keywordsStr = this.createHeaderStrFromArray(
+       "Keywords: ",
+       this.keywords
+@@ -260,16 +293,17 @@ FeedItem.prototype = {
+       "X-Mozilla-Status2: 00000000\n" +
+       "X-Mozilla-Keys: " +
+       " ".repeat(80) +
+       "\n" +
++      resentHdrsStr +
+       "Received: by localhost; " +
+       lazy.FeedUtils.getValidRFC5322Date() +
+       "\n" +
+       "Date: " +
+-      this.mDate +
++      this.date +
+       "\n" +
+       "Message-Id: " +
+-      this.normalizeMessageID(this.id) +
++      messageID +
+       "\n" +
+       fromStr +
+       "MIME-Version: 1.0\n" +
+       "Subject: " +
+@@ -327,8 +361,44 @@ FeedItem.prototype = {
+     this.tagItem(msgDBHdr, this.keywords);
+   },
+ 
+   /**
++   * Create RFC5322 resent headers for a message with <updated> value. If the
++   * parser has filled in the |updated| property, all checks have passed.
++   * Otherwise it will be null.
++   */
++  createResentHeadersStr(fromStr, messageID) {
++    if (!this.updated) {
++      return "";
++    }
++    // Prepend "Updated: " to subject.
++    this.title = lazy.FeedUtils.stringsUpdate.formatStringFromName(
++      "itipRequestUpdatedSubject2",
++      [this.title]
++    );
++    const str =
++      `Resent-Date: ${this.validateDate(this.updated)}\n` +
++      `Resent-From: ${fromStr}` +
++      `Resent-Message-ID: ${messageID}\n`;
++    return str;
++  },
++
++  /**
++   * Create RFC5322 headers for a message with references; the parser will have
++   * filled in the |inReplyTo| property. For threading.
++   */
++  createInReplyToHeadersStr() {
++    if (!this.inReplyTo) {
++      return "";
++    }
++    const inReplyToMessageID = this.normalizeMessageID(this.inReplyTo);
++    const str =
++      `References: ${inReplyToMessageID}\n` +
++      `In-Reply-To: ${inReplyToMessageID}\n`;
++    return str;
++  },
++
++  /**
+    * Create a header string from an array. Intended for comma separated headers
+    * like From or Keywords. In the case of a longer than RFC5322 recommended
+    * line length, create multiple folded lines (easier to parse than multiple
+    * headers).
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -265,19 +265,8 @@ FeedParser.prototype = {
+         tags = this.childrenByTagNameNS(itemNode, lazy.FeedUtils.DC_NS, "date");
+       }
+       item.date = this.getNodeValue(tags ? tags[0] : null) || item.date;
+ 
+-      // If the date is invalid, users will see the beginning of the epoch
+-      // unless we reset it here, so they'll see the current time instead.
+-      // This is typical aggregator behavior.
+-      if (item.date) {
+-        item.date = item.date.trim();
+-        if (!lazy.FeedUtils.isValidRFC822Date(item.date)) {
+-          // XXX Use this on the other formats as well.
+-          item.date = this.dateRescue(aFeed, item.date);
+-        }
+-      }
+-
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.RSS_CONTENT_NS,
+         "encoded"
+@@ -969,25 +958,27 @@ FeedParser.prototype = {
+ 
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_IETF_NS,
++        "published"
++      );
++      const publishedDate = this.getNodeValue(tags ? tags[0] : null);
++
++      tags = this.childrenByTagNameNS(
++        itemNode,
++        lazy.FeedUtils.ATOM_IETF_NS,
+         "updated"
+       );
+       if (!tags || !this.getNodeValue(tags[0])) {
+         tags = this.childrenByTagNameNS(
+-          itemNode,
++          source,
+           lazy.FeedUtils.ATOM_IETF_NS,
+-          "published"
++          "updated"
+         );
+       }
+-      if (!tags || !this.getNodeValue(tags[0])) {
+-        tags = this.childrenByTagNameNS(
+-          source,
+-          lazy.FeedUtils.ATOM_IETF_NS,
+-          "published"
+-        );
+-      }
+-      item.date = this.getNodeValue(tags ? tags[0] : null) || item.date;
++      const updatedDate = this.getNodeValue(tags ? tags[0] : null);
++
++      item.date = publishedDate || updatedDate || item.date;
+ 
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_IETF_NS,
+@@ -1094,8 +1085,11 @@ FeedParser.prototype = {
+           }
+         }
+       }
+ 
++      // Check for storeOnUpdated.
++      this.checkStoreOnUpdated(aFeed, item, publishedDate, updatedDate);
++
+       this.parsedItems.push(item);
+       aFeed.addLog("groupEnd", `parseAsAtomIETF: parsing item.id ${item.id}`);
+     }
+ 
+@@ -1105,8 +1099,38 @@ FeedParser.prototype = {
+     );
+     return this.parsedItems;
+   },
+ 
++  /**
++   * Check and adjust for the user wanting to store updates to same <id>
++   * messages.
++   */
++  checkStoreOnUpdated(feed, item, publishedDate, updatedDate) {
++    const storeOnUpdated = feed.options.updates.storeOnUpdated;
++    feed.addLog(
++      "log",
++      `checkStoreOnUpdated: storeOnUpdated ${storeOnUpdated}, publishedDate ${publishedDate}, updatedDate ${updatedDate}`
++    );
++    if (!storeOnUpdated || !publishedDate || !updatedDate) {
++      return;
++    }
++
++    // Minimum time between published and updated to be meaningful, in seconds.
++    const MIN_UPDATE_DELTA_SECONDS = 15;
++    const updatedTime = new Date(updatedDate) / 1000;
++    const publishedTime = new Date(publishedDate) / 1000;
++    if (updatedTime - publishedTime < MIN_UPDATE_DELTA_SECONDS) {
++      return;
++    }
++
++    // Store the udpated item. Adjust the <id> to make it a new item, to differ
++    // it from the original in feedItems. Set (or override) the orginal
++    // messageID in |inReplyTo| so updates thread to the original, if it exists.
++    item.inReplyTo = item.id;
++    item.id = item.id + "-" + updatedTime;
++    item.updated = updatedDate;
++  },
++
+   isPermanentRedirect(aFeed, aRedirDocChannel, aFeedChannel) {
+     // If subscribing to a new feed, do not check redirect tags.
+     if (!aFeed.downloadCallback || aFeed.downloadCallback.mSubscribeMode) {
+       return false;
+@@ -1467,26 +1491,5 @@ FeedParser.prototype = {
+     s = s.replace(/>/g, "&gt;");
+     s = s.replace(/</g, "&lt;");
+     return s;
+   },
+-
+-  dateRescue(aFeed, dateString) {
+-    // Deal with various kinds of invalid dates.
+-    if (!isNaN(parseInt(dateString))) {
+-      // It's an integer, so maybe it's a timestamp.
+-      const d = new Date(parseInt(dateString) * 1000);
+-      const now = new Date();
+-      const yeardiff = now.getFullYear() - d.getFullYear();
+-      aFeed.addLog(
+-        "debug",
+-        `dateRescue: check Timestamp, date ${d.toString()},year diff ${yeardiff}`
+-      );
+-      if (yeardiff >= 0 && yeardiff < 3) {
+-        // It's quite likely the correct date.
+-        return d.toString();
+-      }
+-    }
+-
+-    // Could be an ISO8601/W3C date.  If not, get the current time.
+-    return lazy.FeedUtils.getValidRFC5322Date(dateString);
+-  },
+ };
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -1288,9 +1288,9 @@ export var FeedUtils = {
+   /**
+    * This object will contain all persisted feed specific properties.
+    */
+   _optionsDefault: {
+-    version: 3,
++    version: 4,
+     updates: {
+       enabled: true,
+       // User set.
+       updateMinutes: 100,
+@@ -1303,8 +1303,13 @@ export var FeedUtils = {
+       // Publisher recommended from the feed.
+       updatePeriod: null,
+       updateFrequency: 1,
+       updateBase: null,
++      // If set, for ATOM feeds, any item with <published> and <updated> tags
++      // will be stored and bypass same <id> duplicate prevention exclusion.
++      // The updated item will use Resent-Date and other RFC headers, and will
++      // contain references to thread to the original message <id>.
++      storeOnUpdated: false,
+     },
+     // Autotag and <category> handling options.
+     category: {
+       enabled: false,
+@@ -1809,32 +1814,34 @@ export var FeedUtils = {
+ 
+   /**
+    * Date validator for feeds.
+    *
+-   * @param {string} aDate - Date string.
++   * @param {string} date - Date string.
+    *
+    * @returns {boolean} - true if passes regex test, false if not.
+    */
+-  isValidRFC822Date(aDate) {
+-    const FZ_RFC822_RE =
+-      "^(((Mon)|(Tue)|(Wed)|(Thu)|(Fri)|(Sat)|(Sun)), *)?\\d\\d?" +
+-      " +((Jan)|(Feb)|(Mar)|(Apr)|(May)|(Jun)|(Jul)|(Aug)|(Sep)|(Oct)|(Nov)|(Dec))" +
+-      " +\\d\\d(\\d\\d)? +\\d\\d:\\d\\d(:\\d\\d)? +(([+-]?\\d\\d\\d\\d)|(UT)|(GMT)" +
+-      "|(EST)|(EDT)|(CST)|(CDT)|(MST)|(MDT)|(PST)|(PDT)|\\w)$";
+-    const regex = new RegExp(FZ_RFC822_RE);
+-    return regex.test(aDate);
++  isValidRFC5322Date(date) {
++    const RFC5322DATE_RE =
++      "^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\\s" +
++      "[0-9]{1,2}\\s" +
++      "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s" +
++      "[0-9]{4}\\s" +
++      "[0-9]{2}:[0-9]{2}(:[0-9]{2})?\\s" +
++      "[\+|\-][0-9]{4}$";
++    const regex = new RegExp(RFC5322DATE_RE);
++    return regex.test(date);
+   },
+ 
+   /**
+-   * Create rfc5322 date.
++   * Create RFC5322 date.
+    *
+-   * @param {string} aDateString - Optional date string; if null or invalid
+-   *                               date, get the current datetime.
++   * @param {string} dateString - Optional date string; if null or invalid
++   *                              date, get the current datetime.
+    *
+-   * @returns {string} - An rfc5322 date string.
++   * @returns {string} - An RFC5322 date string.
+    */
+-  getValidRFC5322Date(aDateString) {
+-    let d = new Date(aDateString || new Date().getTime());
++  getValidRFC5322Date(dateString) {
++    let d = new Date(dateString || new Date().getTime());
+     d = isNaN(d.getTime()) ? new Date() : d;
+     return lazy.jsmime.headeremitter
+       .emitStructuredHeader("Date", d, {})
+       .substring(6)
+@@ -2169,8 +2176,14 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
+     "chrome://messenger/locale/prefs.properties"
+   );
+ });
+ 
++ChromeUtils.defineLazyGetter(FeedUtils, "stringsUpdate", function () {
++  return Services.strings.createBundle(
++    "chrome://lightning/locale/lightning.properties"
++  );
++});
++
+ ChromeUtils.defineLazyGetter(FeedUtils, "stringsBrand", function () {
+   return Services.strings.createBundle(
+     "chrome://branding/locale/brand.properties"
+   );
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -1171,8 +1171,14 @@ var FeedSubscriptions = {
+     const hideRec = !recommendedUnitsVal.textContent;
+     recommendedUnits.hidden = hideRec;
+     recommendedUnitsVal.hidden = hideRec;
+ 
++    // Store on update.
++    const storeOnUpdated = document.getElementById("storeOnUpdated");
++    storeOnUpdated.checked = updates.storeOnUpdated;
++    // Only show this option for existing ATOM feeds (not folder/server items).
++    storeOnUpdated.hidden = aItem.feedType != "ATOM_IETF";
++
+     // Autotag items.
+     const autotagEnable = document.getElementById("autotagEnable");
+     const autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     const autotagPrefix = document.getElementById("autotagPrefix");
+@@ -1346,8 +1352,9 @@ var FeedSubscriptions = {
+     const isFolder = item.folder && !item.folder.isServer;
+     const updateEnabled = document.getElementById("updateEnabled");
+     const updateValue = document.getElementById("updateValue");
+     const updateBox = document.getElementById("updateBox");
++    //const storeOnUpdated = document.getElementById("storeOnUpdated");
+     const autotagEnable = document.getElementById("autotagEnable");
+     const autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     const autotagPrefix = document.getElementById("autotagPrefix");
+     if (
+@@ -1409,8 +1416,11 @@ var FeedSubscriptions = {
+         item.options.updates.updateMinutes = Number(minutes);
+         item.options.updates.updateUnits = biffUnitsNode.value;
+         break;
+       }
++      case "storeOnUpdated":
++        item.options.updates.storeOnUpdated = aNode.checked;
++        break;
+       case "autotagEnable":
+         item.options.category.enabled = aNode.checked;
+         break;
+       case "autotagUsePrefix":
+@@ -1590,8 +1600,9 @@ var FeedSubscriptions = {
+     const locationValue = document.getElementById("locationValue");
+     const updateEnabled = document.getElementById("updateEnabled");
+     const updateBox = document.getElementById("updateBox");
+     const quickMode = document.getElementById("quickMode");
++    const storeOnUpdated = document.getElementById("storeOnUpdated");
+     const autotagEnable = document.getElementById("autotagEnable");
+     const autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     const autotagPrefix = document.getElementById("autotagPrefix");
+ 
+@@ -1604,8 +1615,9 @@ var FeedSubscriptions = {
+ 
+     // Enabled by default.
+     updateEnabled.disabled =
+       quickMode.disabled =
++      storeOnUpdated.disabled =
+       autotagEnable.disabled =
+         false;
+     updateBox.disabled = !updateEnabled.checked;
+     autotagUsePrefix.disabled = !autotagEnable.checked;
+@@ -1627,8 +1639,9 @@ var FeedSubscriptions = {
+         disable && !FeedUtils.getFeedUrlsInFolder(item.folder);
+       // All other options disabled unless intent is to add a feed.
+       updateEnabled.disabled = disable;
+       updateBox.disabled = disable || !updateEnabled.checked;
++      storeOnUpdated.disabled = disable;
+       autotagEnable.disabled = disable;
+ 
+       addFeedButton.disabled =
+         addFeedButton != focusedElement &&
+@@ -1886,8 +1899,11 @@ var FeedSubscriptions = {
+       const minutes =
+         biffUnits == FeedUtils.kBiffUnitsMinutes ? units : units * 24 * 60;
+       options.updates.updateUnits = biffUnits;
+       options.updates.updateMinutes = Number(minutes);
++      // We don't know if it's an ATOM feed yet, do don't set this.
++      //options.updates.storeOnUpdated =
++      //  document.getElementById("storeOnUpdated").checked;
+       options.category.enabled =
+         document.getElementById("autotagEnable").checked;
+       options.category.prefixEnabled =
+         document.getElementById("autotagUsePrefix").checked;
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.xhtml b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+--- a/mailnews/extensions/newsblog/feed-subscriptions.xhtml
++++ b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+@@ -240,17 +240,32 @@
+                 ></html:label>
+               </html:fieldset>
+             </html:div>
+ 
+-            <html:div>
+-              <html:label for="quickMode">
+-                <html:input
+-                  id="quickMode"
+-                  type="checkbox"
+-                  onclick="FeedSubscriptions.setSummary(this);"
+-                />
+-                &quickMode.label;
+-              </html:label>
++            <html:div id="summaryBox">
++              <html:div>
++                <html:label for="quickMode">
++                  <html:input
++                    id="quickMode"
++                    type="checkbox"
++                    onclick="FeedSubscriptions.setSummary(this);"
++                  />
++                  &quickMode.label;
++                </html:label>
++              </html:div>
++
++              <html:div class="inline-flex" />
++
++              <html:div>
++                <html:label id="storeOnUpdatedLabel" for="storeOnUpdated">
++                  <html:input
++                    id="storeOnUpdated"
++                    type="checkbox"
++                    onclick="FeedSubscriptions.setPrefs(this);"
++                  />
++                  &storeOnUpdated.label;
++                </html:label>
++              </html:div>
+             </html:div>
+ 
+             <html:div>
+               <html:label for="autotagEnable">

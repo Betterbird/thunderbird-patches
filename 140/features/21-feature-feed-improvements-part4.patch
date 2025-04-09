@@ -1,0 +1,310 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740081430 25200
+# Parent  53b542dc4d83b3626015ad091346db041f3f18b9
+Improve feed favicon management:
+- cache and persist favicon data urls
+- add preference "rss.show.favicons", default true
+  if this pref is set to false, the cached favicon data is cleared upon restart
+- the favicon for any feed url may be refreshed
+  contextmenu on folder, Subscribe..., select the feed row, click Verify button
+- favicon data is not exported to opml
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -808,8 +808,19 @@ export var FeedUtils = {
+         this[serverKey][aUrl].status.updateMinutes =
+           feed.options.updates.updateMinutes;
+         this[serverKey][aUrl].status.lastUpdateTime =
+           feed.options.updates.lastUpdateTime;
++        if (this.showFavicons) {
++          this[serverKey][aUrl].status.favicon = feed.options.favicon.dataURL;
++        } else if (feed.options.favicon.lastUpdateTime) {
++          // Clear the cache, once, if the user doesn't want favicons.
++          const options = feed.options;
++          options.favicon = {};
++          options.favicon.URL = null;
++          options.favicon.dataURL = null;
++          options.favicon.lastUpdateTime = null;
++          feed.options = options;
++        }
+         feed = null;
+       } else {
+         // Seed persisted status properties for servers.
+         const optionsAcct = FeedUtils.getOptionsAcct(aFolder.server);
+@@ -854,25 +865,33 @@ export var FeedUtils = {
+     }
+   },
+ 
+   /**
++   * The default is true. If the user sets to false, the favicon cache will be
++   * cleared.
++   *
++   * @returns {boolean} - True to display favicons in folderpane and elsewhere.
++   */
++  get showFavicons() {
++    return Services.prefs.getBoolPref("rss.show.favicons");
++  },
++
++  /**
+    * Get the favicon for a feed folder subscription url (first one) or a feed
+    * message url. The favicon service caches it in memory if places history is
+    * not enabled.
+    *
+    * @param {?nsIMsgFolder} folder - The feed folder or null if url set.
+    * @param {?string} feedURL - A url (feed, message, other) or null if folder set.
+    *
+-   * @returns {Promise<string>} - The favicon url or empty string.
++   * @returns {Promise<string>} - The favicon data url or empty string.
+    */
+   async getFavicon(folder, feedURL) {
+-    if (
+-      !Services.prefs.getBoolPref("browser.chrome.site_icons") ||
+-      !Services.prefs.getBoolPref("browser.chrome.favicons")
+-    ) {
++    if (!this.showFavicons) {
+       return "";
+     }
+ 
++    const logStack = [];
+     let url = feedURL;
+     if (!url) {
+       // Get the proposed iconUrl from the folder's first subscribed feed's
+       // <link>.
+@@ -883,10 +902,18 @@ export var FeedUtils = {
+       }
+       feedURL = url;
+     }
+ 
++    let feed;
+     if (folder) {
+-      const feed = new lazy.Feed(url, folder);
++      // If a favicon is stored it will have been seeded in the runtime cache.
++      const dataURL = this.getStatus(folder, url).favicon;
++      if (dataURL) {
++        this.log.debug(`getFavicon: cached favicon for feed url ${url}`);
++        return dataURL;
++      }
++
++      feed = new lazy.Feed(url, folder);
+       url = feed.link && feed.link.startsWith("http") ? feed.link : url;
+     }
+ 
+     /**
+@@ -895,9 +922,9 @@ export var FeedUtils = {
+      * @param {string} faviconUrl - The favicon url.
+      * @returns {string} - Existing favicon url.
+      */
+     const fetchFavicon = async faviconUrl => {
+-      //this.log.debug(`getFavicon: fetch url ${url}`);
++      logStack.push(["debug", `fetchFavicon: fetch url ${faviconUrl}`]);
+       const response = await fetch(faviconUrl);
+       if (!response.ok) {
+         throw new Error(`No favicon for url ${faviconUrl}`);
+       }
+@@ -912,9 +939,9 @@ export var FeedUtils = {
+       ) {
+         return faviconUrl;
+       }
+ 
+-      throw new Error(`Non-image or broken favicon for ${url}`);
++      throw new Error(`Non-image or broken favicon for ${faviconUrl}`);
+     };
+ 
+     /**
+      * Try getting favicon from the a html page.
+@@ -922,8 +949,9 @@ export var FeedUtils = {
+      * @param {string} page - The page url to check.
+      * @returns {string} - Found favicon url.
+      */
+     const discoverFaviconURL = async page => {
++      logStack.push(["debug", `discoverFaviconURL: page url ${page}`]);
+       const response = await fetch(page);
+       if (!response.ok) {
+         throw new Error(`No favicon for page ${page}`);
+       }
+@@ -937,9 +965,9 @@ export var FeedUtils = {
+       // failure warnings in DOMParser().
+       const head = content.split("<head>")[1]?.split("</head>")[0];
+       if (head && !head.includes("<base")) {
+         content = content.replace("<head>", `<head><base href="${page}">`);
+-        //FeedUtils.log.debug(`discoverFaviconURL: added <base> to ${page}`);
++        logStack.push(["debug", `discoverFaviconURL: added <base> to ${page}`]);
+       }
+ 
+       const doc = new DOMParser().parseFromString(content, "text/html");
+       const iconLink = doc.querySelector(
+@@ -956,33 +984,61 @@ export var FeedUtils = {
+         pageURL = iconURI.protocol + iconLink.href;
+       } else {
+         pageURL = iconURI.origin + iconLink.href.replace(/^[.]*/, "");
+       }
+-      //this.log.debug(`discoverFaviconURL: page url ${pageURL}`);
++      logStack.push(["debug", `discoverFaviconURL: page url ${pageURL}`]);
+       return pageURL;
+     };
+ 
++    // The uri is from either the feed's link (webpage) or the feed's url.
+     const uri = Services.io.newURI(url);
+     const iconURL = await discoverFaviconURL(uri.prePath)
+       .then(fetchFavicon)
+-      .catch(_exception => {
+-        //this.log.debug(`getFavicon: ${exception}`);
+-        return fetchFavicon(uri.prePath + "/favicon.ico").catch(_exception2 => {
+-          //this.log.debug(`getFavicon: ${_exception2}`);
++      .catch(exception => {
++        logStack.push(["debug", `${exception}`]);
++        return fetchFavicon(uri.prePath + "/favicon.ico").catch(exception2 => {
++          logStack.push(["debug", `${exception2}`]);
+           return "";
+         });
+       });
+ 
+-    const logString =
+-      (folder ? `${folder.name}` : "") +
++    let dataURL;
++    if (iconURL) {
++      try {
++        const iconURI = Services.io.newURI(iconURL);
++        dataURL = (await lazy.MailUtils.getFaviconDataURLFromNetwork(iconURI))
++          .spec;
++        logStack.push([
++          "debug",
++          `getFaviconDataURLFromNetwork: found dataURL for ${iconURL}`,
++        ]);
++      } catch (exception3) {
++        logStack.push(["debug", `getFaviconDataURLFromNetwork: ${exception3}`]);
++      }
++      if (feed) {
++        const options = feed.options;
++        options.favicon.URL = iconURL;
++        options.favicon.dataURL = dataURL;
++        options.favicon.lastUpdateTime = Date.now();
++        feed.options = options;
++      }
++    }
++
++    FeedUtils.setStatus(folder, feedURL, "favicon", dataURL);
++
++    let logString =
++      (folder ? `${this.getFolderPrettyPath(folder)}` : "") +
+       (!folder && feedURL ? `${feedURL}` : "");
+-    this.log.debug(
++    logString =
+       `getFavicon: ${logString}, favicon url ` +
+-        (iconURL ? `${iconURL}` : "not found")
+-    );
++      (iconURL ? `${iconURL}` : "not found");
++    this.log.groupCollapsed(`${logString}`);
++    for (const [level, message] of logStack) {
++      this.log[`${level}`](message);
++    }
++    this.log.groupEnd(`${logString}`);
+ 
+-    FeedUtils.setStatus(folder, feedURL, "favicon", iconURL);
+-    return iconURL;
++    return dataURL;
+   },
+ 
+   /**
+    * Update the feeds database for rename and move/copy folder name changes.
+@@ -1182,8 +1238,10 @@ export var FeedUtils = {
+     code: 0,
+     updateMinutes: null,
+     // JS Date; startup state is null indicating no update since startup.
+     lastUpdateTime: null,
++    // The feed url's favicon data url.
++    favicon: null,
+   },
+ 
+   get statusTemplate() {
+     // Copy the object.
+@@ -1193,9 +1251,9 @@ export var FeedUtils = {
+   /**
+    * This object will contain all persisted feed specific properties.
+    */
+   _optionsDefault: {
+-    version: 2,
++    version: 3,
+     updates: {
+       enabled: true,
+       // User set.
+       updateMinutes: 100,
+@@ -1215,8 +1273,14 @@ export var FeedUtils = {
+       enabled: false,
+       prefixEnabled: false,
+       prefix: null,
+     },
++    // Favicon store.
++    favicon: {
++      URL: null,
++      dataURL: null,
++      lastUpdateTime: null,
++    },
+   },
+ 
+   get optionsTemplate() {
+     // Copy the object.
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -1975,8 +1975,15 @@ var FeedSubscriptions = {
+           message = FeedUtils.strings.GetStringFromName(
+             "subscribe-feedVerified"
+           );
+           win.updateStatusItem("statusText", message);
++
++          const currentItem = win.mView.currentItem;
++          // Clear favicon and get afresh.
++          FeedUtils.setStatus(feed.folder, feed.url, "favicon", null);
++          currentItem.favicon = null;
++          FeedUtils.getFavicon(feed.folder, feed.url);
++
+           FeedUtils.log.groupEnd(
+             (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
+               `${location}, ${feed.url}`
+           );
+@@ -2801,9 +2808,11 @@ var FeedSubscriptions = {
+     outRv.setAttribute("title", aFeed.title);
+     outRv.setAttribute("text", aFeed.title);
+     outRv.setAttribute("version", "RSS");
+     outRv.setAttribute("fz:quickMode", aFeed.quickMode);
+-    outRv.setAttribute("fz:options", JSON.stringify(aFeed.options));
++    const options = aFeed.options;
++    delete options.favicon;
++    outRv.setAttribute("fz:options", JSON.stringify(options));
+     outRv.setAttribute("xmlUrl", aFeed.url);
+     outRv.setAttribute("htmlUrl", aFeed.link);
+     return outRv;
+   },
+@@ -3009,8 +3018,10 @@ var FeedSubscriptions = {
+             ? outline.getAttribute("fz:quickMode") == "true"
+             : rssServer.getBoolValue("quickMode");
+           let options = outline.getAttribute("fz:options");
+           options = options ? JSON.parse(options) : null;
++          // Ensure imported feed has latest options template or melds with it.
++          options = FeedUtils.newOptions(options);
+ 
+           if (firstFeedInFolderQuickMode === null) {
+             // The summary/web page pref applies to all feeds in a folder,
+             // though it is a property of an individual feed.  This can be
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -772,8 +772,11 @@ pref("rss.show.content-base", 0);
+ // true  = If updating a feed results in an error code, disable the feed until next manual check or application restart.
+ // false = Keep feed automatic updates scheduled, even if the feed source responds with an error code.
+ pref("rss.disable_feeds_on_update_failure", true);
+ 
++// Show feed favicons in folderpane and elsewhere.
++pref("rss.show.favicons", true);
++
+ pref("feeds.loglevel", "Warn");
+ 
+ // 0=default as attachment
+ // 1=forward as quoted (mapped to 2 in mozilla)

@@ -1,0 +1,274 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1737433340 25200
+# Parent  4f953f0186250c3e1c02b00dc5e712b613ad7816
+Fix feed vandalization, Part III - getFavicon() fix
+- do not require places history to be enabled
+- improve getting favicons, handle edge cases
+- check well known favicon.ico location last
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/widgets/folder-tree-row.mjs b/mail/base/content/widgets/folder-tree-row.mjs
+--- a/mail/base/content/widgets/folder-tree-row.mjs
++++ b/mail/base/content/widgets/folder-tree-row.mjs
+@@ -406,10 +406,10 @@ class FolderTreeRow extends HTMLLIElemen
+    * Sets folder properties based on the folder for the row.
+    *
+    * @param {nsIMsgFolder} folder
+    */
+-  setFolderPropertiesFromFolder(folder) {
+-    if (folder.server.type != "rss") {
++  async setFolderPropertiesFromFolder(folder) {
++    if (!lazy.FeedUtils.FEED_ACCOUNT_TYPES.includes(folder.server.type)) {
+       return;
+     }
+     const props = lazy.FeedUtils.getFolderProperties(folder);
+     for (const property of ["hasError", "isBusy", "isPaused"]) {
+@@ -421,19 +421,26 @@ class FolderTreeRow extends HTMLLIElemen
+     }
+     if (props.includes("isFeedFolder")) {
+       if (!this.dataset.isFeedFolder) {
+         this.dataset.isFeedFolder = "true";
+-        lazy.FeedUtils.getFavicon(folder);
++        await lazy.FeedUtils.getFavicon(folder);
+       }
+       if (props.includes("hasError") || props.includes("isBusy")) {
+         this.icon.style = "";
+       } else {
+         const urls = lazy.FeedUtils.getFeedUrlsInFolder(folder);
+         const url = urls[0];
+-        this.icon.style = `background-image: url("page-icon:${url}"); fill: unset;`;
++        const favicon = lazy.FeedUtils.getStatus(folder, url).favicon;
++        if (favicon) {
++          this.icon.style = `background-image: url("${favicon}"); fill: unset;`;
++        } else {
++          this.icon.style = "";
++          this.setIconColor();
++        }
+       }
+-    } else {
++    } else if (!folder.isServer) {
+       this.icon.style = "";
++      this.setIconColor();
+       delete this.dataset.isFeedFolder;
+     }
+   }
+ 
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -11,9 +11,8 @@ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   Feed: "resource:///modules/Feed.sys.mjs",
+   JSONFile: "resource://gre/modules/JSONFile.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+-  PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+   jsmime: "resource:///modules/jsmime.sys.mjs",
+ });
+ 
+ export var FeedUtils = {
+@@ -868,19 +867,19 @@ export var FeedUtils = {
+    */
+   async getFavicon(folder, feedURL) {
+     if (
+       !Services.prefs.getBoolPref("browser.chrome.site_icons") ||
+-      !Services.prefs.getBoolPref("browser.chrome.favicons") ||
+-      !Services.prefs.getBoolPref("places.history.enabled")
++      !Services.prefs.getBoolPref("browser.chrome.favicons")
+     ) {
+       return "";
+     }
+ 
+     let url = feedURL;
+     if (!url) {
+       // Get the proposed iconUrl from the folder's first subscribed feed's
+       // <link>.
+-      url = this.getFeedUrlsInFolder(folder)[0];
++      const urls = this.getFeedUrlsInFolder(folder);
++      url = urls ? urls[0] : null;
+       if (!url) {
+         return "";
+       }
+       feedURL = url;
+@@ -891,56 +890,39 @@ export var FeedUtils = {
+       url = feed.link && feed.link.startsWith("http") ? feed.link : url;
+     }
+ 
+     /**
+-     * Convert a Blob to data URL.
+-     *
+-     * @param {Blob} blob - Blob to convert.
+-     * @returns {string} data URL.
+-     */
+-    const blobToBase64 = blob => {
+-      return new Promise((resolve, reject) => {
+-        const reader = new FileReader();
+-        reader.onloadend = () => {
+-          if (reader.result.endsWith("base64,")) {
+-            reject(new Error(`Invalid blob encountered.`));
+-            return;
+-          }
+-          if (
+-            blob.type == "image/svg+xml" &&
+-            reader.result.length > Ci.nsIFaviconService.MAX_FAVICON_BUFFER_SIZE
+-          ) {
+-            reject(new Error(`Too large svg icon: ${reader.result.length} B`));
+-            return;
+-          }
+-          resolve(reader.result);
+-        };
+-        reader.readAsDataURL(blob);
+-      });
+-    };
+-
+-    /**
+      * Try getting favicon from url.
+      *
+      * @param {string} faviconUrl - The favicon url.
+-     * @returns {Blob} - Existing favicon.
++     * @returns {string} - Existing favicon url.
+      */
+     const fetchFavicon = async faviconUrl => {
++      //this.log.debug(`getFavicon: fetch url ${url}`);
+       const response = await fetch(faviconUrl);
+       if (!response.ok) {
+         throw new Error(`No favicon for url ${faviconUrl}`);
+       }
+-      if (!/^image\//i.test(response.headers.get("Content-Type"))) {
+-        throw new Error(`Non-image favicon for ${faviconUrl}`);
++      const contentType = response.headers.get("Content-Type");
++      const contentLength = response.headers.get("Content-Length");
++      const contentEncoding = response.headers.get("Content-Encoding");
++      if (
++        (contentType.startsWith("image/") ||
++          (contentType.startsWith("text/plain") &&
++            contentEncoding == "gzip")) &&
++        (contentLength == null || contentLength > 68)
++      ) {
++        return faviconUrl;
+       }
+-      return response.blob();
++
++      throw new Error(`Non-image or broken favicon for ${url}`);
+     };
+ 
+     /**
+      * Try getting favicon from the a html page.
+      *
+      * @param {string} page - The page url to check.
+-     * @returns {Blob} - Found favicon.
++     * @returns {string} - Found favicon url.
+      */
+     const discoverFaviconURL = async page => {
+       const response = await fetch(page);
+       if (!response.ok) {
+@@ -948,67 +930,60 @@ export var FeedUtils = {
+       }
+       if (!/^text\/html/i.test(response.headers.get("Content-Type"))) {
+         throw new Error(`No page to get favicon from for ${page}`);
+       }
+-      const doc = new DOMParser().parseFromString(
+-        await response.text(),
+-        "text/html"
+-      );
++
++      let content = await response.text();
++
++      // Add a <base> tag, if missing, to silence relative url resolve
++      // failure warnings in DOMParser().
++      const head = content.split("<head>")[1]?.split("</head>")[0];
++      if (head && !head.includes("<base")) {
++        content = content.replace("<head>", `<head><base href="${page}">`);
++        //FeedUtils.log.debug(`discoverFaviconURL: added <base> to ${page}`);
++      }
++
++      const doc = new DOMParser().parseFromString(content, "text/html");
+       const iconLink = doc.querySelector(
+         `link[href][rel~='icon']:is([sizes~='any'],[sizes~='16x16' i],[sizes~='32x32' i],:not([sizes])`
+       );
+-      if (!iconLink) {
+-        throw new Error(`No iconLink discovered for page=${page}`);
++      if (!iconLink || !iconLink.href) {
++        throw new Error(`No iconLink or href discovered for ${page}`);
+       }
++      let pageURL;
++      const iconURI = new URL(page);
+       if (/^https?:/.test(iconLink.href)) {
+-        return iconLink.href;
++        pageURL = iconLink.href;
++      } else if (/^\/\//.test(iconLink.href)) {
++        pageURL = iconURI.protocol + iconLink.href;
++      } else {
++        pageURL = iconURI.origin + iconLink.href.replace(/^[.]*/, "");
+       }
+-      if (iconLink.href.at(0) != "/") {
+-        iconLink.href = "/" + iconLink.href;
+-      }
+-      return new URL(page).origin + iconLink.href;
++      //this.log.debug(`discoverFaviconURL: page url ${pageURL}`);
++      return pageURL;
+     };
+ 
+     const uri = Services.io.newURI(url);
+-    const iconURL = await fetchFavicon(uri.prePath + "/favicon.ico")
+-      .then(blobToBase64)
+-      .catch(() => {
+-        return discoverFaviconURL(url)
+-          .catch(() => discoverFaviconURL(uri.prePath))
+-          .then(fetchFavicon)
+-          .then(blobToBase64)
+-          .catch(() => "");
++    const iconURL = await discoverFaviconURL(uri.prePath)
++      .then(fetchFavicon)
++      .catch(_exception => {
++        //this.log.debug(`getFavicon: ${exception}`);
++        return fetchFavicon(uri.prePath + "/favicon.ico").catch(_exception2 => {
++          //this.log.debug(`getFavicon: ${_exception2}`);
++          return "";
++        });
+       });
+ 
+-    if (!iconURL) {
+-      return "";
+-    }
+-
+-    // setAndFetchFaviconForPage needs the url to be in the database first.
+-    await lazy.PlacesUtils.history.insert({
+-      url: feedURL,
+-      visits: [
+-        {
+-          date: new Date(),
+-        },
+-      ],
+-    });
+-
+-    // All good. Now store iconURL for future usage.
+-    const pageURI = Services.io.newURI(feedURL);
+-    const iconURI = Services.io.newURI(iconURL);
+-    const dataURL = await lazy.MailUtils.getFaviconDataURLFromNetwork(iconURI);
+-    await lazy.PlacesUtils.favicons.setFaviconForPage(
+-      pageURI,
+-      iconURI,
+-      dataURL
++    const logString =
++      (folder ? `${folder.name}` : "") +
++      (!folder && feedURL ? `${feedURL}` : "");
++    this.log.debug(
++      `getFavicon: ${logString}, favicon url ` +
++        (iconURL ? `${iconURL}` : "not found")
+     );
+ 
+-    return new Promise(resolve => {
+-      lazy.PlacesUtils.favicons.getFaviconDataForPage(pageURI, faviconURI => {
+-        resolve(faviconURI.spec);
+-      });
+-    });
++    FeedUtils.setStatus(folder, feedURL, "favicon", iconURL);
++    return iconURL;
+   },
+ 
+   /**
+    * Update the feeds database for rename and move/copy folder name changes.

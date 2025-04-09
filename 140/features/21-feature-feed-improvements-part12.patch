@@ -1,0 +1,336 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740625508 25200
+# Parent  6d19636dd73cd0cc15608817bc30430d001957be
+Feed enhancements
+- Bug 1665372 - RSS Feeds: Not able to pause updates for a subfolder
+- Use FolderTreeProperties instead of setStringProperty for folder pause state.
+
+Features:
+- An account or folder (may or may not contain feed subscriptions) may be paused
+  via folderpane contextmenu.
+- A folder and all of its subfolder descendants are excluded from processing if
+  the folder is paused.
+- A paused folder/account (and all descendant folders) have the name shown in lower
+  opacity.
+- Individual feeds may be paused by unchecking Check for new articles box in the
+  Subscribe dialog.
+- If all feeds in a folder are paused, the folder's icon is shown in lower opacity.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -550,9 +550,9 @@ var folderPaneContextMenu = {
+         "folderPaneContext-pauseAllUpdates",
+         !optionsAcct.doBiff
+       );
+     }
+-    const showPaused = !isServer && FeedUtils.getFeedUrlsInFolder(folder);
++    const showPaused = !isServer && FeedUtils.isFeedFolder(folder);
+     this._showMenuItem("folderPaneContext-pauseUpdates", showPaused);
+     if (showPaused) {
+       const properties = FeedUtils.getFolderProperties(folder);
+       this._checkMenuItem(
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -1007,15 +1007,11 @@ function MsgGetMessage(folders) {
+   }
+ }
+ 
+ function MsgPauseUpdates(selectedFolders = GetSelectedMsgFolders(), pause) {
+-  // Pause single feed folder subscription updates, or all account updates if
+-  // folder is the account folder.
++  // Pause single feed folder subscription updates and those of any descendant
++  // folders, or all account updates if folder is the account folder.
+   const folder = selectedFolders.length ? selectedFolders[0] : null;
+-  if (!FeedUtils.isFeedFolder(folder)) {
+-    return;
+-  }
+-
+   FeedUtils.pauseFeedFolderUpdates(folder, pause, true);
+   Services.obs.notifyObservers(folder, "folder-properties-changed");
+ }
+ 
+diff --git a/mail/base/content/widgets/folder-tree-row.mjs b/mail/base/content/widgets/folder-tree-row.mjs
+--- a/mail/base/content/widgets/folder-tree-row.mjs
++++ b/mail/base/content/widgets/folder-tree-row.mjs
+@@ -411,9 +411,10 @@ class FolderTreeRow extends HTMLLIElemen
+     if (!lazy.FeedUtils.FEED_ACCOUNT_TYPES.includes(folder.server.type)) {
+       return;
+     }
+     const props = lazy.FeedUtils.getFolderProperties(folder);
+-    for (const property of ["hasError", "isBusy", "isPaused"]) {
++    const properties = ["hasError", "isBusy", "isPaused", "allFeedsPaused"];
++    for (const property of properties) {
+       if (props.includes(property)) {
+         this.dataset[property] = "true";
+       } else {
+         delete this.dataset[property];
+diff --git a/mail/modules/FolderTreeProperties.sys.mjs b/mail/modules/FolderTreeProperties.sys.mjs
+--- a/mail/modules/FolderTreeProperties.sys.mjs
++++ b/mail/modules/FolderTreeProperties.sys.mjs
+@@ -76,5 +76,21 @@ export const FolderTreeProperties = {
+       jsonFile.data.open[mode].splice(index, 1);
+     }
+     jsonFile.saveSoon();
+   },
++
++  getPaused(folderURI) {
++    ensureReady();
++    return jsonFile.data.paused?.[folderURI] == true;
++  },
++
++  setPaused(folderURI, pause) {
++    ensureReady();
++    jsonFile.data.paused = jsonFile.data.paused ?? {};
++    if (pause) {
++      jsonFile.data.paused[folderURI] = true;
++    } else {
++      delete jsonFile.data.paused[folderURI];
++    }
++    jsonFile.saveSoon();
++  },
+ };
+diff --git a/mail/themes/shared/mail/about3Pane.css b/mail/themes/shared/mail/about3Pane.css
+--- a/mail/themes/shared/mail/about3Pane.css
++++ b/mail/themes/shared/mail/about3Pane.css
+@@ -350,10 +350,11 @@ body {
+       background-size: 16px;
+       --icon-color: var(--folder-color-rss);
+     }
+ 
++    &[data-all-feeds-paused] > .container > .icon,
+     &[data-is-paused] > .container > .name,
+-    &[data-server-type][data-is-paused] ul > li[data-is-feed-folder] > .container > .name {
++    &[data-is-paused] ul > li > .container > .name {
+       opacity: 0.6;
+     }
+ 
+     &[data-is-busy] > .container > .icon {
+diff --git a/mail/themes/shared/mail/feedSubscribe.css b/mail/themes/shared/mail/feedSubscribe.css
+--- a/mail/themes/shared/mail/feedSubscribe.css
++++ b/mail/themes/shared/mail/feedSubscribe.css
+@@ -54,9 +54,10 @@ treechildren::-moz-tree-image(folderName
+ treechildren::-moz-tree-image(feedTypeCol, isFeed-true, isAtomFeed) {
+   stroke: MediumAquamarine; /* Atom feed color from somewhere */
+ }
+ 
+-treechildren::-moz-tree-image(isPaused),
++treechildren::-moz-tree-image(folderNameCol, allFeedsPaused),
++treechildren::-moz-tree-image(feedTypeCol, isPaused),
+ treechildren::-moz-tree-cell-text(isPaused) {
+   opacity: 0.6;
+ }
+ 
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -9,8 +9,9 @@ import { setTimeout } from "resource://g
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+   Feed: "resource:///modules/Feed.sys.mjs",
++  FolderTreeProperties: "resource:///modules/FolderTreeProperties.sys.mjs",
+   JSONFile: "resource://gre/modules/JSONFile.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   jsmime: "resource:///modules/jsmime.sys.mjs",
+ });
+@@ -288,8 +289,19 @@ export var FeedUtils = {
+             allFolders.length
+           }, ${location}`
+         );
+ 
++        if (!FeedUtils.getStatus(subFolder, subFolder.URI).enabled) {
++          // Folder is paused. Skip it and its descendants.
++          const subDescendants = subFolder.descendants;
++          allFolders.splice(subDescendants, subDescendants.length);
++          FeedUtils.log.log(
++            `downloadFeed: folder is paused, skipped ${subDescendants.length} ` +
++              `descendant folder(s), ${location}`
++          );
++          continue;
++        }
++
+         const feedUrlArray = FeedUtils.getFeedUrlsInFolder(subFolder);
+         // Continue if there are no feedUrls for the folder in the feeds
+         // database.  All folders in Trash are skipped.
+         if (!feedUrlArray) {
+@@ -454,63 +466,34 @@ export var FeedUtils = {
+     feed.download(true, FeedUtils.progressNotifier);
+   },
+ 
+   /**
+-   * Enable or disable updates for all subscriptions in a folder, or all
+-   * subscriptions in an account if the folder is the account folder.
+-   * A folder's subfolders' feeds are not included.
++   * Enable or disable updates for all subscriptions in a folder (and any
++   * descendant folders), or all subscriptions in an account if the folder is
++   * the account folder.
+    *
+    * @param {nsIMsgFolder} aFolder - Folder or account folder (server).
+    * @param {boolean} aPause - To pause or not to pause.
+    * @param {boolean} aBiffNow - If aPause is false, and aBiffNow is true
+    *                                     do the biff immediately.
+    * @returns {void}
+    */
+   pauseFeedFolderUpdates(aFolder, aPause, aBiffNow) {
++    FeedUtils.setStatus(aFolder, aFolder.URI, "enabled", !aPause);
+     if (aFolder.isServer) {
+-      const serverFolder = aFolder.server.rootFolder;
+       // Remove server from biff first. If enabling biff, this will make the
+       // latest biffMinutes take effect now rather than waiting for the timer
+       // to expire.
+       aFolder.server.doBiff = false;
+       if (!aPause) {
+         aFolder.server.doBiff = true;
+       }
+ 
+-      FeedUtils.setStatus(serverFolder, serverFolder.URI, "enabled", !aPause);
+       if (!aPause && aBiffNow) {
+         aFolder.server.performBiff(null);
+       }
+-
+-      return;
+-    }
+-
+-    const feedUrls = FeedUtils.getFeedUrlsInFolder(aFolder);
+-    if (!feedUrls) {
+-      return;
+-    }
+-
+-    for (const feedUrl of feedUrls) {
+-      const feed = new lazy.Feed(feedUrl, aFolder);
+-      const options = feed.options;
+-      options.updates.enabled = !aPause;
+-      feed.options = options;
+-      FeedUtils.setStatus(aFolder, feedUrl, "enabled", !aPause);
+-      FeedUtils.log.log(
+-        `pauseFeedFolderUpdates: enabled ${!aPause}, url ${feedUrl}`
+-      );
+-    }
+-
+-    // Update Subscribe dialog, if open.
+-    if (this.FeedSubscriptions) {
+-      const curItem = this.FeedSubscriptions.mView.currentItem;
+-      this.FeedSubscriptions.refreshSubscriptionView();
+-      if (curItem.container) {
+-        this.FeedSubscriptions.selectFolder(curItem.folder);
+-      } else {
+-        const feed = new lazy.Feed(curItem.url, curItem.parentFolder);
+-        this.FeedSubscriptions.selectFeed(feed);
+-      }
++    } else {
++      lazy.FolderTreeProperties.setPaused(aFolder.URI, aPause);
+     }
+   },
+ 
+   /**
+@@ -732,23 +715,19 @@ export var FeedUtils = {
+    * @returns {string} - Space separated properties.
+    */
+   getFolderProperties(folder, feedUrl) {
+     const location = this.getFolderPrettyPath(folder);
+-    let properties;
++    const folderEnabled = this.getStatus(folder, folder.URI).enabled;
++    let properties = folderEnabled ? "" : " isPaused";
+     if (folder.isServer) {
+-      const serverEnabled = this.getStatus(
+-        folder.server.rootFolder,
+-        folder.server.rootFolder.URI
+-      ).enabled;
+-      properties = !serverEnabled ? " isPaused" : "";
+       this.log.debug(
+         `getFolderProperties: ${location}, properties '${properties}'`
+       );
+ 
+       return properties;
+     }
+ 
+-    properties = feedUrl ? " isFeed-true" : " isFeedFolder-true";
++    properties = feedUrl ? " isFeed-true" : " isFeedFolder-true" + properties;
+ 
+     // For a subcribe which creates a folder or adds to a folder, the
+     // feed url will not yet be added to the database. Get the busy
+     // code on the folder (instead of urls) if status has been set busy
+@@ -764,9 +743,14 @@ export var FeedUtils = {
+     }
+ 
+     const feedUrls = feedUrl ? [feedUrl] : this.getFeedUrlsInFolder(folder);
+     if (!feedUrls) {
+-      return "";
++      properties = folderEnabled ? "" : " isPaused";
++      this.log.debug(
++        `getFolderProperties: ${location}, properties '${properties}'`
++      );
++
++      return properties;
+     }
+ 
+     let hasError,
+       isBusy,
+@@ -791,9 +775,13 @@ export var FeedUtils = {
+     }
+ 
+     properties += hasError ? " hasError" : "";
+     properties += isBusy ? " isBusy" : "";
+-    properties += numPaused == feedUrls.length ? " isPaused" : "";
++    properties += numPaused == feedUrls.length ? " allFeedsPaused" : "";
++    if (feedUrl) {
++      // For Subscribe feed item row.
++      properties += numPaused == 0 ? "" : " isPaused";
++    }
+     this.log.debug(
+       `getFolderProperties: ${location}, properties '${properties}'`
+     );
+ 
+@@ -842,11 +830,13 @@ export var FeedUtils = {
+           feed.options = options;
+         }
+         feed = null;
+       } else {
+-        // Seed persisted status properties for servers.
++        // Seed persisted status properties for servers/folders.
+         const optionsAcct = FeedUtils.getOptionsAcct(aFolder.server);
+-        this[serverKey][aUrl].status.enabled = optionsAcct.doBiff;
++        this[serverKey][aUrl].status.enabled = aFolder.isServer
++          ? optionsAcct.doBiff
++          : !lazy.FolderTreeProperties.getPaused(aFolder.URI);
+       }
+       FeedUtils.log.debug(`getStatus: seed url ${aUrl}`);
+     }
+ 
+@@ -1175,9 +1165,11 @@ export var FeedUtils = {
+         const feed = new lazy.Feed(sub.url, aFolder);
+         FeedUtils.deleteFeed(feed);
+       });
+       // note: deleteFeed() calls saveSoon(), so we don't need to.
++      // Delete folder from cache/FolderTreeProperties.
+       this.clearStatus(aFolder, aFolder.URI);
++      lazy.FolderTreeProperties.setPaused(aFolder.URI, false);
+     } else if (aFolder.server == aOrigFolder.server) {
+       // Staying in same account - just update destFolder as required
+       for (const sub of affectedSubs) {
+         sub.destFolder = folderURI;
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -317,13 +317,12 @@ var FeedSubscriptions = {
+       }
+       let paused = false;
+       while (!paused) {
+         folder = folder.parent;
++        paused = FeedUtils.getFolderProperties(folder).includes("isPaused");
+         if (folder.isServer) {
+-          paused = FeedUtils.getFolderProperties(folder).includes("isPaused");
+           break;
+         }
+-        paused = folder.getStringProperty("enabled") == "false";
+       }
+ 
+       return paused;
+     },

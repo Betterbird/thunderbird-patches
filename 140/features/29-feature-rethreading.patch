@@ -1,0 +1,2019 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1744198205 -7200
+# Parent  4cec30834a8dbeb61a18a64bb071175823055853
+Message Rethreading and implementation of a generalized message editor class.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+Threaded view must be turned on to perform threading operations.
+Rethreading is possible only for a single message at a time.
+Rethreading is possible in multifolder views (saved search), but only for messages
+in the same folder.
+Rethreading is not possible for a message to a parent with an identical Message-ID.
+Rethreading is not possible in Search view (.isSearch) or Gloda list view (.isSynthetic).
+If threading an ancestor message to a descendant, best practice is to unthread
+the ancestor first, then thread to the descendant; this avoids superflous references.
+
+To rethread:
+  Mouse: drag and drop message to a new parent.
+  Keyboard: select a message; ctrl-t to enter ReThread Mode; arrow up/down to
+    select a new parent; ctrl-t again to 'drop' the original message onto the
+    new parent.
+To unthread (a message is no longer a thread child nor a thread parent nor a thread root):
+  Keyboard: select a message; ctrl-t; ctrl-x.
+To reset (return message to its original thread state, ie original headers):
+  Keyboard: select a message; ctrl-t; ctrl-z.
+To exit ReThread Mode with no action:
+  Mouse: start another dnd operation.
+  Keyboard: ESC key.
+* * *
+Fix for structured headers.
+* * *
+Fix encoding issues.
+* * *
+29-feature-rethreading-UPDATE.patch
+
+1. Implement threadpane contextmenu "unthread" and "reset" actions, currently only available via keyboard.
+2. Ensure any message in a tab/window is also replaced post rethread/edit.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -755,8 +755,13 @@ pref("font.name-list.monospace.el", "mon
+ #endif
+ 
+ pref("mail.setup.loglevel", "Warn");
+ 
++// Message Editor/Rethreading.
++// By default, don't place the original message in the Trash folder.
++pref("mail.messageEditor.backupToTrash", false);
++pref("mail.messageEditor.loglevel", "Warn");
++
+ // Handle links targeting new windows (from within content tabs)
+ // These are the values that Firefox can be set to:
+ // 0=default window, 1=current window/tab, 2=new window,
+ // 3=new tab in most recent window
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -46,8 +46,9 @@ ChromeUtils.defineESModuleGetters(this, 
+   Gloda: "resource:///modules/gloda/GlodaPublic.sys.mjs",
+   MailE10SUtils: "resource:///modules/MailE10SUtils.sys.mjs",
+   MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
++  MessageEditor: "resource:///modules/MessageEditor.sys.mjs",
+   repairMbox: "resource:///modules/MboxRepair.sys.mjs",
+   SmartMailboxUtils: "resource:///modules/SmartMailboxUtils.sys.mjs",
+   TagUtils: "resource:///modules/TagUtils.sys.mjs",
+   UIDensity: "resource:///modules/UIDensity.sys.mjs",
+@@ -4910,8 +4911,53 @@ var threadPane = {
+ 
+     if (event.key == "Enter") {
+       this._onItemActivate(event);
+     }
++
++    // Rethreading commands: ctrl-t enters rethreading mode, selection change
++    // and ctrl-t rethreads the drag target to the selected drop target; on no
++    // selection change, ctrl-x will unthread the drag target; ctrl-z will
++    // reset headers to the message's original headers.
++    if (event.ctrlKey && ["KeyT", "KeyX", "KeyZ"].includes(event.code)) {
++      if (!this._canReThread(nsMsgViewIndex_None, nsMsgViewIndex_None)) {
++        return;
++      }
++      if (threadTree.inKeyDnD) {
++        const dataTransfer = new DataTransfer();
++        dataTransfer.mozSetDataAt("text/x-moz-message", "", 0);
++        dataTransfer.effectAllowed = "copy";
++        dataTransfer.dropEffect = "copy";
++        event.dataTransfer = dataTransfer;
++
++        if (this._currentDragRow.index == this._currentDropRow?.index) {
++          if (event.code == "KeyX") {
++            threadTree.inKeyDnD = "unthread";
++          } else if (event.code == "KeyZ") {
++            threadTree.inKeyDnD = "reset";
++          } else {
++            this._onKeyDragEnd(event);
++            return;
++          }
++        }
++
++        this._onDrop(event);
++        this._onKeyDragEnd(event);
++      } else if (event.code == "KeyT") {
++        const row = threadTree.getRowAtIndex(threadTree.currentIndex);
++        if (!row) {
++          this._onKeyDragEnd(event);
++          return;
++        }
++        threadTree._selection.selectEventsSuppressed = true;
++        row.classList.add("drag-source");
++        this._currentDragRow = row;
++        this._currentDropRow = row;
++        threadTree.inKeyDnD = "rethread";
++      }
++    }
++    if (event.key == "Escape" && threadTree.inKeyDnD) {
++      this._onKeyDragEnd(event);
++    }
+   },
+ 
+   _onMiddleClick(event) {
+     const row =
+@@ -4951,8 +4997,16 @@ var threadPane = {
+   /**
+    * Handle threadPane select events.
+    */
+   _onSelect() {
++    if (threadTree.inKeyDnD) {
++      const row = threadTree.getRowAtIndex(threadTree.currentIndex);
++      this._clearDropTarget();
++      row.classList.add("drop-target");
++      this._currentDropRow = row;
++      return;
++    }
++
+     if (
+       !dbViewWrapperListener.allMessagesLoaded &&
+       !this._selectionIsBeingRestored
+     ) {
+@@ -5012,8 +5066,15 @@ var threadPane = {
+       threadTree.ensureCorrectFocus();
+       return;
+     }
+ 
++    if (threadTree.inKeyDnD) {
++      this._onKeyDragEnd(event);
++    }
++    threadTree.currentIndex = row.index;
++    this._currentDragRow = row;
++    row.classList.add("drag-source");
++
+     if (!alreadySelected) {
+       threadTree.selectedIndex = row.index;
+     }
+     const messageURIs = gDBView.getURIsForSelection();
+@@ -5116,28 +5177,41 @@ var threadPane = {
+    * Handle threadPane dragover events.
+    */
+   _onDragOver(event) {
+     if (event.target.closest("thead")) {
++      this._clearDropTarget();
+       return; // Only allow dropping in the body.
+     }
+     // Must prevent default. Otherwise dropEffect gets cleared.
+     event.preventDefault();
+     event.dataTransfer.dropEffect = "none";
+     const types = Array.from(event.dataTransfer.mozTypesAt(0));
+     const targetFolder = gFolder;
+-    if (types.includes("application/x-moz-file")) {
++    if (targetFolder && types.includes("application/x-moz-file")) {
+       if (targetFolder.isServer || !targetFolder.canFileMessages) {
+         return;
+       }
+       for (let i = 0; i < event.dataTransfer.mozItemCount; i++) {
+         const extFile = event.dataTransfer
+           .mozGetDataAt("application/x-moz-file", i)
+-          .QueryInterface(Ci.nsIFile);
+-        if (!extFile.isFile() || !/\.eml$/i.test(extFile.leafName)) {
++          ?.QueryInterface(Ci.nsIFile);
++        if (!extFile?.isFile() || !/\.eml$/i.test(extFile.leafName)) {
+           return;
+         }
+       }
+       event.dataTransfer.dropEffect = "copy";
++    } else if (types.includes("text/x-moz-message")) {
++      const row = event.target.closest(`tr[is^="thread-"]`);
++      if (!this._canReThread(this._currentDragRow.index, row?.index)) {
++        this._clearDropTarget();
++        return;
++      }
++      event.dataTransfer.dropEffect = "copy";
++      if (row.index != this._currentDropRow?.index) {
++        this._clearDropTarget();
++        row.classList.add("drop-target");
++        this._currentDropRow = row;
++      }
+     }
+   },
+ 
+   /**
+@@ -5146,9 +5220,22 @@ var threadPane = {
+   _onDrop(event) {
+     if (event.target.closest("thead")) {
+       return; // Only allow dropping in the body.
+     }
++
++    if (event.dataTransfer?.dropEffect == "none") {
++      // Somehow this is possible. It should not be possible.
++      return;
++    }
++
+     event.preventDefault();
++
++    const types = Array.from(event.dataTransfer.mozTypesAt(0));
++    if (types.includes("text/x-moz-message")) {
++      this.updateThreading();
++      return;
++    }
++
+     for (let i = 0; i < event.dataTransfer.mozItemCount; i++) {
+       const extFile = event.dataTransfer
+         .mozGetDataAt("application/x-moz-file", i)
+         .QueryInterface(Ci.nsIFile);
+@@ -5170,15 +5257,34 @@ var threadPane = {
+   /**
+    * Handle threadPane drag end events.
+    */
+   _onDragEnd(event) {
++    this._clearDragSource(event);
++    this._clearDropTarget(event);
++    threadPane.releaseSelection();
++
+     if (event.dataTransfer.dropEffect != "none") {
+       return;
+     }
+     folderPane._timedExpand();
+     folderPane._collapseAutoExpandedRows();
+   },
+ 
++  _onKeyDragEnd(event) {
++    this._onDragEnd(event);
++    delete threadTree.inKeyDnD;
++  },
++
++  _clearDragSource() {
++    this._currentDragRow?.classList.remove("drag-source");
++    delete this._currentDragRow;
++  },
++
++  _clearDropTarget() {
++    this._currentDropRow?.classList.remove("drop-target");
++    delete this._currentDropRow;
++  },
++
+   _onContextMenu(event, retry = false) {
+     let row =
+       event.target.closest(`tr[is^="thread-"]`) ||
+       threadTree.getRowAtIndex(threadTree.currentIndex);
+@@ -5260,8 +5366,262 @@ var threadPane = {
+       top.messenger.saveAs(messageURI.value.data, true, null, file.path, true);
+     },
+   },
+ 
++  /*
++   * @param {integer} dragIndex - Index of message to rethread.
++   * @param {integer} dropIndex - Index of potential new parent.
++   */
++  _canReThread(dragIndex, dropIndex) {
++    if (!gViewWrapper.showThreaded || threadTree.selectedIndices.length > 1) {
++      return false;
++    }
++    // Preliminary test; use nsMsgViewIndex_None as params.
++    if (dragIndex == nsMsgViewIndex_None && dropIndex == nsMsgViewIndex_None) {
++      return true;
++    }
++    if (
++      dragIndex == dropIndex ||
++      !this.isValidIndex(dragIndex) ||
++      !this.isValidIndex(dropIndex)
++    ) {
++      return false;
++    }
++    const dragMsgHdr = gViewWrapper.dbView.getMsgHdrAt(dragIndex);
++    const dropMsgHdr = gViewWrapper.dbView.getMsgHdrAt(dropIndex);
++    if (
++      dropMsgHdr.messageKey == dragMsgHdr.threadParent ||
++      dropMsgHdr.messageId == dragMsgHdr.messageId ||
++      !dropMsgHdr.folder.canDeleteMessages ||
++      !dropMsgHdr.folder.canFileMessages ||
++      window.gFolderDisplay?.view?.isSearch ||
++      gViewWrapper?.isSynthetic ||
++      (gViewWrapper.isMultiFolder &&
++        dragMsgHdr.folder.URI != dropMsgHdr.folder.URI)
++    ) {
++      return false;
++    }
++    return true;
++  },
++
++  /*
++   * @param {integer} index - Index to check.
++   * @returns {boolean}
++   */
++  isValidIndex(index) {
++    return (
++      index != nsMsgViewIndex_None &&
++      index >= 0 &&
++      index < gViewWrapper.dbView.rowCount
++    );
++  },
++
++  /*
++   * Retain state on message delete/update and return restore functions.
++   *
++   * @param {integer} index - Index of message.
++   * @returns {Function | {}}[] - Array with successFn and errorFn.
++   */
++  saveStateForMessageReplaceAtIndex(index) {
++    if (!this.isValidIndex(index)) {
++      return [() => {}, () => {}];
++    }
++    const MSG_VIEW_FLAG_ISTHREAD = 0x8000000;
++    // Ensure the thread and selection state is restored.
++    const isIndexExpandedContainer =
++      gViewWrapper.dbView.isContainer(index) &&
++      gViewWrapper.dbView.isContainerOpen(index);
++    const origThreadRootMsgHdr = gViewWrapper.dbView
++      .getThreadContainingIndex(index)
++      .getRootHdr();
++    const selectNewMsgHdr = Boolean(
++      threadTree.inKeyDnD || threadTree.selectedIndex == index
++    );
++    const saveSelectionSummarizedPref = Services.prefs.getBoolPref(
++      "mail.operate_on_msgs_in_collapsed_threads"
++    );
++
++    // If rethreading a rootMsgHdr, collapse it first otherwise display is
++    // incorrect.
++    if (gViewWrapper.dbView.isContainer(index)) {
++      Services.prefs.setBoolPref(
++        "mail.operate_on_msgs_in_collapsed_threads",
++        false
++      );
++      threadTree.collapseRowAtIndex(index);
++    }
++
++    // Ensure no selection after delete. Any selection will be handled in the
++    // callback functions. This is the only way to truly prevent unwanted
++    // selection on delete.
++    const TreeSelection = threadTree.view.selection;
++    threadPane.saveSelection();
++    threadTree.view.selection = null;
++
++    const successFn = newMsgHdr => {
++      threadTree.view.selection = TreeSelection;
++      Services.prefs.setBoolPref(
++        "mail.operate_on_msgs_in_collapsed_threads",
++        saveSelectionSummarizedPref
++      );
++      if (!newMsgHdr) {
++        // No change or other noop; nothing further to do in the view.
++        threadPane.releaseSelection();
++        if (selectNewMsgHdr) {
++          const row = threadTree.getRowAtIndex(threadTree.currentIndex);
++          if (row) {
++            row.selected = true;
++            row.focus();
++          }
++        }
++        if (isIndexExpandedContainer) {
++          threadTree.expandRowAtIndex(threadTree.currentIndex);
++        }
++        return;
++      }
++
++      const newThreadRootMsgHdr = gViewWrapper.dbView
++        .getThreadContainingMsgHdr(newMsgHdr)
++        .getRootHdr();
++      const newThreadRootMsgHdrIndex =
++        gViewWrapper.getViewIndexForMsgHdr(newThreadRootMsgHdr);
++      const origThreadRootMsgHdrIndex =
++        gViewWrapper.getViewIndexForMsgHdr(origThreadRootMsgHdr);
++
++      // Upon both a row's removal from and insertion into a thread, the view
++      // does not update correctly.
++      if (threadPane.isValidIndex(origThreadRootMsgHdrIndex)) {
++        if (gViewWrapper.dbView.isContainerOpen(origThreadRootMsgHdrIndex)) {
++          threadTree.collapseRowAtIndex(origThreadRootMsgHdrIndex);
++          threadTree.expandRowAtIndex(origThreadRootMsgHdrIndex);
++        }
++        // All messages in threaded view have this flag, even if a singleton.
++        // Core code clears the flag if the last child in a thread is deleted.
++        // Restore it otherwise the message will disappear upon sorting..
++        if (
++          gViewWrapper.showThreaded &&
++          !(
++            gViewWrapper.dbView.getFlagsAt(origThreadRootMsgHdrIndex) &
++            MSG_VIEW_FLAG_ISTHREAD
++          )
++        ) {
++          origThreadRootMsgHdr.orFlags(MSG_VIEW_FLAG_ISTHREAD);
++          origThreadRootMsgHdr.folder?.msgDatabase.notifyHdrChangeAll(
++            origThreadRootMsgHdr,
++            0,
++            origThreadRootMsgHdr.flags,
++            {}
++          );
++        }
++      }
++      // Note: we will not get here if folders are different, so no issue
++      // of dupe messageKeys in multifolder view.
++      if (newThreadRootMsgHdr.messageKey != origThreadRootMsgHdr.messageKey) {
++        threadTree.collapseRowAtIndex(newThreadRootMsgHdrIndex);
++        threadTree.expandRowAtIndex(newThreadRootMsgHdrIndex);
++      }
++      // Update thread root message subject to remove Re.
++      // gViewWrapper.dbView.getMsgHdrAt(0).flags & Ci.nsMsgMessageFlags.HasRe
++      // gViewWrapper.dbView.getFlagsAt(0) & Ci.nsMsgMessageFlags.HasRe
++      // are not in sync if a message no longer has References/In-Reply-To when
++      // re-added - m_flags is wrong.
++      if (newThreadRootMsgHdr.messageKey == newMsgHdr.messageKey) {
++        newMsgHdr.folder?.msgDatabase.notifyHdrChangeAll(
++          newMsgHdr,
++          0,
++          newMsgHdr.flags,
++          {}
++        );
++      }
++      // In many cases (sort by date/received, thread root msgHdr property) the
++      // insertion to or removal from a thread will result in an incorrect sort
++      // order. Re sort is required.
++      // If the last child of a thread is unthreaded, or a message is inserted
++      // that becomes the last child of the thread, then a resort is required
++      // as the view will no longer potentially be sorted in correct date order.
++      // TODO: Maybe - currently adding a flag to a messages in a sort by flag
++      // order does not change the sort order automatically.
++
++      if (selectNewMsgHdr) {
++        // The drag-source was the selected message. The new message will have
++        // a different messageKey, even if it were previously selected and in
++        // savedSelections. Restore selectEvents and clear savedSelections.
++        threadTree._selection.selectEventsSuppressed = false;
++        threadPane.forgetSavedSelection(newMsgHdr.folder.URI);
++        selectMessage(newMsgHdr);
++      } else {
++        // Restore the saved selection, if any, if the drag-source was not the
++        // selected message.
++        threadPane.releaseSelection();
++        // The saved selection was restored. However, it may not be in view.
++        // Or, there was no selected message in the saved selection.
++        // Attention is on the new drag-source message.
++        // We want to indicate and set focus on (but not select) the new
++        // drag-source message.
++        threadTree.currentIndex = threadTree.view.findIndexOfMsgHdr(
++          newMsgHdr,
++          true
++        );
++      }
++      setTimeout(() => {
++        threadTree.getRowAtIndex(threadTree.currentIndex)?.focus();
++        threadTree.scrollToIndex(threadTree.currentIndex, true);
++      }, 100);
++    };
++
++    const errorFn = _error => {
++      threadTree.view.selection = TreeSelection;
++      Services.prefs.setBoolPref(
++        "mail.operate_on_msgs_in_collapsed_threads",
++        saveSelectionSummarizedPref
++      );
++      threadPane.releaseSelection();
++      if (selectNewMsgHdr) {
++        const row = threadTree.getRowAtIndex(threadTree.selectedIndex);
++        if (row) {
++          row.selected = true;
++          row.focus();
++        }
++      }
++      if (isIndexExpandedContainer) {
++        threadTree.expandRowAtIndex(threadTree.selectedIndex);
++      }
++    };
++
++    return [successFn, errorFn];
++  },
++
++  /*
++   * @param {string} action - In "rethread", "unthread", "reset".
++   */
++  updateThreading(action = "rethread") {
++    action = threadTree.inKeyDnD ?? action;
++    this.doUpdateThreading(
++      action,
++      this._currentDragRow.index,
++      gDBView.getURIForViewIndex(this._currentDropRow?.index)
++    );
++  },
++
++  /*
++   * @param {string} action - In "rethread", "unthread", "reset".
++   * @param {integer} sourceIndex - Index of message to rethread.
++   * @param {?string} newParentMessageURI - Actually a nsIMsgMailNewsUrl url.
++   */
++  doUpdateThreading(action, sourceIndex, newParentMessageURI) {
++    const [successFn, errorFn] =
++      this.saveStateForMessageReplaceAtIndex(sourceIndex);
++
++    const messageEditor = new MessageEditor({
++      messageURI: gDBView.getURIForViewIndex(sourceIndex),
++      msgWindow: top.msgWindow,
++      successFn,
++      errorFn,
++    });
++
++    messageEditor.updateThreading(action, newParentMessageURI);
++  },
++
+   _jsTree: {
+     QueryInterface: ChromeUtils.generateQI(["nsIMsgJSTree"]),
+     _inBatch: 0,
+     beginUpdateBatch() {
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -287,8 +287,9 @@ window.addEventListener("DOMContentLoade
+   SetAttachmentListLocation();
+ 
+   preferenceObserver.init();
+   Services.obs.addObserver(msgObserver, "message-content-updated");
++  Services.obs.addObserver(msgObserver, "message-replaced");
+ 
+   const browser = getMessagePaneBrowser();
+ 
+   if (parent == top) {
+@@ -363,8 +364,9 @@ window.addEventListener("unload", () => 
+   OnUnloadMsgHeaderPane();
+   MailServices.mailSession.RemoveFolderListener(folderListener);
+   preferenceObserver.cleanUp();
+   Services.obs.removeObserver(msgObserver, "message-content-updated");
++  Services.obs.removeObserver(msgObserver, "message-replaced");
+   window.removeEventListener("MsgLoaded", msgObserver);
+   prefersDarkQuery.removeEventListener("change", msgObserver);
+   gViewWrapper?.close();
+ });
+@@ -574,8 +576,49 @@ var msgObserver = {
+       // This notification is triggered after a partial pop3 message was
+       // fully downloaded. The old message URI is now gone. To reload the
+       // message, we display it with its new URI.
+       displayMessage(data, gViewWrapper);
++    } else if (topic == "message-replaced") {
++      // A message has been rethreaded/edited and the next message was selected
++      // upon delete; reselect the original which has a new messageURI.
++      // The |subject| will contain the old messageURI and the new messageURI.
++      // The message may be standalone in a window (tabOrWindow.isChromeWindow
++      // is true) or tab (tabOrWindow.name is mailMessageTab).
++      // Or, the message may be in a mail3PaneTab type in other windows or tabs
++      // with a message list, including synthetic (tabOrWindow.name is
++      // mail3PaneTab).
++      const tabOrWindow = window.tabOrWindow || parent.tabOrWindow;
++      const isMail3PaneTab = tabOrWindow.mode?.name == "mail3PaneTab";
++      const isSynthetic = isMail3PaneTab && parent.gViewWrapper.isSynthetic;
++      const { oldMessageURI, newMessageURI } = subject.wrappedJSObject;
++      const doMessageUpdate =
++        gMessageURI &&
++        gMessageURI != newMessageURI &&
++        messageHistory.lastSelectedRemovedMessageURI == oldMessageURI;
++
++      if (doMessageUpdate || isSynthetic) {
++        if (isMail3PaneTab) {
++          const msgService = MailServices.messageServiceFromURI(newMessageURI);
++          const msgHdr = msgService.messageURIToMsgHdr(newMessageURI);
++          if (isSynthetic) {
++            // A search results list with no gFolder; refresh() to get the
++            // updated list otherwise the message won't be there.
++            // XXX: this does not work very well.
++            setTimeout(() => {
++              parent.gViewWrapper.refresh();
++              if (doMessageUpdate) {
++                displayMessage(newMessageURI, gViewWrapper);
++              }
++            }, 500);
++          } else if (doMessageUpdate) {
++            // Select the message in the list.
++            parent.selectMessage(msgHdr);
++          }
++        } else if (doMessageUpdate) {
++          // Only for standalone messages (window or tab).
++          displayMessage(newMessageURI, gViewWrapper);
++        }
++      }
+     }
+   },
+ 
+   handleEvent(event) {
+@@ -648,20 +691,24 @@ var messageHistory = {
+    * @type {MessageHistoryEntry[]}
+    */
+   _history: [],
+   _currentIndex: -1,
++  lastSelectedRemovedMessageURI: null,
+   /**
+    * Remove the message from the history, cleaning up the state as needed in
+    * the process.
+    *
+    * @param {nsIMsgFolder} parentFolder
+    * @param {nsIMsgDBHdr} message
+    */
+   onMessageRemoved(parentFolder, message) {
++    const messageURI = parentFolder.generateMessageURI(message.messageKey);
++    if (gMessageURI == messageURI) {
++      this.lastSelectedRemovedMessageURI = messageURI;
++    }
+     if (!this._history.length) {
+       return;
+     }
+-    const messageURI = parentFolder.generateMessageURI(message.messageKey);
+     const folderURI = parentFolder.URI;
+     const oldLength = this._history.length;
+     let removedEntriesBeforeFuture = 0;
+     this._history = this._history.filter((entry, index) => {
+diff --git a/mail/base/content/mailContext.inc.xhtml b/mail/base/content/mailContext.inc.xhtml
+--- a/mail/base/content/mailContext.inc.xhtml
++++ b/mail/base/content/mailContext.inc.xhtml
+@@ -348,8 +348,15 @@
+           class="menu-iconic"
+           data-l10n-id="mail-context-menu-threads"
+           data-l10n-attrs="accesskey">
+       <menupopup id="mailContext-threadsPopup">
++        <menuitem id="mailContext-unthreadMessage"
++                  data-l10n-id="mail-context-unthread-message"
++                  data-l10n-attrs="accesskey"/>
++        <menuitem id="mailContext-resetMessageThreading"
++                  data-l10n-id="mail-context-reset-message-threading"
++                  data-l10n-attrs="accesskey"/>
++        <menuseparator id="mailContext-thread-sep"/>
+         <menuitem id="mailContext-ignoreThread"
+                   type="checkbox"
+                   label="&contextKillThreadMenu.label;"
+                   accesskey="&contextKillThreadMenu.accesskey;"/>
+diff --git a/mail/base/content/mailContext.js b/mail/base/content/mailContext.js
+--- a/mail/base/content/mailContext.js
++++ b/mail/base/content/mailContext.js
+@@ -445,8 +445,20 @@ var mailContextMenu = {
+         count: numSelectedMessages,
+       }
+     );
+ 
++    showItem("mailContext-unthreadMessage", inThreadTree);
++    enableItem(
++      "mailContext-unthreadMessage",
++      gViewWrapper.showThreaded && numSelectedMessages == 1
++    );
++    showItem("mailContext-resetMessageThreading", inThreadTree);
++    enableItem(
++      "mailContext-resetMessageThreading",
++      gViewWrapper.showThreaded && numSelectedMessages == 1
++    );
++    showItem("mailContext-thread-sep", inThreadTree);
++
+     checkItem(
+       "mailContext-ignoreThread",
+       folder?.msgDatabase.isIgnored(message?.messageKey)
+     );
+@@ -692,8 +704,24 @@ var mailContextMenu = {
+           false
+         );
+         break;
+ 
++      // Message threading
++      case "mailContext-unthreadMessage":
++        window.threadPane.doUpdateThreading(
++          "unthread",
++          gDBView.selection.currentIndex,
++          null
++        );
++        break;
++      case "mailContext-resetMessageThreading":
++        window.threadPane.doUpdateThreading(
++          "reset",
++          gDBView.selection.currentIndex,
++          null
++        );
++        break;
++
+       // Save/print/download
+       default: {
+         if (
+           document.getElementById("mailContext-moveMenu").contains(event.target)
+diff --git a/mail/locales/en-US/messenger/messenger.ftl b/mail/locales/en-US/messenger/messenger.ftl
+--- a/mail/locales/en-US/messenger/messenger.ftl
++++ b/mail/locales/en-US/messenger/messenger.ftl
+@@ -273,8 +273,16 @@ mail-context-menu-organize =
+ mail-context-menu-threads =
+     .label = Threads
+     .accesskey = T
+ 
++mail-context-unthread-message =
++    .label = Unthread Message
++    .accesskey = U
++
++mail-context-reset-message-threading =
++    .label = Restore Original Threading
++    .accesskey = R
++
+ context-menu-redirect-msg =
+     .label = Redirect
+ 
+ # This menu item is for canceling an NNTP message
+diff --git a/mail/modules/ConversationOpener.sys.mjs b/mail/modules/ConversationOpener.sys.mjs
+--- a/mail/modules/ConversationOpener.sys.mjs
++++ b/mail/modules/ConversationOpener.sys.mjs
+@@ -15,9 +15,13 @@ export class ConversationOpener {
+     }
+     if (!message || !message.folder) {
+       return false;
+     }
+-    return Gloda.isMessageIndexed(message);
++    try {
++      return Gloda.isMessageIndexed(message);
++    } catch (e) {
++      return false;
++    }
+   }
+ 
+   constructor(window) {
+     this.window = window;
+diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/modules/MessageEditor.sys.mjs
+@@ -0,0 +1,1248 @@
++/* Authored by Alta88 and contributed to the Betterbird Project.
++ * See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE
++ * for license details.
++ * All uses require attribution to the Author.
++ * Redistributions of source code must retain the above copyright. */
++
++const lazy = {};
++ChromeUtils.defineESModuleGetters(lazy, {
++  MailServices: "resource:///modules/MailServices.sys.mjs",
++  MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
++  MimeParser: "resource:///modules/mimeParser.sys.mjs",
++});
++
++/**
++ * A class to edit and rewrite messages. The following functions are public:
++ *
++ * getHeaderLines(headerName)
++ * getHeaderValueRaw(headerLine, headerName)
++ * getHeaderValue(headerLine, headerName)
++ * restoreHeaderValue(headerName)
++ * updateHeaderValue(headerName, newHeaderValue)
++ * updateThreading(action, newParentMessageURI)
++ * getReferencesForThreading(messageURI)
++ *
++ */
++export class MessageEditor {
++  /**
++   * The edited message's URI.
++   *
++   * @type {string}
++   */
++  #messageURI = null;
++
++  /**
++   * Backup original in trash (deleteStorage param is false). Controlled by
++   * pref |mail.messageEditor.backupToTrash|.
++   *
++   * @type {boolean}
++   */
++  #backupToTrash = true;
++
++  /**
++   * @type {nsIMsgWindow}
++   */
++  #msgWindow = null;
++
++  /**
++   * A function to call upon successful update and copy insertion completion,
++   * so that the view can be updated.
++   *
++   * @function
++   * @param {nsIMsgDbHdr|false} _msgDbHdr - Updated message or false for NOOP.
++   */
++  #successFn = _msgDbHdr => {};
++
++  /**
++   * A function to call upon error.
++   *
++   * @function
++   * @param {string} _error - The error string.
++   */
++  #errorFn = _error => {};
++
++  /**
++   * Promise for #getMessage().
++   *
++   * @type {object}
++   */
++  #getMessageDeferred = {};
++
++  /**
++   * Create a new MessageEditor object.
++   *
++   * @param {object} options
++   * @param {string} options.messageURI - The to be edited message's URI.
++   * @param {string} options.msgWindow - The msgWindow, required for imap
++   *   notification consistency.
++   * @param {Function} [options.successFn] - An optional success callback
++   *   function called to update the view or other.
++   * @param {Function} [options.errorFn] - An optional error callback function.
++   */
++  constructor({ messageURI, msgWindow, successFn, errorFn }) {
++    this.#msgWindow = msgWindow;
++    this.#successFn = successFn ?? this.#successFn;
++    this.#errorFn = errorFn ?? this.#errorFn;
++
++    this.#backupToTrash = Services.prefs.getBoolPref(
++      "mail.messageEditor.backupToTrash",
++      true
++    );
++
++    this.log = console.createInstance({
++      prefix: "MessageEditor",
++      maxLogLevel: "Warn",
++      maxLogLevelPref: "mail.messageEditor.loglevel",
++    });
++
++    this.#initialize(messageURI);
++  }
++
++  #initialize(messageURI) {
++    this.#messageURI = messageURI;
++    this.origMsgHdr = this.#messageService.messageURIToMsgHdr(this.#messageURI);
++    if (!(this.origMsgHdr instanceof Ci.nsIMsgDBHdr)) {
++      throw new Error(
++        `#initialize: could not get msgHdr from messageURI: ${messageURI}`
++      );
++    }
++
++    this.origMsgHdrFlags = this.origMsgHdr.flags;
++    this.origMsgHdrKeywords = this.origMsgHdr.getStringProperty("keywords");
++    this.log.debug("#initialize: messageURI - " + messageURI);
++    this.log.debug(
++      "#initialize: messageKey:flags:backupToTrash:keywords - " +
++        this.origMsgHdr.messageKey +
++        ":" +
++        this.origMsgHdrFlags +
++        ":" +
++        this.#backupToTrash +
++        ":" +
++        this.origMsgHdrKeywords
++    );
++
++    this.#getMessageDeferred.promise = new Promise(resolve => {
++      this.#getMessageDeferred.resolve = resolve;
++    });
++
++    this.#getMessage();
++  }
++
++  /**
++   * The msgHdr of the edited message.
++   *
++   * @type {nsIMsgDbHdr}
++   */
++  origMsgHdr = null;
++
++  /**
++   * The msgHdr.flags of the edited message.
++   *
++   * @type {number}
++   */
++  origMsgHdrFlags = 0;
++
++  /**
++   * The msgHdr tags of the edited message.
++   *
++   * @type {string}
++   */
++  origMsgHdrKeywords = "";
++
++  // Backup header name prefix.
++  #ORIGINAL = "X-Original-Header-";
++  #ORIGINAL_HEADER_VALUE_NONE = "<None>";
++  // For rethreading.
++  #MESSAGEID = "Message-ID";
++  #REFERENCES = "References";
++  #INREPLYTO = "In-Reply-To";
++  #ORIGINAL_MESSAGEID = this.#ORIGINAL + "Message-ID";
++  #ORIGINAL_REFERENCES = this.#ORIGINAL + "References";
++  #ORIGINAL_INREPLYTO = this.#ORIGINAL + "In-Reply-To";
++  #UNTHREAD_COUNT = "X-Message-ID-Unthread-Count";
++
++  #TMP_FILENAME = "tmpMessageEditor.eml";
++
++  async #getMessage() {
++    const rawMessage = await this.getRawMessage(this.#messageURI);
++    this.charset = lazy.MailStringUtils.detectCharset(rawMessage);
++    const headersEnd = rawMessage.match(/\r?\n\r?\n/g)[0];
++    const newlineLength = headersEnd.match(/(\r?\n)/)[1].length;
++    // The blank newline belongs to the body.
++    const headersEndOffset = rawMessage.indexOf(headersEnd) + newlineLength;
++    this.msgHeaders = rawMessage.substr(0, headersEndOffset);
++    this.msgBody = rawMessage.substring(this.msgHeaders.length);
++    this.log.debug("#getMessage: original message headers -> " + this.charset);
++    this.log.debug(this.msgHeaders);
++
++    this.#initEditableHeaders();
++
++    this.#getMessageDeferred.resolve();
++  }
++
++  /**
++   * @returns {nsIMsgMessageService} object.
++   */
++  get #messageService() {
++    return lazy.MailServices.messageServiceFromURI(this.#messageURI);
++  }
++
++  get #isMsgEditable() {
++    const folder = this.origMsgHdr.folder;
++    this.log.debug(
++      "#isMsgEditable: origMsgHdr folder serverType:storeType - " +
++        folder.server.type +
++        ":" +
++        folder.msgStore.storeType
++    );
++    if (!folder.canFileMessages || !folder.canDeleteMessages) {
++      return false;
++    }
++    return true;
++  }
++
++  // Editable headers. Pref is formatted in Train-Case for display purposes to
++  // accomodate header names that are not among the common localizable ones.
++  #EDITABLE_HEADERS = [];
++  #initEditableHeaders() {
++    const pref = "mail.messageEditor.editableHeaders";
++    let headers = ["Subject"];
++    try {
++      headers = JSON.parse(Services.prefs.getCharPref(pref));
++      // Dedupe.
++      headers = Array.from(new Set([...headers]));
++    } catch (ex) {
++      Services.prefs.setCharPref(pref, JSON.stringify(headers));
++    }
++
++    // May contain dupes, caller must handle.
++    if (headers.includes("*")) {
++      headers = ["*"];
++      let headerLines = this.msgHeaders.split(this.headerLinesRE());
++      headerLines = headerLines.filter(
++        line =>
++          line &&
++          !line.startsWith("From ") &&
++          !line.startsWith(this.#ORIGINAL) &&
++          !line.startsWith(this.#UNTHREAD_COUNT)
++      );
++      for (const headerLine of headerLines) {
++        headers.push(headerLine.split(":")[0]);
++      }
++    }
++    this.#EDITABLE_HEADERS = headers;
++  }
++
++  /*
++   * Capture a header line, consisting of 3 groups: headerName, colon and all
++   * space/control chars surrounding it, headerValue (folded).
++   *
++   * @param {string} headerName
++   */
++  headerLineRE(headerName) {
++    return new RegExp(
++      `^(${headerName})(\\s*:(?:\\s*\r?\n\\s+)*[ ]*)+((?:.|\r?\n[ \t])*)\r?\n`,
++      "img"
++    );
++  }
++
++  /*
++   * Capture all header lines terminating with \r?\n, considering folded lines.
++   */
++  headerLinesRE() {
++    return new RegExp(/(?:\r\n|\n)(?![ \t])|\r(?![ \t\n])/, "mg");
++  }
++
++  /*
++   * Returns array of single or multiple lines matching the case insensitive
++   * headerName. Multiline headers are returned raw and unfolded. The line
++   * string contains line endings.
++   *
++   * @param {string} headerName
++   * @returns {string[]} Array of headerLines or empty array.
++   */
++  getHeaderLines(headerName) {
++    return this.msgHeaders.match(this.headerLineRE(headerName)) ?? [];
++  }
++
++  /*
++   * Remove a headerLine.
++   *
++   * @param {string} headerLine
++   */
++  #removeHeaderLine(headerLine) {
++    this.msgHeaders = this.msgHeaders.replace(headerLine, "");
++  }
++
++  /*
++   * Returns the raw string header value, given a headerLine.
++   *
++   * @param {string} headerLine - There may be more than 1 with same header,
++   *   caller decides which headerLine to pass.
++   * @param {string} headerName
++   * @returns {string}|null
++   */
++  getHeaderValueRaw(headerLine, headerName) {
++    if (typeof headerLine != "string") {
++      return null;
++    }
++    const re = this.headerLineRE(headerName);
++    const [, curHeaderName, , curHeaderValue] = headerLine.split(re);
++    if (headerName.toLowerCase() != curHeaderName.toLowerCase()) {
++      return null;
++    }
++    return curHeaderValue;
++  }
++
++  /*
++   * Returns the decoded mime header value, given a headerLine.
++   *
++   * @param {string} headerLine - There may be more than 1 with same header,
++   *   caller decides which headerLine to pass.
++   * @param {string} headerName
++   * @returns {string}|null
++   */
++  getHeaderValue(headerLine, headerName) {
++    const headerValue = this.getHeaderValueRaw(headerLine, headerName);
++    if (headerValue == null) {
++      return null;
++    }
++
++    // We want a string and not deconstructed header parts; parse unstructured.
++    return lazy.MimeParser.parseHeaderField(
++      headerValue,
++      lazy.MimeParser.HEADER_OPTION_ALLOW_RAW |
++        lazy.MimeParser.HEADER_OPTION_DECODE_2047,
++      this.charset
++    );
++  }
++
++  /*
++   * Update a header name - internal.
++   *
++   * @param {string} headerLine - There may be more than 1 with same header,
++   *   caller decides which headerLine to pass.
++   * @param {string} headerName
++   * @param {string} newHeaderName
++   * @returns {boolean} True if the cached header was updated, else false.
++   */
++  #updateHeaderName(headerLine, headerName, newHeaderName) {
++    this.log.debug(`#updateHeaderName: headerName - ${headerName}`);
++    this.log.debug(`#updateHeaderName: newHeaderName - ${newHeaderName}`);
++    if (typeof headerLine != "string") {
++      return false;
++    }
++    let re = this.headerLineRE(headerName);
++    const [, curHeaderName, colon, curHeaderValue] = headerLine.split(re);
++    if (headerName.toLowerCase() != curHeaderName.toLowerCase()) {
++      return false;
++    }
++    // Escape any RegExp chars in the headerValue for replace to work. We will
++    // also fix any extraneous non-spec \n or no space manglings around the ":".
++    const curHeaderValueEsc = curHeaderValue.replace(
++      /[.*+?^${}()|[\]\\]/g,
++      "\\$&"
++    );
++    re = new RegExp(`^${curHeaderName + colon + curHeaderValueEsc}`, "im");
++    const newHeaders = this.msgHeaders.replace(
++      re,
++      newHeaderName + ": " + curHeaderValue
++    );
++    if (this.msgHeaders == newHeaders) {
++      return false;
++    }
++    this.msgHeaders = newHeaders;
++    return true;
++  }
++
++  /*
++   * Restore a backed up header in the form Original-headerName.
++   *
++   * @param {integer} headerLineIndex - 0 based index; for second or more same
++   *   headerName line a postfix is added to the backup #ORIGINAL headerName.
++   */
++  async restoreHeaderValue(headerName, headerLineIndex = 0) {
++    this.log.debug(
++      "restoreHeaderValue: headerName:headerLineIndex - " +
++        headerName +
++        ":" +
++        headerLineIndex
++    );
++
++    await this.#getMessageDeferred.promise;
++
++    const currentMsgHeaders = this.msgHeaders;
++    this.#restoreHeaderValue(headerName, headerLineIndex);
++    this.#doUpdate("restoreheader", this.msgHeaders != currentMsgHeaders);
++  }
++
++  /*
++   * Restore a backed up header - internal.
++   */
++  #restoreHeaderValue(headerName, headerLineIndex = 0) {
++    const origHeaderLineIndexStr = headerLineIndex
++      ? "_" + (headerLineIndex + 1)
++      : "";
++    const origHeaderName = this.#ORIGINAL + headerName + origHeaderLineIndexStr;
++    this.log.debug("#restoreHeaderValue: origHeaderName - " + origHeaderName);
++    const origHeaderLine = this.getHeaderLines(origHeaderName)[0];
++    if (!origHeaderLine) {
++      this.log.info(
++        `#restoreHeaderValue: original header not found - ${origHeaderName}`
++      );
++      return;
++    }
++    const headerLine = this.getHeaderLines(headerName)[headerLineIndex];
++    this.log.debug(headerLine);
++    this.log.debug(origHeaderLine);
++    if (headerLine) {
++      this.#removeHeaderLine(headerLine);
++    }
++    // Restore original case, which should have been preserved.
++    headerName = origHeaderLine.split(this.#ORIGINAL)[1];
++    headerName = origHeaderLineIndexStr
++      ? headerName.split(origHeaderLineIndexStr)[0]
++      : headerName;
++    headerName = headerName.split(": ")[0];
++    this.#updateHeaderName(origHeaderLine, origHeaderName, headerName);
++  }
++
++  /*
++   * Update a header value.
++   *
++   * @param {string} headerName
++   * @param {integer} headerLineIndex - For second or more same headerName line.
++   * @param {string} newHeaderValue
++   */
++  async updateHeaderValue(headerName, headerLineIndex = 0, newHeaderValue) {
++    this.log.debug(
++      "updateHeaderValue: headerName:headerLineIndex:newHeaderValue - " +
++        headerName +
++        ":" +
++        headerLineIndex +
++        ":" +
++        newHeaderValue
++    );
++
++    headerName = headerName.trim();
++    if (
++      !Array.from(this.#EDITABLE_HEADERS, h => h.toLowerCase()).includes(
++        headerName.toLowerCase()
++      )
++    ) {
++      this.log.warn(
++        `updateHeaderValue: headerName not updateable - ${headerName}`
++      );
++      this.#doUpdate("updatevalue", false);
++      return;
++    }
++
++    await this.#getMessageDeferred.promise;
++
++    const headerLine = this.getHeaderLines(headerName)[headerLineIndex];
++    if (!headerLine) {
++      this.log.warn(`updateHeaderValue: headerName not found - ${headerName}`);
++      this.#doUpdate("updatevalue", false);
++      return;
++    }
++
++    const origHeaderLineIndexStr = headerLineIndex
++      ? "_" + (headerLineIndex + 1)
++      : "";
++    const origHeaderName = this.#ORIGINAL + headerName + origHeaderLineIndexStr;
++    this.log.debug("updateHeaderValue: origHeaderName - " + origHeaderName);
++    const origHeaderLine = this.getHeaderLines(origHeaderName)[0];
++    if (!origHeaderLine) {
++      // Get the headerName line and effectively clone it while renaming the
++      // following headerName header. Preserve the orignal header case.
++      // Then, update the original.
++      const re = this.headerLineRE(headerName);
++      const [, caseHeaderName] = headerLine.split(re);
++      const origHeaderNameCase =
++        this.#ORIGINAL + caseHeaderName + origHeaderLineIndexStr;
++      this.log.debug(
++        "updateHeaderValue: origHeaderNameCase - " + origHeaderNameCase
++      );
++      if (
++        !this.#updateHeaderName(
++          headerLine,
++          headerName,
++          headerLine + origHeaderNameCase
++        )
++      ) {
++        this.log.warn(
++          `updateHeaderValue: backup original header failed - ${headerName}`
++        );
++        this.#doUpdate("updatevalue", false);
++        return;
++      }
++    }
++
++    // Don't allow unprintable ascii, except CR/LF/TAB. Ensure a space after
++    // any \n to prevent header insertion.
++    newHeaderValue = newHeaderValue
++      .replace(
++        /* eslint-disable-next-line no-control-regex */
++        /[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]+/g,
++        ""
++      )
++      .replace(/(\r?\n)([^\s])/gm, "$1  $2")
++      .trim();
++
++    const headersChanged = this.#updateHeaderValue(
++      headerLine,
++      headerName,
++      newHeaderValue
++    );
++
++    this.#doUpdate("updatevalue", headersChanged);
++  }
++
++  /*
++   * Update a header value - internal.
++   *
++   * @param {string} headerLine - There may be more than 1 with the same
++   *  headerName; caller decides which headerLine to pass.
++   * @param {string} headerName
++   * @param {string} newHeaderValue
++   * @returns {boolean} True if the cached header was updated, else false.
++   */
++  #updateHeaderValue(headerLine, headerName, newHeaderValue) {
++    if (typeof headerLine != "string") {
++      return false;
++    }
++    let re = this.headerLineRE(headerName);
++    const [, curHeaderName, colon, curHeaderValue] = headerLine.split(re);
++    if (headerName.toLowerCase() != curHeaderName.toLowerCase()) {
++      return false;
++    }
++
++    // Convert to byteString.
++    newHeaderValue = lazy.MailStringUtils.stringToByteString(
++      newHeaderValue.toString().trim()
++    );
++
++    // Escape any RegExp chars in the headerValue for replace to work. We will
++    // also fix any extraneous non-spec \n or no space manglings around the ":".
++    const curHeaderValueEsc = curHeaderValue.replace(
++      /[.*+?^${}()|[\]\\]/g,
++      "\\$&"
++    );
++    re = new RegExp(`^${curHeaderName + colon + curHeaderValueEsc}`, "im");
++    const newHeaders = this.msgHeaders.replace(
++      re,
++      curHeaderName + ": " + newHeaderValue
++    );
++    if (this.msgHeaders == newHeaders) {
++      return false;
++    }
++    this.msgHeaders = newHeaders;
++    return true;
++  }
++
++  /*
++   *
++   * @param {string} action - In "rethread", "unthread", "reset".
++   * @param {string} newParentMessageURI - Actually a nsIMsgMailNewsUrl url.
++   */
++  async updateThreading(action, newParentMessageURI) {
++    this.log.debug("updateThreading: drag message url - " + this.#messageURI);
++    this.log.debug("updateThreading: action - " + action);
++
++    await this.#getMessageDeferred.promise;
++
++    let headersChanged = false;
++    if (action == "rethread") {
++      headersChanged = await this.#reThread(newParentMessageURI);
++    } else if (action == "unthread") {
++      headersChanged = this.#unThread();
++    } else if (action == "reset") {
++      headersChanged = this.#resetThreading();
++    }
++
++    this.#doUpdate(action, headersChanged);
++  }
++
++  #doUpdate(action, headersChanged) {
++    if (!headersChanged) {
++      this.log.debug(`#doUpdate: no change, action - ${action}`);
++      this.#onSuccess(false);
++      return;
++    }
++
++    this.newMessage = this.msgHeaders + this.msgBody;
++    this.#replaceChanges();
++  }
++
++  async #reThread(newParentMessageURI) {
++    const currentMsgHeaders = this.msgHeaders;
++    this.log.debug("#reThread: newParentMessageURI - " + newParentMessageURI);
++    try {
++      Services.io
++        .newURI(newParentMessageURI)
++        .QueryInterface(Ci.nsIMsgMailNewsUrl);
++    } catch (ex) {
++      this.log.warn(
++        `updateThreading: invalid parent messageURI - ${newParentMessageURI}`
++      );
++      return false;
++    }
++
++    const newReferences =
++      await this.getReferencesForThreading(newParentMessageURI);
++    if (!newReferences) {
++      this.log.warn(
++        "#reThread: new parent has no Message-ID, References, or In-Reply-To headers."
++      );
++      return false;
++    }
++    this.log.debug("#reThread: newReferences - " + newReferences);
++    // First, backup Message-ID (if necessary), References, and In-Reply-To,
++    // if they exist.
++    if (this.#unThread() === false) {
++      return false;
++    }
++
++    // Get a line to insert the new References header after.
++    let insertAfterHeaderName = this.#ORIGINAL_REFERENCES;
++    let insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
++    // After #unThread(), false means there was no original References header.
++    const hasOrigReferences = Boolean(insertAfterHeaderLine);
++    if (!insertAfterHeaderLine) {
++      insertAfterHeaderName = this.#MESSAGEID;
++      insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
++    }
++    if (!insertAfterHeaderLine) {
++      insertAfterHeaderName = "From";
++      insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
++    }
++    if (!insertAfterHeaderLine) {
++      insertAfterHeaderName = "Date";
++      insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
++    }
++    if (!insertAfterHeaderLine) {
++      this.log.warn(
++        "#reThread: origMsgHdr does not have RFC2822 headers; messageKey - " +
++          this.origMsgHdr.messageKey
++      );
++      return false;
++    }
++
++    // Clone a header line for Refences. Do not create a References clone if
++    // there is already a References line.
++    if (
++      !this.getHeaderLines(this.#REFERENCES)[0] &&
++      !this.#updateHeaderName(
++        insertAfterHeaderLine,
++        insertAfterHeaderName,
++        insertAfterHeaderLine + this.#REFERENCES
++      )
++    ) {
++      this.log.debug("#reThread: after #updateHeaderName - no change");
++    }
++
++    // Update the References header line with the rethread references.
++    if (
++      !this.#updateHeaderValue(
++        this.getHeaderLines(this.#REFERENCES)[0],
++        this.#REFERENCES,
++        newReferences
++      )
++    ) {
++      this.log.debug("#reThread: after #updateHeaderValue - no change");
++    }
++
++    this.log.debug("#reThread: hasOrigReferences - " + hasOrigReferences);
++    if (!hasOrigReferences) {
++      // Insert a placeholder for reversion to original state.
++      const referencesHeaderLine = this.getHeaderLines(this.#REFERENCES)[0];
++      if (
++        !this.#updateHeaderName(
++          referencesHeaderLine,
++          this.#REFERENCES,
++          referencesHeaderLine + this.#ORIGINAL_REFERENCES
++        )
++      ) {
++        this.log.debug("#reThread: after #updateHeaderName - no change");
++      }
++
++      if (
++        !this.#updateHeaderValue(
++          this.getHeaderLines(this.#ORIGINAL_REFERENCES)[0],
++          this.#ORIGINAL_REFERENCES,
++          this.#ORIGINAL_HEADER_VALUE_NONE
++        )
++      ) {
++        this.log.debug("#reThread: after #updateHeaderValue - no change");
++      }
++    }
++
++    if (this.msgHeaders == currentMsgHeaders) {
++      // No change.
++      return false;
++    }
++    return true;
++  }
++
++  #unThread() {
++    const currentMsgHeaders = this.msgHeaders;
++    let headerLine = this.getHeaderLines(this.#ORIGINAL_MESSAGEID)[0];
++    if (!headerLine) {
++      // Do not have the #ORIGINAL line - backup to original.
++      // Get the Message-ID line and effectively clone it while renaming the
++      // following Messaged-ID header. Then, update the original.
++      const messageIDLine = this.getHeaderLines(this.#MESSAGEID)[0];
++      if (
++        !this.#updateHeaderName(
++          messageIDLine,
++          this.#MESSAGEID,
++          messageIDLine + this.#ORIGINAL_MESSAGEID
++        )
++      ) {
++        return false;
++      }
++    }
++    // Ensure message is unthreaded from all children, and also ensure that
++    // messages that are not parents that may become parents are able to be
++    // reset without breaking threading in the UI.
++    if (!this.#resetMessageId()) {
++      return false;
++    }
++
++    headerLine = this.getHeaderLines(this.#ORIGINAL_REFERENCES)[0];
++    if (!headerLine) {
++      // Do not have the #ORIGINAL line - backup to original.
++      headerLine = this.getHeaderLines(this.#REFERENCES)[0];
++      if (
++        headerLine &&
++        !this.#updateHeaderName(
++          headerLine,
++          this.#REFERENCES,
++          this.#ORIGINAL_REFERENCES
++        )
++      ) {
++        this.log.warn(
++          `#unThread: backup original header failed - ${this.#REFERENCES}`
++        );
++        return false;
++      }
++    } else {
++      // Have the #ORIGINAL; if it's <None>, remove it.
++      const headerValue = this.getHeaderValueRaw(
++        headerLine,
++        this.#ORIGINAL_REFERENCES
++      );
++      if (headerValue == this.#ORIGINAL_HEADER_VALUE_NONE) {
++        // Remove the line.
++        this.#removeHeaderLine(headerLine);
++      }
++      // Have the #ORIGINAL, not <None>; keep it and remove References.
++      headerLine = this.getHeaderLines(this.#REFERENCES)[0];
++      this.#removeHeaderLine(headerLine);
++    }
++
++    headerLine = this.getHeaderLines(this.#ORIGINAL_INREPLYTO)[0];
++    if (!headerLine) {
++      // Do not have the #ORIGINAL line - backup to original.
++      headerLine = this.getHeaderLines(this.#INREPLYTO)[0];
++      if (
++        headerLine &&
++        !this.#updateHeaderName(
++          headerLine,
++          this.#INREPLYTO,
++          this.#ORIGINAL_INREPLYTO
++        )
++      ) {
++        this.log.warn(
++          `#unThread: backup original header failed - ${this.#INREPLYTO}`
++        );
++        return false;
++      }
++    }
++    if (this.msgHeaders == currentMsgHeaders) {
++      // No change, but can be ok.
++      return null;
++    }
++    return true;
++  }
++
++  #resetThreading() {
++    const currentMsgHeaders = this.msgHeaders;
++    this.#restoreHeaderValue(this.#MESSAGEID);
++    this.#restoreHeaderValue(this.#REFERENCES);
++    const headerLine = this.getHeaderLines(this.#REFERENCES)[0];
++    const headerValue = this.getHeaderValueRaw(headerLine, this.#REFERENCES);
++    if (headerValue == this.#ORIGINAL_HEADER_VALUE_NONE) {
++      // Remove the line.
++      this.#removeHeaderLine(headerLine);
++    }
++    this.#restoreHeaderValue(this.#INREPLYTO);
++    if (this.msgHeaders == currentMsgHeaders) {
++      // No change.
++      return false;
++    }
++    return true;
++  }
++
++  async getReferencesForThreading(messageURI) {
++    const msgHdr = this.#messageService.messageURIToMsgHdr(messageURI);
++    const rawMessage = await this.getRawMessage(messageURI);
++    const headersEnd = rawMessage.indexOf(rawMessage.match(/\r?\n\r?\n/gi)[0]);
++    const msgHeaders = rawMessage.substr(0, headersEnd);
++    const mimeHeaders = lazy.MimeParser.extractHeaders(msgHeaders);
++
++    const messageID = mimeHeaders.get("message-id") || msgHdr.messageId;
++    const references = mimeHeaders.get("references");
++    const inReplyTo = mimeHeaders.get("in-reply-to");
++
++    this.log.debug("getReferencesForThreading: message-id  - " + messageID);
++    this.log.debug("getReferencesForThreading: references - " + references);
++    this.log.debug("getReferencesForThreading: in-reply-to  - " + inReplyTo);
++
++    // Per RFC2822, references of the child message are done thusly
++    // based on the parent's headers.
++    let newReferences = "";
++    if (references) {
++      newReferences = references + " " + messageID;
++    } else if (inReplyTo) {
++      newReferences = inReplyTo + " " + messageID;
++    } else if (messageID) {
++      newReferences = messageID;
++    }
++
++    // No dupes.
++    const newReferencesSet = new Set(newReferences.split(/\s+/));
++    // Can't have the message's Message-ID in its own References.
++    newReferencesSet.delete(this.origMsgHdr.messageId);
++
++    newReferences = [...newReferencesSet].join(" ");
++    if (newReferences.length > 80) {
++      // Fold em.
++      newReferences = newReferences.split(" ").join("\n  ");
++    }
++
++    return newReferences;
++  }
++
++  /*
++   * For rethreading: The only way to not hit Bug 604319 is to rename the
++   * Message-ID of the message to unthread, as any messages with nested
++   * references to the Message-ID will keep it threaded. This also unthreads
++   * all children from a root thread, making it no one's parent. We need to
++   * keep a total unthreadCount to avoid problems with threading to a reset
++   * message, then restoring original, then unthreading again, etc.
++   */
++  #resetMessageId() {
++    const messageIDLine = this.getHeaderLines(this.#MESSAGEID)[0];
++    if (messageIDLine) {
++      // Rename a messageId by prepending 'X-TH#' and a count.
++      let messageIdValue = this.getHeaderValueRaw(
++        messageIDLine,
++        this.#MESSAGEID
++      );
++      let unthreadCountLine = this.getHeaderLines(this.#UNTHREAD_COUNT)[0];
++      let unthreadCountValue = parseInt(
++        this.getHeaderValueRaw(unthreadCountLine, this.#UNTHREAD_COUNT) || 0
++      );
++      if (!unthreadCountValue) {
++        // Insert the #UNTHREAD_COUNT header.
++        this.#updateHeaderName(
++          messageIDLine,
++          this.#MESSAGEID,
++          messageIDLine + this.#UNTHREAD_COUNT
++        );
++        unthreadCountLine = this.getHeaderLines(this.#UNTHREAD_COUNT)[0];
++      }
++
++      let editCount = messageIdValue.match(/^<X-TH#(\d+)\..*/);
++      editCount = editCount ? parseInt(editCount[1]) : editCount;
++      this.log.debug(
++        "#resetMessageId: messageIdValue:editCount:unthreadCountValue - " +
++          messageIdValue +
++          ":" +
++          editCount +
++          ":" +
++          unthreadCountValue
++      );
++
++      unthreadCountValue++;
++      if (editCount) {
++        messageIdValue = messageIdValue.replace(
++          /(^<X-TH#)(\d+)(\..*)/,
++          `$1${unthreadCountValue}$3`
++        );
++      } else {
++        messageIdValue = messageIdValue.replace(
++          /^<(.*)/,
++          `<X-TH#${unthreadCountValue}.$1`
++        );
++      }
++
++      if (
++        this.#updateHeaderValue(
++          unthreadCountLine,
++          this.#UNTHREAD_COUNT,
++          unthreadCountValue
++        ) &&
++        this.#updateHeaderValue(messageIDLine, this.#MESSAGEID, messageIdValue)
++      ) {
++        return true;
++      }
++      this.log.warn("#resetMessageId: failed to reset Message-ID header.");
++      return false;
++    }
++    // Since Message-ID is RFC5322 'should', it doesn't need to be there.
++    // And if not then it's not an issue.
++    this.log.warn("#resetMessageId: no Message-ID header.");
++    return false;
++  }
++
++  async getRawMessage(msgUri) {
++    return new Promise((resolve, reject) => {
++      const consumer = {
++        _content: [],
++        _inputStream: null,
++        // @implements {nsIRequestObserver}
++        onStartRequest() {},
++        onStopRequest(request, status) {
++          if (Components.isSuccessCode(status)) {
++            resolve(this._content.join(""));
++          } else {
++            reject(new Error(`Error reading message <${msgUri}>: ${status}`));
++          }
++        },
++        // @implements {nsIStreamListener}
++        onDataAvailable(request, inputStream, offset, count) {
++          if (!this._inputStream) {
++            this._inputStream = Cc[
++              "@mozilla.org/scriptableinputstream;1"
++            ].createInstance(Ci.nsIScriptableInputStream);
++            this._inputStream.init(inputStream);
++          }
++          this._content.push(this._inputStream.read(count));
++        },
++        QueryInterface: ChromeUtils.generateQI(["nsIStreamListener"]),
++      };
++
++      this.#messageService.streamMessage(
++        msgUri,
++        consumer, // nsISupports
++        null, // nsIMsgWindow
++        null, // nsIUrlListener
++        false, // aConvertData
++        "" // aAdditionalHeader
++      );
++    });
++  }
++
++  async #replaceChanges() {
++    this.log.debug(
++      "#replaceChanges: START flags:keys - " +
++        this.origMsgHdrFlags +
++        ":" +
++        this.origMsgHdrKeywords
++    );
++
++    const folder = this.origMsgHdr.folder;
++    if (folder.locked) {
++      this.#onError(
++        "#replaceChanges: folder is busy, try again later - " + folder.name
++      );
++      return;
++    }
++
++    // Note: Bug 1737203.
++    if (!folder.databaseOpen) {
++      this.log.debug("#replaceChanges: open folder database");
++      try {
++        Cc["@mozilla.org/msgDatabase/msgDBService;1"]
++          .getService(Ci.nsIMsgDBService)
++          .openFolderDB(folder, true);
++      } catch (ex) {
++        this.#onError(
++          "#replaceChanges: failed to open folder database - " + ex
++        );
++        return;
++      }
++    }
++
++    if (!this.#isMsgEditable) {
++      this.#onError(
++        "#replaceChanges: cannot delete or add messages to this folder - " +
++          folder.name
++      );
++      return;
++    }
++
++    // Write the new message to tmpFile.
++    const tmpFile = await IOUtils.getFile(
++      PathUtils.join(PathUtils.tempDir, this.#TMP_FILENAME)
++    );
++    const success = await IOUtils.write(
++      tmpFile.path,
++      lazy.MailStringUtils.byteStringToUint8Array(this.newMessage)
++    )
++      .then(() => {
++        this.log.debug("#replaceChanges: wrote to tmpFile - " + tmpFile.path);
++        return true;
++      })
++      .catch(error => {
++        this.#onError("#replaceChanges: file write error - " + error);
++        this.#removeTmpFile(tmpFile);
++        return false;
++      })
++      .finally(() => {
++        delete this.newMessage;
++        this.log.debug("#replaceChanges: newMessage? - " + this.newMessage);
++      });
++
++    if (!success) {
++      return;
++    }
++
++    if (!tmpFile.exists()) {
++      this.#onError("#replaceChanges: cannot find tmpFile - " + tmpFile.path);
++      return;
++    }
++
++    // Replace current message with the new message temp .eml file;
++    // args are for a single message delete/copyFile transaction.
++    const args = {
++      deleteStorage: !this.#backupToTrash,
++      msgWindow: this.#msgWindow,
++      folder,
++      isIMAP: folder.flags & Ci.nsMsgFolderFlags.ImapBox,
++      msgHdrToReplace: null,
++      flags: this.origMsgHdrFlags,
++      keywords: this.origMsgHdrKeywords,
++      tmpFile,
++    };
++
++    this.#deleteMessages(args);
++  }
++
++  #deleteMessages(args) {
++    const log = this.log;
++    log.debug("#deleteMessages: START ");
++    // Set up delete.
++    // For non IMAP folders with deleteStorage=true (do not move to trash), or
++    // maildir folders, there is no onStopCopy notification upon delete.
++    // For IMAP folders with deleteStorage=true, the notification is sent.
++    // For IMAP we no longer implement nsIUrlListener (on[Start|Stop]RunningUrl
++    // notices) post Bug 1941332.
++    // IMAP handles deletes per account prefs.
++    // TODO: temporarily change account delete model pref to MoveToTrash
++    // to handle the delete per deleteStorage preference. If MarkDeleted or
++    // RemoveImmediately are selected, results are not correct; there
++    // are longstanding core Bug 399475 and Bug 370509 on delete model
++    // handling. Also Bug 651945 for gmail.
++    let doAutoCopy =
++      (args.deleteStorage && !args.isIMAP) ||
++      args.folder.msgStore.storeType == "maildir";
++
++    const deleteListener = {
++      // @implements {nsIMsgCopyServiceListener}
++      onStartCopy() {
++        log.debug("deleteListener.onStartCopy");
++      },
++      onProgress(_progress, _progressMax) {},
++      setMessageKey(key) {
++        log.debug("deleteListener.setMessageKey - " + key);
++      },
++      getMessageId(_messageId) {
++        return null;
++      },
++      onStopCopy(status) {
++        if (status != Cr.NS_OK) {
++          log.warn("deleteListener.onStopCopy: error - " + status);
++        }
++        log.debug(
++          `deleteListener.onStopCopy - ` +
++            (args.isIMAP ? "IMAP, " : "") +
++            `status ${status}`
++        );
++        success();
++      },
++      QueryInterface: ChromeUtils.generateQI([
++        Ci.nsISupports,
++        Ci.nsIMsgCopyServiceListener,
++      ]),
++    };
++
++    const success = () => {
++      this.#copyFileMessage(args);
++    };
++
++    // Do the delete before the copy. If there is an error here, continue, as
++    // we still want to import the new message from tmpFile.
++    try {
++      args.folder.deleteMessages(
++        [this.origMsgHdr],
++        args.msgWindow,
++        args.deleteStorage,
++        true, // isMove
++        deleteListener,
++        false // allowUndo
++      );
++    } catch (ex) {
++      doAutoCopy = true;
++      this.log.warn("#deleteMessages: error - " + ex);
++    }
++
++    if (doAutoCopy) {
++      log.debug("#deleteMessages: auto #copyFileMessage");
++      this.#copyFileMessage(args);
++    }
++  }
++
++  #copyFileMessage(args) {
++    const log = this.log;
++    log.debug("#copyFileMessage: START ");
++    const copyServiceListener = {
++      newMsgKey: null,
++      // @implements {nsIMsgCopyServiceListener}
++      onStartCopy() {
++        log.debug("copyServiceListener.onStartCopy");
++      },
++      onProgress(_progress, _progressMax) {},
++      setMessageKey(key) {
++        log.debug("copyServiceListener.setMessageKey: " + key);
++        this.newMsgKey = key;
++      },
++      getMessageId(_messageId) {
++        return null;
++      },
++      onStopCopy(status) {
++        if (status != 0) {
++          error("copyServiceListener.onStopCopy: error status - " + status);
++          return;
++        }
++        log.debug(
++          `copyServiceListener.onStopCopy - ` +
++            (args.isIMAP ? "IMAP, " : "") +
++            `status ${status}`
++        );
++        success(this.newMsgKey);
++      },
++      QueryInterface: ChromeUtils.generateQI([
++        Ci.nsISupports,
++        Ci.nsIMsgCopyServiceListener,
++      ]),
++    };
++
++    const success = newMsgKey => {
++      this.#onSuccess(newMsgKey);
++      this.#removeTmpFile(args.tmpFile);
++    };
++
++    const error = status => {
++      this.#onError(status);
++      this.#removeTmpFile(args.tmpFile);
++    };
++
++    try {
++      lazy.MailServices.copy.copyFileMessage(
++        args.tmpFile,
++        args.folder,
++        args.msgHdrToReplace,
++        false, // isDraftOrTemplate
++        args.flags,
++        args.keywords,
++        copyServiceListener,
++        args.msgWindow
++      );
++    } catch (ex) {
++      this.#onError("#copyFileMessage: error - " + ex);
++    }
++  }
++
++  async #removeTmpFile(file) {
++    try {
++      await IOUtils.remove(file.path);
++    } catch (ex) {
++      // Don't throw here, a quiet message is enough.
++    }
++    if (file.exists()) {
++      this.log.debug(
++        "#removeTmpFile: failed; remove on shutdown - " + file.path
++      );
++      const extAppLauncher = Cc[
++        "@mozilla.org/uriloader/external-helper-app-service;1"
++      ].getService(Ci.nsPIExternalAppLauncher);
++      extAppLauncher.deleteTemporaryFileOnExit(file);
++    }
++  }
++
++  async #onSuccess(newMsgKey) {
++    this.log.debug("#onSuccess: newMsgKey - " + newMsgKey);
++    this.log.debug(
++      "#onSuccess: origMsgHdr messageKey:flags:keywords - " +
++        this.origMsgHdr.messageKey +
++        ":" +
++        this.origMsgHdrFlags +
++        ":" +
++        this.origMsgHdrKeywords
++    );
++
++    if (newMsgKey === false) {
++      // Case of no change.
++      this.#successFn(false);
++      return;
++    }
++
++    let newMsgHdr;
++    try {
++      newMsgHdr = this.origMsgHdr.folder.GetMessageHeader(newMsgKey);
++
++      this.log.debug(
++        "#onSuccess: newMsgHdr  messageKey:flags:keywords - " +
++          newMsgHdr.messageKey +
++          ":" +
++          newMsgHdr.flags +
++          ":" +
++          newMsgHdr.getStringProperty("keywords")
++      );
++    } catch (ex) {
++      this.#onError(
++        `#onSuccess: could not get msgHdr from messageKey: ${newMsgKey} - ` + ex
++      );
++      return;
++    }
++
++    // For imap, copyFileMessage() is a fail for tags, so add them now.
++    if (
++      this.origMsgHdrKeywords &&
++      this.origMsgHdr.folder.flags & Ci.nsMsgFolderFlags.ImapBox
++    ) {
++      this.log.debug("#onSuccess: IMAP tags - " + this.origMsgHdrKeywords);
++      this.origMsgHdr.folder.addKeywordsToMessages(
++        [newMsgHdr],
++        this.origMsgHdrKeywords
++      );
++    }
++
++    const newMessageURI = newMsgHdr.folder.getUriForMsg(newMsgHdr);
++    const oldMessageURI = this.#messageURI;
++
++    // Initialize this object again with the new message. This will allow
++    // repeated operations on an updated message.
++    this.#initialize(newMessageURI);
++    await this.#getMessageDeferred.promise;
++
++    this.#successFn(newMsgHdr);
++
++    this.log.debug("#onSuccess: oldMessageURI - " + oldMessageURI);
++    this.log.debug("#onSuccess: newMessageURI - " + newMessageURI);
++
++    // And update all other places with the new message.
++    Services.obs.notifyObservers(
++      { oldMessageURI, newMessageURI },
++      "message-replaced"
++    );
++  }
++
++  #onError(error) {
++    this.log.error("#onError: error - " + (error ?? "logged to console"));
++    this.#errorFn(error);
++  }
++}
+diff --git a/mail/modules/moz.build b/mail/modules/moz.build
+--- a/mail/modules/moz.build
++++ b/mail/modules/moz.build
+@@ -26,8 +26,9 @@ EXTRA_JS_MODULES += [
+     "MailUsageTelemetry.sys.mjs",
+     "MailUtils.sys.mjs",
+     "MailViewManager.sys.mjs",
+     "MessageArchiver.sys.mjs",
++    "MessageEditor.sys.mjs",
+     "PhishingDetector.sys.mjs",
+     "PluralForm.sys.mjs",
+     "QRExport.sys.mjs",
+     "QuickFilterManager.sys.mjs",
+diff --git a/mail/themes/shared/mail/threadPane.css b/mail/themes/shared/mail/threadPane.css
+--- a/mail/themes/shared/mail/threadPane.css
++++ b/mail/themes/shared/mail/threadPane.css
+@@ -222,8 +222,20 @@ tr[data-properties~="tagged"] .tag-icon:
+     }
+   }
+ }
+ 
++.table-layout.drag-source {
++  background-color: var(--listbox-hover) !important;
++  color: currentColor !important;
++  outline: 2px dotted var(--color-orange-70) !important;
++  outline-offset: -2px;
++}
++
++.table-layout.drop-target {
++  background-color: var(--treeitem-background-active);
++  color: var(--treeitem-text-active);
++}
++
+ /* Thread column */
+ 
+ .tree-view-header-thread img {
+   content: var(--icon-thread-sm);

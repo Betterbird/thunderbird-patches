@@ -1,0 +1,540 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1713304583 -7200
+# Parent  8589204192929b6462805b3f68aa0402919c2390
+Selected header editor, depends on MessageEditor class.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+The Edit Headers menuitem is found in the message toolbar More Actions menu.
+* * *
+Remove documentFragment.
+* * *
+30-feature-editHeaders-UPDATE.patch
+
+1. Threadpane contextmenu for Edit Headers.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -731,8 +731,13 @@ pref("font.name-list.monospace.el", "mon
+ 
+ pref("mail.setup.loglevel", "Warn");
+ 
+ // Message Editor/Rethreading.
++// Editable headers. Formatted in Train-Case for display purposes to
++// accomodate header names that are not among the common localizable ones.
++// The default may be changed, eg: '["Date","From","In-Reply-To"]' and adding
++// a "*" anywhere will list all headers in the message.
++pref("mail.messageEditor.editableHeaders", '["Subject"]');
+ // By default, don't place the original message in the Trash folder.
+ pref("mail.messageEditor.backupToTrash", false);
+ pref("mail.messageEditor.loglevel", "Warn");
+ 
+diff --git a/mail/base/content/mailContext.inc.xhtml b/mail/base/content/mailContext.inc.xhtml
+--- a/mail/base/content/mailContext.inc.xhtml
++++ b/mail/base/content/mailContext.inc.xhtml
+@@ -186,8 +186,12 @@
+     <menuitem id="mailContext-editAsNew"
+               class="menuitem-iconic"
+               label="&contextEditMsgAsNew.label;"
+               accesskey="&contextEditMsgAsNew.accesskey;"/>
++    <menuitem id="mailContext-editHeaders"
++              class="menuitem-iconic"
++              data-l10n-id="other-action-msg-edit-headers"
++              data-l10n-attrs="accesskey"/>
+     <menuseparator/>
+ 
+     <menuitem id="mailContext-moveToFolderAgain"
+               class="menuitem-iconic"
+diff --git a/mail/base/content/mailContext.js b/mail/base/content/mailContext.js
+--- a/mail/base/content/mailContext.js
++++ b/mail/base/content/mailContext.js
+@@ -404,8 +404,14 @@ var mailContextMenu = {
+         numSelectedMessages &&
+         commandController.isCommandEnabled("cmd_forwardAttachment")
+     );
+ 
++    setSingleSelection("mailContext-editHeaders", message);
++    enableItem(
++      "mailContext-editHeaders",
++      inAbout3Pane && !gViewWrapper.isSynthetic
++    );
++
+     if (isDummyMessage || onSpecialItem) {
+       showItem("mailContext-tags", false);
+     } else {
+       showItem("mailContext-tags", true);
+@@ -704,8 +710,15 @@ var mailContextMenu = {
+           false
+         );
+         break;
+ 
++      // Edit message headers
++      case "mailContext-editHeaders":
++        messageBrowser.contentWindow.MsgEditHeaders(
++          !this.selectionIsOverridden
++        );
++        break;
++
+       // Message threading
+       case "mailContext-unthreadMessage":
+         window.threadPane.doUpdateThreading(
+           "unthread",
+diff --git a/mail/base/content/msgHdrView.inc.xhtml b/mail/base/content/msgHdrView.inc.xhtml
+--- a/mail/base/content/msgHdrView.inc.xhtml
++++ b/mail/base/content/msgHdrView.inc.xhtml
+@@ -197,8 +197,12 @@
+                     class="menuitem-iconic"
+                     label="&markAsUnreadMenuItem1.label;"
+                     accesskey="&markAsUnreadMenuItem1.accesskey;"
+                     oncommand="MsgMarkMsgAsRead();"/>
++          <menuitem id="editHeadersMenuItem"
++                    class="menuitem-iconic"
++                    data-l10n-id="other-action-msg-edit-headers"
++                    oncommand="MsgEditHeaders();"/>
+           <menuitem id="saveAsMenuItem"
+                     class="menuitem-iconic"
+                     label="&saveAsMenuItem1.label;"
+                     accesskey="&saveAsMenuItem1.accesskey;"
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -2579,8 +2579,19 @@ function onShowOtherActionsPopup() {
+ 
+   document.getElementById("otherActions-calendar-convert-menu").hidden =
+     isDummyMessage || !calendarDeactivator.isCalendarActivated;
+ 
++  document.getElementById("editHeadersMenuItem").disabled =
++    isDummyMessage ||
++    window.parent.document.URL != "about:3pane" ||
++    gViewWrapper.isSynthetic ||
++    !gFolder ||
++    !gFolder.canFileMessages ||
++    !gFolder.canDeleteMessages ||
++    !window.parent.threadPane.isValidIndex(
++      window.parent.threadTree.selectedIndex
++    );
++
+   // Check if the current message is feed or not.
+   const isFeed = FeedUtils.isFeedMessage(gMessage);
+   document.getElementById("otherActionsMessageBodyAs").hidden = isFeed;
+   document.getElementById("otherActionsFeedBodyAs").hidden = !isFeed;
+@@ -3760,8 +3771,46 @@ function MsgMarkAsFlagged() {
+   MarkSelectedMessagesFlagged(!SelectedMessagesAreFlagged());
+ }
+ 
+ /**
++ * Edit selected headers.
++ *
++ * Not supported for a message in standalone window or tab, nor in a
++ * gloda results list (without gFolder no message added notice is received).
++ *
++ * TODO: it would be reasonable to support standalone messages.
++ *
++ * @param {boolean} messageIsDisplayed - If true, the message is selected and
++ *  loaded; otherwise there is no selection or the selection is different
++ *  from the loaded message (as when using the threadpane contextmenu).
++ */
++function MsgEditHeaders(messageIsDisplayed) {
++  const msgWindow = top.msgWindow;
++  const selectedIndex = window.parent.threadTree.selectedIndex;
++  const restoreIndex = messageIsDisplayed ? selectedIndex : -1;
++  const messageURI = messageIsDisplayed
++    ? gMessageURI
++    : window.parent.gViewWrapper.dbView.getURIForViewIndex(selectedIndex);
++
++  if (!messageURI) {
++    return;
++  }
++
++  // In 3pane, we want the threadpane state restored post update/replace.
++  const [successFn, errorFn] =
++    window.parent.threadPane.saveStateForMessageReplaceAtIndex(restoreIndex);
++
++  const messageEditor = new window.parent.MessageEditor({
++    messageURI,
++    msgWindow,
++    successFn,
++    errorFn,
++  });
++
++  messageEditor.updateHeadersWithDialog();
++}
++
++/**
+  * Extract email data and prefill the event/task dialog with that data.
+  *
+  * @param {boolean} [isTask=false]
+  */
+diff --git a/mail/locales/en-US/messenger/messenger.ftl b/mail/locales/en-US/messenger/messenger.ftl
+--- a/mail/locales/en-US/messenger/messenger.ftl
++++ b/mail/locales/en-US/messenger/messenger.ftl
+@@ -319,8 +319,12 @@ context-menu-decrypt-to-folder2 =
+ 
+ other-action-redirect-msg =
+     .label = Redirect
+ 
++other-action-msg-edit-headers =
++    .label = Edit Headers…
++    .accesskey = H
++
+ message-header-msg-flagged =
+     .title = Starred
+     .aria-label = Starred
+ 
+@@ -383,8 +387,19 @@ message-header-all-headers =
+ message-header-dark-message-toggle =
+     .label = Show the dark message mode toggle
+     .accesskey = d
+ 
++## Edit Headers dialog
++
++msg-edit-dialog-title = Edit Headers
++
++msg-edit-cancel-button = Cancel
++
++msg-edit-restore-button = Restore
++    .title = Show the original value
++
++msg-edit-update-button = Update
++
+ ## Action Button Context Menu
+ 
+ toolbar-context-menu-manage-extension =
+     .label = Manage Extension
+diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys.mjs
+--- a/mail/modules/MessageEditor.sys.mjs
++++ b/mail/modules/MessageEditor.sys.mjs
+@@ -3,8 +3,10 @@
+  * for license details.
+  * All uses require attribution to the Author.
+  * Redistributions of source code must retain the above copyright. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   MailServices: "resource:///modules/MailServices.sys.mjs",
+   MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
+@@ -68,8 +70,15 @@ export class MessageEditor {
+    */
+   #getMessageDeferred = {};
+ 
+   /**
++   * Reference to the dialog.
++   *
++   * @type {DOMNode}
++   */
++  #headerEditorDialog = null;
++
++  /**
+    * Create a new MessageEditor object.
+    *
+    * @param {object} options
+    * @param {string} options.messageURI - The to be edited message's URI.
+@@ -1172,8 +1181,284 @@ export class MessageEditor {
+       extAppLauncher.deleteTemporaryFileOnExit(file);
+     }
+   }
+ 
++  /*
++   * Create the <dialog> to accept a header value update.
++   * Note: we could also use a template or even a custom element.
++   */
++  #createHeaderEditorDialog(winDoc) {
++    const dialog = winDoc.createElement("dialog");
++    dialog.id = "headerEditorDialog";
++    dialog.style.borderWidth = "1px";
++    dialog.style.borderColor = "var(--arrowpanel-border-color)";
++    dialog.style.paddingBlock = 0;
++
++    const title = winDoc.createElement("div");
++    title.id = "dialogTitle";
++    title.style.display = "flex";
++    title.style.justifyContent = "center";
++    title.style.marginBlock = "6px";
++    title.style.fontSize = "1.1em";
++    title.style.fontWeight = "bold";
++    // "Edit"
++    winDoc.l10n.setAttributes(title, "msg-edit-dialog-title");
++    dialog.appendChild(title);
++
++    const div = winDoc.createElement("div");
++    div.id = "dialogContainer";
++    div.style.display = "flex";
++
++    const select = winDoc.createElement("select");
++    select.id = "headerSelect";
++    select.name = "headerSelectName";
++    select.style.fontSize = "inherit";
++    select.style.alignSelf = "flex-start";
++    select.style.maxWidth = "120px";
++    select.style.marginBlock = "0";
++    select.style.textOverflow = "ellipsis";
++    const onSelect = () => {
++      const selectedOption = select.selectedOptions[0];
++      const origHeaderValue = selectedOption.getAttribute("origHeaderValue");
++      const curHeaderValue = selectedOption.getAttribute("curHeaderValue");
++      select.title = selectedOption.textContent;
++      textarea.value = curHeaderValue;
++      textarea.setAttribute("curHeaderValue", curHeaderValue);
++      textarea.setAttribute("origHeaderValue", origHeaderValue);
++      textarea.rows = Math.max(
++        Math.ceil(curHeaderValue.length / textarea.cols),
++        Math.min(textarea.rows, 10)
++      );
++      updateButtons();
++    };
++    select.addEventListener("change", onSelect);
++    div.appendChild(select);
++
++    const textarea = winDoc.createElement("textarea");
++    textarea.id = "headerValue";
++    textarea.cols = 30;
++    textarea.rows = 1;
++    textarea.style.marginInlineStart = "4px";
++    textarea.style.padding = "6px";
++    textarea.style.lineHeight = "1.2";
++    textarea.style.marginBlock = "0";
++    textarea.addEventListener("input", () => {
++      updateButtons();
++    });
++    div.appendChild(textarea);
++    dialog.appendChild(div);
++
++    const buttons = winDoc.createElement("menu");
++    buttons.classList.add("dialog-button-box");
++    buttons.style.display = "flex";
++    buttons.style.justifyContent = "end";
++
++    const cancelButton = winDoc.createElement("button");
++    cancelButton.id = "cancelButton";
++    cancelButton.style.order = AppConstants.platform == "win" ? "2" : "";
++    // "Cancel"
++    winDoc.l10n.setAttributes(cancelButton, "msg-edit-cancel-button");
++    cancelButton.addEventListener("click", () => {
++      this.#headerEditorDialog.close("cancel");
++    });
++    buttons.appendChild(cancelButton);
++
++    const restoreButton = winDoc.createElement("button");
++    restoreButton.id = "restoreButton";
++    restoreButton.style.order = AppConstants.platform == "win" ? "1" : "";
++    // "Restore"
++    winDoc.l10n.setAttributes(restoreButton, "msg-edit-restore-button");
++    const onRestore = () => {
++      textarea.value = textarea.getAttribute("origHeaderValue");
++      updateButtons();
++    };
++    restoreButton.addEventListener("click", onRestore);
++    buttons.appendChild(restoreButton);
++
++    const updateButton = winDoc.createElement("button");
++    updateButton.id = "updateButton";
++    // "Update"
++    winDoc.l10n.setAttributes(updateButton, "msg-edit-update-button");
++    const onUpdate = () => {
++      const selectedOption = select.selectedOptions[0];
++      const headerName = selectedOption.value;
++      const headerLineIndex = selectedOption.headerLineIndex;
++      this.log.debug(
++        "onupdate: headerName:headerLineIndex:value - " +
++          headerName +
++          ":" +
++          headerLineIndex +
++          ":" +
++          textarea.value
++      );
++      if (
++        textarea.value.replace(/\r/g, "") ==
++        textarea.getAttribute("origHeaderValue").replace(/\r/g, "")
++      ) {
++        this.restoreHeaderValue(headerName, headerLineIndex);
++      } else {
++        this.updateHeaderValue(headerName, headerLineIndex, textarea.value);
++      }
++    };
++    updateButton.addEventListener("click", onUpdate);
++    buttons.appendChild(updateButton);
++    dialog.appendChild(buttons);
++
++    const updateButtons = () => {
++      updateButton.disabled =
++        textarea.value.replace(/\r/g, "") ==
++        textarea.getAttribute("curHeaderValue").replace(/\r/g, "");
++      restoreButton.disabled =
++        textarea.value.replace(/\r/g, "") ==
++        textarea.getAttribute("origHeaderValue").replace(/\r/g, "");
++      textarea.focus();
++    };
++
++    winDoc.documentElement.append(dialog);
++    return dialog;
++  }
++
++  /*
++   * Init the <select>  with headers.
++   *
++   * @param {HTMLSelectElement} select - The <select> node.
++   * @param {Document} winDoc - The document context.
++   */
++  #initHeadersList(select, winDoc) {
++    const l10n = new DOMLocalization(
++      ["messenger/messageheader/headerFields.ftl"],
++      true
++    );
++    const lineIndexCount = {};
++    this.log.debug(this.#EDITABLE_HEADERS);
++
++    select.replaceChildren();
++    select.selectedIndex = -1;
++    for (const headerName of this.#EDITABLE_HEADERS) {
++      const headerNameLC = headerName.toLowerCase();
++      lineIndexCount[headerNameLC] ??= -1;
++      lineIndexCount[headerNameLC]++;
++      const option = winDoc.createElement("option");
++      option.value = headerNameLC;
++      let label;
++      try {
++        label = l10n.formatValueSync(`message-header-${headerNameLC}-field`);
++        label = label
++          ? label.split("<")[0]
++          : l10n.formatValueSync(`message-header-${headerNameLC}-list-name`);
++      } catch (ex) {}
++      label = label ?? headerName;
++      option.textContent = label;
++      option.headerLineIndex = lineIndexCount[headerNameLC];
++
++      const curHeaderValue = this.getHeaderValue(
++        this.getHeaderLines(headerNameLC)[option.headerLineIndex],
++        headerNameLC
++      );
++      option.setAttribute("curHeaderValue", curHeaderValue ?? "");
++
++      const origHeaderLineIndexStr = option.headerLineIndex
++        ? "_" + (option.headerLineIndex + 1)
++        : "";
++      const origHeaderName =
++        this.#ORIGINAL + headerName + origHeaderLineIndexStr;
++      const origHeaderNameLC = origHeaderName.toLowerCase();
++      const origHeaderValue =
++        this.getHeaderValue(
++          this.getHeaderLines(origHeaderNameLC)[0],
++          origHeaderNameLC
++        ) ?? curHeaderValue;
++      option.setAttribute("origHeaderValue", origHeaderValue ?? "");
++
++      // The header doesn't exist.
++      option.disabled = curHeaderValue === null;
++
++      select.appendChild(option);
++      this.log.debug(
++        "#initHeadersList: " +
++          "headerName:headerNameLC:headerLineIndex:origHeaderNameLC - " +
++          headerName +
++          ":" +
++          headerNameLC +
++          ":" +
++          option.headerLineIndex +
++          ":" +
++          origHeaderNameLC
++      );
++    }
++  }
++
++  /*
++   * Initialize, and create if necessary, a <dialog> to accept a header value
++   * update.
++   */
++  #initHeaderEditorDialog() {
++    this.log.debug("initHeaderEditorDialog: START");
++    const about3Pane = this.#msgWindow.domWindow.gTabmail?.currentAbout3Pane;
++    if (!about3Pane) {
++      this.log.debug("initHeaderEditorDialog: 3Pane window not found");
++      return null;
++    }
++    const winDoc = about3Pane.document;
++    const headerEditorDialog = this.#createHeaderEditorDialog(winDoc);
++
++    const select = headerEditorDialog.querySelector("#headerSelect");
++    if (this.#EDITABLE_HEADERS.includes("*")) {
++      this.#EDITABLE_HEADERS.shift();
++    }
++    this.#initHeadersList(select, winDoc);
++    select.selectedIndex = select.querySelector("[value='subject']")?.index;
++    select.dispatchEvent(new Event("change"));
++
++    const textarea = headerEditorDialog.querySelector("#headerValue");
++    this.#msgWindow.domWindow.setTimeout(() => textarea.focus(), 50);
++
++    // Override #successFn to close the dialog on update.
++    const successFn = this.#successFn;
++    this.#successFn = newMsgHdr => {
++      this.log.debug(
++        "updateHeadersWithDialog.successFn: newMsgHdr.key - " +
++          newMsgHdr.messageKey
++      );
++      this.#headerEditorDialog.close("success");
++      successFn(newMsgHdr);
++    };
++
++    const errorFn = this.#errorFn;
++    this.#errorFn = error => {
++      this.log.debug("updateHeadersWithDialog.errorFn: " + error);
++      // Display an error in the dialog?
++      this.#headerEditorDialog.close("error");
++      errorFn(error);
++    };
++
++    headerEditorDialog.returnValue = "";
++    const onClose = () => {
++      if (headerEditorDialog.returnValue != "success") {
++        // On cancel or ESC, restore the view state by calling successFn in
++        // no change mode. The caller will have set this up if necessary.
++        successFn(false);
++      }
++      this.#headerEditorDialog.remove();
++      this.#headerEditorDialog = null;
++      this.log.debug("onclose: closed - " + headerEditorDialog.returnValue);
++    };
++    headerEditorDialog.addEventListener("close", onClose);
++
++    return headerEditorDialog;
++  }
++
++  async updateHeadersWithDialog() {
++    await this.#getMessageDeferred.promise;
++
++    this.#headerEditorDialog = this.#initHeaderEditorDialog();
++    if (this.#headerEditorDialog) {
++      this.#headerEditorDialog.showModal();
++    } else {
++      this.#onError("updateHeadersWithDialog: failed to initialize dialog");
++    }
++  }
++
+   async #onSuccess(newMsgKey) {
+     this.log.debug("#onSuccess: newMsgKey - " + newMsgKey);
+     this.log.debug(
+       "#onSuccess: origMsgHdr messageKey:flags:keywords - " +
+diff --git a/mail/themes/shared/mail/messenger.css b/mail/themes/shared/mail/messenger.css
+--- a/mail/themes/shared/mail/messenger.css
++++ b/mail/themes/shared/mail/messenger.css
+@@ -574,8 +574,14 @@ html|input[type="color"] {
+   padding: 0 4px;
+   box-shadow: none;
+ }
+ 
++html|button:is([disabled]),
++html|input[type="color"]:is([disabled]) {
++  color: GrayText;
++  background-color: -moz-ButtonDisabledFace;
++}
++
+ xul|button:is(:not([disabled="true"])):hover,
+ html|button:is(:not([disabled])):hover {
+   border-color: var(--button-border-color);
+   background-color: var(--button-hover-background-color);

@@ -1,0 +1,2240 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740081430 25200
+# Parent  8d63b2b518262031b32847d5a5934006fc5ae0ae
+Fix feed vandalization - make logging useful again
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -40,9 +40,9 @@ var FeedCache = {
+       let normalizedUrl = Services.io.newURI(aUrl);
+       const newHost = normalizedUrl.host.toLowerCase();
+       normalizedUrl = normalizedUrl.mutate().setHost(newHost).finalize();
+       return normalizedUrl.spec;
+-    } catch (ex) {
++    } catch (exception) {
+       return aUrl;
+     }
+   },
+ };
+@@ -113,25 +113,31 @@ Feed.prototype = {
+       true
+     ));
+   },
+ 
++  addLog(level, message) {
++    if (!this.logStack) {
++      this.logStack = [];
++    }
++    this.logStack.push([level, message]);
++  },
++
+   download(aParseItems, aCallback) {
+     // May be null.
+     this.downloadCallback = aCallback;
+ 
+     // Whether or not to parse items when downloading and parsing the feed.
+     // Defaults to true, but setting to false is useful for obtaining
+     // just the title of the feed when the user subscribes to it.
+     this.parseItems = aParseItems == null || aParseItems;
++    this.addLog("log", `download: parseItems ${this.parseItems}`);
+ 
+     // Before we do anything, make sure the url is an http url.  This is just
+     // a sanity check so we don't try opening mailto urls, imap urls, etc. that
+     // the user may have tried to subscribe to as an rss feed.
+     if (!lazy.FeedUtils.isValidScheme(this.url)) {
+       // Simulate an invalid feed error.
+-      lazy.FeedUtils.log.info(
+-        "Feed.download: invalid protocol for - " + this.url
+-      );
++      this.addLog("log", `download: invalid protocol for ${this.url}`);
+       this.onParseError(this);
+       return;
+     }
+ 
+@@ -205,21 +211,17 @@ Feed.prototype = {
+       Feed.prototype.onDownloadError(aEvent);
+       return;
+     }
+ 
+-    lazy.FeedUtils.log.debug(
+-      "Feed.onDownloaded: got a download, fileSize:url - " +
+-        aEvent.loaded +
+-        " : " +
+-        url
+-    );
+     const feed = FeedCache.getFeed(url);
+     if (!feed) {
+       throw new Error(
+-        "Feed.onDownloaded: error - couldn't retrieve feed from cache"
++        "onDownloaded: error - couldn't retrieve feed from cache"
+       );
+     }
+ 
++    feed.addLog("log", `onDownloaded: download fileSize ${aEvent.loaded}`);
++
+     // If the server sends a Last-Modified header, store the property on the
+     // feed so we can use it when making future requests, to avoid downloading
+     // and parsing feeds that have not changed.  Don't update if merely checking
+     // the url, as for subscribe move/copy, as a subsequent refresh may get a 304.
+@@ -266,15 +268,11 @@ Feed.prototype = {
+         error = lazy.FeedUtils.kNewsBlogNoNewItems;
+       } else {
+         const [errType, errName] =
+           lazy.FeedUtils.createTCPErrorFromFailedXHR(request);
+-        lazy.FeedUtils.log.info(
+-          "Feed.onDownloaded: request errType:errName:statusCode - " +
+-            errType +
+-            ":" +
+-            errName +
+-            ":" +
+-            request.status
++        feed.addLog(
++          "log",
++          `onDownloadError: request errType ${errType}, errName ${errName}, statusCode ${request.status}`
+         );
+         if (errType == "SecurityCertificate") {
+           // This is the code for nsINSSErrorsService.ERROR_CLASS_BAD_CERT
+           // overridable security certificate errors.
+@@ -335,23 +333,20 @@ Feed.prototype = {
+   // nsIUrlListener methods for getDatabaseWithReparse().
+   OnStartRunningUrl() {},
+   OnStopRunningUrl(aUrl, aExitCode) {
+     if (Components.isSuccessCode(aExitCode)) {
+-      lazy.FeedUtils.log.debug(
+-        "Feed.OnStopRunningUrl: rebuilt msgDatabase for " +
+-          this.folder.name +
+-          " - " +
+-          this.folder.filePath.path
++      this.addLog(
++        "log",
++        `OnStopRunningUrl: rebuilt msgDatabase for ${lazy.FeedUtils.getFolderPrettyPath(
++          this.folder
++        )}`
+       );
+     } else {
+-      lazy.FeedUtils.log.error(
+-        "Feed.OnStopRunningUrl: rebuild msgDatabase failed, " +
+-          "error " +
+-          aExitCode +
+-          ", for " +
+-          this.folder.name +
+-          " - " +
+-          this.folder.filePath.path
++      this.addLog(
++        "error",
++        `OnStopRunningUrl: rebuild msgDatabase failed, error ${aExitCode}, for ${lazy.FeedUtils.getFolderPrettyPath(
++          this.folder
++        )}`
+       );
+     }
+     // Continue.
+     this.storeNextItem();
+@@ -471,8 +466,10 @@ Feed.prototype = {
+ 
+     this.itemsToStoreIndex = 0;
+     this.itemsStored = 0;
+ 
++    this.addLog("groupCollapsed", `parse: store parsed items`);
++
+     // At this point, if we have items to potentially store and an existing
+     // folder, ensure the folder's msgDatabase is openable for new message
+     // processing. If not, reparse with an async nsIUrlListener |this| to
+     // continue once the reparse is complete.
+@@ -495,15 +492,17 @@ Feed.prototype = {
+    * @returns {void}
+    */
+   invalidateItems() {
+     const ds = lazy.FeedUtils.getItemsDS(this.server);
++    this.addLog("groupCollapsed", `invalidateItems: for feed ${this.url}`);
+     for (const id in ds.data) {
+       const item = ds.data[id];
+       if (item.feedURLs.includes(this.url)) {
+         item.valid = false;
+-        lazy.FeedUtils.log.trace("Feed.invalidateItems: item - " + id);
++        this.addLog("debug", `invalidateItems: item ${id}`);
+       }
+     }
++    this.addLog("groupEnd", `invalidateItems: for feed ${this.url}`);
+     ds.saveSoon();
+   },
+ 
+   /**
+@@ -516,10 +515,10 @@ Feed.prototype = {
+    * @returns {void}
+    */
+   removeInvalidItems(aDeleteFeed) {
+     const ds = lazy.FeedUtils.getItemsDS(this.server);
+-    lazy.FeedUtils.log.debug("Feed.removeInvalidItems: for url - " + this.url);
+-
++    let removed = 0;
++    this.addLog("groupCollapsed", `removeInvalidItems: for feed ${this.url}`);
+     const currentTime = new Date().getTime();
+     for (const id in ds.data) {
+       const item = ds.data[id];
+       // skip valid items and ones not part of this feed.
+@@ -535,22 +534,23 @@ Feed.prototype = {
+         // Don't immediately purge items in active feeds; do so for deleted feeds.
+         continue;
+       }
+ 
+-      lazy.FeedUtils.log.trace("Feed.removeInvalidItems: item - " + id);
++      this.addLog("debug", `removeInvalidItems: item ${id}`);
+       // Detach the item from this feed (it could be shared by multiple feeds).
+       item.feedURLs = item.feedURLs.filter(url => url != this.url);
+       if (item.feedURLs.length > 0) {
+-        lazy.FeedUtils.log.debug(
+-          "Feed.removeInvalidItems: " +
+-            id +
+-            " is from more than one feed; only the reference to" +
+-            " this feed removed"
++        this.addLog(
++          "debug",
++          `removeInvalidItems: ${id} is from more than one feed; only the reference to this feed is removed`
+         );
+       } else {
+         delete ds.data[id];
++        removed++;
+       }
+     }
++    this.addLog("debug", `removeInvalidItems: removed ${removed} item(s)`);
++    this.addLog("groupEnd", `removeInvalidItems: for feed ${this.url}`);
+     ds.saveSoon();
+   },
+ 
+   createFolder() {
+@@ -561,17 +561,13 @@ Feed.prototype = {
+     try {
+       this.folder = this.server.rootMsgFolder
+         .QueryInterface(Ci.nsIMsgLocalMailFolder)
+         .createLocalSubfolder(this.folderName);
+-    } catch (ex) {
++    } catch (exception) {
+       // An error creating.
+-      lazy.FeedUtils.log.info(
+-        "Feed.createFolder: error creating folder - '" +
+-          this.folderName +
+-          "' in parent folder " +
+-          this.server.rootMsgFolder.filePath.path +
+-          " -- " +
+-          ex
++      this.addLog(
++        "warn",
++        `createFolder: error creating folder ${this.folderName} in parent folder ${this.server.rootMsgFolder.filePath.path} -- ${exception}`
+       );
+       // But its remnants are still there, clean up.
+       const xfolder = this.server.rootMsgFolder.getChildNamed(this.folderName);
+       this.server.rootMsgFolder.propagateDelete(xfolder, true);
+@@ -600,11 +596,13 @@ Feed.prototype = {
+     }
+ 
+     const item = this.itemsToStore[this.itemsToStoreIndex];
+ 
++    item.feed.addLog("groupCollapsed", `storeNextItem: item.id ${item.id}`);
+     if (item.store()) {
+       this.itemsStored++;
+     }
++    item.feed.addLog("groupEnd", `storeNextItem: item.id ${item.id}`);
+ 
+     if (!this.folder) {
+       this.cleanupParsingState(this, lazy.FeedUtils.kNewsBlogFileError);
+       return;
+@@ -653,8 +651,10 @@ Feed.prototype = {
+     }
+   },
+ 
+   cleanupParsingState(aFeed, aCode) {
++    // Finished storing, close the log group opened in parse().
++    this.addLog("groupEnd", `parse: store parsed items`);
+     // Now that we are done parsing the feed, remove the feed from the cache.
+     FeedCache.removeFeed(aFeed.url);
+ 
+     if (aFeed.parseItems) {
+@@ -667,10 +667,11 @@ Feed.prototype = {
+ 
+       // Flush any feed item changes to disk.
+       const ds = lazy.FeedUtils.getItemsDS(aFeed.server);
+       ds.saveSoon();
+-      lazy.FeedUtils.log.debug(
+-        "Feed.cleanupParsingState: items stored - " + this.itemsStored
++      this.addLog(
++        "log",
++        `cleanupParsingState: stored ${this.itemsStored} item(s)`
+       );
+     }
+ 
+     // Force the xml http request to go away.  This helps reduce some nasty
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -83,11 +83,9 @@ FeedItem.prototype = {
+     messageID.replace(/>/g, "%3E");
+     messageID.replace(/@/g, "%40");
+     messageID = "<" + messageID.trim() + "@localhost.localdomain>";
+ 
+-    lazy.FeedUtils.log.trace(
+-      "FeedItem.normalizeMessageID: messageID - " + messageID
+-    );
++    this.feed.addLog("debug", `normalizeMessageID: ${messageID}`);
+     return messageID;
+   },
+ 
+   get contentBase() {
+@@ -122,12 +120,11 @@ FeedItem.prototype = {
+         stored: false,
+       };
+       ds.data[this.id] = resource;
+       if (!this.content) {
+-        lazy.FeedUtils.log.trace(
+-          "FeedItem.store: " +
+-            this.identity +
+-            " no content; storing description or title"
++        this.feed.addLog(
++          "debug",
++          `store: no content; storing <description> or <title> for item.id ${this.id}`
+         );
+         this.content = this.description || this.title;
+       }
+ 
+@@ -148,35 +145,33 @@ FeedItem.prototype = {
+ 
+   findStoredResource() {
+     // Checks to see if the item has already been stored in its feed's
+     // message folder.
+-    lazy.FeedUtils.log.trace(
+-      "FeedItem.findStoredResource: checking if stored - " + this.identity
++    this.feed.addLog(
++      "debug",
++      `findStoredResource: checking if stored - ${this.identity}`
+     );
+ 
+     const server = this.feed.server;
+     const folder = this.feed.folder;
+ 
+     if (!folder) {
+-      lazy.FeedUtils.log.debug(
+-        "FeedItem.findStoredResource: folder '" +
+-          this.feed.folderName +
+-          "' doesn't exist; creating as child of " +
+-          server.rootMsgFolder.prettyName +
+-          "\n"
++      this.feed.addLog(
++        "debug",
++        `findStoredResource: folder ${this.feed.folderName} doesn't exist; creating as child of ${server.rootMsgFolder.prettyName}`
+       );
+       this.feed.createFolder();
+       return null;
+     }
+ 
+     const ds = lazy.FeedUtils.getItemsDS(server);
+     const item = ds.data[this.id];
+     if (!item || !item.stored) {
+-      lazy.FeedUtils.log.trace("FeedItem.findStoredResource: not stored");
++      this.feed.addLog("debug", "findStoredResource: not stored");
+       return null;
+     }
+ 
+-    lazy.FeedUtils.log.trace("FeedItem.findStoredResource: already stored");
++    this.feed.addLog("debug", "findStoredResource: already stored");
+     return item;
+   },
+ 
+   markValid(resource) {
+@@ -196,13 +191,10 @@ FeedItem.prototype = {
+     resource.stored = true;
+   },
+ 
+   writeToFolder() {
+-    lazy.FeedUtils.log.trace(
+-      "FeedItem.writeToFolder: " +
+-        this.identity +
+-        " writing to message folder " +
+-        this.feed.name
++    const location = lazy.FeedUtils.getFolderPrettyPath(
++      this.feed.folder || this.feed.server.rootFolder
+     );
+     // The subject may contain HTML entities.  Convert these to their unencoded
+     // state. i.e. &amp; becomes '&'.
+     let title = this.title;
+@@ -217,8 +209,10 @@ FeedItem.prototype = {
+     // leading/trailing spaces to prevent mbox header folding issue at just
+     // the right subject length.
+     this.title = title.replace(/[\t\r\n]+/g, " ").trim();
+ 
++    this.feed.addLog("debug", `writeToFolder: ${location}, ${this.title}`);
++
+     // If the date looks like it's in W3C-DTF format, convert it into
+     // an IETF standard date.  Otherwise assume it's in IETF format.
+     if (this.mDate.search(/^\d\d\d\d/) != -1) {
+       this.mDate = new Date(this.mDate).toUTCString();
+@@ -299,15 +293,9 @@ FeedItem.prototype = {
+         "\n" +
+         this.content;
+     }
+ 
+-    lazy.FeedUtils.log.trace(
+-      "FeedItem.writeToFolder: " +
+-        this.identity +
+-        " is " +
+-        source.length +
+-        " characters long"
+-    );
++    this.feed.addLog("debug", `writeToFolder: ${source.length} characters`);
+ 
+     // Get the folder and database storing the feed's messages and headers.
+     const folder = this.feed.folder.QueryInterface(Ci.nsIMsgLocalMailFolder);
+     const msgFolder = folder.QueryInterface(Ci.nsIMsgFolder);
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -42,9 +42,9 @@ FeedParser.prototype = {
+     if (doc.namespaceURI == lazy.FeedUtils.MOZ_PARSERERROR_NS) {
+       // Gecko caught a basic parsing error.
+       const errStr =
+         doc.firstChild.textContent + "\n" + doc.firstElementChild.textContent;
+-      lazy.FeedUtils.log.info("FeedParser.parseFeed: - " + errStr);
++      aFeed.addLog("warn", `parseFeed: ${errStr}`);
+       aFeed.onParseError(aFeed);
+       return [];
+     } else if (aDOM.querySelector("redirect")) {
+       // Check for RSS2.0 redirect document.
+@@ -59,44 +59,23 @@ FeedParser.prototype = {
+       doc.namespaceURI == lazy.FeedUtils.RDF_SYNTAX_NS &&
+       doc.getElementsByTagNameNS(lazy.FeedUtils.RSS_NS, "channel")[0]
+     ) {
+       aFeed.mFeedType = "RSS_1.xRDF";
+-      lazy.FeedUtils.log.debug(
+-        "FeedParser.parseFeed: type:url - " +
+-          aFeed.mFeedType +
+-          " : " +
+-          aFeed.url
+-      );
+-
++      aFeed.addLog("log", `parseFeed: type ${aFeed.mFeedType}`);
+       return this.parseAsRSS1(aFeed, aDOM);
+     } else if (doc.namespaceURI == lazy.FeedUtils.ATOM_03_NS) {
+       aFeed.mFeedType = "ATOM_0.3";
+-      lazy.FeedUtils.log.debug(
+-        "FeedParser.parseFeed: type:url - " +
+-          aFeed.mFeedType +
+-          " : " +
+-          aFeed.url
+-      );
++      aFeed.addLog("log", `parseFeed: type ${aFeed.mFeedType}`);
+       return this.parseAsAtom(aFeed, aDOM);
+     } else if (doc.namespaceURI == lazy.FeedUtils.ATOM_IETF_NS) {
+       aFeed.mFeedType = "ATOM_IETF";
+-      lazy.FeedUtils.log.debug(
+-        "FeedParser.parseFeed: type:url - " +
+-          aFeed.mFeedType +
+-          " : " +
+-          aFeed.url
+-      );
++      aFeed.addLog("log", `parseFeed: type ${aFeed.mFeedType}`);
+       return this.parseAsAtomIETF(aFeed, aDOM);
+     } else if (
+       doc.getElementsByTagNameNS(lazy.FeedUtils.RSS_090_NS, "channel")[0]
+     ) {
+       aFeed.mFeedType = "RSS_0.90";
+-      lazy.FeedUtils.log.debug(
+-        "FeedParser.parseFeed: type:url - " +
+-          aFeed.mFeedType +
+-          " : " +
+-          aFeed.url
+-      );
++      aFeed.addLog("log", `parseFeed: type ${aFeed.mFeedType}`);
+       return this.parseAsRSS2(aFeed, aDOM);
+     }
+ 
+     // Parse as RSS 0.9x.  In theory even RSS 1.0 feeds could be parsed by
+@@ -106,11 +85,9 @@ FeedParser.prototype = {
+       aFeed.mFeedType = "RSS_" + rssVer;
+     } else {
+       aFeed.mFeedType = "RSS_0.9x?";
+     }
+-    lazy.FeedUtils.log.debug(
+-      "FeedParser.parseFeed: type:url - " + aFeed.mFeedType + " : " + aFeed.url
+-    );
++    aFeed.addLog("log", `parseFeed: type ${aFeed.mFeedType}`);
+     return this.parseAsRSS2(aFeed, aDOM);
+   },
+ 
+   parseAsRSS2(aFeed, aDOM) {
+@@ -139,11 +116,11 @@ FeedParser.prototype = {
+       aFeed.title = `${url.hostname} - ${url.pathname}`;
+     }
+ 
+     if (!(aFeed.title || aFeed.description)) {
+-      lazy.FeedUtils.log.error(
+-        "FeedParser.parseAsRSS2: missing mandatory element " +
+-          "<title> and <description>"
++      aFeed.addLog(
++        "error",
++        "parseAsRSS2: missing mandatory element <title> and <description>"
+       );
+       // The RSS2 spec requires a <link> as well, but we can do without it
+       // so ignore the case of (valid) link missing.
+       aFeed.onParseError(aFeed);
+@@ -160,10 +137,11 @@ FeedParser.prototype = {
+     // XXX use getElementsByTagNameNS for now; childrenByTagNameNS would be
+     // better, but RSS .90 is still with us.
+     let itemNodes = aDOM.getElementsByTagNameNS(nsURI, "item");
+     itemNodes = itemNodes ? itemNodes : [];
+-    lazy.FeedUtils.log.debug(
+-      "FeedParser.parseAsRSS2: items to parse - " + itemNodes.length
++    aFeed.addLog(
++      "groupCollapsed",
++      `parseAsRSS2: ${itemNodes.length} item(s) to parse`
+     );
+ 
+     for (const itemNode of itemNodes) {
+       if (!itemNode.childElementCount) {
+@@ -230,11 +208,11 @@ FeedParser.prototype = {
+       item.description = this.getNodeValueFormatted(tags ? tags[0] : null);
+       tags = this.childrenByTagNameNS(itemNode, nsURI, "title");
+       item.title = this.getNodeValue(tags ? tags[0] : null);
+       if (!(item.title || item.description)) {
+-        lazy.FeedUtils.log.info(
+-          "FeedParser.parseAsRSS2: <item> missing mandatory " +
+-            "element, either <title> or <description>; skipping"
++        aFeed.addLog(
++          "log",
++          "parseAsRSS2: <item> missing mandatory element, either <title> or <description>; skipping"
+         );
+         continue;
+       }
+ 
+@@ -253,8 +231,10 @@ FeedParser.prototype = {
+           ) || item.title);
+         item.id = item.id.replace(/[\n\r\t\s]+/g, " ");
+       }
+ 
++      aFeed.addLog("groupCollapsed", `parseAsRSS2: parsing item.id ${item.id}`);
++
+       // Escape html entities in <title>, which are unescaped as textContent
+       // values. If the title is used as content, it will remain escaped; if
+       // it is used as the title, it will be unescaped upon store. Bug 1240603.
+       // The <description> tag must follow escaping examples found in
+@@ -276,9 +256,9 @@ FeedParser.prototype = {
+           "creator"
+         );
+       }
+       let author = this.getNodeValue(tags ? tags[0] : null) || aFeed.title;
+-      author = this.cleanAuthorName(author);
++      author = this.cleanAuthorName(aFeed, author);
+       item.author = author ? ["<" + author + ">"] : item.author;
+ 
+       tags = this.childrenByTagNameNS(itemNode, nsURI, "pubDate");
+       if (!tags || !this.getNodeValue(tags[0])) {
+@@ -292,9 +272,9 @@ FeedParser.prototype = {
+       if (item.date) {
+         item.date = item.date.trim();
+         if (!lazy.FeedUtils.isValidRFC822Date(item.date)) {
+           // XXX Use this on the other formats as well.
+-          item.date = this.dateRescue(item.date);
++          item.date = this.dateRescue(aFeed, item.date);
+         }
+       }
+ 
+       tags = this.childrenByTagNameNS(
+@@ -371,10 +351,15 @@ FeedParser.prototype = {
+         }
+       }
+ 
+       this.parsedItems.push(item);
++      aFeed.addLog("groupEnd", `parseAsRSS2: parsing item.id ${item.id}`);
+     }
+ 
++    aFeed.addLog(
++      "groupEnd",
++      `parseAsRSS2: ${itemNodes.length} item(s) to parse`
++    );
+     return this.parsedItems;
+   },
+ 
+   /**
+@@ -425,11 +410,11 @@ FeedParser.prototype = {
+     );
+     feed.link = this.validLink(this.getNodeValue(linkNode)) || feed.url;
+ 
+     if (!(feed.title || feed.description) || !feed.link) {
+-      lazy.FeedUtils.log.error(
+-        "FeedParser.parseAsRSS1: missing mandatory element " +
+-          "<title> and <description>, or <link>"
++      feed.addLog(
++        "error",
++        "parseAsRSS1: missing mandatory element <title> and <description>, or <link>"
+       );
+       feed.onParseError(feed);
+       return [];
+     }
+@@ -445,9 +430,12 @@ FeedParser.prototype = {
+ 
+     // Now process all the individual items in the feed.
+     let itemNodes = doc.getElementsByTagNameNS(lazy.FeedUtils.RSS_NS, "item");
+     itemNodes = itemNodes ? itemNodes : [];
+-
++    feed.addLog(
++      "groupCollapsed",
++      `parseAsRSS1: ${itemNodes.length} item(s) to parse`
++    );
+     for (const itemNode of itemNodes) {
+       const item = new lazy.FeedItem();
+       item.feed = feed;
+ 
+@@ -462,8 +450,10 @@ FeedParser.prototype = {
+       );
+       item.id = this.getNodeValue(itemLinkNode) || itemURI;
+       item.url = this.validLink(item.id);
+ 
++      feed.addLog("groupCollapsed", `parseAsRSS1: parsing item.id ${item.id}`);
++
+       const itemDescNode = this.childByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.RSS_NS,
+         "description"
+@@ -486,12 +476,11 @@ FeedParser.prototype = {
+       if (!item.title && item.description) {
+         item.title = this.stripTags(item.description).substr(0, 150);
+       }
+       if (!item.url || !item.title) {
+-        lazy.FeedUtils.log.info(
+-          "FeedParser.parseAsRSS1: <item> missing mandatory " +
+-            "element <item rdf:about> and <link>, or <title> and " +
+-            "no <description>; skipping"
++        feed.addLog(
++          "log",
++          "parseAsRSS1: <item> missing mandatory element <item rdf:about> and <link>, or <title> and no <description>; skipping"
+         );
+         continue;
+       }
+ 
+@@ -509,9 +498,9 @@ FeedParser.prototype = {
+       let author =
+         this.getNodeValue(authorNode) ||
+         this.getNodeValue(channelCreatorNode) ||
+         feed.title;
+-      author = this.cleanAuthorName(author);
++      author = this.cleanAuthorName(feed, author);
+       item.author = author ? ["<" + author + ">"] : item.author;
+ 
+       const dateNode = this.childByTagNameNS(
+         itemNode,
+@@ -527,13 +516,15 @@ FeedParser.prototype = {
+       );
+       item.content = this.getNodeValueFormatted(contentNode);
+ 
+       this.parsedItems.push(item);
++      feed.addLog("groupEnd", `parseAsRSS1: parsing item.id ${item.id}`);
+     }
+-    lazy.FeedUtils.log.debug(
+-      "FeedParser.parseAsRSS1: items parsed - " + this.parsedItems.length
++
++    feed.addLog(
++      "groupEnd",
++      `parseAsRSS1: ${itemNodes.length} item(s) to parse`
+     );
+-
+     return this.parsedItems;
+   },
+ 
+   // TODO: deprecate ATOM_03_NS.
+@@ -565,11 +556,9 @@ FeedParser.prototype = {
+     tags = this.childrenByTagNameNS(channel, lazy.FeedUtils.ATOM_03_NS, "link");
+     aFeed.link = this.validLink(this.findAtomLink("alternate", tags));
+ 
+     if (!aFeed.title) {
+-      lazy.FeedUtils.log.error(
+-        "FeedParser.parseAsAtom: missing mandatory element <title>"
+-      );
++      aFeed.addLog("error", "parseAsAtom: missing mandatory element <title>");
+       aFeed.onParseError(aFeed);
+       return [];
+     }
+ 
+@@ -585,12 +574,12 @@ FeedParser.prototype = {
+       lazy.FeedUtils.ATOM_03_NS,
+       "entry"
+     );
+     items = items ? items : [];
+-    lazy.FeedUtils.log.debug(
+-      "FeedParser.parseAsAtom: items to parse - " + items.length
++    aFeed.addLog(
++      "groupCollapsed",
++      `parseAsAtom: ${items.length} item(s) to parse`
+     );
+-
+     for (const itemNode of items) {
+       if (!itemNode.childElementCount) {
+         continue;
+       }
+@@ -610,8 +599,11 @@ FeedParser.prototype = {
+         lazy.FeedUtils.ATOM_03_NS,
+         "id"
+       );
+       item.id = this.getNodeValue(tags ? tags[0] : null);
++
++      aFeed.addLog("groupCollapsed", `parseAsAtom: parsing item.id ${item.id}`);
++
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_03_NS,
+         "summary"
+@@ -626,11 +618,11 @@ FeedParser.prototype = {
+         this.getNodeValue(tags ? tags[0] : null) ||
+         (item.description ? item.description.substr(0, 150) : null);
+       if (!item.title || !item.id) {
+         // We're lenient about other mandatory tags, but insist on these.
+-        lazy.FeedUtils.log.info(
+-          "FeedParser.parseAsAtom: <entry> missing mandatory " +
+-            "element <id>, or <title> and no <summary>; skipping"
++        aFeed.addLog(
++          "log",
++          "parseAsAtom: <entry> missing mandatory element <id>, or <title> and no <summary>; skipping"
+         );
+         continue;
+       }
+ 
+@@ -739,10 +731,12 @@ FeedParser.prototype = {
+       }
+ 
+       item.content = content;
+       this.parsedItems.push(item);
++      aFeed.addLog("groupEnd", `parseAsAtom: parsing item.id ${item.id}`);
+     }
+ 
++    aFeed.addLog("groupEnd", `parseAsAtom: ${items.length} item(s) to parse`);
+     return this.parsedItems;
+   },
+ 
+   parseAsAtomIETF(aFeed, aDOM) {
+@@ -793,9 +787,10 @@ FeedParser.prototype = {
+       contentBase = aFeed.link;
+     }
+ 
+     if (!aFeed.title) {
+-      lazy.FeedUtils.log.error(
++      aFeed.addLog(
++        "error",
+         "FeedParser.parseAsAtomIETF: missing mandatory element <title>"
+       );
+       aFeed.onParseError(aFeed);
+       return [];
+@@ -813,12 +808,12 @@ FeedParser.prototype = {
+       lazy.FeedUtils.ATOM_IETF_NS,
+       "entry"
+     );
+     items = items ? items : [];
+-    lazy.FeedUtils.log.debug(
+-      "FeedParser.parseAsAtomIETF: items to parse - " + items.length
++    aFeed.addLog(
++      "groupCollapsed",
++      `parseAsAtomIETF: ${items.length} item(s) to parse`
+     );
+-
+     for (const itemNode of items) {
+       if (!itemNode.childElementCount) {
+         continue;
+       }
+@@ -889,15 +884,20 @@ FeedParser.prototype = {
+           (item.description ? item.description.substr(0, 150) : null)
+       );
+       if (!item.title || !item.id) {
+         // We're lenient about other mandatory tags, but insist on these.
+-        lazy.FeedUtils.log.info(
+-          "FeedParser.parseAsAtomIETF: <entry> missing mandatory " +
+-            "element <id>, or <title> and no <summary>; skipping"
++        aFeed.addLog(
++          "log",
++          "parseAsAtomIETF: <entry> missing mandatory element <id>, or <title> and no <summary>; skipping"
+         );
+         continue;
+       }
+ 
++      aFeed.addLog(
++        "groupCollapsed",
++        `parseAsAtomIETF: parsing item.id ${item.id}`
++      );
++
+       // Support multiple authors.
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_IETF_NS,
+@@ -934,9 +934,9 @@ FeedParser.prototype = {
+           "email"
+         );
+         let email = this.getNodeValue(tags ? tags[0] : null);
+         if (name) {
+-          name = this.cleanAuthorName(name);
++          name = this.cleanAuthorName(aFeed, name);
+           if (email) {
+             if (!email.match(/^<.*>$/)) {
+               email = " <" + email + ">";
+             }
+@@ -959,16 +959,14 @@ FeedParser.prototype = {
+           lazy.FeedUtils.DC_NS,
+           "publisher"
+         );
+         let author = this.getNodeValue(tags ? tags[0] : null) || aFeed.title;
+-        author = this.cleanAuthorName(author);
++        author = this.cleanAuthorName(aFeed, author);
+         item.author = author ? ["<" + author + ">"] : item.author;
+       } else {
+         item.author = authors;
+       }
+-      lazy.FeedUtils.log.trace(
+-        "FeedParser.parseAsAtomIETF: author(s) - " + item.author
+-      );
++      aFeed.addLog("debug", `parseAsAtomIETF: author(s) - ${item.author}`);
+ 
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_IETF_NS,
+@@ -1097,10 +1095,15 @@ FeedParser.prototype = {
+         }
+       }
+ 
+       this.parsedItems.push(item);
++      aFeed.addLog("groupEnd", `parseAsAtomIETF: parsing item.id ${item.id}`);
+     }
+ 
++    aFeed.addLog(
++      "groupEnd",
++      `parseAsAtomIETF: ${items.length} item(s) to parse`
++    );
+     return this.parsedItems;
+   },
+ 
+   isPermanentRedirect(aFeed, aRedirDocChannel, aFeedChannel) {
+@@ -1136,17 +1139,14 @@ FeedParser.prototype = {
+       newUrl != oldUrl &&
+       lazy.FeedUtils.isValidScheme(newUrl) &&
+       lazy.FeedUtils.changeUrlForFeed(aFeed, newUrl)
+     ) {
+-      lazy.FeedUtils.log.info(
+-        "FeedParser.isPermanentRedirect: found <" +
+-          tagName +
+-          "> tag; updated feed url from: " +
+-          oldUrl +
+-          " to: " +
+-          newUrl +
+-          " in folder: " +
+-          lazy.FeedUtils.getFolderPrettyPath(aFeed.folder)
++      aFeed.addLog(
++        "warn",
++        `isPermanentRedirect: found <${tagName}> tag; updated feed url from
++          ${oldUrl} to ${newUrl} in folder ${lazy.FeedUtils.getFolderPrettyPath(
++            aFeed.folder
++          )}`
+       );
+       aFeed.onUrlChange(aFeed, oldUrl);
+       return true;
+     }
+@@ -1190,27 +1190,26 @@ FeedParser.prototype = {
+ 
+   /**
+    * Return a cleaned up author name value.
+    *
++   * @param {Feed} feed - the feed object.
+    * @param {string} authorString - A string.
+    * @returns {string} - A clean string value.
+    */
+-  cleanAuthorName(authorString) {
++  cleanAuthorName(feed, authorString) {
+     if (!authorString) {
+       return "";
+     }
+-    lazy.FeedUtils.log.trace(
+-      "FeedParser.cleanAuthor: author1 - " + authorString
+-    );
++    feed.addLog("debug", `cleanAuthor: toclean - ${authorString}`);
+     let author = authorString
+       .replace(/[\n\r\t]+/g, " ")
+       .replace(/"/g, '\\"')
+       .trim();
+     // If the name contains special chars, quote it.
+     if (author.match(/[<>@,"]/)) {
+       author = '"' + author + '"';
+     }
+-    lazy.FeedUtils.log.trace("FeedParser.cleanAuthor: author2 - " + author);
++    feed.addLog("debug", `cleanAuthor: cleaned - ${author}`);
+ 
+     return author;
+   },
+ 
+@@ -1396,13 +1395,14 @@ FeedParser.prototype = {
+       lazy.FeedUtils.RSS_SY_NS,
+       "updateBase"
+     );
+     const updateBase = this.getNodeValue(tag ? tag[0] : null) || "";
+-    lazy.FeedUtils.log.debug(
+-      "FeedParser.findSyUpdateTags: updatePeriod:updateFrequency - " +
+-        updatePeriod +
+-        ":" +
+-        updateFrequency
++    aFeed.addLog(
++      "log",
++      "findSyUpdateTags: updatePeriod " +
++        (`${updatePeriod}` || "none") +
++        ", updateFrequency " +
++        (`${updateFrequency}` || "none")
+     );
+ 
+     if (updatePeriod) {
+       if (lazy.FeedUtils.RSS_SY_UNITS.includes(updatePeriod.toLowerCase())) {
+@@ -1468,20 +1468,18 @@ FeedParser.prototype = {
+     s = s.replace(/</g, "&lt;");
+     return s;
+   },
+ 
+-  dateRescue(dateString) {
++  dateRescue(aFeed, dateString) {
+     // Deal with various kinds of invalid dates.
+     if (!isNaN(parseInt(dateString))) {
+       // It's an integer, so maybe it's a timestamp.
+       const d = new Date(parseInt(dateString) * 1000);
+       const now = new Date();
+       const yeardiff = now.getFullYear() - d.getFullYear();
+-      lazy.FeedUtils.log.trace(
+-        "FeedParser.dateRescue: Rescue Timestamp date - " +
+-          d.toString() +
+-          " ,year diff - " +
+-          yeardiff
++      aFeed.addLog(
++        "debug",
++        `dateRescue: check Timestamp, date ${d.toString()},year diff ${yeardiff}`
+       );
+       if (yeardiff >= 0 && yeardiff < 3) {
+         // It's quite likely the correct date.
+         return d.toString();
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -165,17 +165,14 @@ export var FeedUtils = {
+ 
+     // Save new accounts in case of a crash.
+     try {
+       MailServices.accounts.saveAccountInfo();
+-    } catch (ex) {
+-      this.log.error(
+-        "FeedUtils.createRssAccount: error on saveAccountInfo - " + ex
+-      );
++    } catch (exception) {
++      this.log.error(`createRssAccount: saveAccountInfo error ${exception}`);
+     }
+ 
+-    this.log.debug(
+-      "FeedUtils.createRssAccount: " +
+-        account.incomingServer.rootFolder.prettyName
++    this.log.log(
++      `createRssAccount: ${account.incomingServer.rootFolder.prettyName}`
+     );
+ 
+     return account;
+   },
+@@ -195,13 +192,11 @@ export var FeedUtils = {
+     if (sub === undefined) {
+       return false;
+     }
+     const folder = sub.destFolder;
+-    this.log.info(
+-      "FeedUtils.feedAlreadyExists: feed url " +
+-        aUrl +
+-        " subscribed in folder url " +
+-        decodeURI(folder)
++    this.log.warn(
++      `feedAlreadyExists: feed url ${aUrl} is already subscribed in this ` +
++        `account, folder ${decodeURI(folder).split("@")[1]}`
+     );
+ 
+     return true;
+   },
+@@ -216,13 +211,10 @@ export var FeedUtils = {
+    *
+    * @returns {Promise<void>} When all feeds downloading have been set off.
+    */
+   async downloadFeed(aFolder, aUrlListener, aIsBiff, aMsgWindow) {
+-    FeedUtils.log.debug(
+-      "downloadFeed: account isBiff:isOffline - " +
+-        aIsBiff +
+-        " : " +
+-        Services.io.offline
++    FeedUtils.log.log(
++      `downloadFeed: START isBiff ${aIsBiff}, isOffline ${Services.io.offline}`
+     );
+     // User set.
+     if (Services.io.offline) {
+       return;
+@@ -241,10 +233,9 @@ export var FeedUtils = {
+     // in the middle of subscribing to a feed. For now, abort the check for
+     // new feeds.
+     if (FeedUtils.progressNotifier.mSubscribeMode) {
+       FeedUtils.log.warn(
+-        "downloadFeed: Aborting RSS New Mail Check. " +
+-          "Feed subscription in progress\n"
++        "downloadFeed: aborting download, feed subscription in progress"
+       );
+       return;
+     }
+ 
+@@ -269,35 +260,28 @@ export var FeedUtils = {
+       // a msgDatabase necessarily.
+       allFolders.unshift(aFolder);
+     }
+ 
+-    let folder;
++    const rootFolder = FeedUtils.getFolderPrettyPath(aFolder);
++    let folder, location;
+     async function* feeder() {
+       for (let i = 0; i < allFolders.length; i++) {
+         folder = allFolders[i];
+-        FeedUtils.log.debug(
+-          "downloadFeed: START x/# folderName:folderPath - " +
+-            (i + 1) +
+-            "/" +
+-            allFolders.length +
+-            " " +
+-            folder.name +
+-            " : " +
+-            folder.filePath.path
++        location = FeedUtils.getFolderPrettyPath(folder);
++        FeedUtils.log.log(
++          `downloadFeed: folder ${i + 1} of ${allFolders.length}, ${location}`
+         );
+ 
+         const feedUrlArray = FeedUtils.getFeedUrlsInFolder(folder);
+         // Continue if there are no feedUrls for the folder in the feeds
+         // database.  All folders in Trash are skipped.
+         if (!feedUrlArray) {
++          FeedUtils.log.log(`downloadFeed: no feeds subscribed in folder`);
+           continue;
+         }
+ 
+-        FeedUtils.log.debug(
+-          "downloadFeed: CONTINUE foldername:urlArray - " +
+-            folder.name +
+-            " : " +
+-            feedUrlArray
++        FeedUtils.log.log(
++          `downloadFeed: feed url(s) subscribed in folder, ${feedUrlArray}`
+         );
+ 
+         // We need to kick off a download for each feed.
+         const now = Date.now();
+@@ -312,18 +296,14 @@ export var FeedUtils = {
+               status.enabled === false ||
+               (status.enabled === null && !inStartup) ||
+               now - status.lastUpdateTime < status.updateMinutes * 60000
+             ) {
+-              FeedUtils.log.debug(
+-                "downloadFeed: SKIP feed, " +
+-                  "aIsBiff:enabled:minsSinceLastUpdate::url - " +
+-                  aIsBiff +
+-                  " : " +
+-                  status.enabled +
+-                  " : " +
+-                  Math.round((now - status.lastUpdateTime) / 60) / 1000 +
+-                  " :: " +
+-                  url
++              FeedUtils.log.log(
++                `downloadFeed: SKIP feed, enabled ${
++                  status.enabled
++                }, minsSinceLastUpdate ${
++                  Math.round((now - status.lastUpdateTime) / 60) / 1000
++                }, feed url ${url}`
+               );
+               continue;
+             }
+           }
+@@ -355,12 +335,10 @@ export var FeedUtils = {
+             aIsBiff &&
+             FeedUtils.progressNotifier.mNumPendingFeedDownloads >
+               FeedUtils.MAX_CONCURRENT_FEEDS
+           ) {
+-            FeedUtils.log.debug(
+-              "downloadFeed: RETURN active feeds count is greater " +
+-                "than the max - " +
+-                FeedUtils.MAX_CONCURRENT_FEEDS
++            FeedUtils.log.log(
++              `downloadFeed: RETURN active feeds count is greater than the max ${FeedUtils.MAX_CONCURRENT_FEEDS}`
+             );
+             FeedUtils.progressNotifier.downloaded(
+               feed,
+               FeedUtils.kNewsBlogFeedIsBusy
+@@ -368,9 +346,9 @@ export var FeedUtils = {
+             return;
+           }
+ 
+           // Set status info and download.
+-          FeedUtils.log.debug("downloadFeed: DOWNLOAD feed url - " + url);
++          FeedUtils.log.log(`downloadFeed: DOWNLOAD feed url ${url}`);
+           FeedUtils.setStatus(
+             folder,
+             url,
+             "code",
+@@ -382,16 +360,17 @@ export var FeedUtils = {
+             try {
+               const done = getFeed.next().done;
+               if (done) {
+                 // Finished with all feeds in base aFolder and its subfolders.
+-                FeedUtils.log.debug(
+-                  "downloadFeed: Finished with folder - " + aFolder.name
++                FeedUtils.log.log(
++                  `downloadFeed: finished with folder ${rootFolder}`
+                 );
+                 folder = null;
+                 allFolders = null;
++                FeedUtils.log.groupEnd(`downloadFeed: ${rootFolder}`);
+               }
+-            } catch (ex) {
+-              FeedUtils.log.error("downloadFeed: error - " + ex);
++            } catch (exception) {
++              FeedUtils.log.error(`downloadFeed: error ${exception}`);
+               FeedUtils.progressNotifier.downloaded(
+                 feed,
+                 FeedUtils.kNewsBlogFeedIsBusy
+               );
+@@ -402,21 +381,23 @@ export var FeedUtils = {
+         }
+       }
+     }
+ 
++    FeedUtils.log.group(`downloadFeed: ${rootFolder}`);
+     const getFeed = await feeder();
+     try {
+       const done = getFeed.next().done;
+       if (done) {
+         // Nothing to do.
+-        FeedUtils.log.debug(
+-          "downloadFeed: Nothing to do in folder - " + aFolder.name
++        FeedUtils.log.log(
++          `downloadFeed: nothing to do in folder ${rootFolder}`
+         );
+         folder = null;
+         allFolders = null;
++        FeedUtils.log.groupEnd(`downloadFeed: ${rootFolder}`);
+       }
+-    } catch (ex) {
+-      FeedUtils.log.error("downloadFeed: error - " + ex);
++    } catch (exception) {
++      FeedUtils.log.error(`downloadFeed: error ${exception}`);
+       FeedUtils.progressNotifier.downloaded(
+         { folder: aFolder, url: "" },
+         FeedUtils.kNewsBlogFeedIsBusy
+       );
+@@ -436,10 +417,9 @@ export var FeedUtils = {
+     // For now, abort the subscription if we are already in the middle of
+     // subscribing to a feed via drag and drop.
+     if (FeedUtils.progressNotifier.mNumPendingFeedDownloads > 0) {
+       FeedUtils.log.warn(
+-        "subscribeToFeed: Aborting RSS subscription. " +
+-          "Feed downloads already in progress\n"
++        "subscribeToFeed: aborting subscription, feed download in progress"
+       );
+       return;
+     }
+ 
+@@ -521,10 +501,10 @@ export var FeedUtils = {
+       const options = feed.options;
+       options.updates.enabled = !aPause;
+       feed.options = options;
+       FeedUtils.setStatus(aFolder, feedUrl, "enabled", !aPause);
+-      FeedUtils.log.debug(
+-        "pauseFeedFolderUpdates: enabled:url " + !aPause + ": " + feedUrl
++      FeedUtils.log.log(
++        `pauseFeedFolderUpdates: enabled ${!aPause}, url ${feedUrl}`
+       );
+     }
+ 
+     const win = Services.wm.getMostRecentWindow("Mail:News-BlogSubscriptions");
+@@ -602,13 +582,10 @@ export var FeedUtils = {
+       return false;
+     }
+ 
+     if (this.feedAlreadyExists(aNewUrl, aFeed.server)) {
+-      this.log.info(
+-        "FeedUtils.changeUrlForFeed: new feed url " +
+-          aNewUrl +
+-          " already subscribed in account " +
+-          aFeed.server.prettyName
++      this.log.warn(
++        `changeUrlForFeed: new feed url ${aNewUrl} is already subscribed in account ${aFeed.server.prettyName}`
+       );
+       return false;
+     }
+ 
+@@ -697,15 +674,12 @@ export var FeedUtils = {
+         if (sub.destFolder == aFolder.URI) {
+           feedUrlArray.push(sub.url);
+         }
+       }
+-    } catch (ex) {
+-      this.log.error("getFeedUrlsInFolder: feeds db error - " + ex);
++    } catch (exception) {
++      this.log.error(`getFeedUrlsInFolder: feeds db error ${exception}`);
+       this.log.error(
+-        "getFeedUrlsInFolder: feeds db error for account - " +
+-          aFolder.server.serverURI +
+-          " : " +
+-          aFolder.server.prettyName
++        `getFeedUrlsInFolder: feeds db error for account ${aFolder.server.prettyName}`
+       );
+     }
+ 
+     return feedUrlArray.length ? feedUrlArray : null;
+@@ -725,9 +699,9 @@ export var FeedUtils = {
+     try {
+       msgDb = Cc["@mozilla.org/msgDatabase/msgDBService;1"]
+         .getService(Ci.nsIMsgDBService)
+         .openFolderDB(aFolder, true);
+-    } catch (ex) {}
++    } catch (exception) {}
+ 
+     if (msgDb) {
+       return true;
+     }
+@@ -735,21 +709,21 @@ export var FeedUtils = {
+     if (!aReparse) {
+       return false;
+     }
+ 
+-    // Force a reparse.
+-    FeedUtils.log.debug(
+-      "checkMsgDb: rebuild msgDatabase for " +
+-        aFolder.name +
+-        " - " +
+-        aFolder.filePath.path
++    // Force a reparse. aUrlListener is a Feed object.
++    aUrlListener.addLog(
++      "log",
++      `isMsgDatabaseOpenable: rebuild msgDatabase for ${FeedUtils.getFolderPrettyPath(
++        aFolder
++      )}`
+     );
+     try {
+       // Ignore error returns.
+       aFolder
+         .QueryInterface(Ci.nsIMsgLocalMailFolder)
+         .getDatabaseWithReparse(aUrlListener, null);
+-    } catch (ex) {}
++    } catch (exception) {}
+ 
+     return false;
+   },
+ 
+@@ -841,9 +815,9 @@ export var FeedUtils = {
+         // Seed persisted status properties for servers.
+         const optionsAcct = FeedUtils.getOptionsAcct(aFolder.server);
+         this[serverKey][aUrl].status.enabled = optionsAcct.doBiff;
+       }
+-      FeedUtils.log.debug("getStatus: seed url - " + aUrl);
++      FeedUtils.log.debug(`getStatus: seed url ${aUrl}`);
+     }
+ 
+     return this[serverKey][aUrl].status;
+   },
+@@ -1045,20 +1019,13 @@ export var FeedUtils = {
+    *
+    * @returns {void}
+    */
+   updateSubscriptionsDS(aFolder, aOrigFolder, aAction) {
+-    this.log.debug(
+-      "FeedUtils.updateSubscriptionsDS: " +
+-        "\nfolder changed - " +
+-        aAction +
+-        "\nnew folder  - " +
+-        aFolder.filePath.path +
+-        "\norig folder - " +
+-        aOrigFolder.filePath.path
+-    );
+-
+-    this.log.debug(
+-      `updateSubscriptions(${aFolder.name}, ${aOrigFolder.name}, ${aAction})`
++    this.log.log(
++      "updateSubscriptionsDS: \n" +
++        `aAction       - ${aAction}\n` +
++        `aFolder       - ${aFolder.URI}\n` +
++        `aOrigFolder   - ${aOrigFolder.URI}\n`
+     );
+ 
+     if (aFolder.server.type != "rss" || FeedUtils.isInTrash(aOrigFolder)) {
+       // Target not a feed account folder; nothing to do, or move/rename in
+@@ -1110,33 +1077,29 @@ export var FeedUtils = {
+     aOrigFolder,
+     aNewAncestorURI,
+     aOrigAncestorURI
+   ) {
+-    this.log.debug(
+-      "updateFolderChangeInFeedsDS: " +
+-        "\naFolder       - " +
+-        aFolder.URI +
+-        "\naOrigFolder   - " +
+-        aOrigFolder.URI +
+-        "\naOrigAncestor - " +
+-        aOrigAncestorURI +
+-        "\naNewAncestor  - " +
+-        aNewAncestorURI
++    this.log.log(
++      "updateFolderChangeInFeedsDS: \n" +
++        `aFolder       - ${aFolder.URI}\n` +
++        `aOrigFolder   - ${aOrigFolder.URI}\n` +
++        `aOrigAncestor - ${aOrigAncestorURI}\n` +
++        `aNewAncestor  - ${aNewAncestorURI}`
+     );
+ 
+     // Get the original folder's URI.
+     const folderURI = aFolder.URI;
+     const origURI =
+       aNewAncestorURI && aOrigAncestorURI
+         ? folderURI.replace(aNewAncestorURI, aOrigAncestorURI)
+         : aOrigFolder.URI;
+-    this.log.debug("updateFolderChangeInFeedsDS: urls origURI  - " + origURI);
++    this.log.log(`updateFolderChangeInFeedsDS: feedUrls in origURI ${origURI}`);
+ 
+     // Get affected feed subscriptions - all the ones in the original folder.
+     const origDS = this.getSubscriptionsDS(aOrigFolder.server);
+     const affectedSubs = origDS.data.filter(sub => sub.destFolder == origURI);
+     if (affectedSubs.length == 0) {
+-      this.log.debug("updateFolderChangeInFeedsDS: no feedUrls in this folder");
++      this.log.log("updateFolderChangeInFeedsDS: no feedUrls in this folder");
+       return;
+     }
+ 
+     if (this.isInTrash(aFolder)) {
+@@ -1302,9 +1265,9 @@ export var FeedUtils = {
+     try {
+       optionsAcct = JSON.parse(Services.prefs.getCharPref(optionsAcctPref));
+       // Add the server specific biff enabled state.
+       optionsAcct.doBiff = Services.prefs.getBoolPref(check_new_mail);
+-    } catch (ex) {}
++    } catch (exception) {}
+ 
+     if (optionsAcct && optionsAcct.version == this._optionsDefault.version) {
+       return optionsAcct;
+     }
+@@ -1343,11 +1306,9 @@ export var FeedUtils = {
+     // above is reset immediately.
+     const doBiff = Services.prefs.getBoolPref(
+       serverPrefStr + ".check_new_mail"
+     );
+-    FeedUtils.log.debug(
+-      "initAcct: " + aServer.prettyName + " doBiff - " + doBiff
+-    );
++    FeedUtils.log.log(`initAcct: ${aServer.prettyName}, doBiff ${doBiff}`);
+     this.pauseFeedFolderUpdates(aServer.rootFolder, !doBiff, false);
+   },
+ 
+   newOptions(aCurrentOptions) {
+@@ -1533,46 +1494,29 @@ export var FeedUtils = {
+     if (dt.getData(types[0])) {
+       // The url is the data.
+       uri = Services.io.newURI(dt.mozGetDataAt(types[0], 0));
+       validUri = this.isValidScheme(uri);
+-      this.log.trace(
+-        "getFeedUriFromDataTransfer: dropEffect:type:value - " +
+-          dt.dropEffect +
+-          " : " +
+-          types[0] +
+-          " : " +
+-          uri.spec
++      this.log.debug(
++        `getFeedUriFromDataTransfer: dropEffect ${dt.dropEffect}, type ${types[0]}, value ${uri.spec}`
+       );
+     } else if (dt.getData(types[1])) {
+       // The url is the first part of the data, the second part is random.
+       uri = Services.io.newURI(dt.mozGetDataAt(types[1], 0).split("\n")[0]);
+       validUri = this.isValidScheme(uri);
+-      this.log.trace(
+-        "getFeedUriFromDataTransfer: dropEffect:type:value - " +
+-          dt.dropEffect +
+-          " : " +
+-          types[0] +
+-          " : " +
+-          uri.spec
++      this.log.debug(
++        `getFeedUriFromDataTransfer: dropEffect ${dt.dropEffect}, type ${types[0]}, value ${uri.spec}`
+       );
+     } else {
+       // Go through the types and see if there's a url; get the first one.
+       for (let i = 0; i < dt.types.length; i++) {
+         const spec = dt.mozGetDataAt(dt.types[i], 0);
+-        this.log.trace(
+-          "getFeedUriFromDataTransfer: dropEffect:index:type:value - " +
+-            dt.dropEffect +
+-            " : " +
+-            i +
+-            " : " +
+-            dt.types[i] +
+-            " : " +
+-            spec
++        this.log.debug(
++          `getFeedUriFromDataTransfer: dropEffect ${dt.dropEffect}, index ${i}, type ${dt.types[i]}, value ${spec}`
+         );
+         try {
+           uri = Services.io.newURI(spec);
+           validUri = this.isValidScheme(uri);
+-        } catch (ex) {}
++        } catch (exception) {}
+ 
+         if (validUri) {
+           break;
+         }
+@@ -1605,9 +1549,9 @@ export var FeedUtils = {
+       // getErrorClass()) will throw a generic NS_ERROR_FAILURE if the error
+       // code is somehow not in the set of covered errors.
+       try {
+         errorClass = nssErrorsService.getErrorClass(status);
+-      } catch (ex) {
++      } catch (exception) {
+         // Catch security protocol exception.
+         errorClass = "SecurityProtocol";
+       }
+ 
+@@ -1719,9 +1663,9 @@ export var FeedUtils = {
+   isValidScheme(aUri) {
+     if (!(aUri instanceof Ci.nsIURI)) {
+       try {
+         aUri = Services.io.newURI(aUri);
+-      } catch (ex) {
++      } catch (exception) {
+         return false;
+       }
+     }
+ 
+@@ -1873,21 +1817,24 @@ export var FeedUtils = {
+      *
+      * @returns {void}
+      */
+     downloaded(feed, aErrorCode, aDisable) {
+-      const folderName = feed.folder
+-        ? feed.folder.name
+-        : feed.server.rootFolder.prettyName;
+-      FeedUtils.log.debug(
+-        "downloaded: " +
+-          (this.mSubscribeMode ? "Subscribe " : "Update ") +
+-          "errorCode:folderName:feedUrl - " +
+-          aErrorCode +
+-          " : " +
+-          folderName +
+-          " : " +
+-          feed.url
++      const location = FeedUtils.getFolderPrettyPath(
++        feed.folder || feed.server.rootFolder
++      );
++      FeedUtils.log.groupCollapsed(
++        (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
++          `${location}, ${feed.url}`
+       );
++
++      for (const [level, message] of feed.logStack ?? []) {
++        FeedUtils.log[`${level}`](message);
++      }
++
++      FeedUtils.log.log(
++        `downloaded: errorCode ${aErrorCode}, folder ${location}`
++      );
++      let logLevel = "log";
+       if (this.mSubscribeMode) {
+         if (aErrorCode == FeedUtils.kNewsBlogSuccess) {
+           // Add the feed to the databases.
+           FeedUtils.addFeed(feed);
+@@ -1949,15 +1896,9 @@ export var FeedUtils = {
+ 
+             feed.options = options;
+             FeedUtils.setStatus(feed.folder, feed.url, "enabled", false);
+             FeedUtils.log.warn(
+-              "downloaded: updates disabled due to error, " +
+-                "check the url - " +
+-                feed.url
+-            );
+-          } else {
+-            FeedUtils.log.warn(
+-              "downloaded: update failed, check the url - " + feed.url
++              `downloaded: updates disabled due to error on url ${feed.url}`
+             );
+           }
+         }
+ 
+@@ -1973,10 +1914,10 @@ export var FeedUtils = {
+             // This feed may belong to a folder with multiple other feeds, some
+             // of which may not yet be finished, so free only if the folder is
+             // no longer busy.
+             feed.folder.msgDatabase = null;
+-            FeedUtils.log.debug(
+-              "downloaded: msgDatabase freed - " + feed.folder.name
++            FeedUtils.log.log(
++              `downloaded: msgDatabase freed for folder ${location}`
+             );
+           }
+         }
+       }
+@@ -1999,48 +1940,50 @@ export var FeedUtils = {
+           message = FeedUtils.strings.formatStringFromName(
+             "newsblog-feedNotValid",
+             [feed.url]
+           );
++          logLevel = "warn";
+           break;
+         case FeedUtils.kNewsBlogRequestFailure:
+           message = FeedUtils.strings.formatStringFromName(
+             "newsblog-networkError",
+             [feed.url]
+           );
++          logLevel = "warn";
+           break;
+         case FeedUtils.kNewsBlogFileError:
+           message = FeedUtils.strings.GetStringFromName(
+             "subscribe-errorOpeningFile"
+           );
++          logLevel = "warn";
+           break;
+         case FeedUtils.kNewsBlogBadCertError: {
+           const host = Services.io.newURI(feed.url).host;
+           message = FeedUtils.strings.formatStringFromName(
+             "newsblog-badCertError",
+             [host]
+           );
++          logLevel = "warn";
+           break;
+         }
+         case FeedUtils.kNewsBlogNoAuthError:
+           message = FeedUtils.strings.formatStringFromName(
+             "newsblog-noAuthError",
+             [feed.url]
+           );
++          logLevel = "warn";
+           break;
+       }
+ 
+       if (message) {
+-        const location =
+-          FeedUtils.getFolderPrettyPath(feed.folder || feed.server.rootFolder) +
+-          " -> ";
+-        FeedUtils.log.info(
+-          "downloaded: " +
+-            (this.mSubscribeMode ? "Subscribe: " : "Update: ") +
+-            location +
+-            message
+-        );
++        FeedUtils.log[`${logLevel}`]("downloaded: " + message);
+       }
+ 
++      FeedUtils.log.groupEnd(
++        (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
++          `${location}, ${feed.url}`
++      );
++
+       if (this.mStatusFeedback) {
+         this.mStatusFeedback.showStatusString(message);
+         this.mStatusFeedback.stopMeteors();
+       }
+@@ -2049,9 +1992,9 @@ export var FeedUtils = {
+ 
+       if (this.mNumPendingFeedDownloads == 0) {
+         this.mFeeds = {};
+         this.mSubscribeMode = false;
+-        FeedUtils.log.debug("downloaded: all pending downloads finished");
++        FeedUtils.log.log("downloaded: all pending downloads finished");
+ 
+         // Should we do this on a timer so the text sticks around for a little
+         // while?  It doesn't look like we do it on a timer for newsgroups so
+         // we'll follow that model.  Don't clear the status text if we just
+@@ -2128,11 +2071,14 @@ export var FeedUtils = {
+     },
+   },
+ };
+ 
++// Change maxLogLevelPref from default Warn to Log or Debug for finer
++// granularity. Within Log, a regular .log is differentiated from .info in the
++// console. A .log was formerly .debug and .debug was formerly .trace.
+ ChromeUtils.defineLazyGetter(FeedUtils, "log", function () {
+   return console.createInstance({
+-    prefix: "feeds",
++    prefix: "Feeds",
+     maxLogLevelPref: "feeds.loglevel",
+   });
+ });
+ 
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -446,13 +446,10 @@ var FeedSubscriptions = {
+           win.addFeed(results.dropUrl, null, true, null, win.kSubscribeMode);
+         }, 0);
+ 
+         const folderItem = this.getItemAtIndex(aRow);
+-        FeedUtils.log.debug(
+-          "drop: folder, url - " +
+-            folderItem.folder.name +
+-            ", " +
+-            results.dropUrl
++        FeedUtils.log.log(
++          `drop: folder ${folderItem.folder.name}, url ${results.dropUrl}`
+         );
+       } else if (results.dropOnIndex != this.kRowIndexUndefined) {
+         win.moveCopyFeed(results.dropOnIndex, aRow, results.dropEffect);
+       }
+@@ -860,25 +857,19 @@ var FeedSubscriptions = {
+         if (aItem.children[i].container && containsFolder(aItem.children[i])) {
+           if (removeIt && aItem.children[i].url == folderURI) {
+             // Get all occurrences in the tree cache arrays.
+             FeedUtils.log.debug(
+-              "selectFolder: delete in cache, " +
+-                "parent:children:item:index - " +
+-                aItem.name +
+-                ":" +
+-                aItem.children.length +
+-                ":" +
+-                aItem.children[i].name +
+-                ":" +
+-                i
++              `selectFolder: delete in cache, ` +
++                `parentName ${aItem.name}, ` +
++                `num children ${aItem.children.length}, ` +
++                `itemName ${aItem.children[i].name}, ` +
++                `index ${i}`
+             );
+             aItem.children.splice(i, 1);
+             FeedUtils.log.debug(
+-              "selectFolder: deleted in cache, " +
+-                "parent:children - " +
+-                aItem.name +
+-                ":" +
+-                aItem.children.length
++              `selectFolder: deleted in cache, ` +
++                `parentName ${aItem.name}, ` +
++                `num children ${aItem.children.length}`
+             );
+             removeIt = false;
+             return true;
+           }
+@@ -895,15 +886,13 @@ var FeedSubscriptions = {
+               aItem.children = FeedSubscriptions.folderItemSorter(
+                 aItem.children
+               );
+             }
+-            FeedUtils.log.trace(
+-              "selectFolder: parentName:newFolderName:newFolderItem - " +
+-                aItem.name +
+-                ":" +
+-                newItem.name +
+-                ":" +
+-                newItem.toSource()
++            FeedUtils.log.debug(
++              `selectFolder: ` +
++                `parentName ${aItem.name}, ` +
++                `newFolderName ${newItem.name}, ` +
++                `newFolderItem ${newItem.toSource()}`
+             );
+             newFolder = null;
+             return true;
+           }
+@@ -974,19 +963,14 @@ var FeedSubscriptions = {
+       this.mView.tree.ensureRowIsVisible(this.mView.rowCount - 1);
+     }
+ 
+     FeedUtils.log.debug(
+-      "selectFolder: curIndex:firstVisRow:" +
+-        "curFirstVisRow:curLastVisRow:rowCount - " +
+-        this.mView.selection.currentIndex +
+-        ":" +
+-        firstVisRow +
+-        ":" +
+-        curFirstVisRow +
+-        ":" +
+-        curLastVisRow +
+-        ":" +
+-        this.mView.rowCount
++      `selectFolder: ` +
++        `curIndex ${this.mView.selection.currentIndex}, ` +
++        `firstVisRow ${firstVisRow}, ` +
++        `curFirstVisRow ${curFirstVisRow}, ` +
++        `curLastVisRow ${curLastVisRow}, ` +
++        `rowCount ${this.mView.rowCount}`
+     );
+     return found;
+   },
+ 
+@@ -1937,11 +1921,31 @@ var FeedSubscriptions = {
+     async downloaded(feed, aErrorCode) {
+       // Offline check is done in the context of 3pane, return to the subscribe
+       // window once the modal prompt is dispatched.
+       window.focus();
++
++      const win = FeedSubscriptions;
++      const location = FeedUtils.getFolderPrettyPath(
++        feed.folder || feed.server.rootFolder
++      );
++      FeedUtils.log.groupCollapsed(
++        (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
++          `${location}, ${feed.url}`
++      );
++      const mode = Object.entries(win).find(
++        ([name, value]) => name.startsWith("k") && value == win.mActionMode
++      );
++      FeedUtils.log.log(`downloaded: mode ` + (mode ? `${mode[0]}` : mode));
++      for (const [level, message] of feed.logStack ?? []) {
++        FeedUtils.log[`${level}`](message);
++      }
++      FeedUtils.log.log(
++        `downloaded: errorCode ${aErrorCode}, folder ${location}`
++      );
++      let logLevel = "log";
++
+       // Feed is null if our attempt to parse the feed failed.
+       let message = "";
+-      const win = FeedSubscriptions;
+       if (
+         aErrorCode == FeedUtils.kNewsBlogSuccess ||
+         aErrorCode == FeedUtils.kNewsBlogNoNewItems
+       ) {
+@@ -1952,15 +1956,23 @@ var FeedSubscriptions = {
+           // kNewsBlogNoNewItems can only happen in verify mode.
+           win.mActionMode = null;
+           win.clearStatusInfo();
+           if (Services.io.offline) {
++            FeedUtils.log.groupEnd(
++              (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
++                `${location}, ${feed.url}`
++            );
+             return;
+           }
+ 
+           message = FeedUtils.strings.GetStringFromName(
+             "subscribe-feedVerified"
+           );
+           win.updateStatusItem("statusText", message);
++          FeedUtils.log.groupEnd(
++            (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
++              `${location}, ${feed.url}`
++          );
+           return;
+         }
+ 
+         // Update lastUpdateTime if successful.
+@@ -2076,8 +2088,9 @@ var FeedSubscriptions = {
+         if (aErrorCode == FeedUtils.kNewsBlogFileError) {
+           message = FeedUtils.strings.GetStringFromName(
+             "subscribe-errorOpeningFile"
+           );
++          logLevel = "warn";
+         }
+         if (aErrorCode == FeedUtils.kNewsBlogBadCertError) {
+           const host = Services.io.newURI(feed.url).host;
+           message = FeedUtils.strings.formatStringFromName(
+@@ -2099,8 +2112,17 @@ var FeedSubscriptions = {
+           document.getElementById("locationValue").focus();
+         }
+       }
+ 
++      if (message) {
++        FeedUtils.log[`${logLevel}`]("downloaded: " + message);
++      }
++
++      FeedUtils.log.groupEnd(
++        (this.mSubscribeMode ? "[Subscribe] " : "[Update] ") +
++          `${location}, ${feed.url}`
++      );
++
+       win.mActionMode = null;
+       win.clearStatusInfo();
+       const code = feed.url.startsWith("http") ? aErrorCode : null;
+       win.updateStatusItem("statusText", message, code);
+@@ -2184,9 +2206,9 @@ var FeedSubscriptions = {
+         const url = validationQuery + encodeURIComponent(feedLocation);
+ 
+         this.mMainWin.focus();
+         this.mMainWin.openContentTab(url);
+-        FeedUtils.log.debug("checkValidation: query url - " + url);
++        FeedUtils.log.log(`checkValidation: query url ${url}`);
+       }
+     }
+     aEvent.stopPropagation();
+   },
+@@ -2236,13 +2258,16 @@ var FeedSubscriptions = {
+         return;
+       }
+ 
+       const parentFolder = aFolder.isServer ? aFolder : aFolder.parent;
+-      FeedUtils.log.debug(
+-        "folderAdded: folder:parent - " +
+-          aFolder.name +
+-          ":" +
+-          (parentFolder ? parentFolder.filePath.path : "(null)")
++      FeedUtils.log.log(
++        `folderAdded: ` +
++          `${aFolder.name}, ` +
++          `parent ${
++            parentFolder
++              ? FeedUtils.getFolderPrettyPath(parentFolder)
++              : "(null)"
++          }`
+       );
+ 
+       if (!parentFolder || !this.feedWindow) {
+         return;
+@@ -2310,9 +2335,11 @@ var FeedSubscriptions = {
+       if (aFolder.server.type != "rss" || FeedUtils.isInTrash(aFolder)) {
+         return;
+       }
+ 
+-      FeedUtils.log.debug("folderDeleted: folder - " + aFolder.name);
++      FeedUtils.log.log(
++        `folderDeleted: ${FeedUtils.getFolderPrettyPath(aFolder)}`
++      );
+       if (!this.feedWindow) {
+         return;
+       }
+ 
+@@ -2344,10 +2371,12 @@ var FeedSubscriptions = {
+       if (aNewFolder.server.type != "rss" || FeedUtils.isInTrash(aNewFolder)) {
+         return;
+       }
+ 
+-      FeedUtils.log.debug(
+-        "folderRenamed: old:new - " + aOrigFolder.name + ":" + aNewFolder.name
++      FeedUtils.log.log(
++        `folderRenamed: ` +
++          `${FeedUtils.getFolderPrettyPath(aOrigFolder)}, ` +
++          `newName ${FeedUtils.getFolderPrettyPath(aNewFolder)}`
+       );
+       if (!this.feedWindow) {
+         return;
+       }
+@@ -2405,15 +2434,13 @@ var FeedSubscriptions = {
+       if (aDestFolder.server.type != "rss") {
+         return;
+       }
+ 
+-      FeedUtils.log.debug(
+-        "folderMoveCopyCompleted: move:src:dest - " +
+-          aMove +
+-          ":" +
+-          aSrcFolder.name +
+-          ":" +
+-          aDestFolder.name
++      FeedUtils.log.log(
++        `folderMoveCopyCompleted: ` +
++          `isMove ${aMove}, ` +
++          `from ${FeedUtils.getFolderPrettyPath(aSrcFolder)}, ` +
++          `to ${FeedUtils.getFolderPrettyPath(aDestFolder)}`
+       );
+       if (!this.feedWindow) {
+         return;
+       }
+@@ -2591,8 +2618,16 @@ var FeedSubscriptions = {
+     const SPACES2 = "  ";
+     const SPACES4 = "    ";
+ 
+     if (this.mRSSServer.rootFolder.hasSubFolders) {
++      FeedUtils.log.groupCollapsed(
++        `exportOPML: create opml file for account ${rootFolder.prettyName}`
++      );
++      FeedUtils.log.log(
++        `exportOPML: ` +
++          (exportAsList ? "export as a list" : "export with folder structure")
++      );
++
+       const opmlDoc = document.implementation.createDocument("", "opml", null);
+       const opmlRoot = opmlDoc.documentElement;
+       opmlRoot.setAttribute("version", "1.0");
+       opmlRoot.setAttribute("xmlns:fz", "urn:forumzilla:");
+@@ -2629,17 +2664,26 @@ var FeedSubscriptions = {
+       this.generatePPSpace(body, SPACES2);
+ 
+       if (!body.childElementCount) {
+         // No folders/feeds.
++        FeedUtils.log.log("exportOPML: no folders or feeds in this account");
++        FeedUtils.log.groupEnd(
++          `exportOPML: create opml file for account ${rootFolder.prettyName}`
++        );
+         return;
+       }
+ 
+       opmlRoot.appendChild(body);
+       this.generatePPSpace(opmlRoot, "");
+ 
++      FeedUtils.log.groupEnd(
++        `exportOPML: create opml file for account ${rootFolder.prettyName}`
++      );
++
+       // Get file to save from filepicker.
+       const saveAsFile = await this.opmlPickSaveAsFile(exportAsList);
+       if (!saveAsFile) {
++        FeedUtils.log.log("exportOPML: cancel save");
+         return;
+       }
+ 
+       const fos = FileUtils.openSafeFileOutputStream(saveAsFile);
+@@ -2651,9 +2695,9 @@ var FeedSubscriptions = {
+         "subscribe-OPMLExportDone",
+         [saveAsFile.path]
+       );
+       this.updateStatusItem("statusText", statusReport);
+-      FeedUtils.log.info("exportOPML: " + statusReport);
++      FeedUtils.log.info(`exportOPML: ${statusReport}`);
+     }
+   },
+ 
+   generatePPSpace(aNode, indentString) {
+@@ -2666,39 +2710,34 @@ var FeedSubscriptions = {
+     const indentString = " ".repeat(indentLevel - 2);
+ 
+     let feedOutline;
+     for (const folder of baseFolder.subFolders) {
+-      FeedUtils.log.debug(
+-        "generateOutlineList: folder - " + folder.filePath.path
+-      );
++      FeedUtils.log.log(`generateOutlineList: folder ${folder.filePath.path}`);
+       if (
+         !(folder instanceof Ci.nsIMsgFolder) ||
+         folder.getFlag(Ci.nsMsgFolderFlags.Trash) ||
+         folder.getFlag(Ci.nsMsgFolderFlags.Virtual)
+       ) {
+         continue;
+       }
+ 
+-      FeedUtils.log.debug(
+-        "generateOutlineList: CONTINUE folderName - " + folder.name
++      FeedUtils.log.log(
++        `generateOutlineList: CONTINUE folderName ${folder.name}`
+       );
+ 
+       if (folder.hasSubFolders) {
+-        FeedUtils.log.debug(
+-          "generateOutlineList: has subfolders - " + folder.name
++        FeedUtils.log.log(
++          `generateOutlineList: folder ${folder.name} has subfolders`
+         );
+         // Recurse.
+         this.generateOutlineList(folder, parent, indentLevel);
+       }
+ 
+       // Add outline elements with xmlUrls.
+       const feeds = this.getFeedsInFolder(folder);
+       for (const feed of feeds) {
+-        FeedUtils.log.debug(
+-          "generateOutlineList: folder has FEED url - " +
+-            folder.name +
+-            " : " +
+-            feed.url
++        FeedUtils.log.log(
++          `generateOutlineList: folder ${folder.name} has feed.url ${feed.url}`
+         );
+         feedOutline = this.exportOPMLOutline(feed, parent.ownerDocument);
+         this.generatePPSpace(parent, indentString);
+         parent.appendChild(feedOutline);
+@@ -2713,10 +2752,10 @@ var FeedSubscriptions = {
+     }
+ 
+     let folderOutline, feedOutline;
+     for (const folder of baseFolder.subFolders) {
+-      FeedUtils.log.debug(
+-        "generateOutlineStruct: folder - " + folder.filePath.path
++      FeedUtils.log.log(
++        `generateOutlineStruct: folder ${folder.filePath.path}`
+       );
+       if (
+         !(folder instanceof Ci.nsIMsgFolder) ||
+         folder.getFlag(Ci.nsMsgFolderFlags.Trash) ||
+@@ -2724,33 +2763,30 @@ var FeedSubscriptions = {
+       ) {
+         continue;
+       }
+ 
+-      FeedUtils.log.debug(
+-        "generateOutlineStruct: CONTINUE folderName - " + folder.name
++      FeedUtils.log.log(
++        `generateOutlineStruct: CONTINUE folderName ${folder.name}`
+       );
+ 
+       // Make a folder outline element.
+       folderOutline = parent.ownerDocument.createElement("outline");
+       folderOutline.setAttribute("title", folder.prettyName);
+       this.generatePPSpace(parent, indentString(indentLevel + 2));
+ 
+       if (folder.hasSubFolders) {
+-        FeedUtils.log.debug(
+-          "generateOutlineStruct: has subfolders - " + folder.name
++        FeedUtils.log.log(
++          `generateOutlineStruct: folder ${folder.name} has subfolders`
+         );
+         // Recurse.
+         this.generateOutlineStruct(folder, folderOutline, indentLevel + 2);
+       }
+ 
+       const feeds = this.getFeedsInFolder(folder);
+       for (const feed of feeds) {
+         // Add feed outline elements with xmlUrls.
+-        FeedUtils.log.debug(
+-          "generateOutlineStruct: folder has FEED url - " +
+-            folder.name +
+-            " : " +
+-            feed.url
++        FeedUtils.log.log(
++          `generateOutlineStruct: folder ${folder.name} has FEED url ${feed.url}`
+         );
+         feedOutline = this.exportOPMLOutline(feed, parent.ownerDocument);
+         this.generatePPSpace(folderOutline, indentString(indentLevel + 4));
+         folderOutline.appendChild(feedOutline);
+@@ -2827,11 +2863,10 @@ var FeedSubscriptions = {
+       return false;
+     }
+ 
+     let opmlDom, statusReport;
+-    FeedUtils.log.debug(
+-      "importOPMLFile: fileName:fileUrl - " + aFile.leafName + ":" + aFileUrl
+-    );
++    FeedUtils.log.groupCollapsed(`importOPMLFile: fileName ${aFile.leafName}`);
++    FeedUtils.log.log(`importOPMLFile: fileUrl ${aFileUrl}`);
+     const request = new Request(aFileUrl);
+     await fetch(request)
+       .then(function (response) {
+         if (!response.ok) {
+@@ -2871,13 +2906,14 @@ var FeedSubscriptions = {
+       .catch(function (error) {
+         statusReport = FeedUtils.strings.GetStringFromName(
+           "subscribe-errorOpeningFile"
+         );
+-        FeedUtils.log.error("importOPMLFile: error - " + error.message);
++        FeedUtils.log.error(`importOPMLFile: error ${error.message}`);
+       });
+ 
+     if (statusReport) {
+-      FeedUtils.log.error("importOPMLFile: status - " + statusReport);
++      FeedUtils.log.error(`importOPMLFile: status ${statusReport}`);
++      FeedUtils.log.groupEnd(`importOPMLFile: fileName ${aFile.leafName}`);
+       Services.prompt.alert(window, null, statusReport);
+       return false;
+     }
+ 
+@@ -2897,33 +2933,34 @@ var FeedSubscriptions = {
+     let feedsAdded = 0;
+     let rssOutlines = 0;
+ 
+     function processor(aParentNode, aParentFolder) {
+-      FeedUtils.log.trace(
+-        "importOPMLOutlines: PROCESSOR tag:name:children - " +
+-          aParentNode.tagName +
+-          ":" +
+-          aParentNode.getAttribute("text") +
+-          ":" +
+-          aParentNode.childElementCount
++      FeedUtils.log.group(
++        `importOPMLOutlines: processor(), tag <${aParentNode.tagName}>`
++      );
++      FeedUtils.log.log(
++        `importOPMLOutlines: processor(), ` +
++          `attribute "text"=${aParentNode.getAttribute("text")}, ` +
++          `childCount ${aParentNode.childElementCount}`
+       );
+       // @see https://github.com/eslint/eslint/issues/17807
+       // eslint-disable-next-line no-constant-condition
+       while (true) {
+         if (aParentNode.tagName == "body" && !aParentNode.childElementCount) {
+           // Finished.
++          FeedUtils.log.groupEnd(
++            `importOPMLOutlines: processor(), tag <${aParentNode.tagName}>`
++          );
+           const statusReport = win.importOPMLStatus(feedsAdded, rssOutlines);
+           callback(statusReport, lastFolder, win);
+           return;
+         }
+ 
+         outline = aParentNode.firstElementChild;
+         if (outline.tagName != "outline") {
+-          FeedUtils.log.info(
+-            "importOPMLOutlines: skipping, node is not an " +
+-              "<outline> - <" +
+-              outline.tagName +
+-              ">"
++          FeedUtils.log.warn(
++            `importOPMLOutlines: skipping, tagName <${outline.tagName}> ` +
++              `is not an <outline> tag`
+           );
+           badTag = true;
+           break;
+         }
+@@ -2938,26 +2975,18 @@ var FeedSubscriptions = {
+           // A feed outline.
+           feedUrl =
+             outline.getAttribute("xmlUrl") || outline.getAttribute("url");
+           if (!feedUrl) {
+-            FeedUtils.log.info(
+-              "importOPMLOutlines: skipping, type=rss <outline> " +
+-                "has no url - " +
+-                outlineName
++            FeedUtils.log.warn(
++              `importOPMLOutlines: skipping, type=rss <outline> has no url, outlineName ${outlineName}`
+             );
+             break;
+           }
+ 
+           rssOutlines++;
+           feedFolder = aParentFolder;
+ 
+           if (FeedUtils.feedAlreadyExists(feedUrl, rssServer)) {
+-            FeedUtils.log.info(
+-              "importOPMLOutlines: feed already subscribed in account " +
+-                rssServer.prettyName +
+-                ", url - " +
+-                feedUrl
+-            );
+             break;
+           }
+ 
+           if (
+@@ -3000,15 +3029,8 @@ var FeedSubscriptions = {
+             quickMode,
+             options,
+           };
+ 
+-          FeedUtils.log.info(
+-            "importOPMLOutlines: importing feed: name, url - " +
+-              outlineName +
+-              ", " +
+-              feedUrl
+-          );
+-
+           const feed = win.storeFeed(feedProperties);
+           if (outline.hasAttribute("htmlUrl")) {
+             feed.link = outline.getAttribute("htmlUrl");
+           }
+@@ -3019,15 +3041,13 @@ var FeedSubscriptions = {
+             if (feed && feed.url && feed.server) {
+               FeedUtils.deleteFeed(feed);
+             }
+ 
+-            FeedUtils.log.info(
+-              "importOPMLOutlines: skipping, error creating folder - '" +
+-                feed.folderName +
+-                "' from outlineName - '" +
+-                outlineName +
+-                "' in parent folder " +
+-                aParentFolder.filePath.path
++            FeedUtils.log.warn(
++              `importOPMLOutlines: skipping, error creating ` +
++                `folder ${feed.folderName}, ` +
++                `from outlineName ${outlineName}, ` +
++                `in parent folder ${aParentFolder.filePath.path}`
+             );
+             badTag = true;
+             break;
+           }
+@@ -3036,38 +3056,42 @@ var FeedSubscriptions = {
+           FeedUtils.addFeed(feed);
+           // Feed correctly added.
+           feedsAdded++;
+           lastFolder = feed.folder;
++          FeedUtils.log.log(
++            `importOPMLOutlines: added feed with outlineName=${outlineName}, ` +
++              `feedUrl=${feedUrl}`
++          );
+         } else {
++          FeedUtils.log.log(
++            `importOPMLOutlines: child is folder <outline>, ` +
++              `outlineName=${outlineName}`
++          );
+           // A folder outline. If a folder exists in the account structure at
+           // the same level as in the opml structure, feeds are placed into the
+           // existing folder.
+           const folderName = outlineName;
+           feedFolder = aParentFolder.getChildNamed(folderName);
+           if (!feedFolder) {
+             // Folder not found, create it.
+-            FeedUtils.log.info(
+-              "importOPMLOutlines: creating folder - '" +
+-                folderName +
+-                "' from outlineName - '" +
+-                outlineName +
+-                "' in parent folder " +
+-                aParentFolder.filePath.path
++            FeedUtils.log.log(
++              `importOPMLOutlines: creating ` +
++                `folder ${folderName}, ` +
++                `from outlineName ${outlineName}, ` +
++                `in parent folder ${aParentFolder.filePath.path}`
+             );
+             firstFeedInFolderQuickMode = null;
+             try {
+               feedFolder = aParentFolder
+                 .QueryInterface(Ci.nsIMsgLocalMailFolder)
+                 .createLocalSubfolder(folderName);
+             } catch (exception) {
+               // An error creating. Skip it.
+-              FeedUtils.log.info(
+-                "importOPMLOutlines: skipping, error creating folder - '" +
+-                  folderName +
+-                  "' from outlineName - '" +
+-                  outlineName +
+-                  "' in parent folder " +
+-                  aParentFolder.filePath.path
++              FeedUtils.log.warn(
++                `importOPMLOutlines: skipping, error creating ` +
++                  `folder ${folderName}, ` +
++                  `from outlineName ${outlineName}, ` +
++                  `in parent folder ${aParentFolder.filePath.path}`
+               );
+               const xfolder = aParentFolder.getChildNamed(folderName);
+               aParentFolder.propagateDelete(xfolder, true);
+               badTag = true;
+@@ -3089,10 +3113,17 @@ var FeedSubscriptions = {
+         outline.remove();
+         badTag = false;
+         outline = aBody;
+         feedFolder = rssServer.rootFolder;
++        FeedUtils.log.log(
++          `importOPMLOutlines: remove empty/invalid <outline> and recurse`
++        );
+       }
+ 
++      FeedUtils.log.groupEnd(
++        `importOPMLOutlines: processor(), tag <${aParentNode.tagName}>`
++      );
++
+       setTimeout(() => {
+         processor(outline, feedFolder);
+       }, 0);
+     }
+@@ -3139,6 +3170,8 @@ var FeedSubscriptions = {
+     aWin.mActionMode = null;
+     aWin.updateButtons(aWin.mView.currentItem);
+     aWin.clearStatusInfo();
+     aWin.updateStatusItem("statusText", aStatusReport);
++    FeedUtils.log.groupEnd(`importOPMLFile: fileName $aFile.leafName`);
++    FeedUtils.log.info(`importOPMLFinished: ${aStatusReport}`);
+   },
+ };
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -191,12 +191,10 @@ var FeedMessageHandler = {
+           // for idn and non-ascii urls with this api.
+           url = decodeURIComponent(escape(url));
+           uri = Services.io.newURI(url);
+         } catch (ex) {
+-          FeedUtils.log.info(
+-            "FeedMessageHandler.loadWebPage: " +
+-              "invalid Content-Base header url - " +
+-              url
++          FeedUtils.log.warn(
++            `loadWebPage: invalid Content-Base header url ${url}`
+           );
+           return;
+         }
+         //TODO browser currently only used from SearchDialog for kOpenLoadInBrowser
+@@ -214,11 +212,10 @@ var FeedMessageHandler = {
+         } else if (aWhere.window) {
+           openContentTab(url, "window", null);
+         }
+       } else {
+-        FeedUtils.log.info(
+-          "FeedMessageHandler.loadWebPage: could not get " +
+-            "Content-Base header url for this message"
++        FeedUtils.log.warn(
++          "loadWebPage: could not get Content-Base header url for this message"
+         );
+       }
+     });
+   },

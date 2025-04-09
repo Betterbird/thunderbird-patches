@@ -1,0 +1,768 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1744197621 -7200
+# Parent  271f4a8f7fda8440bfe5d9cc702d83d271b92373
+Feed Subscribe dialog enhancements
+Bug 1586596 - Make it configureable whether a new subfolder should be created
+when subscribing to a new RSS feed.
+
+Features:
+- If the Create Subfolder option is checked, when adding a feed to a folder
+  a new subfolder of the current selected folder will be created (this is the
+  default if adding a feed to the root account folder).
+- A drag and drop move/copy of a feed will also behave according to the
+  Create Subfolder option; a new subfolder will be created for the drop target
+  folder if checked, otherwise the feed is added to the target folder.
+- A convenient Delete Folder/Account via button or delete key option has been added
+  to the dialog.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -76,8 +76,9 @@ Feed.prototype = {
+   itemsToStore: [],
+   itemsStored: 0,
+   fileSize: 0,
+   mFolder: null,
++  mParentFolder: null,
+   mInvalidFeed: false,
+   mFeedType: null,
+   mLastModified: null,
+ 
+@@ -106,9 +107,9 @@ Feed.prototype = {
+     const folderName = (this.title || this.description || "").substr(0, 80);
+     const defaultName =
+       lazy.FeedUtils.strings.GetStringFromName("ImportFeedsNew");
+     return (this.mFolderName = lazy.FeedUtils.getSanitizedFolderName(
+-      this.server.rootMsgFolder,
++      this.mParentFolder || this.server.rootMsgFolder,
+       folderName,
+       defaultName,
+       true
+     ));
+@@ -575,10 +576,11 @@ Feed.prototype = {
+     if (this.folder) {
+       return;
+     }
+ 
++    const parentFolder = this.mParentFolder ?? this.server.rootMsgFolder;
+     try {
+-      this.folder = this.server.rootMsgFolder
++      this.folder = parentFolder
+         .QueryInterface(Ci.nsIMsgLocalMailFolder)
+         .createLocalSubfolder(this.folderName);
+ 
+       lazy.FeedUtils.setStatus(
+@@ -590,13 +592,13 @@ Feed.prototype = {
+     } catch (exception) {
+       // An error creating.
+       this.addLog(
+         "warn",
+-        `createFolder: error creating folder ${this.folderName} in parent folder ${this.server.rootMsgFolder.filePath.path} -- ${exception}`
++        `createFolder: error creating folder ${this.folderName} in parent folder ${parentFolder.filePath.path} -- ${exception}`
+       );
+       // But its remnants are still there, clean up.
+-      const xfolder = this.server.rootMsgFolder.getChildNamed(this.folderName);
+-      this.server.rootMsgFolder.propagateDelete(xfolder, true);
++      const xfolder = parentFolder.getChildNamed(this.folderName);
++      parentFolder.propagateDelete(xfolder, true);
+     }
+   },
+ 
+   // Gets the next item from itemsToStore and forces that item to be stored
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -2161,4 +2161,16 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
+   return Services.strings.createBundle(
+     "chrome://messenger/locale/prefs.properties"
+   );
+ });
++
++ChromeUtils.defineLazyGetter(FeedUtils, "stringsMessenger", function () {
++  return Services.strings.createBundle(
++    "chrome://messenger/locale/messenger.properties"
++  );
++});
++
++ChromeUtils.defineLazyGetter(FeedUtils, "stringsSubFolder", function () {
++  return Services.strings.createBundle(
++    "chrome://messenger/locale/imapMsgs.properties"
++  );
++});
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -38,8 +38,13 @@ var FeedSubscriptions = {
+   get mMainWin() {
+     return Services.wm.getMostRecentWindow("mail:3pane");
+   },
+ 
++  get mFolderpane() {
++    const tabmail = this.mMainWin?.gTabmail;
++    return tabmail?.currentAbout3Pane?.folderPane;
++  },
++
+   get mTree() {
+     return document.getElementById("rssSubscriptionsList");
+   },
+ 
+@@ -51,8 +56,9 @@ var FeedSubscriptions = {
+   kMoveMode: 3,
+   kCopyMode: 4,
+   kImportingOPML: 5,
+   kVerifyUrlMode: 6,
++  kDeleteFolderMode: 7,
+ 
+   get FOLDER_ACTIONS() {
+     return (
+       Ci.nsIMsgFolderNotificationService.folderAdded |
+@@ -61,8 +67,12 @@ var FeedSubscriptions = {
+       Ci.nsIMsgFolderNotificationService.folderMoveCopyCompleted
+     );
+   },
+ 
++  get createSubFolder() {
++    return document.getElementById("createSubFolder")?.checked;
++  },
++
+   onLoad() {
+     // Extract the folder argument.
+     let folder;
+     if (window.arguments && window.arguments[0].folder) {
+@@ -88,16 +98,30 @@ var FeedSubscriptions = {
+     if (this.mMainWin) {
+       MailServices.mfn.addListener(this.FolderListener, this.FOLDER_ACTIONS);
+     }
+ 
++    // For observe notices.
++    Services.ww.registerNotification(this);
++
++    // Set up some strings.
++    document.getElementById("createSubFolder").label =
++      FeedUtils.stringsSubFolder.GetStringFromName("imapAclCreateRight");
++
++    const deleteFolder = document.getElementById("deleteFolder");
++    deleteFolder.setAttribute("folderLabel", deleteFolder.label);
++    deleteFolder.setAttribute(
++      "accountLabel",
++      FeedUtils.stringsMessenger.GetStringFromName("removeAccount")
++    );
++
+     UIFontSize.registerWindow(window);
+   },
+ 
+   onDialogAccept() {
+-    FeedUtils.log.log(
++    FeedUtils.log.debug(
+       `onDialogAccept: width ${window.innerWidth}, height ${window.innerHeight}`
+     );
+-    FeedUtils.log.log(
++    FeedUtils.log.debug(
+       `onDialogAccept: screenX ${window.screenX}, screenY ${window.screenY}`
+     );
+     // Explicitly persist the correct values and open the dialog with them.
+     const URL = window.document.URL;
+@@ -523,12 +547,13 @@ var FeedSubscriptions = {
+           const newServer =
+             newItem && newItem.folder ? newItem.folder.server : null;
+ 
+           // No copying within the same account and no moving to the account
+-          // folder in the same account.
++          // folder in the same account unless creating a subFolder.
+           if (
+             !(
+               curServer == newServer &&
++              !FeedSubscriptions.createSubFolder &&
+               (dragDataResults.dropEffect == "copy" ||
+                 newItem.folder == curItem.parentFolder ||
+                 newItem.folder.isServer)
+             )
+@@ -1164,13 +1189,17 @@ var FeedSubscriptions = {
+ 
+     const selectFolder = document.getElementById("selectFolder");
+     const selectFolderPopup = document.getElementById("selectFolderPopup");
+     const selectFolderValue = document.getElementById("selectFolderValue");
++    const createSubFolder = document.getElementById("createSubFolder");
+ 
+     selectFolder.setAttribute("hidden", !aIsFeed);
+     selectFolder._folder = aFolder;
+     selectFolderValue.toggleAttribute("hidden", aIsFeed);
+     selectFolderValue.removeAttribute("showfilepath");
++    createSubFolder.checked =
++      aFolder.isServer || createSubFolder.hasAttribute("userchecked");
++    createSubFolder.disabled = aFolder.isServer;
+ 
+     if (aIsFeed) {
+       selectFolderPopup._ensureInitialized();
+       selectFolderPopup.selectFolder(aFolder);
+@@ -1474,15 +1503,23 @@ var FeedSubscriptions = {
+     if (
+       aEvent.keyCode == aEvent.DOM_VK_DELETE &&
+       aEvent.target.id == this.mTree.id
+     ) {
+-      this.removeFeed(true);
++      this.onTreeDeleteKey();
+       return;
+     }
+ 
+     this.clearStatusInfo();
+   },
+ 
++  onTreeDeleteKey() {
++    if (!document.getElementById("deleteFolder").hidden) {
++      this.deleteFolder();
++    } else {
++      this.removeFeed(true);
++    }
++  },
++
+   onSelect() {
+     const item = this.mView.currentItem;
+     this.updateFeedData(item);
+     this.setFocus();
+@@ -1495,8 +1532,13 @@ var FeedSubscriptions = {
+     const isServer = item && item.folder && item.folder.isServer;
+     const isFeed = item && !item.container;
+     document.getElementById("addFeed").hidden = !item || isFeed;
+     document.getElementById("updateFeed").hidden = !isFeed;
++    const deleteFolder = document.getElementById("deleteFolder");
++    deleteFolder.hidden = isFeed;
++    deleteFolder.label = isServer
++      ? deleteFolder.getAttribute("accountLabel")
++      : deleteFolder.getAttribute("folderLabel");
+     document.getElementById("removeFeed").hidden = !isFeed;
+     document.getElementById("importOPML").hidden = !isServer;
+     document.getElementById("exportOPML").hidden = !isServer;
+ 
+@@ -1600,8 +1642,82 @@ var FeedSubscriptions = {
+       updateFeedButton.disabled = !locationValue.value;
+     }
+   },
+ 
++  /**
++   * Delete a folder, in the context of main window open and about:3pane
++   * showing in a tab. If the account root folder is selected, switch to
++   * about:3pane. select/open the Account Manager tab, and select the account.
++   *
++   * @returns {void}
++   */
++  async deleteFolder() {
++    const seln = this.mView.selection;
++    if (seln.count != 1) {
++      return;
++    }
++
++    const itemToRemove = this.mView.getItemAtIndex(seln.currentIndex) ?? {};
++    const isFolder = itemToRemove.folder && !itemToRemove.folder.isServer;
++
++    if (!isFolder) {
++      // It's the account root folder, go to Account Manager and select it.
++      this.mMainWin?.MsgAccountManager(null, itemToRemove.folder.server);
++      this.mMainWin?.focus();
++      const tabbrowser = this.mMainWin?.getBrowser();
++      if (!tabbrowser) {
++        return;
++      }
++      if (tabbrowser.contentDocument.readyState != "complete") {
++        // We would have to implement 2 load listeners to get to a readyState
++        // in a previously unloaded Account Manager tab, in order to access
++        // the deleteAccount button. Instead, just wait 2 seconds.
++        await new Promise(resolve => setTimeout(resolve, 2000));
++      }
++      const contentDoc = tabbrowser.contentDocument;
++      const deleteAccountButton =
++        contentDoc.defaultView.contentFrame?.document.querySelector(
++          "#deleteAccount"
++        );
++      if (!deleteAccountButton) {
++        return;
++      }
++      deleteAccountButton.click();
++      const dialogStack =
++        contentDoc.documentElement.querySelector("#dialogStack");
++      this.mActionMode = this.kDeleteFolderMode;
++      dialogStack.addEventListener(
++        "dialogclose",
++        () => {
++          const subscriptionsWindow = Services.wm.getMostRecentWindow(
++            "Mail:News-BlogSubscriptions"
++          );
++          const feedWindow = subscriptionsWindow.FeedSubscriptions;
++          if (feedWindow.mActionMode == feedWindow.kDeleteFolderMode) {
++            feedWindow.mActionMode = null;
++            setTimeout(() => {
++              window.focus();
++              feedWindow.mTree.focus();
++            });
++          }
++        },
++        { once: true }
++      );
++
++      return;
++    }
++
++    // Switch to main 3pane tab.
++    this.mMainWin?.gTabmail?.switchToTab(0);
++
++    if (!this.mFolderpane || !isFolder) {
++      return;
++    }
++
++    this.mActionMode = this.kDeleteFolderMode;
++    this.mFolderpane.deleteFolder(itemToRemove.folder);
++  },
++
+   removeFeed(aPrompt) {
+     const seln = this.mView.selection;
+     if (seln.count != 1) {
+       return;
+@@ -1677,8 +1793,13 @@ var FeedSubscriptions = {
+    * @returns {boolean} success        - true if edit checks passed and an
+    *                                     async download has been initiated.
+    */
+   addFeed(aFeedLocation, aFolder, aParse, aParams, aMode) {
++    FeedUtils.log.log(
++      `addFeed: aFeedLocation ${aFeedLocation}, ` +
++        (aFolder ? `${aFolder.name}, ` : `null, `) +
++        `aParse ${aParse}, aMode ${aMode}`
++    );
+     let message;
+     const parse = aParse == null ? true : aParse;
+     const mode = aMode == null ? this.kSubscribeMode : aMode;
+     const locationValue = document.getElementById("locationValue");
+@@ -1760,20 +1881,31 @@ var FeedSubscriptions = {
+         document.getElementById("autotagUsePrefix").checked;
+       options.category.prefix = document.getElementById("autotagPrefix").value;
+     }
+ 
++    // If adding or move/copy a feed, and user wants it in a new subfolder,
++    // the feed folder is the root folder and the desired parent is in
++    // mParentFolder if it is not the root server folder.
++    const feedFolder = this.createSubFolder
++      ? addFolder.server.rootFolder
++      : addFolder;
++
+     const feedProperties = {
+       feedName: name,
+       feedLocation,
+-      feedFolder: addFolder,
++      feedFolder,
+       feedType,
+       quickMode,
+       options,
+     };
+ 
+     const feed = this.storeFeed(feedProperties);
+-    if (!feed) {
+-      return false;
++    feed.mParentFolder =
++      this.createSubFolder && !addFolder.isServer ? addFolder : null;
++
++    // Just checking basics, no network validation required.
++    if ([this.kMoveMode, this.kCopyMode].includes(mode)) {
++      return feed;
+     }
+ 
+     // Now validate and start downloading the feed.
+     message = FeedUtils.strings.GetStringFromName("subscribe-validating-feed");
+@@ -1863,103 +1995,176 @@ var FeedSubscriptions = {
+     const moveFeed = aMoveCopy == "move";
+     const currentItem = this.mView.getItemAtIndex(aOldFeedIndex);
+     if (
+       !currentItem ||
+-      this.mView.getParentIndex(aOldFeedIndex) == aNewParentIndex
++      (!this.createSubFolder &&
++        this.mView.getParentIndex(aOldFeedIndex) == aNewParentIndex)
+     ) {
+-      // If the new parent is the same as the current parent, then do nothing.
++      // If the new parent is the same as the current parent, then do nothing,
++      // unless createSubFolder is true.
+       return;
+     }
+ 
+     const currentParentIndex = this.mView.getParentIndex(aOldFeedIndex);
+     const currentParentItem = this.mView.getItemAtIndex(currentParentIndex);
+     const currentFolder = currentParentItem.folder;
+ 
+-    const newParentItem = this.mView.getItemAtIndex(aNewParentIndex);
+-    const newFolder = newParentItem.folder;
+-
+-    let accountMoveCopy = false;
+-    if (currentFolder.rootFolder.URI == newFolder.rootFolder.URI) {
+-      // Moving within the same account/feeds db.
+-      if (newFolder.isServer || !moveFeed) {
+-        // No moving to account folder if already in the account; can only move,
+-        // not copy, to folder in the same account.
+-        return;
+-      }
+-
+-      // Update the destFolder for this feed's subscription.
+-      FeedUtils.setSubscriptionAttr(
+-        currentItem.url,
+-        currentItem.parentFolder.server,
+-        "destFolder",
+-        newFolder.URI
+-      );
+-
+-      // Update folderpane favicons.
+-      Services.obs.notifyObservers(currentFolder, "folder-properties-changed");
+-      Services.obs.notifyObservers(newFolder, "folder-properties-changed");
+-    } else {
+-      // Moving/copying to a new account.  If dropping on the account folder,
+-      // a new subfolder is created if necessary.
+-      accountMoveCopy = true;
++    let newParentItem = this.mView.getItemAtIndex(aNewParentIndex);
++    let newFolder = newParentItem.folder;
++
++    const accountMoveCopy =
++      currentFolder.rootFolder.URI != newFolder.rootFolder.URI;
++
++    /* Moving/copying to a new account. If dropping on the account folder,
++       a new subfolder is created if necessary. */
++    if (accountMoveCopy) {
+       const mode = moveFeed ? this.kMoveMode : this.kCopyMode;
++      const options = currentItem.options;
++      options.updates.lastUpdateTime = options.updates.lastDownloadTime = 0;
+       const params = {
+         feedType: currentItem.feedType,
+         quickMode: currentItem.quickMode,
+         name: currentItem.name,
+-        options: currentItem.options,
++        options,
+       };
+       // Subscribe to the new folder first.  If it already exists in the
+-      // account or on error, return.
+-      if (!this.addFeed(currentItem.url, newFolder, false, params, mode)) {
++      // account or on error, return. No network validation or downloads.
++      const newFeed = this.addFeed(
++        currentItem.url,
++        newFolder,
++        false,
++        params,
++        mode
++      );
++      if (!newFeed) {
+         return;
+       }
++      // Make sure there's a folder, if createSubFolder is desired; addFeed()
++      // will set it up.
++      newFeed.createFolder();
++      if (!newFeed.folder) {
++        this.mFeedDownloadCallback.downloaded(
++          newFeed,
++          FeedUtils.kNewsBlogFileError
++        );
++        return;
++      }
++      // Clean up, this will add the feed to the database, set state, and
++      // update the view with the new location.
++      this.mFeedDownloadCallback.downloaded(
++        newFeed,
++        FeedUtils.kNewsBlogSuccess
++      );
+       // Unsubscribe the feed from the old folder, if add to the new folder
+       // is successful, and doing a move.
+       if (moveFeed) {
+-        const feed = new Feed(currentItem.url, currentItem.parentFolder);
+-        FeedUtils.deleteFeed(feed);
++        const oldFeed = new Feed(currentItem.url, currentItem.parentFolder);
++        FeedUtils.deleteFeed(oldFeed);
++        // Update old parent folder's quickMode and remove the old row, if move.
++        this.updateFolderQuickModeInView(currentItem, currentParentItem, true);
++        aOldFeedIndex = this.mFeedContainers.findIndex(
++          item => item.url == currentItem.url
++        );
++        this.mView.removeItemAtIndex(aOldFeedIndex, true);
+       }
++      // Update local favicons.
++      currentParentItem.favicon = newParentItem.favicon = null;
++      return;
+     }
+ 
++    FeedUtils.log.log(`moveCopyFeed: newFolder ${newFolder.URI}`);
++    /* Moving a feed within the same account/feeds db. */
++    if ((newFolder.isServer && !this.createSubFolder) || !moveFeed) {
++      // No moving to account folder if already in the account; can only move,
++      // not copy, to folder in the same account.
++      return;
++    }
++
++    let newSubFolder;
++    if (this.createSubFolder) {
++      const newFeed = new Feed(currentItem.url, newFolder.server.rootFolder);
++      newFeed.mParentFolder = !newFolder.isServer ? newFolder : null;
++      newFeed.createFolder();
++      newSubFolder = newFeed.folder;
++      if (!newSubFolder) {
++        this.mFeedDownloadCallback.downloaded(
++          newFeed,
++          FeedUtils.kNewsBlogFileError
++        );
++        return;
++      }
++      newFolder = newSubFolder;
++      // Adding a new folder rebuilds the view; we need the old item in view
++      // for removal.
++      const rootFolderIndex = this.mFeedContainers.findIndex(
++        item => item.level == 0 && item.folder == newFolder.server.rootFolder
++      );
++      FeedUtils.log.log(`moveCopyFeed: rootFolderIndex ${rootFolderIndex}`);
++      this.selectFeed(
++        { folder: currentFolder, url: currentItem.url },
++        rootFolderIndex
++      );
++      FeedUtils.log.log(this.mView.currentItem);
++      this.selectFolder(newFolder, { parentIndex: aNewParentIndex });
++      newParentItem = this.mView.currentItem;
++      FeedUtils.log.log(this.mView.currentItem);
++    }
++
++    // Update the destFolder for this feed's subscription.
++    FeedUtils.setSubscriptionAttr(
++      currentItem.url,
++      currentItem.parentFolder.server,
++      "destFolder",
++      newFolder.URI
++    );
++
++    // Update folderpane favicons.
++    Services.obs.notifyObservers(currentFolder, "folder-properties-changed");
++    Services.obs.notifyObservers(newFolder, "folder-properties-changed");
++
+     // Update local favicons.
+     currentParentItem.favicon = newParentItem.favicon = null;
+ 
+-    // Finally, update our view layer.  Update old parent folder's quickMode
+-    // and remove the old row, if move.  Otherwise no change to the view.
++    // Finally, update our view layer. Update old parent folder's quickMode
++    // and remove the old row, if move. Otherwise no change to the view.
+     if (moveFeed) {
+       this.updateFolderQuickModeInView(currentItem, currentParentItem, true);
++      aOldFeedIndex = this.mFeedContainers.findIndex(
++        item => item.url == currentItem.url
++      );
+       this.mView.removeItemAtIndex(aOldFeedIndex, true);
+-      if (aNewParentIndex > aOldFeedIndex) {
+-        aNewParentIndex--;
+-      }
++      aNewParentIndex = this.mFeedContainers.findIndex(
++        item => item.url == newParentItem.url
++      );
+     }
+ 
+-    if (accountMoveCopy) {
+-      // If a cross account move/copy, download callback will update the view
+-      // with the new location.  Preselect folder/mode for callback.
+-      this.selectFolder(newFolder, { parentIndex: aNewParentIndex });
+-      return;
+-    }
++    FeedUtils.log.log(`moveCopyFeed: aOldFeedIndex ${aOldFeedIndex}`);
++    FeedUtils.log.log(this.mView.getItemAtIndex(aOldFeedIndex));
++
++    FeedUtils.log.log(`moveCopyFeed: aNewParentIndex ${aNewParentIndex}`);
++    FeedUtils.log.log(this.mView.getItemAtIndex(aNewParentIndex));
+ 
+     // Add the new row location to the view.
+     currentItem.level = newParentItem.level + 1;
+     currentItem.parentFolder = newFolder;
+     this.updateFolderQuickModeInView(currentItem, newParentItem, false);
+     newParentItem.children.push(currentItem);
+ 
++    FeedUtils.log.log(`moveCopyFeed: newParentItem`);
++    FeedUtils.log.log(newParentItem);
+     if (newParentItem.open) {
+       // Close the container, selecting the feed will rebuild the view rows.
+       this.mView.toggle(aNewParentIndex);
+     }
+ 
+     this.selectFeed(
+-      { folder: newParentItem.folder, url: currentItem.url },
++      { folder: newFolder, url: currentItem.url },
+       aNewParentIndex
+     );
+ 
+     const message = FeedUtils.strings.GetStringFromName("subscribe-feedMoved");
+     this.updateStatusItem("statusText", message);
++    FeedUtils.setStatus(newFolder, newFolder.URI, "code", "");
+   },
+ 
+   updateFolderQuickModeInView(aFeedItem, aParentItem, aRemove) {
+     const feedItem = aFeedItem;
+@@ -2076,12 +2281,15 @@ var FeedSubscriptions = {
+           );
+           return;
+         }
+ 
+-        // Update lastUpdateTime if successful.
+-        const options = feed.options;
+-        options.updates.lastUpdateTime = Date.now();
+-        feed.options = options;
++        // Update lastUpdateTime if successful. But only if parsing/downloading
++        // in subscribe mode.
++        if (win.mActionMode == win.kSubscribeMode) {
++          const options = feed.options;
++          options.updates.lastUpdateTime = Date.now();
++          feed.options = options;
++        }
+ 
+         // Add the feed to the databases.
+         FeedUtils.addFeed(feed);
+ 
+@@ -2338,8 +2546,32 @@ var FeedSubscriptions = {
+ 
+     locationValue.focus();
+   },
+ 
++  // Observer for delete folder dialog close and refocus.
++  observe(subject, topic, _prefName) {
++    if (topic == "domwindowclosed" && Window.isInstance(subject)) {
++      FeedUtils.log.debug(
++        `observe: topic ${topic}, subject ${subject.document.URL}`
++      );
++      const openedWindow = subject;
++      const dialogURL = "chrome://global/content/commonDialog.xhtml";
++      if (openedWindow.document.URL == dialogURL) {
++        const subscriptionsWindow = Services.wm.getMostRecentWindow(
++          "Mail:News-BlogSubscriptions"
++        );
++        const feedWindow = subscriptionsWindow.FeedSubscriptions;
++        if (feedWindow.mActionMode == feedWindow.kDeleteFolderMode) {
++          feedWindow.mActionMode = null;
++          setTimeout(() => {
++            window.focus();
++            feedWindow.mTree.focus();
++          });
++        }
++      }
++    }
++  },
++
+   // Listener for folder pane changes.
+   FolderListener: {
+     get feedWindow() {
+       const subscriptionsWindow = Services.wm.getMostRecentWindow(
+@@ -2358,9 +2590,12 @@ var FeedSubscriptions = {
+       return this.feedWindow ? this.feedWindow.mView.currentItem : null;
+     },
+ 
+     folderAdded(aFolder) {
+-      if (aFolder.server.type != "rss" || FeedUtils.isInTrash(aFolder)) {
++      if (
++        !FeedUtils.FEED_ACCOUNT_TYPES.includes(aFolder.server.type) ||
++        FeedUtils.isInTrash(aFolder)
++      ) {
+         return;
+       }
+ 
+       const parentFolder = aFolder.isServer ? aFolder : aFolder.parent;
+@@ -2394,8 +2629,9 @@ var FeedSubscriptions = {
+             feedWindow.makeFolderObject(parentFolder, 0)
+           );
+           feedWindow.mView.mRowCount++;
+           feedWindow.mTree.view = feedWindow.mView;
++          feedWindow.mView.tree.rowCountChanged(feedWindow.mView.mRowCount, 1);
+           feedWindow.mView.tree.scrollToRow(firstVisRow);
+           return;
+         }
+       }
+@@ -2436,9 +2672,12 @@ var FeedSubscriptions = {
+       }
+     },
+ 
+     folderDeleted(aFolder) {
+-      if (aFolder.server.type != "rss" || FeedUtils.isInTrash(aFolder)) {
++      if (
++        !FeedUtils.FEED_ACCOUNT_TYPES.includes(aFolder.server.type) ||
++        FeedUtils.isInTrash(aFolder)
++      ) {
+         return;
+       }
+ 
+       FeedUtils.log.log(
+@@ -2472,9 +2711,12 @@ var FeedSubscriptions = {
+       feedWindow.mView.removeItemAtIndex(indexInView, !select);
+     },
+ 
+     folderRenamed(aOrigFolder, aNewFolder) {
+-      if (aNewFolder.server.type != "rss" || FeedUtils.isInTrash(aNewFolder)) {
++      if (
++        !FeedUtils.FEED_ACCOUNT_TYPES.includes(aNewFolder.server.type) ||
++        FeedUtils.isInTrash(aNewFolder)
++      ) {
+         return;
+       }
+ 
+       FeedUtils.log.log(
+@@ -2535,9 +2777,9 @@ var FeedSubscriptions = {
+       }
+     },
+ 
+     folderMoveCopyCompleted(aMove, aSrcFolder, aDestFolder) {
+-      if (aDestFolder.server.type != "rss") {
++      if (!FeedUtils.FEED_ACCOUNT_TYPES.includes(aDestFolder.server.type)) {
+         return;
+       }
+ 
+       FeedUtils.log.log(
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.xhtml b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+--- a/mailnews/extensions/newsblog/feed-subscriptions.xhtml
++++ b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+@@ -36,8 +36,9 @@
+     <link rel="stylesheet" href="chrome://messenger/skin/colors.css" />
+     <link rel="stylesheet" href="chrome://messenger/skin/themeableDialog.css" />
+     <link rel="stylesheet" href="chrome://messenger/skin/contextMenu.css" />
+ 
++    <link rel="localization" href="messenger/messenger.ftl" />
+     <link rel="localization" href="security/certificates/certManager.ftl" />
+     <script
+       defer="defer"
+       src="chrome://messenger/content/globalOverlay.js"
+@@ -97,8 +98,12 @@
+         id="bundle_newsblog"
+         src="chrome://messenger-newsblog/locale/newsblog.properties"
+       />
+       <stringbundle
++        id="bundle_subfolder"
++        src="chrome://messenger/locale/imapMsgs.properties"
++      />
++      <stringbundle
+         id="bundle_brand"
+         src="chrome://branding/locale/brand.properties"
+       />
+ 
+@@ -214,8 +219,13 @@
+                     onkeypress="FeedSubscriptions.onClickSelectFolderValue(event);"
+                     onclick="FeedSubscriptions.onClickSelectFolderValue(event);"
+                     onblur="FeedSubscriptions.onBlurSelectFolderValue(event);"
+                   />
++                  <checkbox
++                    id="createSubFolder"
++                    accesskey="b"
++                    oncommand="this.toggleAttribute('userchecked', this.checked);"
++                  />
+                 </hbox>
+               </vbox>
+             </hbox>
+ 
+@@ -358,8 +368,15 @@
+               accesskey="&button.removeFeed.accesskey;"
+               oncommand="FeedSubscriptions.removeFeed(true);"
+             />
+ 
++            <button
++              id="deleteFolder"
++              hidden="true"
++              data-l10n-id="menu-edit-delete-folder"
++              oncommand="FeedSubscriptions.deleteFolder();"
++            />
++
+             <spacer flex="1" />
+ 
+             <button
+               id="importOPML"

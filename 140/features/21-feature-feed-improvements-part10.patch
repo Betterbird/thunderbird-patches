@@ -1,0 +1,471 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1740081430 25200
+# Parent  6c3927b648868d7d6624f8815cb83bfd7e27429b
+Feed enhancements
+- Bug 946821 - RSS feed URL missing in details of "original message" when forwarded (inline)
+  Note: the implementation is specifically done in a way that does not touch
+  compose code or mime backend code.
+- Refactor getting Content-Base header.
+- Modernize newsblogOverlay.js
+
+Features:
+- Add Website: and url to a feed message's forwarded headers.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -376,64 +376,151 @@ var FeedMessageHandler = {
+             FeedMessageHandler.getHTMLRenderPref(isFeedMessage, true);
+           });
+         }
+       }
++    } else if (topic == "domwindowopened" && Window.isInstance(subject)) {
++      const openedWindow = subject;
++      openedWindow.addEventListener("load", event => {
++        const win = event.target;
++        const winType = win.documentElement.getAttribute("windowtype");
++        FeedUtils.log.log(`onDomWindowOpened: windowtype ${winType}`);
++        // For retrieving Content-Base header link in compose window only. If
++        // View->Headers->All is checked, this isn't necessary.
++        if (
++          winType != "msgcompose" ||
++          Services.prefs.getIntPref("mail.show_headers") == 2
++        ) {
++          return;
++        }
++
++        win.documentElement.addEventListener(
++          "compose-window-init",
++          () => {
++            FeedUtils.log.log("onDomWindowOpened: compose-window-init");
++            win.defaultView.gMsgCompose.RegisterStateListener(
++              FeedMessageHandler.ComposeStateListener
++            );
++          },
++          { once: true }
++        );
++      });
+     }
+   },
+ 
+   /**
+-   * Load a web page for feed messages. Use MsgHdrToMimeMessage() to get
+-   * the content-base url from the message headers. We cannot rely on
+-   * currentHeaderData; it has not yet been streamed at our entry point in
+-   * displayMessageChanged(), and in the case of a collapsed message pane it
+-   * is not streamed.
++   * Listener for compose window state.
++   */
++  ComposeStateListener: {
++    ComposeProcessDone() {},
++    SaveInFolderDone() {},
++    NotifyComposeFieldsReady() {},
++    async NotifyComposeBodyReady() {
++      const composeWin = Services.wm.getMostRecentWindow("msgcompose");
++      const composeDoc = composeWin.document;
++      const composeView = composeDoc.defaultView;
++      const composeType = composeView.gComposeType;
++      FeedUtils.log.groupCollapsed(
++        `NotifyComposeBodyReady: forward message, composeType ${composeType}`
++      );
++      if (composeType != Ci.nsIMsgCompType.ForwardInline) {
++        FeedUtils.log.log("NotifyComposeBodyReady: not a ForwardInline");
++        FeedUtils.log.groupEnd(
++          `NotifyComposeBodyReady: forward message, composeType ${composeType}`
++        );
++        return;
++      }
++      const msgHdr = MailServices.messageServiceFromURI(
++        composeView.gOriginalMsgURI
++      ).messageURIToMsgHdr(composeView.gOriginalMsgURI);
++
++      if (!FeedUtils.isFeedMessage(msgHdr)) {
++        FeedUtils.log.log("NotifyComposeBodyReady: not a feed message");
++        FeedUtils.log.groupEnd(
++          `NotifyComposeBodyReady: forward message, composeType ${composeType}`
++        );
++        return;
++      }
++      const contentBase = await FeedMessageHandler.getContentBaseHeader(msgHdr);
++      FeedUtils.log.log(contentBase);
++      // If there's no header, don't create the table entry.
++      if (!contentBase) {
++        FeedUtils.log.log("NotifyComposeBodyReady: no Content-Base header");
++        FeedUtils.log.groupEnd(
++          `NotifyComposeBodyReady: forward message, composeType ${composeType}`
++        );
++        return;
++      }
++      const l10n = new DOMLocalization(
++        ["messenger/messageheader/headerFields.ftl"],
++        true
++      );
++      const label = l10n
++        .formatValueSync(`message-header-website-field`)
++        .replace(/<[^>]+>/g, "");
++      // Get the forwarding headers table.
++      const selector = "table.moz-email-headers-table";
++      const table = composeDoc
++        .getElementById("messageEditor")
++        ?.contentDocument?.querySelector(selector);
++      const tbody = table?.children[0];
++      if (!tbody || !tbody.childElementCount) {
++        FeedUtils.log.warn(
++          "NotifyComposeBodyReady: <tbody> not found - " + selector
++        );
++        FeedUtils.log.groupEnd(
++          `NotifyComposeBodyReady: forward message, composeType ${composeType}`
++        );
++        return;
++      }
++      // Causes table to jump on hover.
++      table.removeAttribute("border");
++      tbody.childNodes.forEach(tr => {
++        tr.cells[0].removeAttribute("valign");
++        tr.cells[1].style.wordBreak = "break-word";
++      });
++      const tr = tbody.firstElementChild.cloneNode(true);
++      FeedUtils.log.log(tr);
++      tr.cells[0].textContent = label;
++      tr.cells[1].textContent = contentBase;
++      tbody.append(tr);
++      FeedUtils.log.log(tbody);
++      FeedUtils.log.groupEnd(
++        `NotifyComposeBodyReady: forward message, composeType ${composeType}`
++      );
++    },
++  },
++
++  /**
++   * Load a web page for feed messages, where desired.
+    *
+-   * @param {nsIMsgDBHdr} aMessageHdr - The message.
+-   * @param {object} aWhere - name value=true pair, where name is in:
+-   *                          'messagepane', 'browser', 'tab', 'window'.
++   * @param {nsIMsgDBHdr} msgHdr - The message.
++   * @param {object} where -     - A name value=true pair, where name is in:
++   *                               'messagepane', 'browser', 'tab', 'window'.
+    * @returns {void}
+    */
+-  loadWebPage(aMessageHdr, aWhere) {
+-    MsgHdrToMimeMessage(aMessageHdr, null, (aMsgHdr, aMimeMsg) => {
+-      if (
+-        aMimeMsg?.headers["content-base"] &&
+-        aMimeMsg.headers["content-base"][0]
+-      ) {
+-        let url = aMimeMsg.headers["content-base"];
+-        let uri;
+-        try {
+-          // The message and headers are stored as a string of UTF-8 bytes
+-          // and we need to convert that cpp |string| to js UTF-16 explicitly
+-          // for idn and non-ascii urls with this api.
+-          url = decodeURIComponent(escape(url));
+-          uri = Services.io.newURI(url);
+-        } catch (ex) {
+-          FeedUtils.log.warn(
+-            `loadWebPage: invalid Content-Base header url ${url}`
+-          );
+-          return;
+-        }
+-        //TODO browser currently only used from SearchDialog for kOpenLoadInBrowser
+-        if (aWhere.browser) {
+-          openLinkExternally(uri, { addToHistory: false });
+-        } else if (aWhere.messagepane) {
+-          // Load about:blank in the browser before (potentially) switching
+-          // to a remote process. This prevents sandbox flags being carried
+-          // over to the web document.
+-          MailE10SUtils.loadAboutBlank(this.browser);
+-          MailE10SUtils.loadURI(this.browser, url);
+-        } else if (aWhere.tab) {
+-          openContentTab(url, "tab", null);
+-        } else if (aWhere.window) {
+-          openContentTab(url, "window", null);
+-        }
+-      } else {
+-        FeedMessageHandler.setLoadingState(false);
+-        FeedUtils.log.warn(
+-          "loadWebPage: could not get Content-Base header url for this message"
+-        );
++  async loadWebPage(msgHdr, where) {
++    const contentBase = await FeedMessageHandler.getContentBaseHeader(msgHdr);
++    if (contentBase && contentBase.match(/^https?:\/\//)) {
++      if (where.browser) {
++        openLinkExternally(Services.io.newURI(contentBase), {
++          addToHistory: false,
++        });
++      } else if (where.messagepane) {
++        // Load about:blank in the browser before (potentially) switching
++        // to a remote process. This prevents sandbox flags being carried
++        // over to the web document.
++        MailE10SUtils.loadAboutBlank(this.browser);
++        MailE10SUtils.loadURI(this.browser, contentBase);
++      } else if (where.tab) {
++        openContentTab(contentBase, "tab", null);
++      } else if (where.window) {
++        openContentTab(contentBase, "window", null);
+       }
+-    });
++    } else {
++      // If no valid Content-Base, we are showing summary; update correct state.
++      FeedMessageHandler.gShowFeedSummary = true;
++      FeedMessageHandler.setLoadingState(false);
++    }
+   },
+ 
+   setLoadingState(isLoading) {
+     isLoading = isLoading ?? !this.gShowFeedSummary;
+@@ -462,10 +549,78 @@ var FeedMessageHandler = {
+       this.loadWebPage(msgHdr, { messagepane: true });
+       this.gToggle = false;
+     }
+   },
++
++  /**
++   * Use MsgHdrToMimeMessage() to get the Content-Base header url from the
++   * message.
++   *
++   * @param {nsIMsgDBHdr} msgHdr - The message.
++   * @returns {string|null} - The Content-Base valid url or null.
++   */
++  async getContentBaseHeader(msgHdr) {
++    const headerName = "Content-Base";
++    const headerNameLC = headerName.toLowerCase();
++    return await new Promise(resolve => {
++      MsgHdrToMimeMessage(
++        msgHdr,
++        null,
++        async function (aMsgHdr, aMimeMsg) {
++          const headerValue = aMimeMsg?.headers[headerNameLC];
++          if (headerValue && headerValue[0]) {
++            try {
++              const url = FeedMessageHandler.getFormattedUrl(headerValue);
++              FeedUtils.log.log(
++                `getContentBaseHeader: got ${headerName} url ${url}`
++              );
++              resolve(url);
++            } catch (exception) {
++              FeedUtils.log.warn(
++                `getContentBaseHeader: invalid ${headerName} url ${headerValue}`
++              );
++              resolve(null);
++            }
++          } else {
++            FeedUtils.log.warn(
++              `getContentBaseHeader: could not get ${headerName} header for this message`
++            );
++            resolve(null);
++          }
++        },
++        true,
++        { saneBodySize: true }
++      );
++    });
++  },
++
++  /**
++   * Ensure url is formatted for utf8 display, both IDN and path parts.
++   *
++   * @param {string} url   - A url.
++   * @returns {string}     - Formatted url.
++   */
++  getFormattedUrl(url) {
++    try {
++      Services.io.newURI(url);
++      return decodeURIComponent(url);
++    } catch (exception) {
++      // IDN domains will fail; escape them then decode.
++      return decodeURIComponent(escape(url));
++    }
++  },
+ };
+ 
++if (window === top.window) {
++  FeedUtils.log.log("win == top");
++  window.addEventListener("load", () =>
++    Services.ww.registerNotification(FeedMessageHandler)
++  );
++  window.addEventListener("unload", () =>
++    Services.ww.unregisterNotification(FeedMessageHandler)
++  );
++}
++
+ window.addEventListener("aboutMessageLoaded", () => FeedMessageHandler.init());
+ 
+ function openSubscriptionsDialog(aFolder) {
+   // Check for an existing feed subscriptions window and focus it.
+@@ -511,9 +666,9 @@ function openSubscriptionsDialog(aFolder
+ // account server is rss and feed messages moved to other types will have their
+ // summaries loaded, as viewing web pages only happened in an rss account.
+ // The user may choose whether to load a summary or web page link by ensuring
+ // the current feed message is being viewed as either a summary or web page.
+-function openComposeWindowForRSSArticle(
++async function openComposeWindowForRSSArticle(
+   aMsgComposeWindow,
+   aMsgHdr,
+   aMessageUri,
+   aType,
+@@ -523,103 +678,66 @@ function openComposeWindowForRSSArticle(
+ ) {
+   const win =
+     document.getElementById("tabmail")?.currentAboutMessage ||
+     document.getElementById("messageBrowser")?.contentWindow;
+-  if (win.FeedMessageHandler.gShowFeedSummary) {
+-    // The user is viewing the summary.
+-    MailServices.compose.OpenComposeWindow(
+-      aMsgComposeWindow,
+-      aMsgHdr,
+-      aMessageUri,
+-      aType,
+-      aFormat,
+-      aIdentity,
+-      null,
+-      aMsgWindow
+-    );
+-  } else {
+-    // Set up the compose message and get the feed message's web page link.
+-    const msgHdr = aMsgHdr;
+-    const type = aType;
+-    let subject = msgHdr.mime2DecodedSubject;
+-    let fwdPrefix = Services.prefs.getCharPref("mail.forward_subject_prefix");
+-    fwdPrefix = fwdPrefix ? fwdPrefix + ": " : "";
++  const showingSummary = win.FeedMessageHandler.gShowFeedSummary;
+ 
+-    const params = Cc[
+-      "@mozilla.org/messengercompose/composeparams;1"
+-    ].createInstance(Ci.nsIMsgComposeParams);
+-
+-    const composeFields = Cc[
+-      "@mozilla.org/messengercompose/composefields;1"
+-    ].createInstance(Ci.nsIMsgCompFields);
+-
+-    if (
+-      type == Ci.nsIMsgCompType.Reply ||
+-      type == Ci.nsIMsgCompType.ReplyAll ||
+-      type == Ci.nsIMsgCompType.ReplyToSender ||
+-      type == Ci.nsIMsgCompType.ReplyToGroup ||
+-      type == Ci.nsIMsgCompType.ReplyToSenderAndGroup ||
+-      type == Ci.nsIMsgCompType.ReplyToList
+-    ) {
+-      subject = "Re: " + subject;
+-    } else if (
+-      type == Ci.nsIMsgCompType.ForwardInline ||
+-      type == Ci.nsIMsgCompType.ForwardAsAttachment
+-    ) {
+-      subject = fwdPrefix + subject;
+-    }
++  if (!showingSummary) {
++    // Showing the web page; forward the url.
++    const contentBase = await FeedMessageHandler.getContentBaseHeader(aMsgHdr);
++    if (contentBase) {
++      // Set up compose params.
++      const composeParams = Cc[
++        "@mozilla.org/messengercompose/composeparams;1"
++      ].createInstance(Ci.nsIMsgComposeParams);
++      const composeFields = Cc[
++        "@mozilla.org/messengercompose/composefields;1"
++      ].createInstance(Ci.nsIMsgCompFields);
+ 
+-    params.composeFields = composeFields;
+-    params.composeFields.subject = subject;
+-    params.composeFields.body = "";
+-    params.bodyIsLink = false;
+-    params.identity = aIdentity;
++      // Set up the compose message and set the feed message's web page link.
++      let subject = aMsgHdr.mime2DecodedSubject;
++      let fwdPrefix = Services.prefs.getCharPref("mail.forward_subject_prefix");
++      fwdPrefix = fwdPrefix ? fwdPrefix + ": " : "";
++      if (
++        [
++          Ci.nsIMsgCompType.Reply,
++          Ci.nsIMsgCompType.ReplyAll,
++          Ci.nsIMsgCompType.ReplyToSender,
++          Ci.nsIMsgCompType.ReplyToGroup,
++          Ci.nsIMsgCompType.ReplyToSenderAndGroup,
++          Ci.nsIMsgCompType.ReplyToList,
++        ].includes(aType)
++      ) {
++        subject = "Re: " + subject;
++      } else if (
++        [
++          Ci.nsIMsgCompType.ForwardInline,
++          Ci.nsIMsgCompType.ForwardAsAttachment,
++        ].includes(aType)
++      ) {
++        subject = fwdPrefix + subject;
++      }
+ 
+-    try {
+-      // The feed's web page url is stored in the Content-Base header.
+-      MsgHdrToMimeMessage(
+-        msgHdr,
+-        null,
+-        function (messageHeader, aMimeMsg) {
+-          if (
+-            aMimeMsg &&
+-            aMimeMsg.headers["content-base"] &&
+-            aMimeMsg.headers["content-base"][0]
+-          ) {
+-            const url = decodeURIComponent(
+-              escape(aMimeMsg.headers["content-base"])
+-            );
+-            params.composeFields.body = url;
+-            params.bodyIsLink = true;
+-            MailServices.compose.OpenComposeWindowWithParams(null, params);
+-          } else {
+-            // No content-base url, use the summary.
+-            MailServices.compose.OpenComposeWindow(
+-              aMsgComposeWindow,
+-              messageHeader,
+-              aMessageUri,
+-              aType,
+-              aFormat,
+-              aIdentity,
+-              null,
+-              aMsgWindow
+-            );
+-          }
+-        },
+-        false,
+-        { saneBodySize: true }
+-      );
+-    } catch (ex) {
+-      // Error getting header, use the summary.
+-      MailServices.compose.OpenComposeWindow(
+-        aMsgComposeWindow,
+-        aMsgHdr,
+-        aMessageUri,
+-        aType,
+-        aFormat,
+-        aIdentity,
+-        null,
+-        aMsgWindow
+-      );
++      composeParams.composeFields = composeFields;
++      composeParams.composeFields.subject = subject;
++      composeParams.composeFields.body = contentBase;
++      composeParams.bodyIsLink = true;
++      composeParams.identity = aIdentity;
++
++      MailServices.compose.OpenComposeWindowWithParams(null, composeParams);
++      return;
+     }
+   }
++
++  // Showing summary or no website in Content-Base header to display so do the
++  // default, inline the summary.
++  MailServices.compose.OpenComposeWindow(
++    aMsgComposeWindow,
++    aMsgHdr,
++    aMessageUri,
++    aType,
++    aFormat,
++    aIdentity,
++    null,
++    aMsgWindow
++  );
+ }
