@@ -1,0 +1,619 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1724713778 -7200
+# Parent  4cec222c681796aa2adcfe0c5d894963ebae7746
+Feature: RegExp in search terms. Reported as https://bugzilla.mozilla.org/show_bug.cgi?id=19442 in 1999.
+* * *
+Feature: RegExp in search terms: Switch from std::regex to ICU's regex.
+
+diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/nsMsgSearchTerm.h
+--- a/mailnews/search/public/nsMsgSearchTerm.h
++++ b/mailnews/search/public/nsMsgSearchTerm.h
+@@ -5,8 +5,24 @@
+ 
+ #ifndef __nsMsgSearchTerm_h
+ #define __nsMsgSearchTerm_h
+ 
++// Using ICU's regex.
++// For this to link, the following files need to be moved from the
++// "unused" list to the "used" list in
++// mozilla-central/config/external/icu/i18n/sources.mozbuild
++// '/intl/icu/source/i18n/regexcmp.cpp'
++// '/intl/icu/source/i18n/regeximp.cpp'
++// '/intl/icu/source/i18n/regexst.cpp'
++// '/intl/icu/source/i18n/regextxt.cpp'
++// '/intl/icu/source/i18n/rematch.cpp'
++// '/intl/icu/source/i18n/repattrn.cpp'
++// Furthermore, this build option needs to be cleared:
++// # DEFINES['UCONFIG_NO_REGULAR_EXPRESSIONS'] = True
++#include "../../../../intl/icu/source/i18n/unicode/regex.h"
++
++using namespace U_ICU_NAMESPACE;  // currently icu_73
++
+ //---------------------------------------------------------------------------
+ // nsMsgSearchTerm specifies one criterion, e.g. name contains phil
+ //---------------------------------------------------------------------------
+ 
+@@ -84,7 +100,12 @@ class nsMsgSearchTerm : public nsIMsgSea
+   nsresult InitializeAddressBook();
+   nsresult MatchInAddressBook(const nsAString& aAddress, bool* pResult);
+   // fields used by search in address book
+   nsCOMPtr<nsIAbDirectory> mDirectory;
++
++  // Used for Regex search.
++  nsAutoString mLastNeedle;
++  RegexMatcher* mRegex;
++  bool mRegexValid;
+ };
+ 
+ #endif
+diff --git a/mailnews/search/src/nsMsgImapSearch.cpp b/mailnews/search/src/nsMsgImapSearch.cpp
+--- a/mailnews/search/src/nsMsgImapSearch.cpp
++++ b/mailnews/search/src/nsMsgImapSearch.cpp
+@@ -151,8 +151,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsntInAB, 1);
+@@ -169,8 +173,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+@@ -186,8 +194,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+@@ -203,8 +215,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+@@ -220,8 +236,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+@@ -237,8 +257,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Contains, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Contains, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::DoesntContain, 1);
+@@ -246,8 +270,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Is, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Is, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Isnt, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Isnt, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsAfter, 1);
+@@ -324,8 +352,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Keywords, nsMsgSearchOp::Contains, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Keywords, nsMsgSearchOp::Contains, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Keywords, nsMsgSearchOp::DoesntContain, 1);
+@@ -447,8 +479,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsntInAB, 1);
+@@ -465,8 +501,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+@@ -482,8 +522,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+@@ -499,8 +543,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+@@ -516,8 +564,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+@@ -533,8 +585,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsAfter, 1);
+@@ -594,8 +650,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   return rv;
+ }
+ 
+@@ -617,8 +677,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsntInAB, 1);
+@@ -635,8 +699,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+@@ -652,8 +720,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+@@ -669,8 +741,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+@@ -686,8 +762,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+@@ -703,8 +783,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Contains, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Contains, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::DoesntContain, 1);
+@@ -712,8 +796,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Is, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Is, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Isnt, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Isnt, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Body, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Body, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsAfter, 1);
+@@ -778,8 +866,12 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   return rv;
+ }
+ 
+@@ -804,8 +896,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsntInAB, 1);
+@@ -822,8 +918,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::To, nsMsgSearchOp::IsntInAB, 1);
+@@ -839,8 +939,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::CC, nsMsgSearchOp::IsntInAB, 1);
+@@ -856,8 +960,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::ToOrCC, nsMsgSearchOp::IsntInAB, 1);
+@@ -873,8 +981,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::DoesntMatch, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsInAB, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::AllAddresses, nsMsgSearchOp::IsntInAB, 1);
+@@ -890,8 +1002,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsAfter, 1);
+@@ -984,8 +1100,12 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   return rv;
+ }
+ // clang-format on
+diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
+--- a/mailnews/search/src/nsMsgLocalSearch.cpp
++++ b/mailnews/search/src/nsMsgLocalSearch.cpp
+@@ -817,8 +817,12 @@ nsresult SetLocalNews(nsIMsgSearchValidi
+   aTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsInAB, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsntInAB, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::IsntInAB, 1);
+@@ -834,8 +838,12 @@ nsresult SetLocalNews(nsIMsgSearchValidi
+   aTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
+ 
+   aTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::IsBefore, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::IsAfter, 1);
+@@ -881,8 +889,12 @@ nsresult SetLocalNews(nsIMsgSearchValidi
+   aTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
+   return NS_OK;
+ }
+ // clang-format on
+ 
+diff --git a/mailnews/search/src/nsMsgSearchNews.cpp b/mailnews/search/src/nsMsgSearchNews.cpp
+--- a/mailnews/search/src/nsMsgSearchNews.cpp
++++ b/mailnews/search/src/nsMsgSearchNews.cpp
+@@ -347,8 +347,12 @@ nsresult nsMsgSearchValidityManager::Ini
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::BeginsWith, 1);
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::EndsWith, 1);
++    m_newsTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++    m_newsTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::Matches, 1);
++    m_newsTable->SetAvailable(nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
++    m_newsTable->SetEnabled  (nsMsgSearchAttrib::Sender, nsMsgSearchOp::DoesntMatch, 1);
+ 
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Contains, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Contains, 1);
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Is, 1);
+@@ -356,8 +360,12 @@ nsresult nsMsgSearchValidityManager::Ini
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::BeginsWith, 1);
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::EndsWith, 1);
++    m_newsTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++    m_newsTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::Matches, 1);
++    m_newsTable->SetAvailable(nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
++    m_newsTable->SetEnabled  (nsMsgSearchAttrib::Subject, nsMsgSearchOp::DoesntMatch, 1);
+ 
+ #if 0
+     // Size should be handled after the fact...
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::Size, nsMsgSearchOp::IsGreaterThan, 1);
+@@ -372,8 +380,12 @@ nsresult nsMsgSearchValidityManager::Ini
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::BeginsWith, 1);
+     m_newsTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
+     m_newsTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::EndsWith, 1);
++    m_newsTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++    m_newsTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::Matches, 1);
++    m_newsTable->SetAvailable(nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
++    m_newsTable->SetEnabled  (nsMsgSearchAttrib::OtherHeader, nsMsgSearchOp::DoesntMatch, 1);
+     // clang-format on
+   }
+ 
+   return rv;
+diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
+--- a/mailnews/search/src/nsMsgSearchTerm.cpp
++++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -325,8 +325,9 @@ nsMsgSearchTerm::nsMsgSearchTerm() {
+   m_operator = nsMsgSearchOp::Contains;
+   mBeginsGrouping = 0;
+   mEndsGrouping = 0;
+   m_matchAll = false;
++  mRegex = nullptr;
+ 
+   // valgrind warning during GC/java data check suggests
+   // m_booleanp needs to be initialized too.
+   m_booleanOp = nsMsgSearchBooleanOp::BooleanAND;
+@@ -350,11 +351,14 @@ nsMsgSearchTerm::nsMsgSearchTerm(nsMsgSe
+   nsMsgResultElement::AssignValues(val, &m_value);
+   m_matchAll = false;
+   mBeginsGrouping = false;
+   mEndsGrouping = false;
++  mRegex = nullptr;
+ }
+ 
+-nsMsgSearchTerm::~nsMsgSearchTerm() {}
++nsMsgSearchTerm::~nsMsgSearchTerm() {
++  if (mRegex) delete mRegex;
++}
+ 
+ NS_IMPL_ISUPPORTS(nsMsgSearchTerm, nsIMsgSearchTerm)
+ 
+ // Perhaps we could find a better place for this?
+@@ -636,9 +640,10 @@ nsresult nsMsgSearchTerm::MatchArbitrary
+   nsresult rv = NS_OK;
+   bool matchExpected = m_operator == nsMsgSearchOp::Contains ||
+                        m_operator == nsMsgSearchOp::Is ||
+                        m_operator == nsMsgSearchOp::BeginsWith ||
+-                       m_operator == nsMsgSearchOp::EndsWith;
++                       m_operator == nsMsgSearchOp::EndsWith ||
++                       m_operator == nsMsgSearchOp::Matches;
+   // Initialize result to what we want if we don't find the header at all.
+   bool result = !matchExpected;
+ 
+   nsCString dbHdrValue;
+@@ -1010,8 +1015,41 @@ nsresult nsMsgSearchTerm::MatchString(co
+       if (StringEndsWith(utf16StrToMatch, needle,
+                          nsCaseInsensitiveStringComparator))
+         result = true;
+       break;
++    case nsMsgSearchOp::Matches:
++    case nsMsgSearchOp::DoesntMatch: {
++      if (!needle.Equals(mLastNeedle) || !mRegex) {
++        mRegexValid = true;
++        if (mRegex) delete mRegex;
++        UErrorCode status = U_ZERO_ERROR;
++        mRegex = new RegexMatcher(static_cast<const char16_t*>(needle.get()),
++                                  UREGEX_CASE_INSENSITIVE, status);
++        if (U_FAILURE(status)) {
++          // Even on failure a new `RegexMatcher` object is returned,
++          // so no special case required.
++          NS_WARNING("RegexMatcher. Likely a bad regular expression.");
++          mRegexValid = false;
++        }
++        mLastNeedle = needle;
++      }
++      if (!mRegexValid) {
++        *pResult = false;
++        return NS_OK;
++      }
++      // We need to use a local variable here since `reset()` doesn't take a
++      // copy of the string, so it needs to survive the invocation.
++      const UnicodeString string(static_cast<const char16_t*>(
++          PromiseFlatString(utf16StrToMatch).get()));
++      mRegex->reset(string);
++
++      bool found = mRegex->find();
++      if ((m_operator == nsMsgSearchOp::Matches && found) ||
++          (m_operator == nsMsgSearchOp::DoesntMatch && !found)) {
++        result = true;
++      }
++      break;
++    }
+     default:
+       rv = NS_ERROR_FAILURE;
+       NS_ERROR("invalid compare op for matching search results");
+   }
+@@ -1021,8 +1059,9 @@ nsresult nsMsgSearchTerm::MatchString(co
+ }
+ 
+ NS_IMETHODIMP nsMsgSearchTerm::GetMatchAllBeforeDeciding(bool* aResult) {
+   *aResult = (m_operator == nsMsgSearchOp::DoesntContain ||
++              m_operator == nsMsgSearchOp::DoesntMatch ||
+               m_operator == nsMsgSearchOp::Isnt);
+   return NS_OK;
+ }
+ 

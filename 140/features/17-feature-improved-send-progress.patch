@@ -1,0 +1,279 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744320296 -7200
+# Node ID 8005c8f26289897dc9142d6368b4ded9c3ba884e
+# Parent  e42515a153a63bcadf438d3989359b52d57f8ecf
+Feature: Improve send progress window.
+
+Some ideas were taken from Differential Revision: https://phabricator.services.mozilla.com/D171035
+in its earlier form which Thunderbird didn't accept due to (quote) "unreasonable complications".
+* * *
+Misc: Expose pref ui.prefersReducedMotion.
+* * *
+Feature: Improve send progress window: Wait until progress window closes.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -1428,8 +1428,11 @@ pref("betterbird.donation.eoy.version.vi
+ pref("betterbird.donation.eoy.url", "https://www.betterbird.eu/end-of-year/");
+ 
+ pref("mail.download.open_attachments_readonly", true);
+ 
++// Make this visible in the advanced preferences.
++pref("ui.prefersReducedMotion", 0);
++
+ // Unified toolbar
+ 
+ // 0: icons beside text
+ // 1: icons above text
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -6546,8 +6546,20 @@ async function CompleteGenericSendMessag
+     ToggleWindowLock(false);
+     sendError = ex;
+   }
+ 
++  if (progress?.progressWindow) {
++    // Wait until the progress window closes.
++    // When we get there, the progress window was created, but hasn't loaded yet,
++    // that is run its `onLoad()` function. If we listen to "unload", we get
++    // two events, first when the "incomplete" window is replaced with the
++    // real one, second when the real one is unloaded. So use "beforeunload"
++    // which is called only once.
++    await new Promise(r =>
++      progress.progressWindow.addEventListener("beforeunload", r)
++    );
++  }
++
+   if (
+     msgType == Ci.nsIMsgCompDeliverMode.Now ||
+     msgType == Ci.nsIMsgCompDeliverMode.Later ||
+     msgType == Ci.nsIMsgCompDeliverMode.Background
+diff --git a/mailnews/base/public/nsIMsgProgress.idl b/mailnews/base/public/nsIMsgProgress.idl
+--- a/mailnews/base/public/nsIMsgProgress.idl
++++ b/mailnews/base/public/nsIMsgProgress.idl
+@@ -34,5 +34,7 @@ interface nsIMsgProgress: nsIWebProgress
+   /* Indicated if the user asked to cancel the current process */
+   attribute boolean processCanceledByUser;
+ 
+   attribute nsIMsgWindow msgWindow;
++
++  attribute mozIDOMWindowProxy progressWindow;
+ };
+diff --git a/mailnews/base/src/nsMsgProgress.cpp b/mailnews/base/src/nsMsgProgress.cpp
+--- a/mailnews/base/src/nsMsgProgress.cpp
++++ b/mailnews/base/src/nsMsgProgress.cpp
+@@ -65,11 +65,15 @@ NS_IMETHODIMP nsMsgProgress::OpenProgres
+   nsCString chromeOptions("chrome,dependent,centerscreen"_ns);
+   if (inDisplayModal) chromeOptions.AppendLiteral(",modal");
+ 
+   nsCOMPtr<mozIDOMWindowProxy> newWindow;
+-  return wwatch->OpenWindow(parentDOMWindow, nsDependentCString(dialogURL),
+-                            "_blank"_ns, chromeOptions, array,
+-                            getter_AddRefs(newWindow));
++  rv = wwatch->OpenWindow(parentDOMWindow, nsDependentCString(dialogURL),
++                          "_blank"_ns, chromeOptions, array,
++                          getter_AddRefs(newWindow));
++
++  // Grab the new window. Warning: It hasn't loaded yet!
++  if (newWindow) m_msgProgressWindow = newWindow;
++  return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgProgress::CloseProgressDialog(bool forceClose) {
+   m_closeProgress = true;
+@@ -220,8 +224,18 @@ NS_IMETHODIMP nsMsgProgress::GetMsgWindo
+ 
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgProgress::SetProgressWindow(mozIDOMWindowProxy* aProgressWindow) {
++  m_msgProgressWindow = aProgressWindow;
++  return NS_OK;
++}
++
++NS_IMETHODIMP nsMsgProgress::GetProgressWindow(mozIDOMWindowProxy** aProgressWindow) {
++  NS_IF_ADDREF(*aProgressWindow = m_msgProgressWindow);
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgProgress::OnProgress(nsIRequest* request, int64_t aProgress,
+                                         int64_t aProgressMax) {
+   // XXX: What should the nsIWebProgress be?
+   // XXX: This truncates 64-bit to 32-bit
+diff --git a/mailnews/base/src/nsMsgProgress.h b/mailnews/base/src/nsMsgProgress.h
+--- a/mailnews/base/src/nsMsgProgress.h
++++ b/mailnews/base/src/nsMsgProgress.h
+@@ -37,7 +37,8 @@ class nsMsgProgress : public nsIMsgProgr
+   int32_t m_pendingStateFlags;
+   nsresult m_pendingStateValue;
+   nsWeakPtr m_msgWindow;
+   nsCOMArray<nsIWebProgressListener> m_listenerList;
++  nsCOMPtr<mozIDOMWindowProxy> m_msgProgressWindow;
+ };
+ 
+ #endif  // nsMsgProgress_h_
+diff --git a/mailnews/compose/content/sendProgress.js b/mailnews/compose/content/sendProgress.js
+--- a/mailnews/compose/content/sendProgress.js
++++ b/mailnews/compose/content/sendProgress.js
+@@ -12,8 +12,12 @@ var msgProgress = null;
+ // random global variables...
+ var itsASaveOperation = false;
+ var gBundle;
+ 
++// Prevent not wanted status strings such as "Opening folder Drafts…" from
++// appearing during STATE_STOP and overwriting the final status string.
++var inStateStop = false;
++
+ window.addEventListener("DOMContentLoaded", onLoad);
+ window.addEventListener("unload", onUnload);
+ document.addEventListener("dialogcancel", onCancel);
+ 
+@@ -26,8 +30,10 @@ var progressListener = {
+       dialog.progressText.value = "";
+     }
+ 
+     if (aStateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
++      document.getElementById("sendProgress").getButton("cancel").disabled = true;
++      inStateStop = true;
+       if (Components.isSuccessCode(aStatus)) {
+         // we are done sending/saving the message...
+         // Indicate completion in status area.
+         let msg;
+@@ -45,12 +51,14 @@ var progressListener = {
+           gBundle.formatStringFromName("percentMsg", [100])
+         );
+       }
+ 
+-      // Note: Without some delay closing the window the "msg" string above may
+-      // never be visible. Example: setTimeout(() => window.close(), 1000);
+-      // Windows requires other delays. The delays also cause test failures.
+-      window.close();
++      // Allow the user 750 ms to see the final status string before closing
++      // the progress window.
++      setTimeout(() => {
++        msgProgress.progressWindow = null;
++        window.close();
++      }, 750);
+     }
+   },
+ 
+   onProgressChange(
+@@ -76,9 +84,9 @@ var progressListener = {
+       dialog.progressText.value = gBundle.formatStringFromName("percentMsg", [
+         percent,
+       ]);
+     } else {
+-      // Have progress meter show indeterminate with denominator <= 0.
++      // Have progress meter show indeterminate when denominator is <= 0.
+       dialog.progress.removeAttribute("value");
+       dialog.progressText.value = "";
+     }
+   },
+@@ -87,9 +95,9 @@ var progressListener = {
+     // we can ignore this notification
+   },
+ 
+   onStatusChange(aWebProgress, aRequest, aStatus, aMessage) {
+-    if (aMessage != "") {
++    if (aMessage != "" && !inStateStop) {
+       dialog.status.setAttribute("value", aMessage);
+     }
+   },
+ 
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -1353,8 +1353,15 @@ bool nsMsgCompose::IsLastWindow() {
+   }
+   return true;
+ }
+ 
++// Timer callback for delaying the destruction of the compose window.
++void nsMsgCompose::CloseTimer(nsITimer* timer, void* aMsgCompose) {
++  nsMsgCompose* compose = (nsMsgCompose*)aMsgCompose;
++  nsCOMPtr<nsIBaseWindow> window = compose->m_baseWindow.forget();
++  window->Destroy();
++}
++
+ NS_IMETHODIMP nsMsgCompose::CloseWindow(void) {
+   nsresult rv;
+ 
+   nsCOMPtr<nsIMsgComposeService> composeService =
+@@ -1376,10 +1383,39 @@ NS_IMETHODIMP nsMsgCompose::CloseWindow(
+       // The editor will be destroyed during the close window.
+       // Set it to null to be sure we won't use it anymore.
+       m_editor = nullptr;
+     }
+-    nsCOMPtr<nsIBaseWindow> window = m_baseWindow.forget();
+-    rv = window->Destroy();
++    rv = m_baseWindow->SetVisibility(false);
++    NS_ENSURE_SUCCESS(rv, rv);
++
++#if 0
++    Enable to fix tests.
++    // In our tests we need to have a way to ignore "soon to die" windows.
++    // Due to a bug in the Mozilla platform, invisible windows still return
++    // visibility of true. To distinguish we set a custom attribute.
++    nsCOMPtr<nsPIDOMWindowOuter> window = do_QueryInterface(m_window, &rv);
++    NS_ENSURE_SUCCESS(rv, rv);
++    NS_ENSURE_TRUE(window, NS_ERROR_FAILURE);
++
++    mozilla::dom::Document* domDocument = window->GetDoc();
++    NS_ENSURE_TRUE(domDocument, NS_ERROR_FAILURE);
++
++    mozilla::dom::Element* domElement = domDocument->GetDocumentElement();
++    NS_ENSURE_TRUE(domElement, NS_ERROR_FAILURE);
++
++    ErrorResult rv2;
++    domElement->SetAttribute(u"windowdestroy"_ns, u"yes"_ns, rv2);
++    if (rv2.Failed()) {
++      return rv2.StealNSResult();
++    }
++#endif
++
++    // Destroy the window after 2 seconds so the progress
++    // window can hang around for a little longer.
++    rv = NS_NewTimerWithFuncCallback(
++        getter_AddRefs(m_Timer), nsMsgCompose::CloseTimer, (void*)this, 2000,
++        nsITimer::TYPE_ONE_SHOT, "nsMsgCompose::CloseWindow", nullptr);
++    NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   m_window = nullptr;
+   return rv;
+diff --git a/mailnews/compose/src/nsMsgCompose.h b/mailnews/compose/src/nsMsgCompose.h
+--- a/mailnews/compose/src/nsMsgCompose.h
++++ b/mailnews/compose/src/nsMsgCompose.h
+@@ -20,8 +20,9 @@
+ #include "nsIMimeConverter.h"
+ #include "nsIMsgFolder.h"
+ #include "mozIDOMWindow.h"
+ #include "mozilla/dom/Element.h"
++#include "nsITimer.h"
+ 
+ // Forward declares
+ class QuotingOutputStreamListener;
+ class nsMsgComposeSendListener;
+@@ -112,8 +113,9 @@ class nsMsgCompose : public nsIMsgCompos
+   nsCOMPtr<nsIEditor> m_editor;
+   mozIDOMWindowProxy* m_window;
+   nsCOMPtr<nsIDocShell> mDocShell;
+   nsCOMPtr<nsIBaseWindow> m_baseWindow;
++  nsCOMPtr<nsITimer> m_Timer;
+   RefPtr<nsMsgCompFields> m_compFields;
+   nsCOMPtr<nsIMsgIdentity> m_identity;
+   bool m_composeHTML;
+   RefPtr<QuotingOutputStreamListener> mQuoteStreamListener;
+@@ -145,8 +147,9 @@ class nsMsgCompose : public nsIMsgCompos
+   friend class QuotingOutputStreamListener;
+   friend class nsMsgComposeSendListener;
+ 
+  private:
++  static void CloseTimer(nsITimer* timer, void* aMsgCompose);
+   void DeleteTmpAttachments();
+   bool mTmpAttachmentsDeleted;
+ };
+ 
