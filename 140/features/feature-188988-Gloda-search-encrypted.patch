@@ -1,0 +1,240 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744484837 -7200
+# Parent  7dd4d4f6dc3ba8efc4a688f175e1c4da830aa442
+Bug 188988 - Switch on indexing of encrypted parts in Gloda depending on pref.
+
+diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
+--- a/mail/components/preferences/general.inc.xhtml
++++ b/mail/components/preferences/general.inc.xhtml
+@@ -1142,8 +1142,13 @@
+           <checkbox id="enableGloda"
+                     preference="mailnews.database.global.indexer.enabled"
+                     data-l10n-id="enable-gloda-search-label"/>
+         </hbox>
++        <hbox>
++          <checkbox id="enableGlodaEncryptedParts"
++                    preference="mailnews.database.global.indexer.examine_encrypted_parts"
++                    data-l10n-id="enable-gloda-search-encrypted-label"/>
++        </hbox>
+         <hbox align="center">
+           <label control="storeTypeMenulist" data-l10n-id="store-type-label"/>
+           <hbox>
+             <menulist id="storeTypeMenulist"
+diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
+--- a/mail/components/preferences/general.js
++++ b/mail/components/preferences/general.js
+@@ -73,8 +73,9 @@ Preferences.addAll([
+   { id: "mail.display_glyph", type: "bool" },
+   { id: "font.language.group", type: "wstring" },
+   { id: "intl.regional_prefs.use_os_locales", type: "bool" },
+   { id: "mailnews.database.global.indexer.enabled", type: "bool" },
++  { id: "mailnews.database.global.indexer.examine_encrypted_parts", type: "bool" },
+   { id: "mailnews.labels.description.1", type: "wstring" },
+   { id: "mailnews.labels.color.1", type: "string" },
+   { id: "mailnews.labels.description.2", type: "wstring" },
+   { id: "mailnews.labels.color.2", type: "string" },
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+@@ -771,8 +771,28 @@ MimeDecryptHandler.prototype = {
+   extractEncryptedHeaders() {
+     this.decryptedHeaders = lazy.EnigmailMime.extractProtectedHeaders(
+       this.decryptedData
+     );
++
++    if (
++      this.decryptedHeaders?.subject &&
++      this.uri?.spec.includes("emitter=js&examineEncryptedParts=true")
++    ) {
++      // This is a little hack for Gloda. Although we pass the protected-headers part back via
++      // `this.returnData()` the new subject is not acknowledged and Gloda uses
++      // `msgHeg.mime2DecodedSubject` which may be just "...".
++      // So we store the original header in the database. If you have a better idea, let us know!
++      const msgHdr = this.uri.QueryInterface(Ci.nsIMsgMessageUrl).messageHeader;
++      if (msgHdr) {
++        msgHdr.setStringProperty(
++          "originalSubject",
++          String.fromCharCode.apply(
++            undefined,
++            new TextEncoder("UTF-8").encode(this.decryptedHeaders.subject)
++          )
++        );
++      }
++    }
+   },
+ 
+   /**
+    * Process the Autocrypt-Gossip header lines.
+diff --git a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
+@@ -478,8 +478,30 @@ MimeVerify.prototype = {
+       this.signedData
+     );
+     this.returnData(this.signedData);
+ 
++    if (
++      this.protectedHeaders?._cachedHeaders.subject &&
++      this.uri?.spec.includes("emitter=js&examineEncryptedParts=true")
++    ) {
++      // This is a little hack for Gloda. Although we pass the protected-headers part back via
++      // `this.returnData()` the new subject is not acknowledged and Gloda uses
++      // `msgHdr.mime2DecodedSubject` which may be just "...".
++      // So we store the original header in the database. If you have a better idea, let us know!
++      const msgHdr = this.uri.QueryInterface(Ci.nsIMsgMessageUrl).messageHeader;
++      if (msgHdr) {
++        msgHdr.setStringProperty(
++          "originalSubject",
++          String.fromCharCode.apply(
++            undefined,
++            new TextEncoder("UTF-8").encode(
++              this.protectedHeaders._cachedHeaders.subject
++            )
++          )
++        );
++      }
++    }
++
+     if (!this.isAllowedSigPart(this.mimePartNumber, this.msgUriSpec)) {
+       lazy.EnigmailSingletons.addUriWithNestedSignedPart(this.msgUriSpec);
+       return;
+     }
+diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
+--- a/mail/locales/en-US/messenger/preferences/preferences.ftl
++++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
+@@ -243,8 +243,11 @@ mail-browse-sound-button =
+ enable-gloda-search-label =
+     .label = Enable Global Search and Indexer
+     .accesskey = G
+ 
++enable-gloda-search-encrypted-label =
++    .label = Enable search in encrypted messages (stores decrypted copy locally)
++
+ datetime-formatting-legend = Date and Time Formatting
+ language-selector-legend = Language
+ 
+ allow-hw-accel =
+diff --git a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs b/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
+--- a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
++++ b/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
+@@ -132,9 +132,11 @@ MimeMessageEmitter.prototype = {
+       //  content-type needs to get clobbered by the actual content-type of
+       //  the enclosed message.
+       this._writeBody = false;
+       return;
+-    } else if (contentTypeNoParams.startsWith("multipart/")) {
++    } else if (contentTypeNoParams.startsWith("multipart/") ||
++               contentTypeNoParams == "application/pkcs7-mime" ||
++               contentTypeNoParams == "application/x-pkcs7-mime") {
+       // this is going to fall-down with TNEF encapsulation and such, we really
+       // need to just be consuming the object model.
+       this._curPart = new this._mimeMsg.MimeContainer(contentTypeNoParams);
+       this._writeBody = false;
+diff --git a/mailnews/db/gloda/modules/IndexMsg.sys.mjs b/mailnews/db/gloda/modules/IndexMsg.sys.mjs
+--- a/mailnews/db/gloda/modules/IndexMsg.sys.mjs
++++ b/mailnews/db/gloda/modules/IndexMsg.sys.mjs
+@@ -3093,16 +3093,25 @@ export var GlodaMsgIndexer = {
+     if (
+       aMsgHdr.flags & Ci.nsMsgMessageFlags.Offline ||
+       aMsgHdr.folder instanceof Ci.nsIMsgLocalMailFolder
+     ) {
++      let options;
++      if (
++        Services.prefs.getBoolPref(
++          "mailnews.database.global.indexer.examine_encrypted_parts",
++          false
++        )
++      ) {
++        options = { saneBodySize: true, examineEncryptedParts: true };
++      } else {
++        options = { saneBodySize: true };
++      }
+       this._MsgHdrToMimeMessageFunc(
+         aMsgHdr,
+         aCallbackHandle.callbackThis,
+         aCallbackHandle.callback,
+         false,
+-        {
+-          saneBodySize: true,
+-        }
++        options
+       );
+       aMimeMsg = (yield GlodaConstants.kWorkAsync)[1];
+     } else {
+       this._log.debug("  * Message is not offline -- only headers indexed");
+@@ -3317,9 +3326,18 @@ export var GlodaMsgIndexer = {
+     if (insertFulltext) {
+       curMsg._isNew = true;
+     }
+ 
+-    curMsg._subject = aMsgHdr.mime2DecodedSubject;
++    curMsg._subject = aMsgHdr.getStringProperty("originalSubject");
++    if (curMsg._subject) {
++      let arr = new Uint8Array(curMsg._subject.length);
++      for (let i = 0; i < curMsg._subject.length; i++) {
++        arr[i] = curMsg._subject.charCodeAt(i);
++      }
++      curMsg._subject = new TextDecoder().decode(arr);
++    } else {
++      curMsg._subject = aMsgHdr.mime2DecodedSubject;
++    }
+     curMsg._attachmentNames = attachmentNames;
+ 
+     // curMsg._indexAuthor gets set by GlodaFundAttr.sys.mjs
+     // curMsg._indexRecipients gets set by GlodaFundAttr.sys.mjs
+diff --git a/mailnews/db/gloda/modules/MimeMessage.sys.mjs b/mailnews/db/gloda/modules/MimeMessage.sys.mjs
+--- a/mailnews/db/gloda/modules/MimeMessage.sys.mjs
++++ b/mailnews/db/gloda/modules/MimeMessage.sys.mjs
+@@ -711,9 +711,9 @@ export function MimeUnknown(contentType)
+   //  the recursive size computations to fail.
+   this._size = 0;
+   this.isEncrypted = false;
+   // We want to make sure MimeUnknown has a part property: S/MIME encrypted
+-  // messages have a topmost MimeUnknown part, with the encrypted bit set to 1,
++  // messages NO LONGER have a topmost MimeUnknown part, with the encrypted bit set to 1,
+   // and we need to ensure all other encrypted parts are children of this
+   // topmost part.
+   this.parts = [];
+ }
+@@ -774,8 +774,26 @@ MimeUnknown.prototype = {
+   },
+   toString() {
+     return "Unknown: " + this.contentType;
+   },
++  // This code is the alternative to adding application/pkcs7-mime in MimeMessageEmitter._beginPayload.
++  // Same at MimeMessage.coerceBodyToPlaintext().
++  // This is needed so part with type application/pkcs7-mime can collect its sub-parts.
++  // coerceBodyToPlaintext(aMsgFolder) {
++  //   let bodies = [];
++  //   for (let part of this.parts) {
++  //     // an undefined value for something not having the method is fine
++  //     let body =
++  //       part.coerceBodyToPlaintext && part.coerceBodyToPlaintext(aMsgFolder);
++  //     if (body) {
++  //       bodies.push(body);
++  //     }
++  //   }
++  //   if (bodies) {
++  //     return bodies.join("");
++  //   }
++  //   return "";
++  // },
+ };
+ 
+ /**
+  * @class MimeMessageAttachment - An attachment proper.
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -1099,8 +1099,10 @@ pref("gloda.loglevel", "Warn");
+ pref("gloda.test.loglevel", "Warn");
+ // Rate of growth of the gloda cache, whose maximum value is 8 MiB and max is 64 MiB.
+ // See more: https://developer.mozilla.org/en/Thunderbird/gloda#Cache_Size"
+ pref("mailnews.database.global.datastore.cache_to_memory_permillage", 10);
++// Enable search in encrypted parts. Conservatively switched off.
++pref("mailnews.database.global.indexer.examine_encrypted_parts", false);
+ 
+ // default field order in the fieldmap
+ pref("mailnews.import.text.fieldmap", "+0,+1,+2,+3,+4,+5,+36,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,+32,+33,+34,+35");
+ 

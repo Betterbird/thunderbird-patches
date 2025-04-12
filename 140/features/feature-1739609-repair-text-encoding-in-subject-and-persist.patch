@@ -1,0 +1,222 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744488111 -7200
+# Parent  0b5257633d9a622d314b38ba3d860d448e13764a
+Bug 1739609 - Fix the subject in "Repair Text Encoding". Persist charset for subsequent display.
+
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -15,9 +15,10 @@
+ // msgHdrView.js
+ /* globals AdjustHeaderView ClearCurrentHeaders ClearPendingReadTimer
+    HideMessageHeaderPane initFolderDBListener OnLoadMsgHeaderPane OnTagsChange
+    SetAttachmentListLocation gHeaderCustomize
+-   OnUnloadMsgHeaderPane HandleAllAttachments AttachmentMenuController */
++   OnUnloadMsgHeaderPane HandleAllAttachments AttachmentMenuController
++   currentCharacterSet: true */
+ 
+ var { MailServices } = ChromeUtils.importESModule(
+   "resource:///modules/MailServices.sys.mjs"
+ );
+@@ -32,8 +33,9 @@ ChromeUtils.defineESModuleGetters(
+   { global: "current" }
+ );
+ 
+ ChromeUtils.defineESModuleGetters(this, {
++  jsmime: "resource:///modules/jsmime.sys.mjs",
+   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
+   UIDensity: "resource:///modules/UIDensity.sys.mjs",
+   UIFontSize: "resource:///modules/UIFontSize.sys.mjs",
+ });
+@@ -251,9 +253,12 @@ function ReloadMessage() {
+   }
+   displayMessage(gMessageURI, gViewWrapper);
+ }
+ 
+-function MailSetCharacterSet() {
++async function MailSetCharacterSet() {
++  // `currentCharacterSet` comes from from msgHdrView.js.
++  currentCharacterSet = null;
++
+   const messageService = MailServices.messageServiceFromURI(gMessageURI);
+   gMessage = messageService.messageURIToMsgHdr(gMessageURI);
+   messageService.loadMessage(
+     gMessageURI,
+@@ -262,8 +267,76 @@ function MailSetCharacterSet() {
+     null,
+     true
+   );
+   autodetectCharset = true;
++
++  // There is a listener in msgHdrView.js which sets `currentCharacterSet`
++  // but we can't get to it from here.
++  let count = 0;
++  while (count++ < 20 && !currentCharacterSet) {
++    await new Promise(resolve => setTimeout(resolve, 100));
++  }
++  if (!currentCharacterSet) {
++    // eslint-disable-next-line no-console
++    console.info("No detected character set");
++    return;
++  }
++
++  // Keep the charset for the next time we display the message.
++  gMessage.setStringProperty("overrideCharset", currentCharacterSet);
++
++  // Fix the subject.
++  // eslint-disable-next-line no-console
++  console.info(`Detected character set "${currentCharacterSet}"`);
++  const subjectBox = document.getElementById("expandedsubjectBox");
++  // The selected message still has the raw header, so get it and decode it.
++  const buffer = new Uint8Array(
++    Array.from(gMessage.rawSubject, c => c.charCodeAt(0))
++  );
++  let subject;
++  let subjectChanged = false;
++  try {
++    // Check whether this is already UTF-8.
++    subject = new TextDecoder("UTF-8", { fatal: true }).decode(buffer);
++  } catch (ex) {
++    try {
++      subject = new TextDecoder(currentCharacterSet, {
++        fatal: true,
++      }).decode(buffer);
++      subjectChanged = true;
++    } catch (ex) {
++      console.error(
++        `Failed to decode subject with charset ${currentCharacterSet}`
++      );
++      return;
++    }
++  }
++  if (subjectChanged) {
++    gMessage.subject = subject;
++
++    // Update the subject in the header pane, thread pane,
++    // tab or window title for messages opened in a tab or stand-alone window.
++    const subjectDisplay = jsmime.headerparser.decodeRFC2047Words(
++      subject,
++      "utf-8"
++    );
++    subjectBox.headerValue = subjectDisplay;
++
++    const threadTree = window.parent?.threadTree;
++    const index = gDBView?.selection?.currentIndex;
++    if (index >= 0 && threadTree) {
++      threadTree.invalidateRow(index);
++    }
++
++    const tab = top.document.getElementById("tabmail")?.currentTabInfo;
++    if (tab) {
++      if (!tab.first) {
++        tab.tabNode.label = subjectDisplay;
++      }
++    } else {
++      document.title = subjectDisplay;
++    }
++  }
+ }
+ 
+ window.addEventListener("DOMContentLoaded", event => {
+   if (event.target != document) {
+diff --git a/mailnews/base/public/nsIMsgHdr.idl b/mailnews/base/public/nsIMsgHdr.idl
+--- a/mailnews/base/public/nsIMsgHdr.idl
++++ b/mailnews/base/public/nsIMsgHdr.idl
+@@ -75,8 +75,9 @@ interface nsIMsgDBHdr : nsISupports
+     attribute AUTF8String ccList;
+     attribute AUTF8String bccList;
+     attribute AUTF8String author;
+     attribute AUTF8String subject;
++    readonly attribute string rawSubject;
+     attribute AUTF8String recipients;
+ 
+     /* anything below here still has to be fixed */
+     void setReferences(in AUTF8String references);
+diff --git a/mailnews/db/msgdb/src/nsMsgHdr.cpp b/mailnews/db/msgdb/src/nsMsgHdr.cpp
+--- a/mailnews/db/msgdb/src/nsMsgHdr.cpp
++++ b/mailnews/db/msgdb/src/nsMsgHdr.cpp
+@@ -443,8 +443,13 @@ NS_IMETHODIMP nsMsgHdr::GetSubject(nsACS
+   return m_mdb->RowCellColumnToCharPtr(GetMDBRow(), m_mdb->m_subjectColumnToken,
+                                        getter_Copies(resultSubject));
+ }
+ 
++NS_IMETHODIMP nsMsgHdr::GetRawSubject(char** resultSubject) {
++  return m_mdb->RowCellColumnToCharPtr(GetMDBRow(), m_mdb->m_subjectColumnToken,
++                                       resultSubject);
++}
++
+ NS_IMETHODIMP nsMsgHdr::GetRecipients(nsACString& resultRecipients) {
+   return m_mdb->RowCellColumnToCharPtr(GetMDBRow(),
+                                        m_mdb->m_recipientsColumnToken,
+                                        getter_Copies(resultRecipients));
+diff --git a/mailnews/db/panorama/src/Message.cpp b/mailnews/db/panorama/src/Message.cpp
+--- a/mailnews/db/panorama/src/Message.cpp
++++ b/mailnews/db/panorama/src/Message.cpp
+@@ -204,8 +204,13 @@ NS_IMETHODIMP Message::SetAuthor(const n
+ NS_IMETHODIMP Message::GetSubject(nsACString& aSubject) {
+   aSubject.Assign(mSubject);
+   return NS_OK;
+ }
++NS_IMETHODIMP Message::GetRawSubject(char** aSubject) {
++  // Is this correct? Need to check when Panorama goes live.
++  *aSubject = ToNewCString(mSubject);
++  return NS_OK;
++}
+ NS_IMETHODIMP Message::SetSubject(const nsACString& aSubject) {
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ NS_IMETHODIMP Message::GetRecipients(nsACString& aRecipients) {
+diff --git a/mailnews/local/src/nsMsgFileHdr.cpp b/mailnews/local/src/nsMsgFileHdr.cpp
+--- a/mailnews/local/src/nsMsgFileHdr.cpp
++++ b/mailnews/local/src/nsMsgFileHdr.cpp
+@@ -315,8 +315,16 @@ NS_IMETHODIMP nsMsgFileHdr::GetSubject(n
+   aSubject = mSubject;
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgFileHdr::GetRawSubject(char** aSubject) {
++  nsresult rv = ReadFile();
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  *aSubject = ToNewCString(mSubject);
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgFileHdr::SetSubject(const nsACString& aSubject) {
+   mSubject = aSubject;
+   bool strippedRE = NS_MsgStripRE(mSubject, mSubject);
+   nsCOMPtr<nsIMimeConverter> mimeConverter =
+diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
+--- a/mailnews/mime/src/nsStreamConverter.cpp
++++ b/mailnews/mime/src/nsStreamConverter.cpp
+@@ -120,9 +120,28 @@ nsresult bridge_new_new_uri(void* bridge
+               } else {
+                 *default_charset = strdup("UTF-8");
+               }
+             } else {
+-              *default_charset = strdup("UTF-8");
++              // Let's see whether the user repaired this before.
++              nsCOMPtr<nsIMsgMessageUrl> msgUrl(do_QueryInterface(aURI));
++              *default_charset = nullptr;
++              if (msgUrl) {
++                nsCOMPtr<nsIMsgDBHdr> hdr;
++                msgUrl->GetMessageHeader(getter_AddRefs(hdr));
++                if (hdr) {
++                  nsCString charset;
++                  rv = hdr->GetStringProperty("overrideCharset", charset);
++                  if (NS_SUCCEEDED(rv) && !charset.IsEmpty()) {
++                    *default_charset = ToNewCString(charset);
++                  }
++                }
++              }
++              if (*default_charset && **default_charset) {
++                // Pretend that we're repeating the override from last time.
++                *override_charset = true;
++              } else {
++                *default_charset = strdup("UTF-8");
++              }
+             }
+           }
+         }
+         nsAutoCString urlString;
