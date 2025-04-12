@@ -1,0 +1,92 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744490176 -7200
+# Parent  31ca32997574abfb9288a631db1d2b9fa7f2318d
+Feature: Suppress duplicate Gloda results from Gmail's 'All Mail' folder. (TB bug 1875681)
+
+diff --git a/mailnews/base/public/nsMsgFolderFlags.idl b/mailnews/base/public/nsMsgFolderFlags.idl
+--- a/mailnews/base/public/nsMsgFolderFlags.idl
++++ b/mailnews/base/public/nsMsgFolderFlags.idl
+@@ -75,9 +75,9 @@ interface nsMsgFolderFlags : nsISupports
+   const nsMsgFolderFlagType ImapBox         = 0x00002000;
+   /// Whether this is an archive folder
+   const nsMsgFolderFlagType Archive         = 0x00004000;
+   /// This used to be used for virtual newsgroups
+-  const nsMsgFolderFlagType Unused1         = 0x00008000;
++  const nsMsgFolderFlagType AllMail         = 0x00008000;
+   /// Used to be for categories
+   const nsMsgFolderFlagType Unused4         = 0x00010000;
+   /// Used to be for new msgs in a folder
+   const nsMsgFolderFlagType Unused7         = 0x00020000;
+diff --git a/mailnews/db/gloda/modules/GlodaSyntheticView.sys.mjs b/mailnews/db/gloda/modules/GlodaSyntheticView.sys.mjs
+--- a/mailnews/db/gloda/modules/GlodaSyntheticView.sys.mjs
++++ b/mailnews/db/gloda/modules/GlodaSyntheticView.sys.mjs
+@@ -85,12 +85,52 @@ GlodaSyntheticView.prototype = {
+     this.completionCallback = null;
+   },
+ 
+   reportResults(aItems) {
++    const messageMap = new Map();
++
++    // First pass: Store messages in a map with messageId as the key.
+     for (const item of aItems) {
+       const hdr = item.folderMessage;
+       if (hdr) {
++        if (!messageMap.has(hdr.messageId)) {
++          messageMap.set(hdr.messageId, []);
++        }
++        if (hdr.folder.flags & Ci.nsMsgFolderFlags.AllMail) {
++          // Push the header to the end of the array.
++          messageMap.get(hdr.messageId).push(hdr);
++        } else {
++          // Add the header to the front of the array.
++          messageMap.get(hdr.messageId).unshift(hdr);
++        }
++      }
++    }
++
++    // Second pass: Traverse the map, report everything except duplicates
++    // from "All Mail".
++    // The map values are arrays of headers, with the ones not in "All Mail"
++    // at the front.
++    for (const value of messageMap.values()) {
++      if (value.length == 1) {
++        const hdr = value[0];
+         this.searchListener.onSearchHit(hdr, hdr.folder);
++      } else if (value[0].folder.flags & Ci.nsMsgFolderFlags.AllMail) {
++        // First hit is in "All Mail" already, so report all hits.
++        for (const hdr of value) {
++          this.searchListener.onSearchHit(hdr, hdr.folder);
++        }
++      } else {
++        // First hit isn't in "All Mail", so report all hits not in "All Mail".
++        for (const hdr of value) {
++          if (hdr.folder.flags & Ci.nsMsgFolderFlags.AllMail) {
++            // Make sure `this.selectedMessage` references a message we're reporting.
++            if (this.selectedMessage.messageId == hdr.messageId) {
++              this.selectedMessage = value[0];
++            }
++            break;
++          }
++          this.searchListener.onSearchHit(hdr, hdr.folder);
++        }
+       }
+     }
+   },
+ 
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -1228,9 +1228,11 @@ NS_IMETHODIMP nsImapMailFolder::SetBoxFl
+       }
+     }
+   }
+   // Treat the GMail all mail folder as the archive folder.
+-  if (m_boxFlags & (kImapAllMail | kImapArchive))
++  if (m_boxFlags & kImapAllMail)
++    newFlags |= nsMsgFolderFlags::Archive | nsMsgFolderFlags::AllMail;
++  if (m_boxFlags & kImapArchive)
+     newFlags |= nsMsgFolderFlags::Archive;
+ 
+   SetFlags(newFlags);
+   return NS_OK;

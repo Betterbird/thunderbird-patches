@@ -1,0 +1,440 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744493761 -7200
+# Parent  92233d69a0da89223d2fde02c287167279a7f688
+Feature: QuickFilter search for textFilter matches of Display Name and Nickname contact emails in address books.
+
+Based on https://github.com/Betterbird/thunderbird-patches/blob/main/128/unused/feature-460737-quickfilter-search-by-displayname-nickname-in-addresses.patch
+which was authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
+--- a/mail/base/content/quickFilterBar.inc.xhtml
++++ b/mail/base/content/quickFilterBar.inc.xhtml
+@@ -79,8 +79,12 @@
+             <button is="toggle-button" id="qfb-qs-body"
+                     class="button check-button"
+                     data-l10n-id="quick-filter-bar-text-filter-body"></button>
+           </div>
++          <xul:checkbox
++            id="qfb-match-addressbook"
++            data-l10n-id="quick-filter-bar-match-addressbook"
++          />          
+         </div>
+         <div id="quickFilterBarTagsContainer" hidden="hidden">
+           <xul:menulist id="qfb-boolean-mode" value="OR">
+             <xul:menupopup>
+diff --git a/mail/base/content/quickFilterBar.js b/mail/base/content/quickFilterBar.js
+--- a/mail/base/content/quickFilterBar.js
++++ b/mail/base/content/quickFilterBar.js
+@@ -157,8 +157,15 @@ var quickFilterBar = {
+         "enabled",
+         stickyValue
+       );
+     });
++
++    const checkbox = document.getElementById("qfb-match-addressbook");
++    checkbox.addEventListener("click", () => {
++      const matchAB = checkbox.checked ? true : null;
++      this.filterer.filterValues.text.states.matchAB = matchAB;
++      this.deferredUpdateSearch();
++    });
+   },
+ 
+   /**
+    * Get all button groups with the roving-group class.
+@@ -599,13 +606,27 @@ var quickFilterBar = {
+       this.deferredDelay
+     );
+   },
+ 
++  reflectABSearchResult(success) {
++    const checkbox = document.getElementById("qfb-match-addressbook");
++    if (success === null) {
++      checkbox.style.outline = "";
++      checkbox.style.outlineOffset = "";
++    } else if (success) {
++      checkbox.style.outline = "var(--color-green-60) solid 1px";
++      checkbox.style.outlineOffset = "2px";
++    } else {
++      checkbox.style.outline = "var(--color-red-50) solid 1px";
++      checkbox.style.outlineOffset = "2px";
++    }
++  },
++
+   /**
+    * Update the user terms part of the search definition to reflect the active
+    * filterer's current state.
+    */
+-  updateSearch() {
++  async updateSearch() {
+     if (!this._filterer || !gViewWrapper?.search) {
+       return;
+     }
+ 
+@@ -616,10 +637,12 @@ var quickFilterBar = {
+       // A value of null will not create this listener.
+       this.filterer.setFilterValue("results", this.searchHit ? 0 : null, true);
+     }
+ 
+-    const [terms, listeners] = this.filterer.createSearchTerms(
+-      gViewWrapper.search.session
++    this.reflectABSearchResult(null);
++    const [terms, listeners] = await this.filterer.createSearchTerms(
++      gViewWrapper.search.session,
++      this.reflectABSearchResult
+     );
+ 
+     for (const [listener, filterDef] of listeners) {
+       // it registers itself with the search session.
+diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/messenger/about3Pane.ftl
+--- a/mail/locales/en-US/messenger/about3Pane.ftl
++++ b/mail/locales/en-US/messenger/about3Pane.ftl
+@@ -117,8 +117,14 @@ quick-filter-bar-negate =
+       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
+       • [Any of] with [Important] negated and [Work] and [Personal] selected:
+       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
+ 
++# Explain email type textFilter searches with address book display Name
++# and Nickname.
++quick-filter-bar-match-addressbook =
++    .label = Match Address Book
++    .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
++
+ # The contents of the results box when there is a filter active but there
+ # are no messages matching the filter.
+ quick-filter-bar-no-results = No results
+ 
+diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
+--- a/mail/modules/QuickFilterManager.sys.mjs
++++ b/mail/modules/QuickFilterManager.sys.mjs
+@@ -178,12 +178,13 @@ export class QuickFilterState {
+    * Create the search terms appropriate to the current filter states.
+    *
+    * @param {nsIMsgSearchSession} aTermCreator
+    */
+-  createSearchTerms(aTermCreator) {
+-    return QuickFilterManager.createSearchTerms(
++  async createSearchTerms(aTermCreator, callback) {
++    return await QuickFilterManager.createSearchTerms(
+       this.filterValues,
+-      aTermCreator
++      aTermCreator,
++      callback
+     );
+   }
+ 
+   /**
+@@ -567,19 +568,20 @@ export var QuickFilterManager = {
+    * @param {object} aFilterValues - The values to clear by filter.
+    * @param {nsIMsgSearchSession} aTermCreator
+    * @returns {Array.<?string[], Array.<Array.<SearchListener, FilterDefinition>>>}
+    */
+-  createSearchTerms(aFilterValues, aTermCreator) {
++  async createSearchTerms(aFilterValues, aTermCreator, callback) {
+     const searchTerms = [],
+       listeners = [];
+     for (const filterName in aFilterValues) {
+       const filterValue = aFilterValues[filterName];
+       const filterDef = this.filterDefsByName[filterName];
+       try {
+-        const listener = filterDef.appendTerms(
++        const listener = await filterDef.appendTerms(
+           aTermCreator,
+           searchTerms,
+-          filterValue
++          filterValue,
++          callback
+         );
+         if (listener) {
+           listeners.push([listener, filterDef]);
+         }
+@@ -1230,27 +1232,49 @@ export var MessageTextFilter = {
+    * filters OR'ed together. So if the user queries for 'foo bar' with
+    * sender and recipient enabled, we build:
+    * ("foo" sender OR "foo" recipient) AND ("bar" sender OR "bar" recipient)
+    */
+-  appendTerms(aTermCreator, aTerms, aFilterValue) {
++  async appendTerms(aTermCreator, aTerms, aFilterValue, callback = null) {
+     let term, value;
+ 
+     if (aFilterValue.text) {
+       const haveNegation = Object.entries(aFilterValue.states).some(
+         tfName => tfName[1] === false
+       );
++      let overallSuccess = null;
+       const phrases = this._parseSearchString(aFilterValue.text);
+       for (const groupedPhrases of phrases) {
+         let firstClause = true;
+         term = null;
+         const splitPhrases = groupedPhrases.split("|");
+         for (const phrase of splitPhrases) {
++          const success = await this.cacheEmailAddressesByDisplayNameNickName(
++            aFilterValue.states,
++            phrase
++          );
++          if (success !== null) {
++            // `null || false` is `false`.
++            overallSuccess ||= success;
++          }
++
+           for (const [tfName, tfValue] of Object.entries(aFilterValue.states)) {
+             if (tfValue !== true && tfValue !== false) {
+               continue;
+             }
++            if (tfName == "matchAB") {
++              continue;
++            }
+             const tfDef = this.textFilterDefs[tfName];
+ 
++            // Create extra search terms for the e-mail addresses matching
++            // display name and nickname.
++            const extraSearchEmailAddressTerms =
++              this.createExtraTermsForEmailTextfilter(
++                aTermCreator,
++                tfDef.attrib,
++                tfValue
++              );
++
+             term = aTermCreator.createTerm();
+             term.attrib = tfDef.attrib;
+             value = term.value;
+             value.attrib = tfDef.attrib;
+@@ -1263,16 +1287,139 @@ export var MessageTextFilter = {
+             term.booleanAnd = firstClause || (!firstClause && haveNegation);
+             term.beginsGrouping = firstClause ? 1 : 0;
+             aTerms.push(term);
+             firstClause = false;
++
++            // Add extra terms from display name/nickname search.
++            for (const extraTerm of extraSearchEmailAddressTerms) {
++              aTerms.push(extraTerm);
++            }
+           }
+         }
+-        if (term) {
+-          term.endsGrouping = 1;
++        if (aTerms.length) {
++          aTerms[aTerms.length - 1].endsGrouping = 1;
+         }
+       }
++      if (callback) {
++        callback(overallSuccess);
++      }
+     }
+   },
++
++  /**
++   * Create an array of contact email addresses that match text with address
++   * book DisplayName or NickName fields.
++   *
++   * @param {object} states - The filterValue.states object.
++   * @param {string} searchVal - The search text.
++   * @returns {boolean} - true: found addresses via AB search, false: found nothing, null: error.
++   */
++  async cacheEmailAddressesByDisplayNameNickName(states, searchVal) {
++    if (!this.isEmailAddressTextFilterActive(states) || !states.matchAB) {
++      this.emailAddressesByDisplayNameNickName = [];
++      return null;
++    }
++
++    // Looks like `nsIAbDirectory.search()` does a `decodeURIComponent()` on the value:
++    // https://searchfox.org/comm-central/rev/711e05a96e02a6086ebef3096219549190343364/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs#358
++    // Also required here:
++    // https://searchfox.org/comm-central/rev/711e05a96e02a6086ebef3096219549190343364/mailnews/addrbook/modules/QueryStringToExpression.sys.mjs#18
++    // Curiously enough, `encodeURIComponent()` doesn't replace "()". So do it here.
++    const sv = encodeURIComponent(searchVal)
++      .replace(/\(/g, "%28")
++      .replace(/\)/g, "%29");
++    // See `createBooleanConditionString()` for operators:
++    // "=": Ci.nsIAbBooleanConditionTypes.Is
++    // bw: Ci.nsIAbBooleanConditionTypes.BeginsWith
++    // https://searchfox.org/comm-central/rev/5fc342efb04b403770acbf8b658a8c168dfa07e2/mailnews/addrbook/public/nsIAbDirectory.idl#186
++    // calls for: (BOOL1(FIELD1,OP1,VALUE1)..(FIELDn,OPn,VALUEn)(BOOL2(FIELD1,OP1,VALUE1)...)...).
++    // LDAP search requires the `or( ... )`, local AB search works without it.
++    const searchString = `(or(DisplayName,bw,${sv})(NickName,=,${sv}))`;
++
++    let emailAddresses = [];
++    let allError = true;
++    const doSearch = async () => {
++      for (const addrbook of MailServices.ab.directories) {
++        await new Promise(resolve => {
++          const searchListener = {
++            onSearchFoundCard(card) {
++              // console.info(
++              //   `Search of AB ${addrbook.dirName} with ${searchString} yielded:`,
++              //   card.emailAddresses
++              // );
++              emailAddresses = emailAddresses.concat(card.emailAddresses);
++            },
++            onSearchFinished() {
++              resolve();
++            },
++          };
++          // The user my have entered some crazy search term in which case
++          // the search may throw.
++          try {
++            addrbook.search(searchString, "", searchListener);
++            allError = false;
++          } catch (ex) {
++            console.warn(
++              `Search of AB ${addrbook.dirName} with ${searchString} yielded error`
++            );
++            resolve();
++          }
++        });
++      }
++    };
++
++    await doSearch();
++
++    // Tricky code to give a unique result.
++    this.emailAddressesByDisplayNameNickName = [...new Set(emailAddresses)];
++    console.info(
++      `AB search with ${searchString} yielded`,
++      this.emailAddressesByDisplayNameNickName
++    );
++
++    if (allError) {
++      return null;
++    }
++
++    if (this.emailAddressesByDisplayNameNickName.length > 100) {
++      console.warn("Too many search conditions; search value is too general");
++      this.emailAddressesByDisplayNameNickName = [];
++      return null;
++    }
++    return this.emailAddressesByDisplayNameNickName.length > 0;
++  },
++
++  /**
++   * Create extra terms to match an email address to an email type attrib value.
++   *
++   * @param {nsIMsgSearchSession} termCreator
++   * @param {nsMsgSearchAttrib} attrib
++   * @param {boolean} tfValue
++   *
++   * @returns {nsiTerm[]}  - Array of nsiTerm or empty array.
++   */
++  createExtraTermsForEmailTextfilter(termCreator, attrib, tfValue) {
++    const terms = [];
++    let term, value;
++    for (const emailAddress of this.emailAddressesByDisplayNameNickName) {
++      term = termCreator.createTerm();
++      term.attrib = attrib;
++      value = term.value;
++      value.attrib = attrib;
++      value.str = emailAddress;
++      term.value = value;
++      term.op = tfValue
++        ? Ci.nsMsgSearchOp.Contains
++        : Ci.nsMsgSearchOp.DoesntContain;
++      // Explicit OR here unless negated (tfValue === false).
++      term.booleanAnd = tfValue === false;
++      term.beginsGrouping = 0;
++      term.endsGrouping = 0;
++      terms.push(term);
++    }
++    return terms;
++  },
++
+   getDefaults() {
+     const states = Object.assign({}, this._defaultStates);
+     return {
+       text: null,
+@@ -1334,14 +1481,24 @@ export var MessageTextFilter = {
+       const state = aMuxer.getFilterValueForMutation(MessageTextFilter.name);
+       const filterDef = MessageTextFilter.textFilterDefsByDomId[this.id];
+       state.states[filterDef.name] = !this.pressed ? null : !this.inverted;
+       aMuxer.deferredUpdateSearch();
++      aDocument
++        .getElementById("quick-filter-bar-filter-text-bar")
++        .toggleAttribute(
++          "emailFilterActive",
++          MessageTextFilter.isEmailAddressTextFilterActive(state.states)
++        );
++      // We can't persist `matchAB` since Thunderbird doesn't recognize it.
++      const matchAB = state.states.matchAB;
++      delete state.states.matchAB;
+       lazy.XULStoreUtils.setValue(
+         "messenger",
+         "quickFilter",
+         "textFilters",
+         JSON.stringify(state.states)
+       );
++      state.states.matchAB = matchAB;
+     }
+ 
+     for (const name in this.textFilterDefs) {
+       const textFilter = this.textFilterDefs[name];
+@@ -1436,8 +1593,15 @@ export var MessageTextFilter = {
+ 
+     // Toggle the expanded filters visibility.
+     aDocument.getElementById("quick-filter-bar-filter-text-bar").hidden =
+       aFilterValue.text == null;
++
++    aDocument
++      .getElementById("quick-filter-bar-filter-text-bar")
++      .toggleAttribute(
++        "emailFilterActive",
++        this.isEmailAddressTextFilterActive(states)
++      );
+   },
+ 
+   /**
+    * In order to do our upsell we need to know when we are not getting any
+@@ -1469,14 +1633,27 @@ export var MessageTextFilter = {
+    */
+   isTextFilterActive(states) {
+     return Object.entries(states).some(
+       ([tfName, tfValue]) =>
++        tfName != "matchAB" &&
+         "attrib" in this.textFilterDefs[tfName] &&
+         (tfValue === true || tfValue === false)
+     );
+   },
+ 
+   /**
++   * @param {object} states - The filterValue.states object.
++   * @returns {boolean} - True if an email type textFilter is checked.
++   */
++  isEmailAddressTextFilterActive(states) {
++    return Object.entries(states).some(
++      ([tfName, tfValue]) =>
++        ["sender", "recipients"].includes(tfName) &&
++        (tfValue === true || tfValue === false)
++    );
++  },
++
++  /**
+    * Maps text filter names to whether they are enabled by default.
+    *
+    * @type {Record<string, boolean>}
+    */
+@@ -1492,8 +1669,9 @@ export var MessageTextFilter = {
+    *
+    * @type {Record<string, object>}
+    */
+   textFilterDefsByDomId: {},
++
+   /**
+    * Add a message field available for text filtering.
+    *
+    * @param {object} aTextDef - Text filter definition.
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -264,8 +264,12 @@
+ 
+   & > .button-group > .button {
+     min-width: 0;
+   }
++
++  &:not([emailFilterActive]) > #qfb-match-addressbook {
++    display: none;
++  }
+ }
+ 
+ #qfb-upsell-line-one {
+   font-weight: bold;
