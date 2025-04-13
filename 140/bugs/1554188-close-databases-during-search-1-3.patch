@@ -1,0 +1,246 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744578209 -7200
+# Parent  ffab26ff0297a5ec210a022a78da00c306e407db
+Bug 1554188 - More aggressively close databases during search.
+* * *
+Bug 1554188 - Only aggressively close folders if many involved in search.
+* * *
+Bug 1554188 - modify algorithm that closes databases during search. Allow for 100 open ones, keep simple LRU cache.
+
+diff --git a/mail/app/nsMailApp.cpp b/mail/app/nsMailApp.cpp
+--- a/mail/app/nsMailApp.cpp
++++ b/mail/app/nsMailApp.cpp
+@@ -387,8 +387,14 @@ int main(int argc, char* argv[], char* e
+ #ifdef MOZ_BROWSER_CAN_BE_CONTENTPROC
+   gBootstrap->XRE_EnableSameExecutableForContentProc();
+ #endif
+ 
++#ifdef WIN32
++  // Allow for 75% of the max number of 8192, see:
++  // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setmaxstdio?view=msvc-170
++  _setmaxstdio(6144);
++#endif
++
+   int result = do_main(argc, argv, envp);
+ 
+   gBootstrap->NS_LogTerm();
+ 
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -567,8 +567,10 @@ interface nsIMsgFolder : nsISupports {
+    *                         out of date information.
+    * @see nsIMsgFolder::getDBFolderInfoAndDB.
+    */
+   attribute nsIMsgDatabase msgDatabase;
++  /// Get database via API that keeps a LRU cache.
++  readonly attribute nsIMsgDatabase msgDatabaseLRU;
+ 
+   /// Does the folder have a local reference to the msgDatabase?
+   readonly attribute boolean databaseOpen;
+ 
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -4688,16 +4688,86 @@ NS_IMETHODIMP nsMsgDBFolder::EnableNotif
+   }
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
++// Cheap implementation of LRU cache.
++#define MAXLRUCACHE 100
++size_t dbLRUcacheCount = 0;
++MOZ_RUNINIT nsWeakPtr dbLRUcache[MAXLRUCACHE];
++
++static void insertIntoLRUcache(nsMsgDBFolder* folder) {
++// #define FOLDER_DEBUG 1
++#ifdef FOLDER_DEBUG
++  nsAutoCString n;
++  folder->GetURI(n);
++#endif
++
++  // Let's keep track of the last folders and close a folder database
++  // if necessary.
++  // Let's see whether our folder is in the cache.
++  bool found = false;
++  for (size_t i = 0; i < dbLRUcacheCount; i++) {
++    nsCOMPtr<nsIMsgFolder> f = do_QueryReferent(dbLRUcache[i]);
++    if (f == folder) {
++      found = true;
++      // Move elements down to i and insert at [0].
++      if (i > 0) {
++        memmove((void*)&dbLRUcache[1], (void*)&dbLRUcache[0], i * sizeof(nsWeakPtr));
++        dbLRUcache[0] = do_GetWeakReference(folder);
++      }
++      break;
++    }
++  }
++#ifdef FOLDER_DEBUG
++  fprintf(stderr, "LRU insert: %s, found: %d, %zu\n", n.get(), found, dbLRUcacheCount);
++#endif
++  if (!found) {
++    if (dbLRUcacheCount == MAXLRUCACHE) {
++      // Expunge last element.
++      nsCOMPtr<nsIMsgFolder> last = do_QueryReferent(dbLRUcache[MAXLRUCACHE - 1]);
++      if (last) {
++        bool dbOpen = false;
++        last->GetDatabaseOpen(&dbOpen);
++        if (dbOpen) last->SetMsgDatabase(nullptr);
++#ifdef FOLDER_DEBUG
++        last->GetURI(n);
++        fprintf(stderr, "LRU cache closed: %s\n", n.get());
++#endif
++      }
++      dbLRUcacheCount--;
++    }
++    // Move elements down and insert at [0].
++    if (dbLRUcacheCount > 0) {
++      memmove((void*)&dbLRUcache[1], (void*)&dbLRUcache[0], dbLRUcacheCount * sizeof(nsWeakPtr));
++    }
++    dbLRUcacheCount++;
++    dbLRUcache[0] = do_GetWeakReference(folder);
++  }
++}
++
+ NS_IMETHODIMP nsMsgDBFolder::GetMessageHeader(nsMsgKey msgKey,
+                                               nsIMsgDBHdr** aMsgHdr) {
+   NS_ENSURE_ARG_POINTER(aMsgHdr);
++  bool weOpenedDB = !mDatabase;
+   nsCOMPtr<nsIMsgDatabase> database;
+   nsresult rv = GetMsgDatabase(getter_AddRefs(database));
+   NS_ENSURE_SUCCESS(rv, rv);
+-  return (database) ? database->GetMsgHdrForKey(msgKey, aMsgHdr)
+-                    : NS_ERROR_FAILURE;
++  if (!database) return NS_ERROR_FAILURE;
++  rv = database->GetMsgHdrForKey(msgKey, aMsgHdr);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  if (weOpenedDB) {
++    insertIntoLRUcache(this);
++  }
++  return rv;
++}
++
++NS_IMETHODIMP
++nsMsgDBFolder::GetMsgDatabaseLRU(nsIMsgDatabase** aMsgDatabase) {
++  if (!mDatabase) {
++    insertIntoLRUcache(this);
++  }
++  return GetMsgDatabase(aMsgDatabase);
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetDescendants(
+     nsTArray<RefPtr<nsIMsgFolder>>& aDescendants) {
+@@ -4910,9 +4980,10 @@ NS_IMETHODIMP nsMsgDBFolder::NotifyCompa
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgDBFolder::CloseDB() {
+-  if (!(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox))) {
++  if (!(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Inbox |
++                  nsMsgFolderFlags::Queue))) {
+     SetMsgDatabase(nullptr);
+   }
+   return NS_OK;
+ }
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -364,14 +364,11 @@ nsresult nsMsgSearchDBView::GetMsgHdrFor
+   }
+ 
+   nsIMsgFolder* folder = m_folders[index];
+   if (folder) {
+-    nsCOMPtr<nsIMsgDatabase> db;
+-    nsresult rv = folder->GetMsgDatabase(getter_AddRefs(db));
++    nsresult rv = folder->GetMessageHeader(m_keys[index], msgHdr);
+     NS_ENSURE_SUCCESS(rv, rv);
+-    if (db) {
+-      return db->GetMsgHdrForKey(m_keys[index], msgHdr);
+-    }
++    return rv;
+   }
+ 
+   return NS_ERROR_FAILURE;
+ }
+diff --git a/mailnews/base/src/nsMsgXFViewThread.cpp b/mailnews/base/src/nsMsgXFViewThread.cpp
+--- a/mailnews/base/src/nsMsgXFViewThread.cpp
++++ b/mailnews/base/src/nsMsgXFViewThread.cpp
+@@ -272,12 +272,11 @@ nsresult nsMsgXFViewThread::AddHdr(nsIMs
+ NS_IMETHODIMP
+ nsMsgXFViewThread::GetChildHdrAt(uint32_t aIndex, nsIMsgDBHdr** aResult) {
+   if (aIndex >= m_keys.Length()) return NS_MSG_MESSAGE_NOT_FOUND;
+ 
+-  nsCOMPtr<nsIMsgDatabase> db;
+-  nsresult rv = m_folders[aIndex]->GetMsgDatabase(getter_AddRefs(db));
++  nsresult rv = m_folders[aIndex]->GetMessageHeader(m_keys[aIndex], aResult);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  return db->GetMsgHdrForKey(m_keys[aIndex], aResult);
++  return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFViewThread::RemoveChildAt(uint32_t aIndex) {
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -177,9 +177,9 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+ 
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForFolder(
+     nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits) {
+   nsCOMPtr<nsIMsgDatabase> db;
+-  nsresult rv = folder->GetMsgDatabase(getter_AddRefs(db));
++  nsresult rv = folder->GetMsgDatabaseLRU(getter_AddRefs(db));
+   if (NS_SUCCEEDED(rv) && db) {
+     nsCString searchUri;
+     m_viewFolder->GetURI(searchUri);
+     nsTArray<nsMsgKey> badHits;
+@@ -188,9 +188,9 @@ void nsMsgXFVirtualFolderDBView::UpdateC
+       nsCOMPtr<nsIMsgDBHdr> badHdr;
+       for (nsMsgKey badKey : badHits) {
+         // ### of course, this isn't quite right, since we should be
+         // using FindHdr, and we shouldn't be expanding the threads.
+-        db->GetMsgHdrForKey(badKey, getter_AddRefs(badHdr));
++        folder->GetMessageHeader(badKey, getter_AddRefs(badHdr));
+         // Let nsMsgSearchDBView decide what to do about this header
+         // getting removed.
+         if (badHdr) OnHdrDeleted(badHdr, nsMsgKey_None, 0, this);
+       }
+@@ -248,11 +248,9 @@ nsMsgXFVirtualFolderDBView::OnSearchHit(
+ 
+   bool hdrInCache = false;
+   if (!m_doingQuickSearch) {
+     nsCOMPtr<nsIMsgDatabase> dbToUse;
+-    nsCOMPtr<nsIDBFolderInfo> dummyInfo;
+-    nsresult rv = aFolder->GetDBFolderInfoAndDB(getter_AddRefs(dummyInfo),
+-                                                getter_AddRefs(dbToUse));
++    nsresult rv = aFolder->GetMsgDatabaseLRU(getter_AddRefs(dbToUse));
+     if (NS_SUCCEEDED(rv)) {
+       nsCString searchUri;
+       m_viewFolder->GetURI(searchUri);
+       dbToUse->HdrIsInCache(searchUri, aMsgHdr, &hdrInCache);
+@@ -412,9 +410,9 @@ nsMsgXFVirtualFolderDBView::OnNewSearch(
+     if (searchFolder) {
+       nsCOMPtr<nsIMsgDatabase> searchDB;
+       nsCString searchUri;
+       m_viewFolder->GetURI(searchUri);
+-      nsresult rv = searchFolder->GetMsgDatabase(getter_AddRefs(searchDB));
++      nsresult rv = searchFolder->GetMsgDatabaseLRU(getter_AddRefs(searchDB));
+       if (NS_SUCCEEDED(rv) && searchDB) {
+         if (msgDBService)
+           msgDBService->RegisterPendingListener(searchFolder, this);
+ 
+diff --git a/mailnews/db/mork/morkRowSpace.cpp b/mailnews/db/mork/morkRowSpace.cpp
+--- a/mailnews/db/mork/morkRowSpace.cpp
++++ b/mailnews/db/mork/morkRowSpace.cpp
+@@ -305,8 +305,9 @@ morkTable* morkRowSpace::NewTable(
+ 
+ mork_tid morkRowSpace::MakeNewTableId(morkEnv* ev) {
+   mork_tid outTid = 0;
+   mork_tid id = mRowSpace_NextTableId;
++  if (!id) id++;
+   mork_num count = 9;  // try up to eight times
+ 
+   while (!outTid && --count)  // still trying to find an unused table ID?
+   {
