@@ -1,0 +1,175 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1717805174 -7200
+# Parent  119700aef8df158c7afa6503ab670a78b84808ae
+Bug 1873353 - Restore secondary sort order by date in "Grouped by" views.
+
+Partial backout of rev. c18e9a718aae from bug 1866951.
+
+To test:
+1) First sort by date ascending, then by - say - subject. Group by sort: Date order in subject groups should be ascending.
+2) First sort by date decending, then by - say - subject. Group by sort: Date order in subject groups should be decending.
+
+diff --git a/mailnews/base/src/nsMsgGroupThread.cpp b/mailnews/base/src/nsMsgGroupThread.cpp
+--- a/mailnews/base/src/nsMsgGroupThread.cpp
++++ b/mailnews/base/src/nsMsgGroupThread.cpp
+@@ -10,25 +10,23 @@
+ #include "nsMsgUtils.h"
+ 
+ NS_IMPL_ISUPPORTS(nsMsgGroupThread, nsIMsgThread)
+ 
+-nsMsgGroupThread::nsMsgGroupThread(nsIMsgDatabase* db,
+-                                   nsMsgViewSortOrderValue sortOrder) {
++nsMsgGroupThread::nsMsgGroupThread(nsIMsgDatabase* db) {
+   m_threadKey = nsMsgKey_None;
+   m_threadRootKey = nsMsgKey_None;
+   m_numNewChildren = 0;
+   m_numUnreadChildren = 0;
+   m_flags = 0;
+   m_newestMsgDate = 0;
+   m_dummy = false;
+   m_db = db;
+-  m_sortOrder = sortOrder;
+ }
+ 
+ nsMsgGroupThread::~nsMsgGroupThread() {}
+ 
+ already_AddRefed<nsMsgGroupThread> nsMsgGroupThread::Clone() {
+-  RefPtr<nsMsgGroupThread> thread = new nsMsgGroupThread(m_db, m_sortOrder);
++  RefPtr<nsMsgGroupThread> thread = new nsMsgGroupThread(m_db);
+   thread->m_threadKey = m_threadKey;
+   thread->m_threadRootKey = m_threadRootKey;
+   thread->m_numNewChildren = m_numNewChildren;
+   thread->m_numUnreadChildren = m_numUnreadChildren;
+@@ -134,9 +132,29 @@ nsMsgViewIndex nsMsgGroupThread::AddMsgH
+   // since we're sorted by date, we could do a binary search for the
+   // insert point. Or, we could start at the end...
+   if (m_keys.Length() > 0) {
+     // sort by date within group.
+-    insertIndex = GetInsertIndexFromView(view, child, m_sortOrder);
++    nsMsgViewSortTypeValue sortType;
++    nsMsgViewSortOrderValue sortOrder;
++    (void)view->GetSortType(&sortType);
++    (void)view->GetSortOrder(&sortOrder);
++    // historical behavior is ascending date order unless our primary sort is
++    //  on date
++    nsMsgViewSortOrderValue threadSortOrder =
++        (sortType == nsMsgViewSortType::byDate &&
++         sortOrder == nsMsgViewSortOrder::descending)
++            ? nsMsgViewSortOrder::descending
++            : nsMsgViewSortOrder::ascending;
++    // new behavior is tricky and uses the secondary sort order if the secondary
++    //  sort is on the date
++    nsMsgViewSortTypeValue secondarySortType;
++    nsMsgViewSortOrderValue secondarySortOrder;
++    (void)view->GetSecondarySortType(&secondarySortType);
++    (void)view->GetSecondarySortOrder(&secondarySortOrder);
++    if (secondarySortType == nsMsgViewSortType::byDate)
++      threadSortOrder = secondarySortOrder;
++    // sort by date within group.
++    insertIndex = GetInsertIndexFromView(view, child, threadSortOrder);
+   }
+   m_keys.InsertElementAt(insertIndex, newHdrKey);
+   if (!insertIndex) m_threadRootKey = newHdrKey;
+   return insertIndex;
+@@ -389,21 +407,20 @@ NS_IMETHODIMP nsMsgGroupThread::GetNewes
+ NS_IMETHODIMP nsMsgGroupThread::SetNewestMsgDate(uint32_t aNewestMsgDate) {
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ 
+-nsMsgXFGroupThread::nsMsgXFGroupThread(nsMsgViewSortOrderValue sortOrder)
+-    : nsMsgGroupThread(nullptr, sortOrder) {}
++nsMsgXFGroupThread::nsMsgXFGroupThread()
++    : nsMsgGroupThread(nullptr) {}
+ 
+ already_AddRefed<nsMsgXFGroupThread> nsMsgXFGroupThread::Clone() {
+-  RefPtr<nsMsgXFGroupThread> thread = new nsMsgXFGroupThread(0);
++  RefPtr<nsMsgXFGroupThread> thread = new nsMsgXFGroupThread();
+   thread->m_threadKey = m_threadKey;
+   thread->m_threadRootKey = m_threadRootKey;
+   thread->m_numNewChildren = m_numNewChildren;
+   thread->m_numUnreadChildren = m_numUnreadChildren;
+   thread->m_flags = m_flags;
+   thread->m_newestMsgDate = m_newestMsgDate;
+   thread->m_dummy = m_dummy;
+-  thread->m_sortOrder = m_sortOrder;
+   thread->m_keys = m_keys.Clone();
+   thread->m_folders.SetCapacity(m_folders.Count());
+   thread->m_folders.AppendObjects(m_folders);
+   return thread.forget();
+diff --git a/mailnews/base/src/nsMsgGroupThread.h b/mailnews/base/src/nsMsgGroupThread.h
+--- a/mailnews/base/src/nsMsgGroupThread.h
++++ b/mailnews/base/src/nsMsgGroupThread.h
+@@ -16,10 +16,9 @@ class nsMsgGroupView;
+ class nsMsgGroupThread : public nsIMsgThread {
+  public:
+   friend class nsMsgGroupView;
+ 
+-  explicit nsMsgGroupThread(nsIMsgDatabase* db,
+-                            nsMsgViewSortOrderValue sortOrder);
++  explicit nsMsgGroupThread(nsIMsgDatabase* db);
+ 
+   already_AddRefed<nsMsgGroupThread> Clone();
+ 
+   NS_DECL_NSIMSGTHREAD
+@@ -61,14 +60,13 @@ class nsMsgGroupThread : public nsIMsgTh
+   uint32_t m_newestMsgDate;
+   nsTArray<nsMsgKey> m_keys;
+   bool m_dummy;  // top level msg is a dummy, e.g., grouped by age.
+   nsCOMPtr<nsIMsgDatabase> m_db;  // should we make a weak ref or just a ptr?
+-  nsMsgViewSortOrderValue m_sortOrder;
+ };
+ 
+ class nsMsgXFGroupThread : public nsMsgGroupThread {
+  public:
+-  explicit nsMsgXFGroupThread(nsMsgViewSortOrderValue sortOrder);
++  explicit nsMsgXFGroupThread();
+ 
+   already_AddRefed<nsMsgXFGroupThread> Clone();
+ 
+   NS_IMETHOD GetNumChildren(uint32_t* aNumChildren) override;
+diff --git a/mailnews/base/src/nsMsgGroupView.cpp b/mailnews/base/src/nsMsgGroupView.cpp
+--- a/mailnews/base/src/nsMsgGroupView.cpp
++++ b/mailnews/base/src/nsMsgGroupView.cpp
+@@ -241,16 +241,9 @@ nsresult nsMsgGroupView::HashHdr(nsIMsgD
+   return rv;
+ }
+ 
+ nsMsgGroupThread* nsMsgGroupView::CreateGroupThread(nsIMsgDatabase* db) {
+-  nsMsgViewSortOrderValue threadSortOrder = nsMsgViewSortOrder::descending;
+-  if (m_sortType == nsMsgViewSortType::byDate ||
+-      m_sortType == nsMsgViewSortType::byReceived) {
+-    threadSortOrder = m_sortOrder;
+-  } else {
+-    m_db->GetDefaultSortOrder(&threadSortOrder);
+-  }
+-  return new nsMsgGroupThread(db, threadSortOrder);
++  return new nsMsgGroupThread(db);
+ }
+ 
+ nsMsgGroupThread* nsMsgGroupView::AddHdrToThread(nsIMsgDBHdr* msgHdr,
+                                                  bool* pNewThread) {
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -1296,19 +1296,9 @@ nsresult nsMsgSearchDBView::RemoveMsgFro
+ }
+ 
+ nsMsgGroupThread* nsMsgSearchDBView::CreateGroupThread(
+     nsIMsgDatabase* /* db */) {
+-  nsMsgViewSortOrderValue threadSortOrder = nsMsgViewSortOrder::descending;
+-  if (m_sortType == nsMsgViewSortType::byDate ||
+-      m_sortType == nsMsgViewSortType::byReceived) {
+-    threadSortOrder = m_sortOrder;
+-  } else {
+-    if (mozilla::Preferences::GetInt("mailnews.default_sort_order") ==
+-        nsMsgViewSortOrder::ascending) {
+-      threadSortOrder = nsMsgViewSortOrder::ascending;
+-    }
+-  }
+-  return new nsMsgXFGroupThread(threadSortOrder);
++  return new nsMsgXFGroupThread();
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgSearchDBView::GetThreadContainingMsgHdr(nsIMsgDBHdr* msgHdr,

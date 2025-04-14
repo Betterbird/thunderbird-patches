@@ -1,16 +1,16 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1729013523 -7200
-# Parent  5b736d5653262d62ee5bf8b210868563166b6567
+# Date 1744668807 -7200
+# Parent  454c137ac8bbb9b21d321885c75d7b60d30d850b
 Bug 1911916 - Continuation: Transfer env addr/date from source to copy.
 
 diff --git a/mailnews/base/public/nsIMsgHdr.idl b/mailnews/base/public/nsIMsgHdr.idl
 --- a/mailnews/base/public/nsIMsgHdr.idl
 +++ b/mailnews/base/public/nsIMsgHdr.idl
-@@ -76,8 +76,11 @@ interface nsIMsgDBHdr : nsISupports
-     attribute AUTF8String bccList;
+@@ -77,8 +77,11 @@ interface nsIMsgDBHdr : nsISupports
      attribute AUTF8String author;
      attribute AUTF8String subject;
+     readonly attribute string rawSubject;
      attribute AUTF8String recipients;
 +    /* hackery for envelop address/date */
 +    attribute AUTF8String envAddr;
@@ -22,38 +22,17 @@ diff --git a/mailnews/base/public/nsIMsgHdr.idl b/mailnews/base/public/nsIMsgHdr
 diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
 --- a/mailnews/base/src/nsMsgDBFolder.cpp
 +++ b/mailnews/base/src/nsMsgDBFolder.cpp
-@@ -64,8 +64,10 @@
+@@ -66,8 +66,9 @@
  #include "mozilla/Utf8.h"
  #include "nsIPromptService.h"
  #include "nsEmbedCID.h"
  #include "nsIWritablePropertyBag2.h"
 +#include "MboxMsgInputStream.h"
-+#include "nsQueryObject.h"
- 
- #define oneHour 3600000000U
- 
- using namespace mozilla;
-@@ -748,17 +750,17 @@ nsMsgDBFolder::GetMsgInputStream(nsIMsgD
-   NS_ENSURE_SUCCESS(rv, rv);
-   nsCString storeToken;
-   rv = aMsgHdr->GetStringProperty("storeToken", storeToken);
-   NS_ENSURE_SUCCESS(rv, rv);
-+  nsAutoCString storeType;
-+  msgStore->GetStoreType(storeType);
- 
-   // Handle legacy DB which has mbox offset but no storeToken.
-   // If this is still needed (open question), it should be done as separate
-   // migration pass, probably at folder creation when store and DB are set
-   // up (but that's tricky at the moment, because the DB is created
-   // on-demand).
-   if (storeToken.IsEmpty()) {
--    nsAutoCString storeType;
--    msgStore->GetStoreType(storeType);
-     if (!storeType.EqualsLiteral("mbox")) {
-       return NS_ERROR_FAILURE;  // DB is missing storeToken.
-     }
-     uint64_t offset;
-@@ -778,8 +780,18 @@ nsMsgDBFolder::GetMsgInputStream(nsIMsgD
+ #ifdef MOZ_PANORAMA
+ #  include "nsIDatabaseCore.h"
+ #  include "nsIFolderDatabase.h"
+ #  include "nsIFolderLookupService.h"
+@@ -801,8 +802,20 @@ nsMsgDBFolder::GetMsgInputStream(nsIMsgD
                     .get());
    }
  
@@ -61,6 +40,8 @@ diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFold
 +
 +  // Excuse the hackery, but MboxMsgInputStream is not set up for
 +  // QueryInterface.
++  nsAutoCString storeType;
++  msgStore->GetStoreType(storeType);
 +  if (storeType.EqualsLiteral("mbox")) {
 +    MboxMsgInputStream* mboxStream =
 +        static_cast<MboxMsgInputStream*>(*aInputStream);
@@ -126,12 +107,11 @@ diff --git a/mailnews/db/msgdb/src/nsMsgHdr.cpp b/mailnews/db/msgdb/src/nsMsgHdr
    m_mdbRow = NULL;
    m_threadId = nsMsgKey_None;
    m_threadParent = nsMsgKey_None;
-@@ -949,4 +950,24 @@ NS_IMETHODIMP nsMsgHdr::GetUidOnServer(u
- 
- NS_IMETHODIMP nsMsgHdr::SetUidOnServer(uint32_t uid) {
-   return SetUInt32Column(uid, m_mdb->m_uidOnServerColumnToken);
+@@ -932,8 +933,28 @@ NS_IMETHODIMP nsMsgHdr::GetProperties(ns
+   }
+   return NS_OK;
  }
-+
+ 
 +NS_IMETHODIMP nsMsgHdr::SetEnvDate(PRTime date) {
 +  m_envDate = date;
 +  return NS_OK;
@@ -151,6 +131,57 @@ diff --git a/mailnews/db/msgdb/src/nsMsgHdr.cpp b/mailnews/db/msgdb/src/nsMsgHdr
 +  addr = m_envAddr;
 +  return NS_OK;
 +}
++
+ NS_IMETHODIMP nsMsgHdr::GetUidOnServer(uint32_t* result) {
+   uint32_t uid;
+   nsresult rv = GetUInt32Column(m_mdb->m_uidOnServerColumnToken, &uid);
+   *result = uid;
+diff --git a/mailnews/db/panorama/src/Message.cpp b/mailnews/db/panorama/src/Message.cpp
+--- a/mailnews/db/panorama/src/Message.cpp
++++ b/mailnews/db/panorama/src/Message.cpp
+@@ -209,8 +209,27 @@ NS_IMETHODIMP Message::GetRawSubject(cha
+   // Is this correct? Need to check when Panorama goes live.
+   *aSubject = ToNewCString(mSubject);
+   return NS_OK;
+ }
++NS_IMETHODIMP Message::SetEnvDate(PRTime date) {
++  m_envDate = date;
++  return NS_OK;
++}
++
++NS_IMETHODIMP Message::GetEnvDate(PRTime* date) {
++  *date = m_envDate;
++  return NS_OK;
++}
++
++NS_IMETHODIMP Message::SetEnvAddr(const nsACString& addr) {
++  m_envAddr = addr;
++  return NS_OK;
++}
++
++NS_IMETHODIMP Message::GetEnvAddr(nsACString& addr) {
++  addr = m_envAddr;
++  return NS_OK;
++}
+ NS_IMETHODIMP Message::SetSubject(const nsACString& aSubject) {
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
+ NS_IMETHODIMP Message::GetRecipients(nsACString& aRecipients) {
+diff --git a/mailnews/db/panorama/src/Message.h b/mailnews/db/panorama/src/Message.h
+--- a/mailnews/db/panorama/src/Message.h
++++ b/mailnews/db/panorama/src/Message.h
+@@ -33,8 +33,11 @@ class Message : public nsIMsgDBHdr {
+   nsAutoCString mSubject;
+   uint64_t mFlags;
+   nsAutoCString mTags;
+ 
++  PRTime m_envDate;
++  nsCString m_envAddr;
++
+  protected:
+   virtual ~Message() {};
+ 
+  private:
 diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
 --- a/mailnews/local/src/nsLocalMailFolder.cpp
 +++ b/mailnews/local/src/nsLocalMailFolder.cpp
@@ -166,20 +197,21 @@ diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLoc
  #include <algorithm>
  #include <functional>
  
-@@ -2025,8 +2028,12 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
-   // of inscrutable conditions. This needs cleaning up (see Bug 1731177).
-   if (!mCopyState->m_fileStream) {
-     return NS_OK;
-   }
+@@ -1986,8 +1989,13 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
+   // message to be fetched from server and streamed to Local Folders storage,
+   // m_fileStream is null.
+   if (!mCopyState->m_fileStream) return NS_OK;
+ 
 +  nsAutoCString storeType;
 +  mCopyState->m_msgStore->GetStoreType(storeType);
 +  bool quarantining =
 +      mozilla::Preferences::GetBool("mailnews.downloadToTempFile", false);
- 
++
    int32_t messageIndex = (mCopyState->m_copyingMultipleMessages)
                               ? mCopyState->m_curCopyIndex - 1
                               : mCopyState->m_curCopyIndex;
-@@ -2035,8 +2042,30 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
+   NS_ASSERTION(!mCopyState->m_copyingMultipleMessages || messageIndex >= 0,
+@@ -1995,8 +2003,30 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Begi
    // by the time we get here, m_curCopyIndex is 1 relative because
    // WriteStartOfNewMessage increments it
    if (messageIndex < (int32_t)mCopyState->m_messages.Length()) {
@@ -223,7 +255,7 @@ diff --git a/mailnews/local/src/nsMsgFileHdr.cpp b/mailnews/local/src/nsMsgFileH
  }
  
  nsMsgFileHdr::~nsMsgFileHdr() {}
-@@ -418,4 +419,25 @@ NS_IMETHODIMP nsMsgFileHdr::GetFolder(ns
+@@ -429,4 +430,25 @@ NS_IMETHODIMP nsMsgFileHdr::GetFolder(ns
  
  NS_IMETHODIMP nsMsgFileHdr::GetProperties(nsTArray<nsCString>& headers) {
    return NS_OK;

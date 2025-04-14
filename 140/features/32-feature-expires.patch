@@ -1,0 +1,675 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1744669795 -7200
+# Parent  8e1af7390f7f5ac538908e5f737b74d2e419cb6a
+Feature: Implement Expires header.
+
+diff --git a/mail/locales/en-US/chrome/messenger/search-attributes.properties b/mail/locales/en-US/chrome/messenger/search-attributes.properties
+--- a/mail/locales/en-US/chrome/messenger/search-attributes.properties
++++ b/mail/locales/en-US/chrome/messenger/search-attributes.properties
+@@ -7,8 +7,9 @@
+ Subject=Subject
+ From=From
+ Body=Body
+ Date=Date
++Expires=Expires
+ Priority=Priority
+ Status=Status
+ To=To
+ Cc=Cc
+diff --git a/mailnews/base/public/nsIMsgHdr.idl b/mailnews/base/public/nsIMsgHdr.idl
+--- a/mailnews/base/public/nsIMsgHdr.idl
++++ b/mailnews/base/public/nsIMsgHdr.idl
+@@ -69,8 +69,9 @@ interface nsIMsgDBHdr : nsISupports
+      */
+     attribute unsigned long offlineMessageSize;
+     /* common headers */
+     attribute PRTime date;
++    attribute PRTime expires;
+     readonly attribute unsigned long dateInSeconds;
+     attribute AUTF8String messageId;
+     attribute AUTF8String ccList;
+     attribute AUTF8String bccList;
+diff --git a/mailnews/db/msgdb/public/nsMsgDatabase.h b/mailnews/db/msgdb/public/nsMsgDatabase.h
+--- a/mailnews/db/msgdb/public/nsMsgDatabase.h
++++ b/mailnews/db/msgdb/public/nsMsgDatabase.h
+@@ -311,8 +311,9 @@ class nsMsgDatabase : public nsIMsgOffli
+   mdb_token m_messageIdColumnToken;
+   mdb_token m_referencesColumnToken;
+   mdb_token m_recipientsColumnToken;
+   mdb_token m_dateColumnToken;
++  mdb_token m_expiresColumnToken;
+   mdb_token m_messageSizeColumnToken;
+   mdb_token m_flagsColumnToken;
+   mdb_token m_priorityColumnToken;
+   mdb_token m_labelColumnToken;
+diff --git a/mailnews/db/msgdb/public/nsMsgHdr.h b/mailnews/db/msgdb/public/nsMsgHdr.h
+--- a/mailnews/db/msgdb/public/nsMsgHdr.h
++++ b/mailnews/db/msgdb/public/nsMsgHdr.h
+@@ -74,8 +74,9 @@ class nsMsgHdr : public nsIMsgDBHdr {
+   nsMsgKey m_threadId;
+   nsMsgKey m_messageKey;    // Unique id of message in msgDB.
+   nsMsgKey m_threadParent;  // message this is a reply to, in thread.
+   PRTime m_date;
++  PRTime m_expires;
+   uint32_t m_messageSize;  // lines for news articles, bytes for mail messages
+   uint32_t m_flags;
+   // avoid parsing references every time we want one
+   nsTArray<nsCString> m_references;
+diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+--- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
++++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+@@ -1015,8 +1015,9 @@ nsMsgDatabase::nsMsgDatabase()
+       m_messageIdColumnToken(0),
+       m_referencesColumnToken(0),
+       m_recipientsColumnToken(0),
+       m_dateColumnToken(0),
++      m_expiresColumnToken(0),
+       m_messageSizeColumnToken(0),
+       m_flagsColumnToken(0),
+       m_priorityColumnToken(0),
+       m_labelColumnToken(0),
+@@ -1514,8 +1515,9 @@ const char* kSenderColumnName = "sender"
+ const char* kMessageIdColumnName = "message-id";
+ const char* kReferencesColumnName = "references";
+ const char* kRecipientsColumnName = "recipients";
+ const char* kDateColumnName = "date";
++const char* kExpiresColumnName = "expires";
+ const char* kMessageSizeColumnName = "size";
+ const char* kFlagsColumnName = "flags";
+ const char* kPriorityColumnName = "priority";
+ const char* kLabelColumnName = "label";
+@@ -1715,8 +1717,9 @@ nsresult nsMsgDatabase::InitMDBInfo() {
+     // similarly, recipients could be tokenized properties
+     GetStore()->StringToToken(GetEnv(), kRecipientsColumnName,
+                               &m_recipientsColumnToken);
+     GetStore()->StringToToken(GetEnv(), kDateColumnName, &m_dateColumnToken);
++    GetStore()->StringToToken(GetEnv(), kExpiresColumnName, &m_expiresColumnToken);
+     GetStore()->StringToToken(GetEnv(), kMessageSizeColumnName,
+                               &m_messageSizeColumnToken);
+     GetStore()->StringToToken(GetEnv(), kFlagsColumnName, &m_flagsColumnToken);
+     GetStore()->StringToToken(GetEnv(), kPriorityColumnName,
+diff --git a/mailnews/db/msgdb/src/nsMsgHdr.cpp b/mailnews/db/msgdb/src/nsMsgHdr.cpp
+--- a/mailnews/db/msgdb/src/nsMsgHdr.cpp
++++ b/mailnews/db/msgdb/src/nsMsgHdr.cpp
+@@ -42,8 +42,9 @@ void nsMsgHdr::Init() {
+   m_initedValues = 0;
+   m_messageKey = nsMsgKey_None;
+   m_messageSize = 0;
+   m_date = 0;
++  m_expires = 0;
+   m_envDate = 0;
+   m_flags = 0;
+   m_mdbRow = NULL;
+   m_threadId = nsMsgKey_None;
+@@ -64,8 +65,10 @@ nsresult nsMsgHdr::InitCachedValues() {
+     err = GetUInt32Column(m_mdb->m_messageSizeColumnToken, &m_messageSize);
+ 
+     err = GetUInt32Column(m_mdb->m_dateColumnToken, &uint32Value);
+     Seconds2PRTime(uint32Value, &m_date);
++    err = GetUInt32Column(m_mdb->m_expiresColumnToken, &uint32Value);
++    Seconds2PRTime(uint32Value, &m_expires);
+ 
+     err = GetUInt32Column(m_mdb->m_messageThreadIdColumnToken, &m_threadId);
+ 
+     if (NS_SUCCEEDED(err)) m_initedValues |= CACHED_VALUES_INITED;
+@@ -280,8 +283,15 @@ NS_IMETHODIMP nsMsgHdr::GetDate(PRTime* 
+   *result = m_date;
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgHdr::GetExpires(PRTime* result) {
++  if (!(m_initedValues & CACHED_VALUES_INITED)) InitCachedValues();
++
++  *result = m_expires;
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgHdr::GetDateInSeconds(uint32_t* aResult) {
+   return GetUInt32Column(m_mdb->m_dateColumnToken, aResult);
+ }
+ 
+@@ -367,8 +377,15 @@ NS_IMETHODIMP nsMsgHdr::SetDate(PRTime d
+   PRTime2Seconds(date, &seconds);
+   return SetUInt32Column((uint32_t)seconds, m_mdb->m_dateColumnToken);
+ }
+ 
++NS_IMETHODIMP nsMsgHdr::SetExpires(PRTime date) {
++  m_expires = date;
++  uint32_t seconds;
++  PRTime2Seconds(date, &seconds);
++  return SetUInt32Column((uint32_t)seconds, m_mdb->m_expiresColumnToken);
++}
++
+ NS_IMETHODIMP nsMsgHdr::SetPriority(nsMsgPriorityValue priority) {
+   SetUInt32Column((uint32_t)priority, m_mdb->m_priorityColumnToken);
+   return NS_OK;
+ }
+diff --git a/mailnews/db/panorama/src/Message.cpp b/mailnews/db/panorama/src/Message.cpp
+--- a/mailnews/db/panorama/src/Message.cpp
++++ b/mailnews/db/panorama/src/Message.cpp
+@@ -168,8 +168,16 @@ NS_IMETHODIMP Message::GetDate(PRTime* a
+ }
+ NS_IMETHODIMP Message::SetDate(PRTime aDate) {
+   return NS_ERROR_NOT_IMPLEMENTED;
+ }
++NS_IMETHODIMP Message::GetExpires(PRTime* result) {
++  *result = m_expires;
++  return NS_OK;
++}
++NS_IMETHODIMP Message::SetExpires(PRTime date) {
++  m_expires = date;
++  return NS_OK;
++}
+ NS_IMETHODIMP Message::GetDateInSeconds(uint32_t* aDateInSeconds) {
+   *aDateInSeconds = mDate / PR_USEC_PER_SEC;
+   return NS_OK;
+ }
+diff --git a/mailnews/db/panorama/src/Message.h b/mailnews/db/panorama/src/Message.h
+--- a/mailnews/db/panorama/src/Message.h
++++ b/mailnews/db/panorama/src/Message.h
+@@ -35,8 +35,9 @@ class Message : public nsIMsgDBHdr {
+   nsAutoCString mTags;
+ 
+   PRTime m_envDate;
+   nsCString m_envAddr;
++  PRTime m_expires;
+ 
+  protected:
+   virtual ~Message() {};
+ 
+diff --git a/mailnews/local/src/nsMsgFileHdr.cpp b/mailnews/local/src/nsMsgFileHdr.cpp
+--- a/mailnews/local/src/nsMsgFileHdr.cpp
++++ b/mailnews/local/src/nsMsgFileHdr.cpp
+@@ -260,8 +260,16 @@ NS_IMETHODIMP nsMsgFileHdr::SetDate(PRTi
+ NS_IMETHODIMP nsMsgFileHdr::GetDateInSeconds(uint32_t* aDateInSeconds) {
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgFileHdr::GetExpires(PRTime* aDate) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++NS_IMETHODIMP nsMsgFileHdr::SetExpires(PRTime aDate) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
+ NS_IMETHODIMP nsMsgFileHdr::GetMessageId(nsACString& aMessageId) {
+   nsresult rv = ReadFile();
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+diff --git a/mailnews/local/src/nsParseMailbox.cpp b/mailnews/local/src/nsParseMailbox.cpp
+--- a/mailnews/local/src/nsParseMailbox.cpp
++++ b/mailnews/local/src/nsParseMailbox.cpp
+@@ -372,8 +372,9 @@ NS_IMETHODIMP nsParseMailMessageState::C
+   m_EnvDate = 0;
+   m_message_id.length = 0;
+   m_references.length = 0;
+   m_date.length = 0;
++  m_expires.length = 0;
+   m_delivery_date.length = 0;
+   m_from.length = 0;
+   m_sender.length = 0;
+   m_newsgroups.length = 0;
+@@ -555,8 +556,13 @@ nsresult nsParseMailMessageState::ParseH
+           header = &m_mdn_dnt;
+         else if (headerStr.EqualsLiteral("delivery-date"))
+           header = &m_delivery_date;
+         break;
++      case 'e':
++        if (headerStr.EqualsLiteral("expires") && !m_expires.length) {
++          header = &m_expires;
++        }
++        break;
+       case 'f':
+         if (headerStr.EqualsLiteral("from") && !m_from.length) {
+           header = &m_from;
+         }
+@@ -793,8 +799,9 @@ nsresult nsParseMailMessageState::Finali
+   HeaderData* inReplyTo;
+   HeaderData* replyTo;
+   HeaderData* references;
+   HeaderData* date;
++  HeaderData* expires;
+   HeaderData* deliveryDate;
+   HeaderData* statush;
+   HeaderData* mozstatus;
+   HeaderData* mozstatus2;
+@@ -857,8 +864,9 @@ nsresult nsParseMailMessageState::Finali
+   statush      = (m_status.length        ? &m_status        : 0);
+   mozstatus    = (m_mozstatus.length     ? &m_mozstatus     : 0);
+   mozstatus2   = (m_mozstatus2.length    ? &m_mozstatus2    : 0);
+   date         = (m_date.length          ? &m_date          : 0);
++  expires      = (m_expires.length       ? &m_expires       : 0);
+   deliveryDate = (m_delivery_date.length ? &m_delivery_date : 0);
+   priority     = (m_priority.length      ? &m_priority      : 0);
+   keywords     = (m_keywords.length      ? &m_keywords      : 0);
+   mdn_dnt      = (m_mdn_dnt.length       ? &m_mdn_dnt       : 0);
+@@ -1109,8 +1117,15 @@ nsresult nsParseMailMessageState::Finali
+           datePRTime = PR_Now();
+         }
+         m_newMsgHdr->SetDate(datePRTime);
+ 
++        if (expires) {
++          if (PR_ParseTimeString(expires->value, false, &datePRTime) ==
++              PR_SUCCESS) {
++            m_newMsgHdr->SetExpires(datePRTime);
++          }
++        }
++
+         if (priority) {
+           nsMsgPriorityValue priorityVal = nsMsgPriority::Default;
+ 
+           // We can ignore |NS_MsgGetPriorityFromString()| return value,
+diff --git a/mailnews/local/src/nsParseMailbox.h b/mailnews/local/src/nsParseMailbox.h
+--- a/mailnews/local/src/nsParseMailbox.h
++++ b/mailnews/local/src/nsParseMailbox.h
+@@ -85,8 +85,9 @@ class nsParseMailMessageState : public n
+   // These all point into the m_headers buffer.
+   HeaderData m_message_id;
+   HeaderData m_references;
+   HeaderData m_date;
++  HeaderData m_expires;
+   HeaderData m_delivery_date;
+   HeaderData m_from;
+   HeaderData m_sender;
+   HeaderData m_newsgroups;
+diff --git a/mailnews/search/content/searchWidgets.js b/mailnews/search/content/searchWidgets.js
+--- a/mailnews/search/content/searchWidgets.js
++++ b/mailnews/search/content/searchWidgets.js
+@@ -1005,8 +1005,11 @@
+           break;
+         case Ci.nsMsgSearchAttrib.Date:
+           this.setInput("date", value?.date);
+           break;
++        case Ci.nsMsgSearchAttrib.Expires:
++          this.setInput("date", value?.expires);
++          break;
+         case Ci.nsMsgSearchAttrib.Sender:
+         case Ci.nsMsgSearchAttrib.To:
+         case Ci.nsMsgSearchAttrib.ToOrCC:
+         case Ci.nsMsgSearchAttrib.AllAddresses:
+@@ -1155,8 +1158,11 @@
+           break;
+         case Ci.nsMsgSearchAttrib.Date:
+           searchValue.date = this.getInputValue();
+           break;
++        case Ci.nsMsgSearchAttrib.Expires:
++          searchValue.expires = this.getInputValue();
++          break;
+         case Ci.nsMsgSearchAttrib.JunkStatus:
+           searchValue.junkStatus = this.getInputValue();
+           break;
+         case Ci.nsMsgSearchAttrib.HasAttachmentStatus:
+diff --git a/mailnews/search/public/nsIMsgSearchTerm.idl b/mailnews/search/public/nsIMsgSearchTerm.idl
+--- a/mailnews/search/public/nsIMsgSearchTerm.idl
++++ b/mailnews/search/public/nsIMsgSearchTerm.idl
+@@ -47,8 +47,9 @@ interface nsIMsgSearchTerm : nsISupports
+      * decoded result.
+      */
+     boolean matchRfc2047String(in ACString aString, in string charset, in boolean charsetOverride);
+     boolean matchDate(in PRTime aTime);
++    boolean matchExpires(in PRTime aTime);
+     boolean matchStatus(in unsigned long aStatus);
+     boolean matchPriority(in nsMsgPriorityValue priority);
+     boolean matchAge(in PRTime days);
+     boolean matchSize(in unsigned long size);
+diff --git a/mailnews/search/public/nsIMsgSearchValue.idl b/mailnews/search/public/nsIMsgSearchValue.idl
+--- a/mailnews/search/public/nsIMsgSearchValue.idl
++++ b/mailnews/search/public/nsIMsgSearchValue.idl
+@@ -16,8 +16,9 @@ interface nsIMsgSearchValue : nsISupport
+     // attribute does not match the type!
+     attribute AString str;
+     attribute nsMsgPriorityValue priority;
+     attribute PRTime date;
++    attribute PRTime expires;
+      // see nsMsgMessageFlags.idl and nsMsgFolderFlags.idl
+     attribute unsigned long status;
+     attribute unsigned long size;
+     attribute nsMsgKey msgKey;
+diff --git a/mailnews/search/public/nsMsgSearchCore.idl b/mailnews/search/public/nsMsgSearchCore.idl
+--- a/mailnews/search/public/nsMsgSearchCore.idl
++++ b/mailnews/search/public/nsMsgSearchCore.idl
+@@ -91,8 +91,9 @@ interface nsMsgSearchAttrib : nsISupport
+     const nsMsgSearchAttribValue HasAttachmentStatus = 44;
+     const nsMsgSearchAttribValue JunkStatus = 45;
+     const nsMsgSearchAttribValue JunkPercent = 46;
+     const nsMsgSearchAttribValue JunkScoreOrigin = 47;
++    const nsMsgSearchAttribValue Expires = 48;
+     const nsMsgSearchAttribValue HdrProperty = 49; // uses nsIMsgSearchTerm::hdrProperty
+     const nsMsgSearchAttribValue FolderFlag = 50; // uses nsIMsgSearchTerm::status
+     const nsMsgSearchAttribValue Uint32HdrProperty = 51; // uses nsIMsgSearchTerm::hdrProperty
+ 
+@@ -173,8 +174,9 @@ typedef struct nsMsgSearchValue
+     union
+     {
+       nsMsgPriorityValue priority;
+       PRTime date;
++      PRTime expires;
+       uint32_t msgStatus; /* see MSG_FLAG in msgcom.h */
+       uint32_t size;
+       nsMsgKey key;
+       int32_t age; /* in days */
+@@ -198,9 +200,9 @@ typedef struct nsMsgSearchValue
+ (!(_a == nsMsgSearchAttrib::Priority || _a == nsMsgSearchAttrib::Date || \
+    _a == nsMsgSearchAttrib::MsgStatus || _a == nsMsgSearchAttrib::MessageKey || \
+    _a == nsMsgSearchAttrib::Size || _a == nsMsgSearchAttrib::AgeInDays || \
+    _a == nsMsgSearchAttrib::FolderInfo || _a == nsMsgSearchAttrib::Location || \
+-   _a == nsMsgSearchAttrib::JunkStatus || \
++   _a == nsMsgSearchAttrib::JunkStatus || _a == nsMsgSearchAttrib::Expires || \
+    _a == nsMsgSearchAttrib::FolderFlag || _a == nsMsgSearchAttrib::Uint32HdrProperty || \
+    _a == nsMsgSearchAttrib::JunkPercent || _a == nsMsgSearchAttrib::HasAttachmentStatus))
+ %}
+ 
+diff --git a/mailnews/search/public/nsMsgSearchTerm.h b/mailnews/search/public/nsMsgSearchTerm.h
+--- a/mailnews/search/public/nsMsgSearchTerm.h
++++ b/mailnews/search/public/nsMsgSearchTerm.h
+@@ -85,8 +85,10 @@ class nsMsgSearchTerm : public nsIMsgSea
+ 
+   nsresult MatchString(const nsACString& stringToMatch, const char* charset,
+                        bool* pResult);
+   nsresult MatchString(const nsAString& stringToMatch, bool* pResult);
++  nsresult MatchDateExpires(PRTime dateToMatch, PRTime valueDate,
++                            bool* pResult);
+   nsresult OutputValue(nsCString& outputStr);
+   nsresult ParseAttribute(char* inStream, nsMsgSearchAttribValue* attrib);
+   nsresult ParseOperator(char* inStream, nsMsgSearchOpValue* value);
+   nsresult ParseValue(char* inStream);
+diff --git a/mailnews/search/src/nsMsgImapSearch.cpp b/mailnews/search/src/nsMsgImapSearch.cpp
+--- a/mailnews/search/src/nsMsgImapSearch.cpp
++++ b/mailnews/search/src/nsMsgImapSearch.cpp
+@@ -282,8 +282,17 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Is, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+ 
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++  m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_offlineMailTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+   m_offlineMailTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+@@ -417,8 +426,17 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Is, 1);
+   m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+   m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+ 
++  m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++  m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++
+   m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::MsgStatus, nsMsgSearchOp::Is, 1);
+   m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::MsgStatus, nsMsgSearchOp::Is, 1);
+   m_onlineMailTable->SetAvailable(nsMsgSearchAttrib::MsgStatus, nsMsgSearchOp::Isnt, 1);
+   m_onlineMailTable->SetEnabled  (nsMsgSearchAttrib::MsgStatus, nsMsgSearchOp::Isnt, 1);
+@@ -597,8 +615,17 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Is, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+ 
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++  m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_onlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+   m_onlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+@@ -808,8 +835,17 @@ nsMsgSearchValidityManager::InitOfflineM
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Is, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+ 
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++  m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_offlineMailFilterTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+   m_offlineMailFilterTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+@@ -1014,8 +1050,17 @@ nsMsgSearchValidityManager::InitOnlineMa
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Is, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+ 
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++  m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsHigherThan, 1);
+   m_onlineManualFilterTable->SetAvailable(nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+   m_onlineManualFilterTable->SetEnabled  (nsMsgSearchAttrib::Priority, nsMsgSearchOp::IsLowerThan, 1);
+diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
+--- a/mailnews/search/src/nsMsgLocalSearch.cpp
++++ b/mailnews/search/src/nsMsgLocalSearch.cpp
+@@ -495,8 +495,15 @@ nsresult nsMsgSearchOfflineMail::Process
+       err = aTerm->MatchDate(date, &result);
+ 
+       break;
+     }
++    case nsMsgSearchAttrib::Expires: {
++      PRTime expires;
++      msgToMatch->GetExpires(&expires);
++      err = aTerm->MatchExpires(expires, &result);
++
++      break;
++    }
+     case nsMsgSearchAttrib::HasAttachmentStatus:
+     case nsMsgSearchAttrib::MsgStatus:
+       err = aTerm->MatchStatus(msgFlags, &result);
+       break;
+@@ -857,8 +864,17 @@ nsresult SetLocalNews(nsIMsgSearchValidi
+   aTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Is, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::Date, nsMsgSearchOp::Isnt, 1);
+ 
++  aTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsBefore, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::IsAfter, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Is, 1);
++  aTable->SetAvailable(nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++  aTable->SetEnabled  (nsMsgSearchAttrib::Expires, nsMsgSearchOp::Isnt, 1);
++
+   aTable->SetAvailable(nsMsgSearchAttrib::AgeInDays, nsMsgSearchOp::IsGreaterThan, 1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::AgeInDays, nsMsgSearchOp::IsGreaterThan, 1);
+   aTable->SetAvailable(nsMsgSearchAttrib::AgeInDays, nsMsgSearchOp::IsLessThan,  1);
+   aTable->SetEnabled  (nsMsgSearchAttrib::AgeInDays, nsMsgSearchOp::IsLessThan, 1);
+diff --git a/mailnews/search/src/nsMsgSearchAdapter.cpp b/mailnews/search/src/nsMsgSearchAdapter.cpp
+--- a/mailnews/search/src/nsMsgSearchAdapter.cpp
++++ b/mailnews/search/src/nsMsgSearchAdapter.cpp
+@@ -306,8 +306,9 @@ nsresult nsMsgSearchAdapter::EncodeImapT
+           return NS_ERROR_INVALID_ARG;
+       }
+       break;
+     case nsMsgSearchAttrib::Date:
++    case nsMsgSearchAttrib::Expires:
+       switch (op) {
+         case nsMsgSearchOp::IsBefore:
+           whichMnemonic = m_kImapBefore;
+           break;
+@@ -379,17 +380,21 @@ nsresult nsMsgSearchAdapter::EncodeImapT
+   char dateBuf[100];
+   dateBuf[0] = '\0';
+ 
+   bool valueWasAllocated = false;
+-  if (attrib == nsMsgSearchAttrib::Date) {
++  if (attrib == nsMsgSearchAttrib::Date || attrib == nsMsgSearchAttrib::Expires) {
+     // note that there used to be code here that encoded an RFC822 date for imap
+     // searches. The IMAP RFC 2060 is misleading to the point that it looks like
+     // it requires an RFC822 date but really it expects dd-mmm-yyyy, like dredd,
+     // and refers to the RFC822 date only in that the dd-mmm-yyyy date will
+     // match the RFC822 date within the message.
+ 
+     PRTime adjustedDate;
+-    searchValue->GetDate(&adjustedDate);
++    if (attrib == nsMsgSearchAttrib::Date) {
++      searchValue->GetDate(&adjustedDate);
++    } else {
++      searchValue->GetExpires(&adjustedDate);
++    }
+     if (whichMnemonic == m_kImapSince) {
+       // it looks like the IMAP server searches on Since includes the date in
+       // question... our UI presents Is, IsGreater and IsLessThan. For the
+       // IsGreater case (m_kImapSince) we need to adjust the date so we get
+@@ -863,8 +868,9 @@ static struct {
+     {nsMsgSearchAttrib::Subject, "Subject"},
+     {nsMsgSearchAttrib::Sender, "From"},
+     {nsMsgSearchAttrib::Body, "Body"},
+     {nsMsgSearchAttrib::Date, "Date"},
++    {nsMsgSearchAttrib::Expires, "Expires"},
+     {nsMsgSearchAttrib::Priority, "Priority"},
+     {nsMsgSearchAttrib::MsgStatus, "Status"},
+     {nsMsgSearchAttrib::To, "To"},
+     {nsMsgSearchAttrib::CC, "Cc"},
+diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
+--- a/mailnews/search/src/nsMsgSearchTerm.cpp
++++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -57,8 +57,9 @@ nsMsgSearchAttribEntry SearchAttribEntry
+     {nsMsgSearchAttrib::Subject, "subject"},
+     {nsMsgSearchAttrib::Sender, "from"},
+     {nsMsgSearchAttrib::Body, "body"},
+     {nsMsgSearchAttrib::Date, "date"},
++    {nsMsgSearchAttrib::Expires, "expires"},
+     {nsMsgSearchAttrib::Priority, "priority"},
+     {nsMsgSearchAttrib::MsgStatus, "status"},
+     {nsMsgSearchAttrib::To, "to"},
+     {nsMsgSearchAttrib::CC, "cc"},
+@@ -404,11 +405,16 @@ nsresult nsMsgSearchTerm::OutputValue(ns
+     }
+     if (quoteVal) outputStr += "\"";
+   } else {
+     switch (m_attribute) {
+-      case nsMsgSearchAttrib::Date: {
++      case nsMsgSearchAttrib::Date:
++      case nsMsgSearchAttrib::Expires: {
+         PRExplodedTime exploded;
+-        PR_ExplodeTime(m_value.u.date, PR_LocalTimeParameters, &exploded);
++        if (m_attribute == nsMsgSearchAttrib::Date) {
++          PR_ExplodeTime(m_value.u.date, PR_LocalTimeParameters, &exploded);
++        } else {
++          PR_ExplodeTime(m_value.u.expires, PR_LocalTimeParameters, &exploded);
++        }
+ 
+         // wow, so tm_mon is 0 based, tm_mday is 1 based.
+         char dateBuf[100];
+         PR_FormatTimeUSEnglish(dateBuf, sizeof(dateBuf), "%d-%b-%Y", &exploded);
+@@ -524,8 +530,11 @@ nsresult nsMsgSearchTerm::ParseValue(cha
+     switch (m_attribute) {
+       case nsMsgSearchAttrib::Date:
+         PR_ParseTimeString(inStream, false, &m_value.u.date);
+         break;
++      case nsMsgSearchAttrib::Expires:
++        PR_ParseTimeString(inStream, false, &m_value.u.expires);
++        break;
+       case nsMsgSearchAttrib::MsgStatus:
+         m_value.u.msgStatus = NS_MsgGetStatusValueFromName(inStream);
+         break;
+       case nsMsgSearchAttrib::Priority:
+@@ -1115,17 +1124,18 @@ nsresult nsMsgSearchTerm::GetLocalTimes(
+   PR_ExplodeTime(b, PR_LocalTimeParameters, &bExploded);
+   return NS_OK;
+ }
+ 
+-nsresult nsMsgSearchTerm::MatchDate(PRTime dateToMatch, bool* pResult) {
++
++nsresult nsMsgSearchTerm::MatchDateExpires(PRTime dateToMatch, PRTime valueDate, bool* pResult) {
+   NS_ENSURE_ARG_POINTER(pResult);
+ 
+   nsresult rv = NS_OK;
+   bool result = false;
+ 
+   PRExplodedTime tmToMatch, tmThis;
+   if (NS_SUCCEEDED(
+-          GetLocalTimes(dateToMatch, m_value.u.date, tmToMatch, tmThis))) {
++          GetLocalTimes(dateToMatch, valueDate, tmToMatch, tmThis))) {
+     switch (m_operator) {
+       case nsMsgSearchOp::IsBefore:
+         if (tmToMatch.tm_year < tmThis.tm_year ||
+             (tmToMatch.tm_year == tmThis.tm_year &&
+@@ -1158,8 +1168,20 @@ nsresult nsMsgSearchTerm::MatchDate(PRTi
+   *pResult = result;
+   return rv;
+ }
+ 
++nsresult nsMsgSearchTerm::MatchDate(PRTime dateToMatch, bool* pResult) {
++  return MatchDateExpires(dateToMatch, m_value.u.date, pResult);
++}
++
++nsresult nsMsgSearchTerm::MatchExpires(PRTime dateToMatch, bool* pResult) {
++  if (dateToMatch == 0) {
++    *pResult = false;
++    return NS_OK;
++  }
++  return MatchDateExpires(dateToMatch, m_value.u.expires, pResult);
++}
++
+ nsresult nsMsgSearchTerm::MatchAge(PRTime msgDate, bool* pResult) {
+   NS_ENSURE_ARG_POINTER(pResult);
+ 
+   bool result = false;
+@@ -1766,8 +1788,11 @@ nsresult nsMsgResultElement::AssignValue
+       break;
+     case nsMsgSearchAttrib::Date:
+       rv = src->GetDate(&dst->u.date);
+       break;
++    case nsMsgSearchAttrib::Expires:
++      rv = src->GetExpires(&dst->u.expires);
++      break;
+     case nsMsgSearchAttrib::HasAttachmentStatus:
+     case nsMsgSearchAttrib::MsgStatus:
+     case nsMsgSearchAttrib::FolderFlag:
+     case nsMsgSearchAttrib::Uint32HdrProperty:
+diff --git a/mailnews/search/src/nsMsgSearchValue.cpp b/mailnews/search/src/nsMsgSearchValue.cpp
+--- a/mailnews/search/src/nsMsgSearchValue.cpp
++++ b/mailnews/search/src/nsMsgSearchValue.cpp
+@@ -22,8 +22,9 @@ NS_IMPL_GETSET(nsMsgSearchValueImpl, Sta
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, Size, uint32_t, mValue.u.size)
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, MsgKey, nsMsgKey, mValue.u.key)
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, Age, int32_t, mValue.u.age)
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, Date, PRTime, mValue.u.date)
++NS_IMPL_GETSET(nsMsgSearchValueImpl, Expires, PRTime, mValue.u.expires)
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, Attrib, nsMsgSearchAttribValue,
+                mValue.attribute)
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, JunkStatus, uint32_t, mValue.u.junkStatus)
+ NS_IMPL_GETSET(nsMsgSearchValueImpl, JunkPercent, uint32_t,
+@@ -72,8 +73,9 @@ nsMsgSearchValueImpl::ToString(nsAString
+ 
+   switch (mValue.attribute) {
+     case nsMsgSearchAttrib::Priority:
+     case nsMsgSearchAttrib::Date:
++    case nsMsgSearchAttrib::Expires:
+     case nsMsgSearchAttrib::MsgStatus:
+     case nsMsgSearchAttrib::MessageKey:
+     case nsMsgSearchAttrib::Size:
+     case nsMsgSearchAttrib::AgeInDays:
