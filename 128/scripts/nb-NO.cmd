@@ -56,14 +56,14 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .accesskey = O"                     >> localization\nb-NO\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
-:: Strings from https://hg-edge.mozilla.org/l10n-central/nb-NO/file/33181fded8d77da81eec6d6e9d570b7757537020/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Kan ikke åpne e-post bufferfil %%S."                             >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Kan ikke opprette låsfil %%S. For at movemail skal fungere, må det opprettes låsfiler i e-postens buffermappe. På endel systemer gjøres dette ved å sette mappen til modus 01777." >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Kan ikke slette låsfil %%S."                                        >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Kan ikke avkorte bufferfil %%S."                             >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
-%lecho% "movemailSpoolFileNotFound=Kan ikke finne bufferfil for e-post."                            >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Kan ikke lese bufferfil %%S. Filen kan være skadet eller ugyldig." >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
-%lecho% "serverType-movemail=Unix Movemail"                                                         >> chrome\nb-NO\locale\nb-NO\messenger\messenger.properties
+:: Strings from https://hg-edge.mozilla.org/l10n-central/nb-NO/file/38a9ac50ec12266cba8754c3008523e9d2eaedae/mail/chrome/messenger/localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=Klarte ikke åpne Spool-filen %%S for e-post." >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
+%lecho% "movemailCantCreateLock=Klarte ikke opprette låsefilen %%S. For at movemail skal virke, må det være mulig å opprette låsefiler i Spool-mappen til e-posten. På mange systemer kan dette gjøres enkelt ved å sette modus 01777 på Spool-mappen." >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
+%lecho% "movemailCantDeleteLock==Klarte ikke slette låsefilen %%S."              >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Klarte ikke tømme spool-filen %%S."       >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=Klarte ikke finne spool-filen for e-post."    >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
+%lecho% "movemailCantParseSpool=Klarte ikke tolke spool-fil %%S. Filen kan være skadet eller ugyldig." >> chrome\nb-NO\locale\nb-NO\messenger\localMsgs.properties
+%lecho% "serverType-movemail=Unix Movemail"                                      >> chrome\nb-NO\locale\nb-NO\messenger\messenger.properties
 
 %lecho% "account-action-add-movemail-account ="  >> localization\nb-NO\messenger\accountManager.ftl
 %lecho% "    .label = Legg til Movemail-konto…"  >> localization\nb-NO\messenger\accountManager.ftl
