@@ -1,0 +1,103 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1745523775 -7200
+# Parent  5bb0c4e475c48cece3f6cfe665e7cf17fa7a2632
+Bug 1926810 - Continuation: Log mbox errors to console.
+
+diff --git a/mailnews/base/src/MboxMsgInputStream.h b/mailnews/base/src/MboxMsgInputStream.h
+--- a/mailnews/base/src/MboxMsgInputStream.h
++++ b/mailnews/base/src/MboxMsgInputStream.h
+@@ -92,8 +92,10 @@ class MboxMsgInputStream : public nsIInp
+    * If the "From " line contained a timestamp, it can be accessed here.
+    * Otherwise 0 will be returned.
+    */
+   PRTime EnvDate();
++  
++  nsresult MboxStatus() { return mStatus; }
+ 
+  protected:
+   virtual ~MboxMsgInputStream();
+ 
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -76,8 +76,11 @@
+ #endif  // MOZ_PANORAMA
+ 
+ #define oneHour 3600000000U
+ 
++/* for logging to Error Console */
++#include "nsIScriptError.h"
++
+ using namespace mozilla;
+ 
+ extern LazyLogModule FILTERLOGMODULE;
+ extern LazyLogModule DBLog;
+@@ -780,8 +783,33 @@ nsMsgDBFolder::GetMsgInputStream(nsIMsgD
+   failsafeSize = std::max((uint32_t)512, failsafeSize);
+ 
+   rv =
+       msgStore->GetMsgInputStream(this, storeToken, failsafeSize, aInputStream);
++  if (rv == NS_MSG_ERROR_MBOX_MALFORMED) {
++    nsCString uri;
++    GetURI(uri);
++    nsCString msg;
++    nsMsgKey key;
++    aMsgHdr->GetMessageKey(&key);
++    nsCString subject;
++    aMsgHdr->GetSubject(subject);
++    nsCString mdi;
++    aMsgHdr->GetMessageId(mdi);
++    PRTime date;
++    aMsgHdr->GetDate(&date);
++    char dateBuf[64];
++    PRExplodedTime exploded;
++    PR_ExplodeTime(date, PR_GMTParameters, &exploded);
++    PR_FormatTimeUSEnglish(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S %Y",
++                           &exploded);
++    msg = nsPrintfCString(
++        "Mbox parsing error for folder %s looking for key=%" PRIu32
++        ", date=%s, subject='%s', messageID=%s",
++        uri.get(), key, dateBuf, subject.get(), mdi.get());
++    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                     nsCString(__FILE__), __LINE__,
++                     nsIScriptError::errorFlag);
++  }
+ 
+   if (NS_FAILED(rv)) {
+     NS_WARNING(nsPrintfCString(
+                    "(debug) nsMsgDBFolder::GetMsgInputStream: msgStore->"
+diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+--- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
++++ b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+@@ -37,8 +37,11 @@
+ #include "mozilla/ScopeExit.h"
+ #include <cstdlib>  // for std::abs(int/long)
+ #include <cmath>    // for std::abs(float/double)
+ 
++/* for logging to Error Console */
++#include "nsIScriptError.h"
++
+ mozilla::LazyLogModule gMboxLog("mbox");
+ using mozilla::LogLevel;
+ 
+ /****************************************************************************
+@@ -776,8 +779,18 @@ nsMsgBrkMBoxStore::GetMsgInputStream(nsI
+   // But it's OK - MboxMsgInputStream will handle that case, and its Read()
+   // method will safely return an error (NS_MSG_ERROR_MBOX_MALFORMED).
+   RefPtr<MboxMsgInputStream> msgStream =
+       new MboxMsgInputStream(rawMboxStream, aMaxAllowedSize);
++  if (msgStream->MboxStatus() == NS_MSG_ERROR_MBOX_MALFORMED) {
++    nsCString fileName(mboxFile->HumanReadablePath());
++    nsCString msg;
++    msg = nsPrintfCString("Mbox parsing error at offset %s on %s",
++                          PromiseFlatCString(aMsgToken).get(), fileName.get());
++    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg),
++                     nsCString(__FILE__), __LINE__,
++                     nsIScriptError::errorFlag);
++    return NS_MSG_ERROR_MBOX_MALFORMED;
++  }
+   msgStream.forget(aResult);
+   return NS_OK;
+ }
+ 
