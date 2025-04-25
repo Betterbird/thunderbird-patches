@@ -1,0 +1,106 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1745181325 -7200
+# Parent  e4ce72f0932a944764e6ffe1181225bef4d37af5
+Bug 1841411 - Hacky mitigation of problems due to restoring mail tabs.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -567,8 +567,9 @@ pref("mail.tabs.drawInTitlebar", true);
+ // Save and restore the tabs session on startup:
+ // 0: Restore none, 32768: Restore "system" tabs, 65536: Restore all tabs.
+ // Future use: 1 to 32767 as bit field to more granularly select which ones to restore.
+ pref("mail.tabs.restoreSession", 65536);
++pref("mail.tabs.fastRestore", true);
+ 
+ // The breakpad report server to link to in about:crashes
+ pref("breakpad.reportURL", "https://crash-stats.mozilla.com/report/index/");
+ 
+diff --git a/mail/base/content/tabmail.js b/mail/base/content/tabmail.js
+--- a/mail/base/content/tabmail.js
++++ b/mail/base/content/tabmail.js
+@@ -1426,9 +1426,9 @@ ChromeUtils.defineESModuleGetters(this, 
+      * |persistTabs|. This is currently a synchronous operation, but in
+      * the future this may kick off an asynchronous mechanism to restore
+      * the tabs one-by-one.
+      */
+-    restoreTabs(aPersistedState, aDontRestoreFirstTab) {
++    async restoreTabs(aPersistedState, aDontRestoreFirstTab) {
+       const tabs = aPersistedState.tabs;
+       let indexToSelect = null;
+ 
+       for (const [iTab, tabState] of tabs.entries()) {
+@@ -1444,8 +1444,72 @@ ChromeUtils.defineESModuleGetters(this, 
+         //  tab as the guy to select.
+         if (iTab == aPersistedState.selectedIndex) {
+           indexToSelect = this.tabInfo.length - 1;
+         }
++
++        // There is something fundamentally wrong here.
++        // Observed behaviour is that mail tabs don't load if we don't wait until
++        // the are loaded completely. We've also seen other tabs, like Settings or the
++        // Add-ons Manager, being loaded incomplete and defective.
++        // So as a makeshift solution, we'll wait for the tab to load before
++        // restoring the next one.
++
++        // If the tab has a `chromeBrowser`, wait for it to load.
++        // Note that `this.tabInfo.length - 1` is the newest tab.
++        if (
++          !Services.prefs.getBoolPref("mail.tabs.fastRestore", true) &&
++          this.tabInfo.length >= 1 &&
++          this.tabInfo[this.tabInfo.length - 1].chromeBrowser
++        ) {
++          const chromeBrowser =
++            this.tabInfo[this.tabInfo.length - 1].chromeBrowser;
++          if (chromeBrowser.contentDocument.readyState != "complete") {
++            await new Promise(r => {
++              // Code from mailTabs.js.
++              // Experiments show that it mostly resolves via "DOMContentLoaded"
++              // but sometimes also via "load".
++              let resolved = false;
++              chromeBrowser.addEventListener(
++                "DOMContentLoaded",
++                event => {
++                  if (event.target == chromeBrowser.contentDocument) {
++                    if (!resolved) {
++                      resolved = true;
++                      r();
++                    }
++                  }
++                },
++                { capture: true, once: true }
++              );
++              chromeBrowser.addEventListener(
++                "load",
++                event => {
++                  if (event.target == chromeBrowser.contentDocument) {
++                    if (!resolved) {
++                      resolved = true;
++                      r();
++                    }
++                  }
++                },
++                { capture: true, once: true }
++              );
++              // Kill the wait with a timeout if the two events above haven't fired.
++              setTimeout(() => {
++                if (!resolved) {
++                  resolved = true;
++                  const uri =
++                    tabState.state?.messageURI ||
++                    tabState.state?.folderURI ||
++                    "<unknown>";
++                  console.error(
++                    `Unable to restore tab for ${uri} after five seconds`
++                  );
++                  r();
++                }
++              }, 5000);
++            });
++          }
++        }
+       }
+ 
+       if (indexToSelect != null && !aDontRestoreFirstTab) {
+         this.tabContainer.selectedIndex = indexToSelect;

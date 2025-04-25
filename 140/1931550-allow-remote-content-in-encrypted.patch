@@ -1,0 +1,98 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1733768048 -3600
+# Parent  8370a8b96aab19c0be1de5fdf3be83f5fca81f04
+Bug 1931550 - allow remote content in encrypted messages.
+
+diff --git a/mail/base/content/msgHdrPopup.inc.xhtml b/mail/base/content/msgHdrPopup.inc.xhtml
+--- a/mail/base/content/msgHdrPopup.inc.xhtml
++++ b/mail/base/content/msgHdrPopup.inc.xhtml
+@@ -237,8 +237,15 @@
+     <menuitem id="remoteContentOptionAllowAll"
+               oncommand="allowRemoteContentForAll(this.parentNode);"/>
+   </menupopup>
+ 
++  <menupopup id="remoteContentOptionsEncrypted" value="">
++    <menuitem id="remoteContentOptionAllowForMsg"
++              label="&remoteContentOptionsAllowForMsg.label;"
++              accesskey="&remoteContentOptionsAllowForMsg.accesskey;"
++              oncommand="LoadMsgWithRemoteContent();"/>
++  </menupopup>
++
+   <menupopup id="phishingOptions">
+     <menuitem id="phishingOptionIgnore"
+               label="&phishingOptionIgnore.label;"
+               accesskey="&phishingOptionIgnore.accesskey;"
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -3887,9 +3887,9 @@ var gMessageNotificationBar = {
+   isShowingJunkNotification() {
+     return !!this.msgNotificationBar.getNotificationWithValue("junkContent");
+   },
+ 
+-  async setRemoteContentMsg(aMsgHdr, aContentURI, aCanOverride) {
++  async setRemoteContentMsg(aMsgHdr, aContentURI, isNotEncrypted) {
+     // update the allow remote content for sender string
+     const brandName = this.brandBundle.getString("brandShortName");
+     const remoteContentMsg = this.stringBundle.getFormattedString(
+       "remoteContentBarMessage",
+@@ -3910,9 +3910,11 @@ var gMessageNotificationBar = {
+     const buttons = [
+       {
+         label: buttonLabel,
+         accessKey: buttonAccesskey,
+-        popup: "remoteContentOptions",
++        popup: isNotEncrypted
++          ? "remoteContentOptions"
++          : "remoteContentOptionsEncrypted",
+         callback() {},
+       },
+     ];
+ 
+@@ -3936,11 +3938,13 @@ var gMessageNotificationBar = {
+           "remoteContent",
+           {
+             label: remoteContentMsg,
+             image: "chrome://messenger/skin/icons/remote-blocked.svg",
+-            priority: this.msgNotificationBar.PRIORITY_WARNING_MEDIUM,
++            priority: isNotEncrypted
++              ? this.msgNotificationBar.PRIORITY_WARNING_MEDIUM
++              : this.msgNotificationBar.PRIORITY_CRITICAL_MEDIUM,
+           },
+-          aCanOverride ? buttons : []
++          buttons
+         )
+         .then(notification => {
+           notification.buttonContainer.firstElementChild?.classList.add(
+             "button-menu-list"
+diff --git a/mailnews/base/src/nsMsgContentPolicy.cpp b/mailnews/base/src/nsMsgContentPolicy.cpp
+--- a/mailnews/base/src/nsMsgContentPolicy.cpp
++++ b/mailnews/base/src/nsMsgContentPolicy.cpp
+@@ -326,9 +326,25 @@ nsMsgContentPolicy::ShouldLoad(nsIURI* a
+                                         &isEncrypted);
+   NS_ENSURE_SUCCESS(rv, rv);
+   if (isEncrypted) {
+     *aDecision = nsIContentPolicy::REJECT_REQUEST;
+-    NotifyContentWasBlocked(targetContext->Id(), aContentLocation);
++
++    nsCOMPtr<nsIMsgMessageUrl> msgUrl(
++        do_QueryInterface(aRequestingLocation, &rv));
++    if (NS_FAILED(rv)) return NS_OK;
++    nsCString resourceURI;
++    rv = msgUrl->GetUri(resourceURI);
++    if (NS_FAILED(rv)) return NS_OK;
++    nsCOMPtr<nsIMsgDBHdr> msgHdr;
++    rv = GetMsgDBHdrFromURI(resourceURI, getter_AddRefs(msgHdr));
++    if (NS_FAILED(rv)) return NS_OK;
++    uint32_t remoteContentPolicy = kNoRemoteContentPolicy;
++    msgHdr->GetUint32Property("remoteContentPolicy", &remoteContentPolicy);
++    if (remoteContentPolicy == kAllowRemoteContent) {
++      *aDecision = nsIContentPolicy::ACCEPT;
++    } else {
++      NotifyContentWasBlocked(targetContext->Id(), aContentLocation);
++    }
+     return NS_OK;
+   }
+ 
+   // If we are allowing all remote content...

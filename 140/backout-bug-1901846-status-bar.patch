@@ -1,0 +1,290 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1745605947 -7200
+# Parent  841bfa81fe7129033c1da3552faf94e53cec430f
+Backout bug 1901846 for generally being the wrong solution and causing bug 1945489.
+
+diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
+--- a/mail/base/content/mailWindow.js
++++ b/mail/base/content/mailWindow.js
+@@ -313,9 +313,8 @@ function nsMsgStatusFeedback() {
+     "statusbar-progresspanel"
+   );
+   this._throbber = document.getElementById("throbber-box");
+   this._activeProcesses = [];
+-  this._statusQueue = [];
+ 
+   // make sure the stop button is accurate from the get-go
+   goUpdateCommand("cmd_stop");
+ }
+@@ -340,13 +339,14 @@ nsMsgStatusFeedback.prototype = {
+   _stopTimeoutID: null,
+   // How many start meteors have been requested.
+   _startRequests: 0,
+   _meteorsSpinning: false,
++  _defaultStatusText: "",
+   _progressBarVisible: false,
+   _activeProcesses: null,
+   _statusFeedbackProgress: -1,
+   _statusLastShown: 0,
+-  _statusQueue: null,
++  _lastStatusText: null,
+   _timeoutDelay: ChromeUtils.isInAutomation ? 50 : 500,
+ 
+   // unload - call to remove links to listeners etc.
+   unload() {
+@@ -434,54 +434,52 @@ nsMsgStatusFeedback.prototype = {
+     "nsIActivityListener",
+     "nsISupportsWeakReference",
+   ]),
+ 
+-  /**
+-   * @param {string} statusText - The status string to display.
+-   * @see {nsIMsgStatusFeedback}
+-   */
++  // nsIMsgStatusFeedback implementation.
+   showStatusString(statusText) {
++    if (!statusText) {
++      statusText = this._defaultStatusText;
++    } else {
++      this._defaultStatusText = "";
++    }
+     // Let's make sure the display doesn't flicker.
+-    const MIN_DISPLAY_TIME = 750;
+-    if (
+-      !this._statusIntervalId &&
+-      Date.now() - this._statusLastShown > MIN_DISPLAY_TIME
+-    ) {
+-      this._statusLastShown = Date.now();
++    const timeBetweenDisplay = 500;
++    const now = Date.now();
++    if (now - this._statusLastShown > timeBetweenDisplay) {
++      // Cancel any pending status message. The timeout is not guaranteed
++      // to run within timeBetweenDisplay milliseconds.
++      this._lastStatusText = null;
++
++      this._statusLastShown = now;
+       if (this._statusText.value != statusText) {
+         this._statusText.value = statusText;
+       }
+-      return;
+-    }
+-    if (this._statusQueue.length >= 10) {
+-      // Drop further messages until the queue has cleared up.
+-      return;
+-    }
+-    if (!statusText && this._statusQueue.length > 0) {
+-      // Don't queue empty strings in the middle.
+-      return;
+-    }
+-    this._statusQueue.push(statusText);
+-    if (this._statusIntervalId) {
+-      return;
+-    }
+-
+-    // Arrange for this to be shown in MIN_DISPLAY_TIME ms.
+-    this._statusIntervalId = setInterval(() => {
+-      const text = this._statusQueue.shift();
+-      if (text === undefined) {
+-        clearInterval(this._statusIntervalId);
+-        this._statusIntervalId = null;
+-        if (!this._meteorsSpinning) {
+-          this._statusText.value = ""; // Clear status text once done.
+-        }
++    } else {
++      if (this._lastStatusText !== null) {
++        // There's already a pending display. Replace it.
++        this._lastStatusText = statusText;
+         return;
+       }
+-      this._statusLastShown = Date.now();
+-      if (this._statusText.value != text) {
+-        this._statusText.value = text;
+-      }
+-    }, MIN_DISPLAY_TIME);
++      // Arrange for this to be shown in timeBetweenDisplay milliseconds.
++      this._lastStatusText = statusText;
++      setTimeout(() => {
++        if (this._lastStatusText !== null) {
++          this._statusLastShown = Date.now();
++          if (this._statusText.value != this._lastStatusText) {
++            this._statusText.value = this._lastStatusText;
++          }
++          this._lastStatusText = null;
++        }
++      }, timeBetweenDisplay);
++    }
++  },
++
++  setStatusString(status) {
++    if (status.length > 0) {
++      this._defaultStatusText = status;
++      this._statusText.value = status;
++    }
+   },
+ 
+   _startMeteors() {
+     this._meteorsSpinning = true;
+@@ -524,9 +522,9 @@ nsMsgStatusFeedback.prototype = {
+     }
+   },
+ 
+   _stopMeteors() {
+-    this.showStatusString("");
++    this.showStatusString(this._defaultStatusText);
+ 
+     // stop the throbber
+     if (this._throbber) {
+       this._throbber.setAttribute("busy", false);
+diff --git a/mail/base/test/browser/browser_statusFeedback.js b/mail/base/test/browser/browser_statusFeedback.js
+--- a/mail/base/test/browser/browser_statusFeedback.js
++++ b/mail/base/test/browser/browser_statusFeedback.js
+@@ -71,38 +71,4 @@ add_task(async function testMessageOpen(
+     () => statusText.value == "",
+     "status message should eventually reset"
+   );
+ });
+-
+-add_task(async function testManyStatuses() {
+-  const statusFeedback = window.MsgStatusFeedback;
+-  const statuses = [];
+-  for (let i = 0; i < 25; i++) {
+-    const str = `Hey hey hey #${i}`;
+-    if (i < 10) {
+-      // after 10 messages, messages should get dropped
+-      statuses.push(
+-        BrowserTestUtils.waitForMutationCondition(
+-          statusText,
+-          {
+-            attributes: true,
+-            attributeFilter: ["value"],
+-          },
+-          () => statusText.value == str
+-        )
+-      );
+-    }
+-    statusFeedback.showStatusString(str);
+-  }
+-  await Promise.all(statuses);
+-  Assert.ok(true, `The ${statuses.length} first statuses should be shown`);
+-
+-  // After that, it should clear up.
+-  await BrowserTestUtils.waitForMutationCondition(
+-    statusText,
+-    {
+-      attributes: true,
+-      attributeFilter: ["value"],
+-    },
+-    () => statusText.value == ""
+-  );
+-});
+diff --git a/mailnews/base/content/subscribe.js b/mailnews/base/content/subscribe.js
+--- a/mailnews/base/content/subscribe.js
++++ b/mailnews/base/content/subscribe.js
+@@ -116,8 +116,9 @@ function SetUpTree(forceToServer, getOnl
+     document.getElementById("newGroupsTab").disabled = true;
+     document.getElementById("refreshButton").disabled = true;
+ 
+     gStatusFeedback._startMeteors();
++    gStatusFeedback.setStatusString("");
+     gStatusFeedback.showStatusString(
+       gSubscribeBundle.getString("pleaseWaitString")
+     );
+     document.getElementById("stopButton").disabled = false;
+@@ -125,14 +126,14 @@ function SetUpTree(forceToServer, getOnl
+     gSubscribableServer.startPopulating(msgWindow, forceToServer, getOnlyNew);
+   } catch (e) {
+     if (e.result == 0x80550014) {
+       // NS_MSG_ERROR_OFFLINE
+-      gStatusFeedback.showStatusString(
++      gStatusFeedback.setStatusString(
+         gSubscribeBundle.getString("offlineState")
+       );
+     } else {
+       console.error("Failed to populate subscribe tree: ", e);
+-      gStatusFeedback.showStatusString(
++      gStatusFeedback.setStatusString(
+         gSubscribeBundle.getString("errorPopulating")
+       );
+     }
+     Stop();
+diff --git a/mailnews/base/public/nsIMsgStatusFeedback.idl b/mailnews/base/public/nsIMsgStatusFeedback.idl
+--- a/mailnews/base/public/nsIMsgStatusFeedback.idl
++++ b/mailnews/base/public/nsIMsgStatusFeedback.idl
+@@ -6,13 +6,13 @@
+ #include "nsISupports.idl"
+ 
+ [scriptable, uuid(AACBFA34-8D29-4A08-9283-A8E5B3AB067F)]
+ interface nsIMsgStatusFeedback : nsISupports {
+-
+   void showStatusString(in AString aStatus);
+   void startMeteors();
+   void stopMeteors();
+   void showProgress(in long aPercent);
++  void setStatusString(in AString aStatus); // will be displayed until next user action
+ 
+   /* aStatusFeedback: a wrapped JS status feedback object */
+   void setWrappedStatusFeedback(in nsIMsgStatusFeedback aStatusFeedback);
+ };
+diff --git a/mailnews/base/src/FolderCompactor.cpp b/mailnews/base/src/FolderCompactor.cpp
+--- a/mailnews/base/src/FolderCompactor.cpp
++++ b/mailnews/base/src/FolderCompactor.cpp
+@@ -1089,9 +1089,9 @@ static void GUIShowCompactingMsg(nsIMsgW
+   window->GetStatusFeedback(getter_AddRefs(feedback));
+   if (feedback) {
+     // Not all windows have .statusFeedback set, especially during
+     // xpcshell-tests (search for gDummyMsgWindow, set up in alertTestUtils.js).
+-    feedback->ShowStatusString(statusMessage);
++    feedback->SetStatusString(statusMessage);
+     feedback->StartMeteors();
+   }
+ }
+ 
+@@ -1120,9 +1120,9 @@ static void GUIShowDoneMsg(nsIMsgWindow*
+   // Show message, and turn off progress bar.
+   nsCOMPtr<nsIMsgStatusFeedback> feedback;
+   window->GetStatusFeedback(getter_AddRefs(feedback));
+   if (feedback) {
+-    feedback->ShowStatusString(doneMsg);
++    feedback->SetStatusString(doneMsg);
+     feedback->StopMeteors();
+   }
+ }
+ 
+diff --git a/mailnews/base/src/nsMsgProgress.cpp b/mailnews/base/src/nsMsgProgress.cpp
+--- a/mailnews/base/src/nsMsgProgress.cpp
++++ b/mailnews/base/src/nsMsgProgress.cpp
+@@ -194,8 +194,13 @@ NS_IMETHODIMP nsMsgProgress::ShowStatusS
+   return OnStatusChange(nullptr, nullptr, NS_OK,
+                         PromiseFlatString(aStatus).get());
+ }
+ 
++NS_IMETHODIMP nsMsgProgress::SetStatusString(const nsAString& aStatus) {
++  return OnStatusChange(nullptr, nullptr, NS_OK,
++                        PromiseFlatString(aStatus).get());
++}
++
+ NS_IMETHODIMP nsMsgProgress::StartMeteors() { return NS_ERROR_NOT_IMPLEMENTED; }
+ 
+ NS_IMETHODIMP nsMsgProgress::StopMeteors() { return NS_ERROR_NOT_IMPLEMENTED; }
+ 
+diff --git a/mailnews/base/src/nsMsgStatusFeedback.cpp b/mailnews/base/src/nsMsgStatusFeedback.cpp
+--- a/mailnews/base/src/nsMsgStatusFeedback.cpp
++++ b/mailnews/base/src/nsMsgStatusFeedback.cpp
+@@ -153,8 +153,16 @@ nsMsgStatusFeedback::ShowStatusString(co
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++nsMsgStatusFeedback::SetStatusString(const nsAString& aStatus) {
++  nsCOMPtr<nsIMsgStatusFeedback> jsStatusFeedback(
++      do_QueryReferent(mJSStatusFeedbackWeak));
++  if (jsStatusFeedback) jsStatusFeedback->SetStatusString(aStatus);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
+ nsMsgStatusFeedback::ShowProgress(int32_t aPercentage) {
+   // If the percentage hasn't changed...OR if we are going from 0 to 100% in one
+   // step then don't bother....just fall out....
+   if (aPercentage == m_lastPercent ||
