@@ -1,8 +1,8 @@
 #!/bin/sh
 MOZILLA_REPO=https://hg.mozilla.org/releases/mozilla-esr128/
-MOZILLA_REV=3aaf665616b3c0f61839d40a02a9f7ae8778b04c
+MOZILLA_REV=8e875e7de75c05112284e9f6e91927b7bbe36e79
 COMM_REPO=https://hg.mozilla.org/releases/comm-esr128/
-COMM_REV=3dc116e792891bdcfaaa36232ed71fb2a79ed570
+COMM_REV=fb57b123f3f34cc4fdca17761f3743351afee769
 RUST_VER=1.79.0
 MOZ="-moz"
 MOZU="-moz"
