@@ -140,7 +140,7 @@ echo "======================================================="
 echo "Removing old patches from $MOZILLA_DIR and updating"
 hg revert --all
 hg qpop --all
-hg pull
+hg pull -r $MOZILLA_REV
 hg update -r $MOZILLA_REV
 
 echo
@@ -155,7 +155,7 @@ echo "======================================================="
 echo "Removing old patches from $MOZILLA_DIR/comm and updating"
 hg revert --all
 hg qpop --all
-hg pull
+hg pull -r $COMM_REV
 hg update -r $COMM_REV
 cd ..
 
