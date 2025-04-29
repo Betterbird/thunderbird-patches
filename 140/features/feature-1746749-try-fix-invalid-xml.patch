@@ -1,0 +1,241 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1745509557 21600
+# Parent  fd4aae5a04b810b08cfecd54c2444237fe5e1ce0
+Bug 1746749 - Make feed reader more tolerant to XML errors.
+- Remove invalid xml 1.0 characters
+- A formerly working feed, which may have invalid/unescaped characters (or any
+  multitude of xml spec errors) will be "rescued" once in an update cycle.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -187,10 +187,9 @@ Feed.prototype = {
+       this.request.setRequestHeader("If-Modified-Since", lastModified);
+     }
+ 
+     // Only order what you're going to eat...
+-    this.request.responseType = "document";
+-    this.request.overrideMimeType("text/xml");
++    this.request.responseType = this.responseType;
+     this.request.setRequestHeader("Accept", lazy.FeedUtils.REQUEST_ACCEPT);
+     this.request.timeout = lazy.FeedUtils.REQUEST_TIMEOUT;
+     this.request.onload = this.onDownloaded;
+     this.request.onreadystatechange = this.onReadyStateChange;
+@@ -224,8 +223,13 @@ Feed.prototype = {
+         "onDownloaded: error - couldn't retrieve feed from cache"
+       );
+     }
+ 
++    feed.addLog("debug", `onDownloaded: responseType ${request.responseType}`);
++    feed.addLog(
++      "debug",
++      `onDownloaded: contentType ${request.channel.contentType}`
++    );
+     feed.addLog("log", `onDownloaded: download fileSize ${aEvent.loaded}`);
+ 
+     // If the server sends a Last-Modified header, store the property on the
+     // feed so we can use it when making future requests, to avoid downloading
+@@ -310,9 +314,9 @@ Feed.prototype = {
+ 
+     FeedCache.removeFeed(url);
+   },
+ 
+-  onParseError(aFeed) {
++  onParseError(aFeed, disable = true) {
+     if (!aFeed) {
+       return;
+     }
+ 
+@@ -320,9 +324,9 @@ Feed.prototype = {
+     if (aFeed.downloadCallback) {
+       aFeed.downloadCallback.downloaded(
+         aFeed,
+         lazy.FeedUtils.kNewsBlogInvalidFeed,
+-        true
++        disable
+       );
+     }
+ 
+     FeedCache.removeFeed(aFeed.url);
+@@ -363,8 +367,24 @@ Feed.prototype = {
+     // Continue.
+     this.storeNextItem();
+   },
+ 
++  // Optimize responseType; get responseText for fixup if there's an error.
++  // Also use "text" in subscribe mode, as feeds now can be xml or json.
++  get responseType() {
++    const status = lazy.FeedUtils.getStatus(this.folder, this.url);
++    if (
++      this.downloadCallback.mSubscribeMode ||
++      status?.code == lazy.FeedUtils.kNewsBlogInvalidFeed
++    ) {
++      return "text";
++    }
++
++    // Invalid xml means request.response is an xml document with <parsererror>.
++    this.request.overrideMimeType("text/xml");
++    return "document";
++  },
++
+   get title() {
+     return lazy.FeedUtils.getSubscriptionAttr(
+       this.url,
+       this.server,
+@@ -484,9 +504,13 @@ Feed.prototype = {
+ 
+   parse() {
+     // Create a feed parser which will parse the feed.
+     let parser = new lazy.FeedParser();
+-    this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
++    this.itemsToStore = parser.parseFeed(
++      this,
++      this.request.responseType == "text" ? this.request.responseText : null,
++      this.request.response
++    );
+     parser = null;
+ 
+     if (this.mInvalidFeed) {
+       this.request = null;
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -26,13 +26,24 @@ FeedParser.prototype = {
+    * currently a synchronous operation.  If there is an error parsing the feed,
+    * parseFeed returns an empty feed in addition to calling aFeed.onParseError.
+    *
+    * @param {Feed} aFeed - The Feed object.
++   * @param {string|null} responseText - The document as string or null.
+    * @param {XMLDocument} aDOM - The document to parse.
+    * @returns {Array} - array of items, or empty array for error returns or
+    *                    nothing to do condition.
+    */
+-  parseFeed(aFeed, aDOM) {
++  parseFeed(aFeed, responseText, aDOM) {
++    // We only have responseText if 'document' previously had a <parsererror>.
++    if (responseText) {
++      if (aFeed.downloadCallback?.mSubscribeMode) {
++        aDOM = this.xmlCheck(aFeed, responseText);
++      } else {
++        // Try to fix some basic errors.
++        aDOM = this.xmlRescue(aFeed, responseText);
++      }
++    }
++
+     if (!XMLDocument.isInstance(aDOM)) {
+       // No xml doc.
+       aFeed.onParseError(aFeed);
+       return [];
+@@ -43,9 +54,11 @@ FeedParser.prototype = {
+       // Gecko caught a basic parsing error.
+       const errStr =
+         doc.firstChild.textContent + "\n" + doc.firstElementChild.textContent;
+       aFeed.addLog("warn", `parseFeed: ${errStr}`);
+-      aFeed.onParseError(aFeed);
++      // Automatic retry for a failed xml 'document' responseType.
++      const disable = aFeed.request.responseType != "document";
++      aFeed.onParseError(aFeed, disable);
+       return [];
+     } else if (aDOM.querySelector("redirect")) {
+       // Check for RSS2.0 redirect document.
+       const channel = aDOM.querySelector("redirect");
+@@ -89,8 +102,12 @@ FeedParser.prototype = {
+     aFeed.addLog("log", `parseFeed: type ${aFeed.mFeedType}`);
+     return this.parseAsRSS2(aFeed, aDOM);
+   },
+ 
++  xmlCheck(aFeed, responseText) {
++    return new DOMParser().parseFromString(responseText, "text/xml");
++  },
++
+   parseAsRSS2(aFeed, aDOM) {
+     // Get the first channel (assuming there is only one per RSS File).
+     const channel = aDOM.querySelector("channel");
+     if (!channel) {
+@@ -1455,8 +1472,61 @@ FeedParser.prototype = {
+     options.updates.updateBase = updateBase;
+     aFeed.options = options;
+   },
+ 
++  xmlRescue(feed, responseText) {
++    /* eslint-disable no-control-regex */
++    if (!feed || !responseText) {
++      return false;
++    }
++    // Remove everything forbidden by XML 1.0 specifications, plus the unicode
++    // replacement character U+FFFD.
++    // See https://www.ryadel.com/en/javascript-remove-xml-invalid-chars-
++    //     characters-string-utf8-unicode-regex/
++    // and https://www.w3.org/TR/xml/#charsets
++    let re = new RegExp(
++      "((?:[\0-\x08\x0B\f\x0E-\x1F\uFFFD\uFFFE\uFFFF]|[\uD800-\uDBFF]" +
++        "(?![\uDC00-\uDFFF])|" +
++        "(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]))",
++      "g"
++    );
++    let xmlString = responseText.replace(re, "\uFFFD");
++    let xmlDoc = new DOMParser().parseFromString(xmlString, "text/xml");
++    let doc = xmlDoc?.documentElement;
++    if (doc && doc.namespaceURI != lazy.FeedUtils.MOZ_PARSERERROR_NS) {
++      feed.addLog("warn", `xmlRescue: invalid chars rescue successful`);
++      return xmlDoc;
++    }
++
++    feed.addLog(
++      "warn",
++      `xmlRescue: invalid chars rescue failed, trying escape chars`
++    );
++
++    // There are 5 special xml chars that need to be escaped in certain
++    // cases: & < > ' ".
++    // 1. Escape & if not in CDATA.
++    // See https://www.w3.org/TR/xml/#syntax
++    re = new RegExp("<!\\[CDATA\\[[^]*?\\]\\]>", "g");
++    xmlString = xmlString.replaceAll("&amp;", "\x01");
++    xmlString = xmlString.replace(re, match => match.replace("&", "\x02"));
++    xmlString = xmlString.replace(/[&,\x01]/g, "&amp;").replace(/\x02/g, "&");
++    xmlDoc = new DOMParser().parseFromString(xmlString, "text/xml");
++    doc = xmlDoc?.documentElement;
++    if (doc && doc.namespaceURI != lazy.FeedUtils.MOZ_PARSERERROR_NS) {
++      feed.addLog("warn", `xmlRescue: escape chars rescue successful`);
++      return xmlDoc;
++    }
++
++    feed.addLog("warn", `xmlRescue: escape chars rescue failed`);
++    feed.addLog(
++      "warn",
++      `xmlRescue: rescue failed, publisher must follow the XML spec`
++    );
++    return false;
++    /* eslint-enable no-control-regex */
++  },
++
+   /**
+    * Remove unprintable ascii, particularly CR/LF, for non formatted tag values.
+    *
+    * @param {string} s - String to clean.
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -392,15 +392,15 @@ export var FeedUtils = {
+ 
+     const fetcher = async feedsToFetchArray => {
+       for (const feedToFetch of feedsToFetchArray) {
+         // Set status info and download.
++        feedToFetch.download(true, FeedUtils.progressNotifier);
+         FeedUtils.setStatus(
+           feedToFetch.folder,
+           feedToFetch.url,
+           "code",
+           FeedUtils.kNewsBlogFeedIsBusy
+         );
+-        feedToFetch.download(true, FeedUtils.progressNotifier);
+         await new Promise(resolve =>
+           setTimeout(resolve, FeedUtils.FETCH_DELAY)
+         );
+       }
