@@ -1,0 +1,133 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1746128185 -7200
+# Parent  1f775382b54826fcea56b8496baf9688e0325da9
+Bug 1890253 - Fix deletion of message moved by filter.
+
+128 commit message:
+Bug 1890253 - Fix issue in nsMsgBrkMBoxStore::DiscardNewMessage().
+
+Make DiscardNewMessage() truncate mbox to original size. Temporary fix.
+Inspired by https://phabricator.services.mozilla.com/D213510 by Chiaki Ishikawa, adjusted by Betterbird.
+
+140 update:
+DiscardNewMessage() was reworked and not doesn't work at all any more in this situation.
+As a band-aid, we're bringing the previous version back under a new name.
+
+diff --git a/mailnews/base/public/nsIMsgPluggableStore.idl b/mailnews/base/public/nsIMsgPluggableStore.idl
+--- a/mailnews/base/public/nsIMsgPluggableStore.idl
++++ b/mailnews/base/public/nsIMsgPluggableStore.idl
+@@ -151,8 +151,9 @@ interface nsIMsgPluggableStore : nsISupp
+    * @param folder - The target nsIMsgFolder.
+    * @param stream - The stream obtained by getNewMsgOutputStream().
+    */
+   void discardNewMessage(in nsIMsgFolder folder, in nsIOutputStream stream);
++  void discardLastMessageForce(in nsIMsgFolder folder, in AUTF8String storeToken);
+ 
+   /**
+    * Called by pop3 message filters when a newly downloaded message is being
+    * moved by an incoming filter. This is called before finishNewMessage, and
+diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+--- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
++++ b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+@@ -743,8 +743,29 @@ nsMsgBrkMBoxStore::DiscardNewMessage(nsI
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++nsMsgBrkMBoxStore::DiscardLastMessageForce(nsIMsgFolder* folder,
++                                           const nsACString& storeToken) {
++  NS_ENSURE_ARG_POINTER(folder);
++
++  nsresult rv = NS_OK;
++  MOZ_LOG(gMboxLog, LogLevel::Info, ("nsMsgBrkMBoxStore::DiscardLastMessageForce()"));
++
++  // Truncate back to original size.
++  do {
++    uint64_t msgStart = storeToken.ToInteger64(&rv);
++    if (NS_FAILED(rv)) break;
++    nsCOMPtr<nsIFile> mboxFile;
++    rv = folder->GetFilePath(getter_AddRefs(mboxFile));
++    if (NS_FAILED(rv)) break;
++    rv = mboxFile->SetFileSize(msgStart);
++  } while (false);
++
++  return rv;
++}
++
++NS_IMETHODIMP
+ nsMsgBrkMBoxStore::MoveNewlyDownloadedMessage(nsIMsgDBHdr* aNewHdr,
+                                               nsIMsgFolder* aDestFolder,
+                                               bool* aResult) {
+   NS_ENSURE_ARG_POINTER(aNewHdr);
+diff --git a/mailnews/local/src/nsMsgMaildirStore.cpp b/mailnews/local/src/nsMsgMaildirStore.cpp
+--- a/mailnews/local/src/nsMsgMaildirStore.cpp
++++ b/mailnews/local/src/nsMsgMaildirStore.cpp
+@@ -887,8 +887,26 @@ nsMsgMaildirStore::DiscardNewMessage(nsI
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++nsMsgMaildirStore::DiscardLastMessageForce(nsIMsgFolder* folder,
++                                           const nsACString& fileName) {
++  NS_ENSURE_ARG_POINTER(folder);
++
++  if (fileName.IsEmpty()) return NS_ERROR_FAILURE;
++
++  nsCOMPtr<nsIFile> path;
++  nsresult rv = folder->GetFilePath(getter_AddRefs(path));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  // path to the message download folder
++  path->Append(u"tmp"_ns);
++  path->AppendNative(fileName);
++
++  return path->Remove(false);
++}
++
++NS_IMETHODIMP
+ nsMsgMaildirStore::MoveNewlyDownloadedMessage(nsIMsgDBHdr* aHdr,
+                                               nsIMsgFolder* aDestFolder,
+                                               bool* aResult) {
+   NS_ENSURE_ARG_POINTER(aHdr);
+diff --git a/mailnews/local/src/nsParseMailbox.cpp b/mailnews/local/src/nsParseMailbox.cpp
+--- a/mailnews/local/src/nsParseMailbox.cpp
++++ b/mailnews/local/src/nsParseMailbox.cpp
+@@ -2112,24 +2112,24 @@ nsresult nsParseNewMailState::MoveIncorp
+   (void)localFolder->RefreshSizeOnDisk();
+ 
+   // Notify the message was moved.
+   if (notifier) {
+-    nsCOMPtr<nsIMsgFolder> folder;
+-    nsresult rv = mailHdr->GetFolder(getter_AddRefs(folder));
++    notifier->NotifyMsgUnincorporatedMoved(m_downloadFolder, newHdr);
++  }
++
++  nsCOMPtr<nsIMsgPluggableStore> store;
++  rv = m_downloadFolder->GetMsgStore(getter_AddRefs(store));
++  // Standard `DiscardNewMessage()` won't work here at all since it relies
++  // on `mOngoingWrites` in the store code. However, the writes are all
++  // over and done with, so the function fails.
++  if (store) {
++    nsAutoCString storeToken;
++    rv = mailHdr->GetStoreToken(storeToken);
+     if (NS_SUCCEEDED(rv)) {
+-      notifier->NotifyMsgUnincorporatedMoved(folder, newHdr);
+-      nsCOMPtr<nsIMsgPluggableStore> store;
+-      m_downloadFolder->GetMsgStore(getter_AddRefs(store));
+-      if (store) {
+-        store->DiscardNewMessage(folder, m_outputStream);
+-      }
+-      if (sourceDB) {
+-        sourceDB->RemoveHeaderMdbRow(mailHdr);
+-      }
+-    } else {
+-      NS_WARNING("Can't get folder for message that was moved.");
++      store->DiscardLastMessageForce(m_downloadFolder, storeToken);
+     }
+   }
++  if (sourceDB) sourceDB->RemoveHeaderMdbRow(mailHdr);
+ 
+   // update the folder size so we won't reparse.
+   UpdateDBFolderInfo(destMailDB);
+   destIFolder->UpdateSummaryTotals(true);
