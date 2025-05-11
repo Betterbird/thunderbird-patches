@@ -177,10 +177,10 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .label = Restore Original Threading
 ::     .accesskey = R
 %lecho% "mail-context-unthread-message ="        >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "    .label = 取消聚合会话"               >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .label = 取消话题关联"               >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .accesskey = U"                     >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "mail-context-reset-message-threading =" >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "    .label = 恢复原本会话"               >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .label = 恢复原始话题结构"           >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .accesskey = R"                     >> localization\zh-CN\messenger\messenger.ftl
 
 :: Disable account:
