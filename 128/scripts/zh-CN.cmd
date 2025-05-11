@@ -48,11 +48,11 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .accesskey = O
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option =" >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .label = 纯文本或HTML格式" >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = HTML 或纯文本"          >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "compose-send-plain-or-html-description = 如果邮件中有样式则转为 HTML 发送，否则以纯文本发送。" >> localization\zh-CN\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 纯文本或HTML格式" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = HTML 或纯文本"             >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = O"                     >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
