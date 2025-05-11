@@ -15,9 +15,9 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .tooltiptext = Show messages with no tags
 :: quick-filter-bar-tagged-button =
 ::     .tooltiptext = Show messages with one or more tags. Right-click to clear individual tag selection.
-%lecho% "quick-filter-bar-untagged-button ="        >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "    .tooltiptext = 不显示消息标签" >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "quick-filter-bar-tagged-button ="          >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-untagged-button ="                                   >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "    .tooltiptext = 不显示消息标签"                                     >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-tagged-button ="                                     >> localization\zh-CN\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = 显示一个或多个消息标签，右键单击以清除选中的单个标签。" >> localization\zh-CN\messenger\about3Pane.ftl
 
 :: Original strings:
@@ -31,15 +31,15 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .label = Recent File(s)…
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
-%lecho% "menuitem-recent-files ="            >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = 最近的文件…"   >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
-%lecho% "context-menuitem-recent-files ="    >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
+%lecho% "menuitem-recent-files =" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = 最近的文件…" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
+%lecho% "context-menuitem-recent-files =" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .label = 附加最近的文件…" >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
 
 :: Original strings:
 :: menu-multi-line-all-folders =
 ::     .label = Multi-line View On All Folders
-%lecho% "menu-multi-line-all-folders ="         >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "menu-multi-line-all-folders ="       >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "    .label = 在所有文件夹启用多行视图" >> localization\zh-CN\messenger\menubar.ftl
 
 :: Original strings:
@@ -56,26 +56,26 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .accesskey = O"                     >> localization\zh-CN\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
-:: Strings from https://hg.mozilla.org/l10n-central/zh-CN/file/6ae114401a4cb7736a46e7d99b1ccd241fa7909b/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=无法打开邮件缓冲文件 %%S。"    >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+:: Strings from https://hg.mozilla.org/l10n-central/zh-CN/file/e61e1a64227e0b4e9d26e6f38fd6a4b04f6a2831/mail/chrome/messenger/localMsgs.properties
+%lecho% "movemailCantOpenSpoolFile=无法打开邮件缓冲文件 %%S。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
 %lecho% "movemailCantCreateLock=无法创建锁文件 %%S。在邮件缓冲文件夹中创建锁文件是必要的。在大多系统中，将缓冲文件夹权限设置为 01777 即可。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
 %lecho% "movemailCantDeleteLock=无法删除锁文件 %%S。"          >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
 %lecho% "movemailCantTruncateSpoolFile=无法截除缓冲文件 %%S。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
-%lecho% "movemailSpoolFileNotFound=无法定位邮件缓冲文件。"      >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=无法定位邮件缓冲文件。"     >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
 %lecho% "movemailCantParseSpool=无法解析缓冲文件 %%S。文件可能损坏或者无效。" >> chrome\zh-CN\locale\zh-CN\messenger\localMsgs.properties
-%lecho% "serverType-movemail=Unix Movemail"                                >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
+%lecho% "serverType-movemail=Unix Movemail"                  >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 
-%lecho% "account-action-add-movemail-account ="  >> localization\zh-CN\messenger\accountManager.ftl
-%lecho% "    .label = 新建 Movemail 账户…"  >> localization\zh-CN\messenger\accountManager.ftl
-%lecho% "    .accesskey = M"                     >> localization\zh-CN\messenger\accountManager.ftl
-%lecho% "file-new-movemail-account ="            >> localization\zh-CN\messenger\menubar.ftl
-%lecho% "    .label = Movemail 账户…"       >> localization\zh-CN\messenger\menubar.ftl
-%lecho% "    .accesskey = M"                     >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "account-action-add-movemail-account =" >> localization\zh-CN\messenger\accountManager.ftl
+%lecho% "    .label = 新建 Movemail 账户…"       >> localization\zh-CN\messenger\accountManager.ftl
+%lecho% "    .accesskey = M"                    >> localization\zh-CN\messenger\accountManager.ftl
+%lecho% "file-new-movemail-account ="           >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = Movemail 账户…"           >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .accesskey = M"                    >> localization\zh-CN\messenger\menubar.ftl
 
 :: Unread/seleted status
 %lecho% "unreadMsgStatus=未读: %%S"   >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 %lecho% "selectedMsgStatus=已选: %%S" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
-%lecho% "totalMsgStatus=合计: %%S"      >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
+%lecho% "totalMsgStatus=合计: %%S"    >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 
 :: Original strings:
 :: vertical-tabs-label =
@@ -84,12 +84,12 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: attachments-display-top-label =
 ::     .label = Display attachment list above message
 ::     .accesskey = p
-%lecho% "vertical-tabs-label ="                  >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .label = 显示垂直标签页"           >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = v"                     >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "attachments-display-top-label ="        >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "vertical-tabs-label ="            >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = 显示垂直标签页"       >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = v"               >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "attachments-display-top-label ="  >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .label = 在消息内容前列出附件列表" >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = p"                     >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .accesskey = p"               >> localization\zh-CN\messenger\preferences\preferences.ftl
 
 :: Original strings:
 :: restore-tabs-session-label =
@@ -109,10 +109,10 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 %lecho% "    .label = 所有标签页"        >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = t"            >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "restore-system-tabs ="         >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .label = 系统标签页"         >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = 系统标签页"        >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = s"            >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "restore-no-tabs ="             >> localization\zh-CN\messenger\preferences\preferences.ftl
-%lecho% "    .label = 空标签页"              >> localization\zh-CN\messenger\preferences\preferences.ftl
+%lecho% "    .label = 空标签页"          >> localization\zh-CN\messenger\preferences\preferences.ftl
 %lecho% "    .accesskey = n"            >> localization\zh-CN\messenger\preferences\preferences.ftl
 
 :: Original strings:
@@ -123,10 +123,10 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .label = Stacked View
 ::     .accesskey = S
 %lecho% "menu-view-layout-widethread =" >> localization\zh-CN\messenger\menubar.ftl
-%lecho% "    .label = 宽线程视图"   >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = 宽线程视图"        >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "    .accesskey = T"            >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "menu-view-layout-stacked ="    >> localization\zh-CN\messenger\menubar.ftl
-%lecho% "    .label = 堆叠视图"        >> localization\zh-CN\messenger\menubar.ftl
+%lecho% "    .label = 堆叠视图"          >> localization\zh-CN\messenger\menubar.ftl
 %lecho% "    .accesskey = S"            >> localization\zh-CN\messenger\menubar.ftl
 
 :: Original strings:
@@ -138,14 +138,14 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: msg-edit-restore-button = Restore
 ::     .title = Show the original value
 :: msg-edit-update-button = Update
-%lecho% "other-action-msg-edit-headers ="     >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "other-action-msg-edit-headers ="   >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .label = 编辑邮件头..."         >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "    .accesskey = H"                  >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .accesskey = H"                >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "msg-edit-dialog-title = 邮件头编辑" >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "msg-edit-cancel-button = 取消"    >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "msg-edit-restore-button = 恢复"      >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "msg-edit-cancel-button = 取消"     >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "msg-edit-restore-button = 恢复"    >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .title = 显示原始值"            >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "msg-edit-update-button = 更新"       >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "msg-edit-update-button = 更新"     >> localization\zh-CN\messenger\messenger.ftl
 
 :: Original strings:
 :: quick-filter-bar-negate =
@@ -157,15 +157,15 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
-%lecho% "quick-filter-bar-negate ="                                                               >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "    .title = 在按钮上右键单击或按 Ctrl+Enter 可反向过滤"                     >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "      在文本过滤和标签过滤中，任何被反选的按钮都会创建 AND 条件"                         >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "      当标签过滤器被反选时，选择标签按钮会将对应邮件添加至无标签的邮件列表"     >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "      例如："                                                                               >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "      • 「星标」和「标签」被反选时：显示所有「无星标」且「无标签」的邮件"  >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-negate ="                                             >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "    .title = 在按钮上右键单击或按 Ctrl+Enter 可反向过滤"                 >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "      在文本过滤和标签过滤中，任何被反选的按钮都会创建 AND 条件"           >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "      当标签过滤器被反选时，选择标签按钮会将对应邮件添加至无标签的邮件列表" >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "      例如："                                                           >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "      • 「星标」和「标签」被反选时：显示所有「无星标」且「无标签」的邮件"          >> localization\zh-CN\messenger\about3Pane.ftl
 %lecho% "      • 「主题」被反选且「正文」被选中时：显示所有主题不包含「关键词」且正文包含「关键词」的邮件" >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "      • 「任意匹配」下反选「重要」并选中「工作」和「私人」："         >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "      显示所有不含「重要」标签且包含「工作」或「私人」标签的邮件" >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "      • 「任意匹配」下反选「重要」并选中「工作」和「私人」："                     >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "      显示所有不含「重要」标签且包含「工作」或「私人」标签的邮件"               >> localization\zh-CN\messenger\about3Pane.ftl
 
 :: New in 128:
 
@@ -177,24 +177,24 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 ::     .label = Restore Original Threading
 ::     .accesskey = R
 %lecho% "mail-context-unthread-message ="        >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "    .label = 取消聚合会话"                  >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .label = 取消聚合会话"               >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .accesskey = U"                     >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "mail-context-reset-message-threading =" >> localization\zh-CN\messenger\messenger.ftl
-%lecho% "    .label = 恢复原本会话"            >> localization\zh-CN\messenger\messenger.ftl
+%lecho% "    .label = 恢复原本会话"               >> localization\zh-CN\messenger\messenger.ftl
 %lecho% "    .accesskey = R"                     >> localization\zh-CN\messenger\messenger.ftl
 
 :: Disable account:
 :: account-disabled =
 ::   .label = Account disabled
-%lecho% "account-disabled ="          >> localization\zh-CN\messenger\accountSettings.ftl
+%lecho% "account-disabled ="   >> localization\zh-CN\messenger\accountSettings.ftl
 %lecho% "  .label = 账户已禁用" >> localization\zh-CN\messenger\accountSettings.ftl
 
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =
 ::     .label = Match Address Book
 ::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
-%lecho% "quick-filter-bar-match-addressbook ="                                        >> localization\zh-CN\messenger\about3Pane.ftl
-%lecho% "    .label = 匹配地址簿"                                                   >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-match-addressbook ="                             >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "    .label = 匹配地址簿"                                           >> localization\zh-CN\messenger\about3Pane.ftl
 %lecho% "    .tooltiptext = 根据地址簿中的显示名称（开头）或昵称（精确）进行匹配" >> localization\zh-CN\messenger\about3Pane.ftl
 
 :: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
