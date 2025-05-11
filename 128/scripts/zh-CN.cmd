@@ -75,7 +75,7 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Unread/seleted status
 %lecho% "unreadMsgStatus=未读: %%S"   >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 %lecho% "selectedMsgStatus=已选: %%S" >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
-%lecho% "totalMsgStatus=合计: %%S"    >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
+%lecho% "totalMsgStatus=总计: %%S"    >> chrome\zh-CN\locale\zh-CN\messenger\messenger.properties
 
 :: Original strings:
 :: vertical-tabs-label =
