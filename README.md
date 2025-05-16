@@ -16,7 +16,7 @@ Sadly `./mach bootstrap` doesn't work on Linux/aarch64, so please read [here](./
 This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html) copied below:
 1. Prepare to install necessary dependencies: `sudo apt update`
 1. Install some packages: `sudo apt-get install git python3 python3-dev python3-pip`
-1. More packages: `sudo aptitude install libdbusmenu-gtk3-dev`
+1. More packages: `sudo apt-get install libdbusmenu-gtk3-dev`
 1. Install Mercurial: `sudo apt-get install mercurial` if the Mercurial in your distribution is new enough (as it should be for Ubuntu 20.04). Otherwise use the following two steps.
 1. Install Mercurial: `echo "export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"" >> ~/.bashrc` and `python3 -m pip install --user mercurial`
 1. In a new shell: `hg version`
