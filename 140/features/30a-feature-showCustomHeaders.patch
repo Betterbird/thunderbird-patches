@@ -1,0 +1,350 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1747676645 -7200
+# Parent  905d79e60801fbc56c201cc76ae7d04223f0090d
+Feature: customizable quick headers popup
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -752,8 +752,16 @@ pref("font.name-list.monospace.el", "mon
+ #endif
+ 
+ pref("mail.setup.loglevel", "Warn");
+ 
++// Show custom and all headers in a popup. The pref is a JSON string array of
++// headers to match. An array item "*" shows all headers. Matching is case
++// insensitive and exact, unless a wildcard * is used. Any custom named
++// header(s) are shown first. For example:
++// '["message-id", "*date*", "*"]' displays Message-Id, then all headers
++// containing 'date', then all remaining headers. Omitting "*" skips all headers
++// and shows only named headers, if any matches are found.
++pref("mail.messageEditor.showCustomHeaders", '["*"]');
+ // Message Editor/Rethreading.
+ // Editable headers. Formatted in Train-Case for display purposes to
+ // accomodate header names that are not among the common localizable ones.
+ // The default may be changed, eg: '["Date","From","In-Reply-To"]' and adding
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -32,8 +32,9 @@ ChromeUtils.defineESModuleGetters(
+   { global: "current" }
+ );
+ 
+ ChromeUtils.defineESModuleGetters(this, {
++  MessageEditor: "resource:///modules/MessageEditor.sys.mjs",
+   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
+   UIDensity: "resource:///modules/UIDensity.sys.mjs",
+   UIFontSize: "resource:///modules/UIFontSize.sys.mjs",
+ });
+diff --git a/mail/base/content/msgHdrView.inc.xhtml b/mail/base/content/msgHdrView.inc.xhtml
+--- a/mail/base/content/msgHdrView.inc.xhtml
++++ b/mail/base/content/msgHdrView.inc.xhtml
+@@ -135,8 +135,14 @@
+       <toolbarbutton id="hdrTrashButton"
+                      data-l10n-id="message-header-delete"
+                      observes="cmd_delete"
+                      class="toolbarbutton-1 message-header-view-button hdrTrashButton"/>
++      <toolbarbutton id="showCustomHeaders"
++                     class="toolbarbutton-1 message-header-view-button check-button hdrCustomHeadersButton"
++                     style="list-style-image: url(chrome://messenger/skin/icons/bullet-list.svg);fill: var(--toolbarbutton-icon-fill, currentColor);"
++                     label="&headersMenu.label;"
++                     tooltiptext="&headersMenu.label;"
++                     oncommand="MsgShowCustomHeaders()"/>
+       <toolbarbutton id="otherActionsButton"
+                      type="menu"
+                      wantdropmarker="true"
+                      label="&otherActionsButton2.label;"
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -3802,8 +3802,269 @@ function MsgEditHeaders(messageIsDisplay
+   messageEditor.updateHeadersWithDialog();
+ }
+ 
+ /**
++ * Show custom headers in a popup. Pref "mail.messageEditor.showCustomHeaders"
++ * is documented in all-thunderbird.js. The header toolbar button opens the
++ * popup; messages in 3pane, tab, and standalone window are all supported.
++ *
++ */
++async function MsgShowCustomHeaders() {
++  const winDoc = window.document;
++  const button = document.getElementById("showCustomHeaders");
++  const messageURI = gMessageURI;
++  if (!messageURI) {
++    return;
++  }
++
++  const onShow = () => {
++    button.checked = true;
++    popup.show();
++    popup.focus();
++  };
++
++  const onClose = () => {
++    button.checked = false;
++    document.getSelection().empty();
++    popup.close();
++  };
++
++  const onBlur = () => {
++    if (!button.matches(":hover") && !popup.matches(":hover")) {
++      // The button will do the close.
++      onClose();
++    }
++  };
++
++  const controller = {
++    supportsCommand(command) {
++      return (
++        document.activeElement == popup &&
++        (command == "cmd_copy" || command == "cmd_selectAll")
++      );
++    },
++    isCommandEnabled(command) {
++      switch (command) {
++        case "cmd_copy":
++          return (
++            document.activeElement == popup &&
++            !document.getSelection().isCollapsed
++          );
++        case "cmd_selectAll":
++          return document.activeElement == popup;
++        default:
++          return false;
++      }
++    },
++    doCommand(command) {
++      if (!this.isCommandEnabled(command)) {
++        return;
++      }
++      switch (command) {
++        case "cmd_copy":
++          Cc["@mozilla.org/widget/clipboardhelper;1"]
++            .getService(Ci.nsIClipboardHelper)
++            .copyString(
++              document.getSelection().toString().replace(/:\n */gm, ": ")
++            );
++          break;
++        case "cmd_selectAll":
++          document.getSelection().selectAllChildren(popup);
++          break;
++      }
++    },
++    onEvent(_event) {},
++  };
++
++  let popup = winDoc.getElementById("showHeadersPopup");
++  if (popup) {
++    if (popup.getAttribute("messageURI") == messageURI) {
++      button.checked ? onClose() : onShow();
++      return;
++    }
++    popup.querySelector("#dialogContainer")?.replaceChildren();
++  }
++
++  const getCustomHeaders = () => {
++    let customHeaders = ["*"];
++    try {
++      customHeaders = JSON.parse(Services.prefs.getCharPref(headersPref));
++      // Dedupe. Create a regex.
++      customHeaders = Array.from(new Set([...customHeaders])).map(
++        customHeader => {
++          customHeader = customHeader.replace(/\*+/g, ".*").replace(":", "");
++          customHeader = "^" + customHeader + ":";
++          return customHeader;
++        }
++      );
++    } catch (exception) {
++      console.warn(`getCustomHeaders: reset invalid pref, ${exception}`);
++      Services.prefs.setCharPref(headersPref, JSON.stringify(customHeaders));
++      customHeaders = ["^.*:"];
++    }
++    return customHeaders;
++  };
++
++  const matchCustomHeaders = (headerLines, customHeader) => {
++    const allHeadersLine = "_all_headers_: _start_line_\n";
++    headerLines.forEach(headerLine => {
++      try {
++        const re = new RegExp(customHeader, "i");
++        const headerName = headerLine.split(":")[0] + ":";
++        if (re.test(headerName) && !matchLines.includes(headerLine)) {
++          // All headers start marker.
++          if (customHeader == "^.*:" && !matchLines.includes(allHeadersLine)) {
++            matchLines.push(allHeadersLine);
++          }
++          matchLines.push(headerLine);
++        }
++      } catch (exception) {
++        console.error(exception);
++      }
++    });
++  };
++
++  const createCustomHeadersPopup = () => {
++    if (popup) {
++      return;
++    }
++    const dialog = winDoc.createElement("dialog");
++    dialog.id = "showHeadersPopup";
++    dialog.style.width = "auto";
++    dialog.style.top = "0";
++    dialog.style.zIndex = "10";
++    dialog.style.outline = "none";
++    dialog.style.borderWidth = "1px";
++    dialog.style.borderColor = "var(--arrowpanel-border-color)";
++    dialog.style.margin = "28px 14px";
++    dialog.style.padding = "0";
++
++    // For contextmenu.
++    const dialogInputBox = winDoc.createXULElement("moz-input-box");
++    dialogInputBox.id = "dialogInputBox";
++    dialogInputBox.style.display = "block";
++    dialogInputBox.style.maxHeight = "130px";
++    dialogInputBox.style.overflow = "hidden auto";
++
++    const dialogContainer = winDoc.createElement("div");
++    dialogContainer.id = "dialogContainer";
++    dialogContainer.setAttribute("anonid", "input");
++    dialogContainer.style.display = "grid";
++    dialogContainer.style.gridGap = "6px 0";
++    dialogContainer.style.padding = "6px";
++    dialogContainer.style.userSelect = "text";
++
++    dialogInputBox.appendChild(dialogContainer);
++    dialog.appendChild(dialogInputBox);
++    winDoc.documentElement.append(dialog);
++
++    dialogInputBox.menupopup.classList.add("no-icon-menupopup");
++    const menuitems = dialogInputBox.menupopup.children;
++    for (let i = menuitems.length - 1; i >= 0; i--) {
++      const mi = menuitems[i];
++      if (!["cmd_copy", "cmd_selectAll"].includes(mi.attributes?.cmd?.value)) {
++        mi.remove();
++      }
++    }
++
++    top.window.addEventListener("mousedown", () => {
++      onBlur();
++    });
++    dialog.addEventListener("blur", () => {
++      onBlur();
++    });
++    dialog.addEventListener("keydown", event => {
++      if (event.key == "Escape" || event.key == "Tab") {
++        onClose();
++      }
++    });
++
++    // Be responsive.
++    const minWidth = 400;
++    const updateForWidth = width => {
++      dialogContainer.style.gridTemplateColumns =
++        width >= minWidth ? "20% auto" : "auto";
++    };
++    updateForWidth(window.innerWidth);
++    window.matchMedia(`(min-width: ${minWidth}px)`).addListener(_event => {
++      updateForWidth(window.innerWidth);
++    });
++
++    // Insert controller for copy/selectAll. It's only relevant for popup.
++    window.controllers.insertControllerAt(0, controller);
++    // Reset on pref change.
++    Services.prefs.addObserver(headersPref, () => {
++      popup.removeAttribute("messageURI");
++    });
++
++    popup = dialog;
++  };
++
++  const populateCustomHeadersPopup = () => {
++    popup.setAttribute("messageURI", messageURI);
++    const dialogContainer = popup.querySelector("#dialogContainer");
++
++    if (!matchLines.length) {
++      const bundle = Services.strings.createBundle(
++        "chrome://messenger/locale/search.properties"
++      );
++      const headerNameDiv = winDoc.createElement("div");
++      headerNameDiv.textContent = bundle.GetStringFromName("noMatchesFound");
++      dialogContainer.appendChild(headerNameDiv);
++      return;
++    }
++
++    for (const matchLine of matchLines) {
++      const headerNameDiv = winDoc.createElement("div");
++      headerNameDiv.className = "headername";
++      headerNameDiv.style.paddingInlineEnd = "4px";
++      //headerNameDiv.style.textAlign = "end";
++      headerNameDiv.style.overflowWrap = "anywhere";
++      headerNameDiv.style.lineHeight = "1";
++      headerNameDiv.style.opacity = "var(--message-header-label-opacity)";
++      const headerValueDiv = winDoc.createElement("div");
++      headerValueDiv.className = "headervalue";
++      headerValueDiv.style.overflowWrap = "anywhere";
++      headerValueDiv.style.lineHeight = "1";
++      const headerName = matchLine.split(":")[0];
++      headerNameDiv.textContent = headerName + ":";
++      headerValueDiv.textContent = messageEditor.getHeaderValue(
++        matchLine,
++        headerName.toLowerCase()
++      );
++      if (headerName == "_all_headers_") {
++        if (!dialogContainer.childElementCount) {
++          continue;
++        }
++        // Add a separator if there are custom headers.
++        headerNameDiv.textContent = headerValueDiv.textContent = "";
++        headerNameDiv.style.borderTop = headerValueDiv.style.borderTop =
++          "1px solid var(--arrowpanel-border-color)";
++      }
++      dialogContainer.appendChild(headerNameDiv);
++      dialogContainer.appendChild(headerValueDiv);
++    }
++  };
++
++  // MessageEditor is local to about:message for this readonly case.
++  const messageEditor = new MessageEditor({ messageURI });
++  await messageEditor.messageReady();
++  const headerLines = messageEditor.msgHeaders.match(
++    messageEditor.headerLineRE(".*")
++  );
++  const headersPref = "mail.messageEditor.showCustomHeaders";
++  const customHeaders = getCustomHeaders();
++  const matchLines = [];
++  customHeaders.forEach(customHeader =>
++    matchCustomHeaders(headerLines, customHeader)
++  );
++  createCustomHeadersPopup();
++  populateCustomHeadersPopup();
++  onShow();
++  popup.firstElementChild.scrollTo(0, 0);
++}
++
++/**
+  * Extract email data and prefill the event/task dialog with that data.
+  *
+  * @param {boolean} [isTask=false]
+  */
+diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys.mjs
+--- a/mail/modules/MessageEditor.sys.mjs
++++ b/mail/modules/MessageEditor.sys.mjs
+@@ -69,8 +69,12 @@ export class MessageEditor {
+    * @type {object}
+    */
+   #getMessageDeferred = {};
+ 
++  async messageReady() {
++    await this.#getMessageDeferred.promise;
++  }
++
+   /**
+    * Reference to the dialog.
+    *
+    * @type {DOMNode}
