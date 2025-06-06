@@ -1,0 +1,198 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1747496739 21600
+# Parent  c6e6b2d62212ec6e81a1d12f4503cb187209735a
+Feed enhancements:
+- Linkify subject, hide content-base url (pref rss.linkifySubject).
+- Make url-header-row custom element be a real url, obviously.
+
+diff --git a/mail/base/content/msgHdrPopup.inc.xhtml b/mail/base/content/msgHdrPopup.inc.xhtml
+--- a/mail/base/content/msgHdrPopup.inc.xhtml
++++ b/mail/base/content/msgHdrPopup.inc.xhtml
+@@ -141,12 +141,23 @@
+               oncommand="gMessageHeader.createFilter(event);"/>
+   </menupopup>
+ 
+   <menupopup id="copyUrlPopup"
++             class="no-icon-menupopup"
+              popupanchor="bottomleft">
++    <menuitem id="openLinkInBrowser"
++              class="menuitem-iconic"
++              label="&openLinkInBrowser.label;"
++              accesskey="&openLinkInBrowser.accesskey;"
++              oncommand="gMessageHeader.openWebsiteUrl(event);"/>
+     <menuitem label="&copyLinkCmd.label;"
+               accesskey="&copyLinkCmd.accesskey;"
+               oncommand="gMessageHeader.copyWebsiteUrl(event);"/>
++    <menuseparator/>
++    <menuitem id="copyMenuitem"
++              data-l10n-id="text-action-copy"
++              class="menuitem-iconic"
++              oncommand="gMessageHeader.copyString(event);"/>
+   </menupopup>
+ 
+   <menupopup id="listIdPopup"
+              position="after_start"
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -3039,9 +3039,9 @@ const gMessageHeader = {
+   openCopyPopup(event, element) {
+     document.getElementById("copyCreateFilterFrom").disabled =
+       !gFolder?.server.canHaveFilters;
+     const popup = document.getElementById(
+-      element.matches(`:scope[is="url-header-row"],a`)
++      element.matches(`a`) || element.querySelector(`a:not([hidden])`)
+         ? "copyUrlPopup"
+         : "copyPopup"
+     );
+     popup.headerField = element;
+@@ -3438,12 +3438,22 @@ const gMessageHeader = {
+ 
+   copyWebsiteUrl(event) {
+     const element = event.currentTarget.parentNode.headerField;
+     navigator.clipboard.writeText(
+-      element.matches("a") ? element.href : element.value.textContent
++      element.matches("a")
++        ? element.href
++        : (element.querySelector("a")?.href ?? element.value.textContent)
+     );
+   },
+ 
++  openWebsiteUrl(event) {
++    const element = event.currentTarget.parentNode.headerField;
++    const url = element.matches("a")
++      ? element.href
++      : (element.querySelector("a")?.href ?? element.value.textContent);
++    openUILink(url, event);
++  },
++
+   openListURL(event) {
+     const url = event.target.value;
+     if (url.startsWith("mailto:")) {
+       const [identity] = MailUtils.getIdentityForHeader(gMessage);
+diff --git a/mail/base/content/widgets/header-fields.js b/mail/base/content/widgets/header-fields.js
+--- a/mail/base/content/widgets/header-fields.js
++++ b/mail/base/content/widgets/header-fields.js
+@@ -720,9 +720,12 @@
+ 
+       this.setAttribute("is", "url-header-row");
+       document.l10n.setAttributes(this.heading, "message-header-website-field");
+ 
+-      this.value.classList.add("text-link");
++      this.value.remove();
++      this.value = document.createElement("a");
++      this.appendChild(this.value);
++
+       this.addEventListener("click", event => {
+         if (event.button != 2) {
+           openUILink(encodeURI(this.value.textContent), event);
+         }
+@@ -732,8 +735,13 @@
+           openUILink(encodeURI(this.value.textContent), event);
+         }
+       });
+     }
++
++    set headerValue(val) {
++      super.headerValue = val;
++      this.value.href = val;
++    }
+   }
+   customElements.define("url-header-row", UrlHeaderRow, {
+     extends: "div",
+   });
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -90,8 +90,10 @@ var FeedMessageHandler = {
+         FeedMessageHandler.setContent(gMessage);
+       } else {
+         FeedMessageHandler.setLoadingState(false);
+       }
++
++      FeedMessageHandler.linkifySubject();
+     },
+   },
+ 
+   progressListener: {
+@@ -359,8 +361,65 @@ var FeedMessageHandler = {
+     );
+     return renderFunc;
+   },
+ 
++  linkifySubject() {
++    let doLinkify =
++      FeedUtils.isFeedMessage(gMessage) &&
++      Services.prefs.getBoolPref("rss.linkifySubject");
++    const spanNode =
++      document.getElementById("expandedsubjectBox").lastElementChild;
++    let linkNode = document.getElementById("expandedsubjectLink");
++    if (!linkNode) {
++      if (!doLinkify) {
++        return;
++      }
++      linkNode = document.createElement("a");
++      linkNode.id = "expandedsubjectLink";
++      spanNode.parentElement.insertBefore(linkNode, spanNode);
++
++      const rule = `
++        .linkified:not(:hover) a {
++          color: unset;
++          text-decoration: unset;
++        }`;
++      const ss = [...document.styleSheets].filter(s =>
++        s.href.includes("messageHeader.css")
++      )[0];
++      ss ? ss.insertRule(rule, ss.rules.length) : null;
++
++      linkNode.addEventListener("click", event => {
++        if (event.button != 2) {
++          window.openUILink(encodeURI(linkNode.href), event);
++        }
++      });
++      linkNode.addEventListener("keydown", event => {
++        if (event.key == "Enter") {
++          window.openUILink(encodeURI(linkNode.href), event);
++        }
++      });
++    }
++
++    const subjectValue = window.currentHeaderData.subject?.headerValue;
++    const contentBaseData = window.currentHeaderData["content-base"];
++    //spanNode.textContent = doLinkify ? "" : subjectValue;
++    linkNode.textContent = doLinkify ? subjectValue : "";
++    linkNode.href = doLinkify ? (contentBaseData?.headerValue ?? "") : "";
++    doLinkify = Boolean(linkNode.href);
++    spanNode.hidden = doLinkify;
++    linkNode.hidden = !doLinkify;
++
++    let headerEntry = window.gExpandedHeaderView.subject;
++    headerEntry.enclosingBox.classList.toggle("linkified", doLinkify);
++
++    headerEntry = window.gExpandedHeaderView["content-base"];
++    headerEntry.enclosingRow.hidden = doLinkify || !contentBaseData;
++    // Core leaves invalid stale data in the row, though hidden; don't do that.
++    if (!contentBaseData) {
++      window.updateHeaderValue(headerEntry, "");
++    }
++  },
++
+   observe(subject, topic, prefName) {
+     if (topic == "nsPref:changed") {
+       // Must observe the pref that always changes in a render update.
+       if (prefName == "mailnews.display.html_as") {
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -768,8 +768,10 @@ pref("rss.show.summary", 1);
+ // 2 - toggle load summary and content-base url in message pane
+ // 3 - load content-base url in browser
+ pref("rss.show.content-base", 0);
+ 
++pref("rss.linkifySubject", true);
++
+ // Feed message additional web page display.
+ // 0 - no action
+ // 1 - load web page in default browser, on select
+ pref("rss.message.loadWebPageOnSelect", 0);
