@@ -1,8 +1,8 @@
 #!/bin/sh
 MOZILLA_REPO=https://hg.mozilla.org/releases/mozilla-beta/
-MOZILLA_REV=c2561deaa710d71d7555a5c0914f91221a3340bb
+MOZILLA_REV=364c87e7f501fa5ee083e21af912d12a0c205c8a
 COMM_REPO=https://hg.mozilla.org/releases/comm-beta/
-COMM_REV=1cc032b92f9d6877b5dd6f66dd562598adfd44e9
+COMM_REV=3bc3699b84c5238b56c7a425cd90e94db50a456a
 RUST_VER=1.86.0
 MOZ="-moz"
 MOZU="-moz"
