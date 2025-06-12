@@ -122,9 +122,10 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 
 :: New in 140:
 
-%lecho% "menu-view-layout-horizontal =" >> localization\ru\messenger\menubar.ftl
-%lecho% "    .label = Horizontal View"  >> localization\ru\messenger\menubar.ftl
-%lecho% "    .accesskey = z"            >> localization\ru\messenger\menubar.ftl
+%lecho% "menu-view-layout-horizontal =" >> localization\en-GB\messenger\menubar.ftl
+%lecho% "    .label = Horizontal View"  >> localization\en-GB\messenger\menubar.ftl
+%lecho% "    .accesskey = z"            >> localization\en-GB\messenger\menubar.ftl
 
-%lecho% "<!ENTITY storeOnUpdated.label \"Store" '&lt;'"updated"'&gt;' "items\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                               >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd

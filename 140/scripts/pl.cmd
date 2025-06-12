@@ -213,8 +213,10 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "    .label = Horizontal View"  >> localization\pl\messenger\menubar.ftl
 %lecho% "    .accesskey = z"            >> localization\pl\messenger\menubar.ftl
 
-:: Original string:
-:: <!ENTITY storeOnUpdated.label        "Store &lt;updated&gt; items">
-:: <!ENTITY storeOnUpdated.accesskey    "u">
-%lecho% "<!ENTITY storeOnUpdated.label \"Store" '&lt;'"updated"'&gt;' "items\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                               >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
+:: Original strings:
+:: <!ENTITY storeOnUpdated.label     "Store updated articles">
+:: <!ENTITY storeOnUpdated.accesskey "u">
+:: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
+%lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
