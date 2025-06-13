@@ -219,8 +219,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"Guardar artículos actualizados\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.label \"Store an archive of the web page with the article\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Para feeds Atom o JSON con el elemento "'&lt;updated&gt;'". Si el editor cambia el valor, el artículo se guarda en lugar de tratarse como un duplicado.\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"Guardar un archivo de la página web junto con el artículo\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\es-AR\locale\es-AR\messenger-newsblog\feed-subscriptions.dtd

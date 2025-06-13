@@ -219,8 +219,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.label \"Store an archive of the web page with the article\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"Зберігати оновлені статті\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                     >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Для стрічок Atom або JSON з тегом "'&lt;updated&gt;'". Якщо видавець змінює значення, стаття зберігається, а не вважається дублікатом.\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"Зберігати архів вебсторінки разом зі статтею\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd

@@ -219,8 +219,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.label \"Store an archive of the web page with the article\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"Bijgewerkte artikelen opslaan\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"b\">"                         >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Voor Atom- of JSON-feeds met de tag "'&lt;updated&gt;'". Als de uitgever de waarde wijzigt, wordt het artikel opgeslagen in plaats van als duplicaat behandeld.\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"Sla een archief op van de webpagina samen met het artikel\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\nl\locale\nl\messenger-newsblog\feed-subscriptions.dtd

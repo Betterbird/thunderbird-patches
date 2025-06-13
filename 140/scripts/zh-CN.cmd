@@ -219,8 +219,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.label \"Store an archive of the web page with the article\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"存储已更新的文章\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"           >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"适用于带有 "'&lt;updated&gt;'" 标签的 Atom 或 JSON 源。如果发布者更改了该值，则保存文章，而不是将其视为重复。\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"	与文章一起保存网页存档\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
