@@ -129,3 +129,5 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "<!ENTITY storeOnUpdated.label \"Store updated articles\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeOnUpdatedInfo.label \"For Atom or JSON feeds with the "'&lt;updated&gt;'" tag. If the publisher changes the value, store the article instead of treating it as a duplicate.\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"Store an archive of the web page with the article\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\en-GB\locale\en-GB\messenger-newsblog\feed-subscriptions.dtd
