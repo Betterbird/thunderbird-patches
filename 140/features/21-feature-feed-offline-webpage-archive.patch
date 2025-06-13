@@ -1,0 +1,661 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1749844398 -7200
+# Parent  1f2f70b1c6c721895aebcc085052f663d1bb8adf
+Feed enhancements
+- Enable optional store of the feed article web page with the message
+- Bug 308436
+
+Features:
+In Subscribe dialog, if Store an archive of the web page option is set for a feed,
+save the web page, at the time of storing the article, as an attachment to the message.
+The attachment may be detached to file. The pref rss.show.feed-webpage-archive
+may be set as follows to govern display of the
+archived web page whenever viewing the Web Page option is used:
+0 - never (always load the remote Content-Base url)
+1 - when offline or no network only (default)
+2 - always
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -904,8 +904,10 @@ var messageProgressListener = {
+       // Note: for imap parts_on_demand, a small size consisting of the part
+       // headers would have been returned above.
+       last.size = -1;
+       last.sizeResolved = false;
++    } else if (field == "Content-Description" && value) {
++      last.contentDescription = value;
+     }
+   },
+ 
+   onEndAllAttachments() {
+diff --git a/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd b/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd
+--- a/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd
++++ b/mail/locales/en-US/chrome/messenger-newsblog/feed-subscriptions.dtd
+@@ -33,8 +33,11 @@
+ <!ENTITY storeOnUpdated.label        "Store updated articles">
+ <!ENTITY storeOnUpdated.accesskey    "u">
+ <!ENTITY storeOnUpdatedInfo.label    "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
+ 
++<!ENTITY storeWebPageArchive.label   "Store an archive of the web page with the article">
++<!ENTITY storeWebPageArchive.accesskey "w">
++
+ <!ENTITY autotagEnable.label         "Automatically create tags from feed &lt;category&gt; names">
+ <!ENTITY autotagEnable.accesskey     "o">
+ <!ENTITY autotagUsePrefix.label      "Prefix tags with:">
+ <!ENTITY autotagUsePrefix.accesskey  "P">
+diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.sys.mjs
+--- a/mail/modules/AttachmentInfo.sys.mjs
++++ b/mail/modules/AttachmentInfo.sys.mjs
+@@ -609,10 +609,10 @@ export class AttachmentInfo {
+       return true;
+     }
+ 
+     if (this.message && this.message.flags & Ci.nsMsgMessageFlags.FeedMsg) {
+-      // Feed enclosures allow only http.
+-      return /^https?:/i.test(this.url);
++      // Feed enclosures allow http and the webpage archive part - all cases ok.
++      return /^(https?|file|data|mailbox|imap|s?news|ews):/i.test(this.url);
+     }
+ 
+     // Don't allow http for other cases.
+     return /^(file|data|mailbox|imap|s?news|ews):/i.test(this.url);
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -506,8 +506,12 @@ Feed.prototype = {
+     }
+     lazy.FeedUtils.setSubscriptionAttr(this.url, this.server, "link", aNewLink);
+   },
+ 
++  get storeWebPageArchive() {
++    return this.options.updates.storeWebPageArchive;
++  },
++
+   parse() {
+     // Create a feed parser which will parse the feed.
+     let parser = new lazy.FeedParser();
+     this.itemsToStore = parser.parseFeed(
+@@ -643,9 +647,9 @@ Feed.prototype = {
+ 
+   // Gets the next item from itemsToStore and forces that item to be stored
+   // to the folder.  If more items are left to be stored, fires a timer for
+   // the next one, otherwise triggers a download done notification to the UI.
+-  storeNextItem() {
++  async storeNextItem() {
+     if (lazy.FeedUtils.CANCEL_REQUESTED) {
+       lazy.FeedUtils.CANCEL_REQUESTED = false;
+       this.cleanupParsingState(this, lazy.FeedUtils.kNewsBlogCancel);
+       return;
+@@ -664,9 +668,9 @@ Feed.prototype = {
+ 
+     const item = this.itemsToStore[this.itemsToStoreIndex];
+ 
+     item.feed.addLog("groupCollapsed", `storeNextItem: item.id ${item.id}`);
+-    if (item.store()) {
++    if (await item.store()) {
+       this.itemsStored++;
+     }
+     item.feed.addLog("groupEnd", `storeNextItem: item.id ${item.id}`);
+ 
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -152,9 +152,9 @@ FeedItem.prototype = {
+    * Writes the item to the folder as a message and updates the feeditems db.
+    *
+    * @returns {void}
+    */
+-  store() {
++  async store() {
+     // this.title and this.content contain HTML.
+     // this.mUrl and this.contentBase contain plain text.
+ 
+     let stored = false;
+@@ -184,9 +184,9 @@ FeedItem.prototype = {
+       content = content.replace(/%TITLE%/, this.title);
+       content = content.replace(/%BASE%/, this.htmlEscape(this.contentBase));
+       content = content.replace(/%CONTENT%/, this.content);
+       this.content = content;
+-      this.writeToFolder();
++      await this.writeToFolder();
+       this.markStored(resource);
+       stored = true;
+     }
+ 
+@@ -249,9 +249,9 @@ FeedItem.prototype = {
+     }
+     resource.stored = true;
+   },
+ 
+-  writeToFolder() {
++  async writeToFolder() {
+     const location = lazy.FeedUtils.getFolderPrettyPath(
+       this.feed.folder || this.feed.server.rootFolder
+     );
+     // The subject may contain HTML entities.  Convert these to their unencoded
+@@ -315,9 +315,9 @@ FeedItem.prototype = {
+       "Content-Base: " +
+       this.mURL +
+       "\n";
+ 
+-    if (this.enclosures.length) {
++    if (this.enclosures.length || this.feed.storeWebPageArchive) {
+       const boundaryID = source.length;
+       source +=
+         'Content-Type: multipart/mixed; boundary="' +
+         this.ENCLOSURE_HEADER_BOUNDARY_PREFIX +
+@@ -332,8 +332,10 @@ FeedItem.prototype = {
+         "\n" +
+         "Content-Transfer-Encoding: 8bit\n" +
+         this.content;
+ 
++      source += await this.createWebPageArchivePart(boundaryID);
++
+       this.enclosures.forEach(function (enclosure) {
+         source += enclosure.convertToAttachment(boundaryID);
+       });
+ 
+@@ -478,8 +480,67 @@ FeedItem.prototype = {
+       aMsgDBHdr.folder.addKeywordsToMessages([aMsgDBHdr], keys.join(" "));
+     }
+   },
+ 
++  /**
++   * Create an html attachment part if the user wants to archive the web page
++   * with the article.
++   */
++  async createWebPageArchivePart(aBoundaryID) {
++    if (!this.feed.storeWebPageArchive) {
++      return "";
++    }
++
++    const htmlStr = await this.getWebPage();
++    if (!htmlStr) {
++      return "";
++    }
++
++    const doc = new DOMParser().parseFromString(htmlStr, "text/html");
++    const descType = "feed-webpage-archive";
++    const title = doc.title?.trim() || "Web Page Archive";
++    const charSet = doc.characterSet || "";
++    this.feed.addLog(
++      "log",
++      `createWebPageArchivePart: charSet=${charSet}, title=${title}`
++    );
++    const part =
++      "\n" +
++      this.ENCLOSURE_BOUNDARY_PREFIX +
++      aBoundaryID +
++      "\n" +
++      `Content-Type: text/html; charset=${charSet}; size=${htmlStr.length}\n` +
++      `Content-Disposition: attachment; filename*=${charSet}''${title}.html\n` +
++      `Content-Description: ${descType}="${this.url}"\n` +
++      "\n" +
++      htmlStr +
++      "\n";
++
++    return part;
++  },
++
++  /**
++   * Fetch the web page.
++   *
++   * @returns {string}
++   */
++  async getWebPage() {
++    this.feed.addLog("log", `getWebPage: fetch url, ${this.url}`);
++    const response = await fetch(this.url);
++    if (!response.ok) {
++      this.feed.addLog("warn", `getWebPage: error fetching url, ${this.url}`);
++      return null;
++    }
++    if (!/^text\/html/i.test(response.headers.get("Content-Type"))) {
++      this.feed.addLog("warn", `getWebPage: no web page at ${this.url}`);
++      return null;
++    }
++
++    const content = await response.text();
++    this.feed.addLog("log", "getWebPage: content length, " + content.length);
++    return content;
++  },
++
+   htmlEscape(s) {
+     s = s.replace(/&/g, "&amp;");
+     s = s.replace(/>/g, "&gt;");
+     s = s.replace(/</g, "&lt;");
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -1299,9 +1299,9 @@ export var FeedUtils = {
+   /**
+    * This object will contain all persisted feed specific properties.
+    */
+   _optionsDefault: {
+-    version: 4,
++    version: 5,
+     updates: {
+       enabled: true,
+       // User set.
+       updateMinutes: 100,
+@@ -1319,8 +1319,11 @@ export var FeedUtils = {
+       // will be stored and bypass same <id> duplicate prevention exclusion.
+       // The updated item will use Resent-Date and other RFC headers, and will
+       // contain references to thread to the original message <id>.
+       storeOnUpdated: false,
++      // If set, archive the web page for the article as an attachment with the
++      // message. Useful for offline reading.
++      storeWebPageArchive: false,
+     },
+     // Autotag and <category> handling options.
+     category: {
+       enabled: false,
+@@ -2210,10 +2213,4 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
+   return Services.strings.createBundle(
+     "chrome://messenger/locale/messenger.properties"
+   );
+ });
+-
+-ChromeUtils.defineLazyGetter(FeedUtils, "stringsSubFolder", function () {
+-  return Services.strings.createBundle(
+-    "chrome://messenger/locale/imapMsgs.properties"
+-  );
+-});
+diff --git a/mailnews/extensions/newsblog/am-newsblog.js b/mailnews/extensions/newsblog/am-newsblog.js
+--- a/mailnews/extensions/newsblog/am-newsblog.js
++++ b/mailnews/extensions/newsblog/am-newsblog.js
+@@ -37,8 +37,9 @@ function onInit() {
+   gUpdateEnabled = document.getElementById("updateEnabled");
+   gUpdateValue = document.getElementById("updateValue");
+   gBiffUnits = document.getElementById("biffUnits");
+   gStoreOnUpdated = document.getElementById("storeOnUpdated");
++  gStoreWebPageArchive = document.getElementById("storeWebPageArchive");
+   gAutotagEnable = document.getElementById("autotagEnable");
+   gAutotagUsePrefix = document.getElementById("autotagUsePrefix");
+   gAutotagPrefix = document.getElementById("autotagPrefix");
+ 
+@@ -54,8 +55,9 @@ function onInit() {
+   onCheckItem("biffDays", ["updateEnabled"]);
+ 
+   gStoreOnUpdated.checked = false;
+   gStoreOnUpdated.disabled = true;
++  gStoreWebPageArchive.checked = optionsAcct.updates.storeWebPageArchive;
+   gAutotagEnable.checked = optionsAcct.category.enabled;
+   gAutotagUsePrefix.disabled = !gAutotagEnable.checked;
+   gAutotagUsePrefix.checked = optionsAcct.category.prefixEnabled;
+   gAutotagPrefix.disabled =
+@@ -137,8 +139,11 @@ function setPrefs(aNode) {
+       optionsAcct.updates.updateMinutes = Number(minutes);
+       optionsAcct.updates.updateUnits = gBiffUnits.value;
+       break;
+     }
++    case "storeWebPageArchive":
++      optionsAcct.updates.storeWebPageArchive = aNode.checked;
++      break;
+     case "autotagEnable":
+       optionsAcct.category.enabled = aNode.checked;
+       gAutotagUsePrefix.disabled = !aNode.checked;
+       gAutotagPrefix.disabled = !aNode.checked || !gAutotagUsePrefix.checked;
+diff --git a/mailnews/extensions/newsblog/am-newsblog.xhtml b/mailnews/extensions/newsblog/am-newsblog.xhtml
+--- a/mailnews/extensions/newsblog/am-newsblog.xhtml
++++ b/mailnews/extensions/newsblog/am-newsblog.xhtml
+@@ -197,8 +197,15 @@
+             </html:span>
+           </hbox>
+ 
+           <checkbox
++            id="storeWebPageArchive"
++            accesskey="&storeWebPageArchive.accesskey;"
++            label="&storeWebPageArchive.label;"
++            oncommand="setPrefs(this)"
++          />
++
++          <checkbox
+             id="autotagEnable"
+             accesskey="&autotagEnable.accesskey;"
+             label="&autotagEnable.label;"
+             oncommand="setPrefs(this)"
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -1205,8 +1205,12 @@ var FeedSubscriptions = {
+     // folder/server rows even when adding a feed).
+     storeOnUpdated.disabled =
+       aItem.feedType != "ATOM_IETF" && !aItem.feedType?.startsWith("JSON");
+ 
++    // Store web page archive.
++    const storeWebPageArchive = document.getElementById("storeWebPageArchive");
++    storeWebPageArchive.checked = updates.storeWebPageArchive;
++
+     // Autotag items.
+     const autotagEnable = document.getElementById("autotagEnable");
+     const autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     const autotagPrefix = document.getElementById("autotagPrefix");
+@@ -1446,8 +1450,11 @@ var FeedSubscriptions = {
+       }
+       case "storeOnUpdated":
+         item.options.updates.storeOnUpdated = aNode.checked;
+         break;
++      case "storeWebPageArchive":
++        item.options.updates.storeWebPageArchive = aNode.checked;
++        break;
+       case "autotagEnable":
+         item.options.category.enabled = aNode.checked;
+         break;
+       case "autotagUsePrefix":
+@@ -1627,8 +1634,9 @@ var FeedSubscriptions = {
+     const locationValue = document.getElementById("locationValue");
+     const updateEnabled = document.getElementById("updateEnabled");
+     const updateBox = document.getElementById("updateBox");
+     const quickMode = document.getElementById("quickMode");
++    const storeWebPageArchive = document.getElementById("storeWebPageArchive");
+     const autotagEnable = document.getElementById("autotagEnable");
+     const autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     const autotagPrefix = document.getElementById("autotagPrefix");
+ 
+@@ -1641,8 +1649,9 @@ var FeedSubscriptions = {
+ 
+     // Enabled by default.
+     updateEnabled.disabled =
+       quickMode.disabled =
++      storeWebPageArchive.disabled =
+       autotagEnable.disabled =
+         false;
+     updateBox.disabled = !updateEnabled.checked;
+     autotagUsePrefix.disabled = !autotagEnable.checked;
+@@ -1664,8 +1673,9 @@ var FeedSubscriptions = {
+         disable && !FeedUtils.getFeedUrlsInFolder(item.folder);
+       // All other options disabled unless intent is to add a feed.
+       updateEnabled.disabled = disable;
+       updateBox.disabled = disable || !updateEnabled.checked;
++      storeWebPageArchive.disabled = disable;
+       autotagEnable.disabled = disable;
+ 
+       addFeedButton.disabled =
+         addFeedButton != focusedElement &&
+@@ -1926,8 +1936,11 @@ var FeedSubscriptions = {
+       options.updates.updateMinutes = Number(minutes);
+       // We don't know if it's an ATOM or JSON feed yet, so don't set this.
+       // options.updates.storeOnUpdated =
+       //   document.getElementById("storeOnUpdated").checked;
++      options.updates.storeWebPageArchive = document.getElementById(
++        "storeWebPageArchive"
++      ).checked;
+       options.category.enabled =
+         document.getElementById("autotagEnable").checked;
+       options.category.prefixEnabled =
+         document.getElementById("autotagUsePrefix").checked;
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.xhtml b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+--- a/mailnews/extensions/newsblog/feed-subscriptions.xhtml
++++ b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+@@ -272,8 +272,22 @@
+               </html:span>
+             </html:div>
+ 
+             <html:div>
++              <html:label
++                id="storeWebPageArchiveLabel"
++                for="storeWebPageArchive"
++              >
++                <html:input
++                  id="storeWebPageArchive"
++                  type="checkbox"
++                  onclick="FeedSubscriptions.setPrefs(this);"
++                />
++                &storeWebPageArchive.label;
++              </html:label>
++            </html:div>
++
++            <html:div>
+               <html:label for="autotagEnable">
+                 <html:input
+                   id="autotagEnable"
+                   type="checkbox"
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -42,8 +42,11 @@ var FeedMessageHandler = {
+   kOpenWebPage: 0,
+   kOpenSummary: 1,
+   kOpenToggleInMessagePane: 2,
+   kOpenLoadInBrowser: 3,
++  kShowWebPageArchiveNever: 0,
++  kShowWebPageArchiveOffline: 1,
++  kShowWebPageArchiveAlways: 2,
+ 
+   FeedAccountTypes: ["rss"],
+ 
+   /**
+@@ -74,27 +77,35 @@ var FeedMessageHandler = {
+   set onOpenPref(val) {
+     Services.prefs.setIntPref("rss.show.content-base", val);
+   },
+ 
++  get showWebPageArchivePref() {
++    return Services.prefs.getIntPref("rss.show.feed-webpage-archive");
++  },
++
+   messageListener: {
+     onStartHeaders() {
+       FeedMessageHandler.setShowSummary(gMessage, false);
+     },
+     onEndHeaders() {
+       if (FeedMessageHandler.isLegacyFeedMsg()) {
+         FeedMessageHandler.setLoadingState(true);
+       }
+-      // Load feed web page if so configured. This entry point works for
+-      // messagepane loads in 3pane folder tab, 3pane message tab, and the
+-      // standalone message window.
+-      if (!FeedMessageHandler.gShowFeedSummary) {
+-        FeedMessageHandler.setContent(gMessage);
+-      } else {
++      if (FeedMessageHandler.gShowFeedSummary) {
+         FeedMessageHandler.setLoadingState(false);
+       }
+ 
+       FeedMessageHandler.linkifySubject();
+     },
++    onEndAttachments() {
++      // Load feed web page if so configured. This entry point works for
++      // messagepane loads in 3pane folder tab, 3pane message tab, and the
++      // standalone message window.
++      // Wait for attachments, to load web page archive if necessary.
++      if (!FeedMessageHandler.gShowFeedSummary) {
++        FeedMessageHandler.setContent(gMessage);
++      }
++    },
+   },
+ 
+   progressListener: {
+     visibilityHidden: false,
+@@ -107,10 +118,10 @@ var FeedMessageHandler = {
+         request.QueryInterface(Ci.nsIChannel);
+         location = request?.URI?.spec;
+       } catch (ex) {}
+ 
+-      // Only web page loads need messagepane to be made visible again.
+-      if (!location?.startsWith("http")) {
++      // Only web page and file loads need messagepane to be made visible again.
++      if (!location?.match(/^(https?|file):\/\//)) {
+         return;
+       }
+ 
+       if (
+@@ -546,24 +557,24 @@ var FeedMessageHandler = {
+    *                               'messagepane', 'browser', 'tab', 'window'.
+    * @returns {void}
+    */
+   async loadWebPage(msgHdr, where) {
+-    const contentBase = await FeedMessageHandler.getContentBaseHeader(msgHdr);
+-    if (contentBase && contentBase.match(/^https?:\/\//)) {
++    const url = await FeedMessageHandler.getUrlForWebPageDisplay(msgHdr);
++    if (url?.match(/^(https?|file):\/\//)) {
+       if (where.browser) {
+-        openLinkExternally(Services.io.newURI(contentBase), {
++        openLinkExternally(Services.io.newURI(url), {
+           addToHistory: false,
+         });
+       } else if (where.messagepane) {
+         // Load about:blank in the browser before (potentially) switching
+         // to a remote process. This prevents sandbox flags being carried
+         // over to the web document.
+         MailE10SUtils.loadAboutBlank(this.browser);
+-        MailE10SUtils.loadURI(this.browser, contentBase);
++        MailE10SUtils.loadURI(this.browser, url);
+       } else if (where.tab) {
+-        openContentTab(contentBase, "tab", null);
++        openContentTab(url, "tab", null);
+       } else if (where.window) {
+-        openContentTab(contentBase, "window", null);
++        openContentTab(url, "window", null);
+       }
+     } else {
+       // If no valid Content-Base, we are showing summary; update correct state.
+       FeedMessageHandler.gShowFeedSummary = true;
+@@ -600,8 +611,74 @@ var FeedMessageHandler = {
+     }
+   },
+ 
+   /**
++   * To display web page content, return either the Content-Base url or web page
++   * archive content in the message attachment, as a tempFile url of the part or
++   * its detached local file url.
++   *
++   * @param {nsIMsgDBHdr} msgHdr - The message.
++   * @returns {string|null} - The Content-Base valid url or local file or null.
++   */
++  async getUrlForWebPageDisplay(msgHdr) {
++    // First, see if there's a web page archive attachment for this message.
++    const archiveAttachment = window.currentAttachments?.filter(
++      a => a.contentDescription
++    )[0];
++
++    const descType = "feed-webpage-archive";
++    if (archiveAttachment?.contentDescription.includes(descType)) {
++      const url = archiveAttachment.contentDescription
++        .split(descType)[1]
++        .split('"')[1];
++      FeedUtils.log.log(`getUrlForWebPageDisplay: got ${descType} url, ${url}`);
++
++      if (this.showWebPageArchivePref == this.kShowWebPageArchiveNever) {
++        return url;
++      }
++      if (
++        !Services.io.offline &&
++        Services.io.connectivity &&
++        this.showWebPageArchivePref == this.kShowWebPageArchiveOffline
++      ) {
++        return url;
++      }
++      // If the part has been detached, use the file url.
++      if (archiveAttachment.isExternalAttachment) {
++        await archiveAttachment.isEmpty();
++        if (archiveAttachment.size > 0) {
++          FeedUtils.log.log(
++            `getUrlForWebPageDisplay: use ${descType} detached url ${decodeURIComponent(archiveAttachment.url)}`
++          );
++          return archiveAttachment.url;
++        }
++        FeedUtils.log.log(
++          `getUrlForWebPageDisplay: use ${descType} url; detached url not found ${decodeURIComponent(archiveAttachment.url)}`
++        );
++        return url;
++      }
++      // Now, we want to create and return a temp file url with the web page
++      // archive.
++      const fileName = window.DownloadPaths.sanitize(archiveAttachment.name);
++      const tmpFile = new window.FileUtils.File(
++        PathUtils.join(PathUtils.tempDir, fileName)
++      );
++      await archiveAttachment.saveToFile(tmpFile.path, true);
++      const fileUrl = window.makeFileURI(tmpFile);
++      Cc["@mozilla.org/uriloader/external-helper-app-service;1"]
++        .getService(Ci.nsPIExternalAppLauncher)
++        .deleteTemporaryFileOnExit(tmpFile);
++      FeedUtils.log.log(
++        `getUrlForWebPageDisplay: use ${descType} tmpFile url ${decodeURIComponent(fileUrl.spec)}`
++      );
++      return fileUrl.spec;
++    }
++
++    const contentBase = await FeedMessageHandler.getContentBaseHeader(msgHdr);
++    return contentBase;
++  },
++
++  /**
+    * Use MsgHdrToMimeMessage() to get the Content-Base header url from the
+    * message.
+    *
+    * @param {nsIMsgDBHdr} msgHdr - The message.
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -760,8 +760,15 @@ pref("mailnews.display.disallow_mime_han
+ // 1 - global override, load summary
+ // 2 - use default feed folder setting from Subscribe dialog; if no setting default to 1
+ pref("rss.show.summary", 1);
+ 
++// Feed message display for web page, if user has set storeWebPageArchive
++// option for the feed.
++// 0 - never (always load the remote Content-Base url)
++// 1 - when offline or no network only
++// 2 - always
++pref("rss.show.feed-webpage-archive", 1);
++
+ // Feed message display (summary or web page), on open.
+ // Action on double click or enter in threadpane for a feed message.
+ // 0 - open content-base url in new window
+ // 1 - open summary in new window
+diff --git a/mailnews/mime/src/mimemoz2.cpp b/mailnews/mime/src/mimemoz2.cpp
+--- a/mailnews/mime/src/mimemoz2.cpp
++++ b/mailnews/mime/src/mimemoz2.cpp
+@@ -697,15 +697,15 @@ extern "C" void NotifyEmittersOfAttachme
+     mimeEmitterAddAttachmentField(opt, HEADER_X_MOZILLA_PART_SIZE,
+                                   sizeStr.get());
+     mimeEmitterAddAttachmentField(opt, HEADER_X_MOZILLA_PART_DOWNLOADED,
+                                   downloadedStr.get());
++    mimeEmitterAddAttachmentField(opt, HEADER_CONTENT_DESCRIPTION,
++                                  tmp->m_description.get());
+ 
+     if ((opt->format_out == nsMimeOutput::nsMimeMessageQuoting) ||
+         (opt->format_out == nsMimeOutput::nsMimeMessageBodyQuoting) ||
+         (opt->format_out == nsMimeOutput::nsMimeMessageSaveAs) ||
+         (opt->format_out == nsMimeOutput::nsMimeMessagePrintOutput)) {
+-      mimeEmitterAddAttachmentField(opt, HEADER_CONTENT_DESCRIPTION,
+-                                    tmp->m_description.get());
+       mimeEmitterAddAttachmentField(opt, HEADER_CONTENT_TYPE,
+                                     tmp->m_realType.get());
+       mimeEmitterAddAttachmentField(opt, HEADER_CONTENT_ENCODING,
+                                     tmp->m_realEncoding.get());
+diff --git a/mailnews/mime/src/mimemult.cpp b/mailnews/mime/src/mimemult.cpp
+--- a/mailnews/mime/src/mimemult.cpp
++++ b/mailnews/mime/src/mimemult.cpp
+@@ -230,11 +230,21 @@ static int MimeMultipart_parse_line(cons
+                 MimeWriteAString(obj, nsDependentCString(contentType));
+                 PR_Free(contentType);
+               }
+               MimeWriteAString(obj, nsLiteralCString(MSG_LINEBREAK));
+-              MimeWriteAString(obj, "Content-Disposition: attachment; filename=\""_ns);
++              // RFC 5987, section 3.2. Charset is a MUST though this part is
++              // internal and filename is handled without.
++              MimeWriteAString(obj, "Content-Disposition: attachment; filename*=UTF-8''"_ns);
+               MimeWriteAString(obj, fileName);
+-              MimeWriteAString(obj, "\""_ns MSG_LINEBREAK);
++              MimeWriteAString(obj, nsLiteralCString(MSG_LINEBREAK));
++              char *contentDescription =
++                  MimeHeaders_get(mult->hdrs, "Content-Description", false, false);
++              if (contentDescription) {
++                MimeWriteAString(obj, "Content-Description: "_ns);
++                MimeWriteAString(obj, nsDependentCString(contentDescription));
++                PR_Free(contentDescription);
++              }
++              MimeWriteAString(obj, nsLiteralCString(MSG_LINEBREAK));
+               MimeWriteAString(obj, "X-Mozilla-External-Attachment-URL: "_ns);
+               MimeWriteAString(obj, obj->options->state->detachedFilePath);
+               MimeWriteAString(obj, nsLiteralCString(MSG_LINEBREAK));
+               MimeWriteAString(obj, "X-Mozilla-Altered: AttachmentDetached; date=\""_ns);
