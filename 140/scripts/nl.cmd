@@ -209,9 +209,9 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: menu-view-layout-horizontal =
 ::    .label = Horizontal View
 ::    .accesskey = z
-%lecho% "menu-view-layout-horizontal =" >> localization\nl\messenger\menubar.ftl
-%lecho% "    .label = Horizontal View"  >> localization\nl\messenger\menubar.ftl
-%lecho% "    .accesskey = z"            >> localization\nl\messenger\menubar.ftl
+%lecho% "menu-view-layout-horizontal ="  >> localization\nl\messenger\menubar.ftl
+%lecho% "    .label = Horizontaal bleed" >> localization\nl\messenger\menubar.ftl
+%lecho% "    .accesskey = z"             >> localization\nl\messenger\menubar.ftl
 
 :: Original strings:
 :: <!ENTITY storeOnUpdated.label     "Store updated articles">

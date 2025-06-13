@@ -210,7 +210,7 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 ::    .label = Horizontal View
 ::    .accesskey = z
 %lecho% "menu-view-layout-horizontal =" >> localization\pl\messenger\menubar.ftl
-%lecho% "    .label = Horizontal View"  >> localization\pl\messenger\menubar.ftl
+%lecho% "    .label = Poziomy"          >> localization\pl\messenger\menubar.ftl
 %lecho% "    .accesskey = z"            >> localization\pl\messenger\menubar.ftl
 
 :: Original strings:
