@@ -219,8 +219,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"更新された記事を保存\">" >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"             >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \""'&lt;updated&gt;'" タグを含む Atom または JSON フィードに対応。発行者が値を変更した場合は、重複ではなく新しい記事として保存します。\">" >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"更新された記事を保存する\">" >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \""'&lt;updated&gt;'" タグを含む Atom または JSON フィードに対応します。発信元が値を変更した場合は、重複ではなく新しい記事として保存します。\">" >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.label \"記事と一緒にウェブページのアーカイブを保存する\">" >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\ja\locale\ja\messenger-newsblog\feed-subscriptions.dtd
