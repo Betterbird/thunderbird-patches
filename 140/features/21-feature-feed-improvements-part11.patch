@@ -1,6 +1,6 @@
 # HG changeset patch
 # User alta88@fixall.com
-# Date 1749924081 -7200
+# Date 1749940171 -7200
 # Parent  f8d270cd62b1d5898fa221a6fe590b9af41045ba
 Feed enhancements
 - Bug 1871741 - Use "published" before "updated" for atom feeds date.
@@ -108,6 +108,20 @@ diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/new
    server: null,
    downloadCallback: null,
    resource: null,
+@@ -479,8 +481,13 @@ Feed.prototype = {
+     }
+     lazy.FeedUtils.setSubscriptionAttr(this.url, this.server, "link", aNewLink);
+   },
+ 
++  get updatedTagValid() {
++    // The <updated> tag is only in the ATOM spec.
++    return this.feedType == "ATOM_IETF";
++  },
++
+   parse() {
+     // Create a feed parser which will parse the feed.
+     let parser = new lazy.FeedParser();
+     this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
 diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
 --- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
 +++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
@@ -490,7 +504,21 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
      return lazy.jsmime.headeremitter
        .emitStructuredHeader("Date", d, {})
        .substring(6)
-@@ -2169,8 +2176,14 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
+@@ -1914,8 +1921,13 @@ export var FeedUtils = {
+       let logLevel = "log";
+       if (this.mSubscribeMode) {
+         if (aErrorCode == FeedUtils.kNewsBlogSuccess) {
+           FeedUtils.setStatus(feed.folder, feed.folder.URI, "code", "");
++          if (!feed.updatedTagValid) {
++            const options = feed.options;
++            options.updates.storeOnUpdated = false;
++            feed.options = options;
++          }
+           // Add the feed to the databases.
+           FeedUtils.addFeed(feed);
+ 
+           // Nice touch: notify so the window ca select the folder that now
+@@ -2169,8 +2181,14 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
      "chrome://messenger/locale/prefs.properties"
    );
  });
@@ -505,10 +533,92 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
    return Services.strings.createBundle(
      "chrome://branding/locale/brand.properties"
    );
+diff --git a/mailnews/extensions/newsblog/am-newsblog.js b/mailnews/extensions/newsblog/am-newsblog.js
+--- a/mailnews/extensions/newsblog/am-newsblog.js
++++ b/mailnews/extensions/newsblog/am-newsblog.js
+@@ -15,8 +15,9 @@ ChromeUtils.defineESModuleGetters(this, 
+ var gAccount,
+   gUpdateEnabled,
+   gUpdateValue,
+   gBiffUnits,
++  gStoreOnUpdated,
+   gAutotagEnable,
+   gAutotagUsePrefix,
+   gAutotagPrefix;
+ var AMUtils;
+@@ -36,8 +37,9 @@ function onInit() {
+ 
+   gUpdateEnabled = document.getElementById("updateEnabled");
+   gUpdateValue = document.getElementById("updateValue");
+   gBiffUnits = document.getElementById("biffUnits");
++  gStoreOnUpdated = document.getElementById("storeOnUpdated");
+   gAutotagEnable = document.getElementById("autotagEnable");
+   gAutotagUsePrefix = document.getElementById("autotagUsePrefix");
+   gAutotagPrefix = document.getElementById("autotagPrefix");
+ 
+@@ -51,8 +53,9 @@ function onInit() {
+   onCheckItem("updateValue", ["updateEnabled"]);
+   onCheckItem("biffMinutes", ["updateEnabled"]);
+   onCheckItem("biffDays", ["updateEnabled"]);
+ 
++  gStoreOnUpdated.checked = optionsAcct.updates.storeWebPageArchive;
+   gAutotagEnable.checked = optionsAcct.category.enabled;
+   gAutotagUsePrefix.disabled = !gAutotagEnable.checked;
+   gAutotagUsePrefix.checked = optionsAcct.category.prefixEnabled;
+   gAutotagPrefix.disabled =
+@@ -120,8 +123,11 @@ function setPrefs(aNode) {
+       optionsAcct.updates.updateMinutes = Number(minutes);
+       optionsAcct.updates.updateUnits = gBiffUnits.value;
+       break;
+     }
++    case "storeOnUpdated":
++      optionsAcct.updates.storeOnUpdated = aNode.checked;
++      break;
+     case "autotagEnable":
+       optionsAcct.category.enabled = aNode.checked;
+       gAutotagUsePrefix.disabled = !aNode.checked;
+       gAutotagPrefix.disabled = !aNode.checked || !gAutotagUsePrefix.checked;
+diff --git a/mailnews/extensions/newsblog/am-newsblog.xhtml b/mailnews/extensions/newsblog/am-newsblog.xhtml
+--- a/mailnews/extensions/newsblog/am-newsblog.xhtml
++++ b/mailnews/extensions/newsblog/am-newsblog.xhtml
+@@ -175,8 +175,23 @@
+             prefattribute="value"
+             prefstring="mail.server.%serverkey%.quickMode"
+           />
+ 
++          <hbox>
++            <checkbox
++              id="storeOnUpdated"
++              accesskey="&storeOnUpdated.accesskey;"
++              label="&storeOnUpdated.label;"
++              oncommand="setPrefs(this)"
++            />
++            <html:span
++              class="icon-info"
++              title="&storeOnUpdatedInfo.label;"
++              style="margin-inline: 3px;"
++            >
++            </html:span>
++          </hbox>
++
+           <checkbox
+             id="autotagEnable"
+             accesskey="&autotagEnable.accesskey;"
+             label="&autotagEnable.label;"
 diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
 --- a/mailnews/extensions/newsblog/feed-subscriptions.js
 +++ b/mailnews/extensions/newsblog/feed-subscriptions.js
-@@ -1190,8 +1190,15 @@ var FeedSubscriptions = {
+@@ -826,8 +826,9 @@ var FeedSubscriptions = {
+       parentFolder: aFolder,
+       name: aFeed.title || aFeed.description || aFeed.url,
+       url: aFeed.url,
+       feedType: aFeed.feedType,
++      updatedTagValid: aFeed.updatedTagValid,
+       quickMode: aFeed.quickMode,
+       options: aFeed.options || FeedUtils.optionsTemplate,
+       level: aLevel,
+       open: false,
+@@ -1190,8 +1191,14 @@ var FeedSubscriptions = {
      const hideRec = !recommendedUnitsVal.textContent;
      recommendedUnits.hidden = hideRec;
      recommendedUnitsVal.hidden = hideRec;
@@ -516,9 +626,8 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
 +    // Store on update.
 +    const storeOnUpdated = document.getElementById("storeOnUpdated");
 +    storeOnUpdated.checked = updates.storeOnUpdated;
-+    // Only enable this option for existing ATOM feeds (not on
-+    // folder/server rows even when adding a feed).
-+    storeOnUpdated.disabled = aItem.feedType != "ATOM_IETF";
++    // Only enable this option for existing feedTypes with <updated> tags spec.
++    storeOnUpdated.disabled = isFeed && !aItem.updatedTagValid;
 +
      // Autotag items.
      const autotagEnable = document.getElementById("autotagEnable");
@@ -536,7 +645,27 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
          item.options.category.enabled = aNode.checked;
          break;
        case "autotagUsePrefix":
-@@ -1905,8 +1915,11 @@ var FeedSubscriptions = {
+@@ -1609,8 +1619,9 @@ var FeedSubscriptions = {
+     const locationValue = document.getElementById("locationValue");
+     const updateEnabled = document.getElementById("updateEnabled");
+     const updateBox = document.getElementById("updateBox");
+     const quickMode = document.getElementById("quickMode");
++    const storeOnUpdated = document.getElementById("storeOnUpdated");
+     const autotagEnable = document.getElementById("autotagEnable");
+     const autotagUsePrefix = document.getElementById("autotagUsePrefix");
+     const autotagPrefix = document.getElementById("autotagPrefix");
+ 
+@@ -1644,8 +1655,9 @@ var FeedSubscriptions = {
+       // Summary is enabled for a folder with feeds or if adding a feed.
+       quickMode.disabled =
+         disable && !FeedUtils.getFeedUrlsInFolder(item.folder);
+       // All other options disabled unless intent is to add a feed.
++      storeOnUpdated.disabled = disable;
+       updateEnabled.disabled = disable;
+       updateBox.disabled = disable || !updateEnabled.checked;
+       autotagEnable.disabled = disable;
+ 
+@@ -1905,8 +1917,11 @@ var FeedSubscriptions = {
        const minutes =
          biffUnits == FeedUtils.kBiffUnitsMinutes ? units : units * 24 * 60;
        options.updates.updateUnits = biffUnits;
@@ -548,6 +677,18 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
          document.getElementById("autotagEnable").checked;
        options.category.prefixEnabled =
          document.getElementById("autotagUsePrefix").checked;
+@@ -2328,8 +2343,11 @@ var FeedSubscriptions = {
+           }
+ 
+           const options = feed.options;
+           options.updates.lastUpdateTime = Date.now();
++          if (!feed.updatedTagValid) {
++            options.updates.storeOnUpdated = false;
++          }
+           feed.options = options;
+         }
+ 
+         // Add the feed to the databases.
 diff --git a/mailnews/extensions/newsblog/feed-subscriptions.xhtml b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
 --- a/mailnews/extensions/newsblog/feed-subscriptions.xhtml
 +++ b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
