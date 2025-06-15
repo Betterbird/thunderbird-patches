@@ -221,6 +221,6 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeWebPageArchive.accesskey "w">
 %lecho% "<!ENTITY storeOnUpdated.label \"Armazenar artigos atualizados\">" >> chrome\pt-BR\locale\pt-BR\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                  >> chrome\pt-BR\locale\pt-BR\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Para feeds Atom ou JSON com a tag "'&lt;updated&gt;'". Se o publicador alterar o valor, o artigo será armazenado em vez de tratado como duplicado.\">" >> chrome\pt-BR\locale\pt-BR\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Para canais de informações Atom ou JSON com a tag "'&lt;updated&gt;'". Se o editor alterar o valor, armazena o artigo em vez de tratá-lo como duplicado.\">" >> chrome\pt-BR\locale\pt-BR\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.label \"Armazenar um arquivo da página web com o artigo\">" >> chrome\pt-BR\locale\pt-BR\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\pt-BR\locale\pt-BR\messenger-newsblog\feed-subscriptions.dtd
