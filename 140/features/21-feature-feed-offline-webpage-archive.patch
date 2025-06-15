@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
-# Date 1749844398 -7200
-# Parent  1f2f70b1c6c721895aebcc085052f663d1bb8adf
+# Date 1750012349 -7200
+# Parent  db9618f7c55f9127fedb12ea56dc591300a8c316
 Feed enhancements
 - Enable optional store of the feed article web page with the message
 - Bug 308436
@@ -68,9 +68,9 @@ diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.s
 diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
 --- a/mailnews/extensions/newsblog/Feed.sys.mjs
 +++ b/mailnews/extensions/newsblog/Feed.sys.mjs
-@@ -506,8 +506,12 @@ Feed.prototype = {
-     }
-     lazy.FeedUtils.setSubscriptionAttr(this.url, this.server, "link", aNewLink);
+@@ -511,8 +511,12 @@ Feed.prototype = {
+     // The <updated> tag is only in the ATOM or JSON spec.
+     return this.feedType == "ATOM_IETF" || this.feedType?.startsWith("JSON");
    },
  
 +  get storeWebPageArchive() {
@@ -81,7 +81,7 @@ diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/new
      // Create a feed parser which will parse the feed.
      let parser = new lazy.FeedParser();
      this.itemsToStore = parser.parseFeed(
-@@ -643,9 +647,9 @@ Feed.prototype = {
+@@ -648,9 +652,9 @@ Feed.prototype = {
  
    // Gets the next item from itemsToStore and forces that item to be stored
    // to the folder.  If more items are left to be stored, fires a timer for
@@ -92,7 +92,7 @@ diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/new
        lazy.FeedUtils.CANCEL_REQUESTED = false;
        this.cleanupParsingState(this, lazy.FeedUtils.kNewsBlogCancel);
        return;
-@@ -664,9 +668,9 @@ Feed.prototype = {
+@@ -669,9 +673,9 @@ Feed.prototype = {
  
      const item = this.itemsToStore[this.itemsToStoreIndex];
  
@@ -106,7 +106,27 @@ diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/new
 diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
 --- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
 +++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
-@@ -152,9 +152,9 @@ FeedItem.prototype = {
+@@ -7,15 +7,19 @@ import { MailServices } from "resource:/
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
++  ReaderMode: "moz-src:///toolkit/components/reader/ReaderMode.sys.mjs",
+ });
+ 
+ export function FeedItem() {
+   this.mDate = lazy.FeedUtils.getValidRFC5322Date();
+   this.mParserUtils = Cc["@mozilla.org/parserutils;1"].getService(
+     Ci.nsIParserUtils
+   );
++  this.mCharsetConv = Cc["@mozilla.org/charset-converter-manager;1"].getService(
++    Ci.nsICharsetConverterManager
++  );
+ }
+ 
+ FeedItem.prototype = {
+   // Only for IETF Atom.
+@@ -152,9 +156,9 @@ FeedItem.prototype = {
     * Writes the item to the folder as a message and updates the feeditems db.
     *
     * @returns {void}
@@ -117,7 +137,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
      // this.mUrl and this.contentBase contain plain text.
  
      let stored = false;
-@@ -184,9 +184,9 @@ FeedItem.prototype = {
+@@ -184,9 +188,9 @@ FeedItem.prototype = {
        content = content.replace(/%TITLE%/, this.title);
        content = content.replace(/%BASE%/, this.htmlEscape(this.contentBase));
        content = content.replace(/%CONTENT%/, this.content);
@@ -128,7 +148,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
        stored = true;
      }
  
-@@ -249,9 +249,9 @@ FeedItem.prototype = {
+@@ -249,9 +253,9 @@ FeedItem.prototype = {
      }
      resource.stored = true;
    },
@@ -139,7 +159,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
        this.feed.folder || this.feed.server.rootFolder
      );
      // The subject may contain HTML entities.  Convert these to their unencoded
-@@ -315,9 +315,9 @@ FeedItem.prototype = {
+@@ -315,9 +319,9 @@ FeedItem.prototype = {
        "Content-Base: " +
        this.mURL +
        "\n";
@@ -150,7 +170,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
        source +=
          'Content-Type: multipart/mixed; boundary="' +
          this.ENCLOSURE_HEADER_BOUNDARY_PREFIX +
-@@ -332,8 +332,10 @@ FeedItem.prototype = {
+@@ -332,8 +336,10 @@ FeedItem.prototype = {
          "\n" +
          "Content-Transfer-Encoding: 8bit\n" +
          this.content;
@@ -161,7 +181,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
          source += enclosure.convertToAttachment(boundaryID);
        });
  
-@@ -478,8 +480,67 @@ FeedItem.prototype = {
+@@ -478,8 +484,98 @@ FeedItem.prototype = {
        aMsgDBHdr.folder.addKeywordsToMessages([aMsgDBHdr], keys.join(" "));
      }
    },
@@ -175,54 +195,85 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +      return "";
 +    }
 +
-+    const htmlStr = await this.getWebPage();
-+    if (!htmlStr) {
++    // Reader hardcodes charset. The fontLang for UTF-8 is x-unicode in prefs.
++    const charSet = "UTF-8";
++    let fontLang = "x-unicode";
++    try {
++      fontLang = this.mCharsetConv.getCharsetLangGroup(charSet);
++    } catch (exception) {}
++    const descType = "feed-webpage-archive";
++    const name = "Web Page Archive";
++
++    const article = await lazy.ReaderMode.downloadAndParseDocument(
++      this.url
++    ).catch(exception => {
++      this.feed.addLog(
++        "warn",
++        `createWebPageArchivePart: error parsing document: ", ${exception}`
++      );
++      return "";
++    });
++    if (!article.content) {
++      this.feed.addLog(
++        "warn",
++        `createWebPageArchivePart: could not get reader doc for url, ${this.url}`
++      );
 +      return "";
 +    }
 +
-+    const doc = new DOMParser().parseFromString(htmlStr, "text/html");
-+    const descType = "feed-webpage-archive";
-+    const title = doc.title?.trim() || "Web Page Archive";
-+    const charSet = doc.characterSet || "";
++    const title = article.title || name;
++    const lang = article.lang || "";
++
++    const ARCHIVE_TEMPLATE =
++      `<!DOCTYPE html>\n` +
++      `<html>\n` +
++      `  <head>\n` +
++      `    <title>${title}</title>\n` +
++      `    <meta content="text/html; charset=${charSet}" http-equiv="content-type"/>\n` +
++      `    <meta name="viewport" content="width=device-width; user-scalable=0" />\n` +
++      `  </head>\n` +
++      `  <body>\n` +
++      `    <div class="container">\n` +
++      `      <div class="content moz-text-html" lang="${fontLang}"></div>\n` +
++      `    </div>\n` +
++      `  </body>\n` +
++      `</html>\n`;
++
++    const doc = new DOMParser().parseFromString(ARCHIVE_TEMPLATE, "text/html");
++    const contentElement = doc.querySelector(".content");
++    const contentFragment = this.mParserUtils.parseFragment(
++      article.content,
++      Ci.nsIParserUtils.SanitizerDropForms |
++        Ci.nsIParserUtils.SanitizerAllowStyle,
++      false,
++      null,
++      contentElement
++    );
++    contentElement.appendChild(contentFragment);
++    const htmlStr = new XMLSerializer().serializeToString(doc);
++
 +    this.feed.addLog(
 +      "log",
-+      `createWebPageArchivePart: charSet=${charSet}, title=${title}`
++      `createWebPageArchivePart: charSet=${charSet}, lang=${lang}, ` +
++        `fontLang=${fontLang}, size=${htmlStr.length}, title=${title}`
 +    );
 +    const part =
 +      "\n" +
 +      this.ENCLOSURE_BOUNDARY_PREFIX +
 +      aBoundaryID +
 +      "\n" +
-+      `Content-Type: text/html; charset=${charSet}; size=${htmlStr.length}\n` +
-+      `Content-Disposition: attachment; filename*=${charSet}''${title}.html\n` +
-+      `Content-Description: ${descType}="${this.url}"\n` +
++      `Content-Type: text/html;` +
++      ` charset=${charSet};` +
++      ` size=${htmlStr.length}\n` +
++      `Content-Disposition: attachment;` +
++      ` filename*=${charSet}'${lang}'${title}.html\n` +
++      `Content-Description: name="${name}";` +
++      ` ${descType}="${this.url}"\n` +
 +      "\n" +
 +      htmlStr +
 +      "\n";
 +
 +    return part;
-+  },
-+
-+  /**
-+   * Fetch the web page.
-+   *
-+   * @returns {string}
-+   */
-+  async getWebPage() {
-+    this.feed.addLog("log", `getWebPage: fetch url, ${this.url}`);
-+    const response = await fetch(this.url);
-+    if (!response.ok) {
-+      this.feed.addLog("warn", `getWebPage: error fetching url, ${this.url}`);
-+      return null;
-+    }
-+    if (!/^text\/html/i.test(response.headers.get("Content-Type"))) {
-+      this.feed.addLog("warn", `getWebPage: no web page at ${this.url}`);
-+      return null;
-+    }
-+
-+    const content = await response.text();
-+    this.feed.addLog("log", "getWebPage: content length, " + content.length);
-+    return content;
 +  },
 +
    htmlEscape(s) {
@@ -255,7 +306,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
      // Autotag and <category> handling options.
      category: {
        enabled: false,
-@@ -2210,10 +2213,4 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
+@@ -2215,10 +2218,4 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
    return Services.strings.createBundle(
      "chrome://messenger/locale/messenger.properties"
    );
@@ -269,7 +320,17 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
 diff --git a/mailnews/extensions/newsblog/am-newsblog.js b/mailnews/extensions/newsblog/am-newsblog.js
 --- a/mailnews/extensions/newsblog/am-newsblog.js
 +++ b/mailnews/extensions/newsblog/am-newsblog.js
-@@ -37,8 +37,9 @@ function onInit() {
+@@ -16,8 +16,9 @@ var gAccount,
+   gUpdateEnabled,
+   gUpdateValue,
+   gBiffUnits,
+   gStoreOnUpdated,
++  gStoreWebPageArchive,
+   gAutotagEnable,
+   gAutotagUsePrefix,
+   gAutotagPrefix;
+ var AMUtils;
+@@ -38,8 +39,9 @@ function onInit() {
    gUpdateEnabled = document.getElementById("updateEnabled");
    gUpdateValue = document.getElementById("updateValue");
    gBiffUnits = document.getElementById("biffUnits");
@@ -279,21 +340,21 @@ diff --git a/mailnews/extensions/newsblog/am-newsblog.js b/mailnews/extensions/n
    gAutotagUsePrefix = document.getElementById("autotagUsePrefix");
    gAutotagPrefix = document.getElementById("autotagPrefix");
  
-@@ -54,8 +55,9 @@ function onInit() {
+@@ -54,8 +56,9 @@ function onInit() {
+   onCheckItem("biffMinutes", ["updateEnabled"]);
    onCheckItem("biffDays", ["updateEnabled"]);
  
-   gStoreOnUpdated.checked = false;
-   gStoreOnUpdated.disabled = true;
+   gStoreOnUpdated.checked = optionsAcct.updates.storeWebPageArchive;
 +  gStoreWebPageArchive.checked = optionsAcct.updates.storeWebPageArchive;
    gAutotagEnable.checked = optionsAcct.category.enabled;
    gAutotagUsePrefix.disabled = !gAutotagEnable.checked;
    gAutotagUsePrefix.checked = optionsAcct.category.prefixEnabled;
    gAutotagPrefix.disabled =
-@@ -137,8 +139,11 @@ function setPrefs(aNode) {
-       optionsAcct.updates.updateMinutes = Number(minutes);
-       optionsAcct.updates.updateUnits = gBiffUnits.value;
-       break;
+@@ -140,8 +143,11 @@ function setPrefs(aNode) {
      }
+     case "storeOnUpdated":
+       optionsAcct.updates.storeOnUpdated = aNode.checked;
+       break;
 +    case "storeWebPageArchive":
 +      optionsAcct.updates.storeWebPageArchive = aNode.checked;
 +      break;
@@ -323,10 +384,10 @@ diff --git a/mailnews/extensions/newsblog/am-newsblog.xhtml b/mailnews/extension
 diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
 --- a/mailnews/extensions/newsblog/feed-subscriptions.js
 +++ b/mailnews/extensions/newsblog/feed-subscriptions.js
-@@ -1205,8 +1205,12 @@ var FeedSubscriptions = {
-     // folder/server rows even when adding a feed).
-     storeOnUpdated.disabled =
-       aItem.feedType != "ATOM_IETF" && !aItem.feedType?.startsWith("JSON");
+@@ -1204,8 +1204,12 @@ var FeedSubscriptions = {
+     storeOnUpdated.checked = updates.storeOnUpdated;
+     // Only enable this option for existing feedTypes with <updated> tags spec.
+     storeOnUpdated.disabled = isFeed && !aItem.updatedTagValid;
  
 +    // Store web page archive.
 +    const storeWebPageArchive = document.getElementById("storeWebPageArchive");
@@ -336,7 +397,7 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
      const autotagEnable = document.getElementById("autotagEnable");
      const autotagUsePrefix = document.getElementById("autotagUsePrefix");
      const autotagPrefix = document.getElementById("autotagPrefix");
-@@ -1446,8 +1450,11 @@ var FeedSubscriptions = {
+@@ -1445,8 +1449,11 @@ var FeedSubscriptions = {
        }
        case "storeOnUpdated":
          item.options.updates.storeOnUpdated = aNode.checked;
@@ -349,10 +410,10 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
          break;
        case "autotagUsePrefix":
 @@ -1627,8 +1634,9 @@ var FeedSubscriptions = {
-     const locationValue = document.getElementById("locationValue");
      const updateEnabled = document.getElementById("updateEnabled");
      const updateBox = document.getElementById("updateBox");
      const quickMode = document.getElementById("quickMode");
+     const storeOnUpdated = document.getElementById("storeOnUpdated");
 +    const storeWebPageArchive = document.getElementById("storeWebPageArchive");
      const autotagEnable = document.getElementById("autotagEnable");
      const autotagUsePrefix = document.getElementById("autotagUsePrefix");
@@ -368,9 +429,9 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
          false;
      updateBox.disabled = !updateEnabled.checked;
      autotagUsePrefix.disabled = !autotagEnable.checked;
-@@ -1664,8 +1673,9 @@ var FeedSubscriptions = {
-         disable && !FeedUtils.getFeedUrlsInFolder(item.folder);
+@@ -1665,8 +1674,9 @@ var FeedSubscriptions = {
        // All other options disabled unless intent is to add a feed.
+       storeOnUpdated.disabled = disable;
        updateEnabled.disabled = disable;
        updateBox.disabled = disable || !updateEnabled.checked;
 +      storeWebPageArchive.disabled = disable;
@@ -378,7 +439,7 @@ diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/exten
  
        addFeedButton.disabled =
          addFeedButton != focusedElement &&
-@@ -1926,8 +1936,11 @@ var FeedSubscriptions = {
+@@ -1927,8 +1937,11 @@ var FeedSubscriptions = {
        options.updates.updateMinutes = Number(minutes);
        // We don't know if it's an ATOM or JSON feed yet, so don't set this.
        // options.updates.storeOnUpdated =
