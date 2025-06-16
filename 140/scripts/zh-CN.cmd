@@ -224,3 +224,9 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "<!ENTITY storeOnUpdatedInfo.label \"对于包含 "'&lt;updated&gt;'" 标签的 Atom 或 JSON 订阅源，如果发布者更改了该值，则保存文章，而非将其视作重复项。\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.label \"将网页的存档与文章一起保存\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\zh-CN\locale\zh-CN\messenger-newsblog\feed-subscriptions.dtd
+
+:: Original strings:
+:: run-filters-on-incoming-msgs =
+::   .label = Run filters on incoming messages
+%lecho% "run-filters-on-incoming-msgs ="   >> localization\zh-CN\messenger\folderprops.ftl
+%lecho% "  .label = 对收到的邮件运行过滤器" >> localization\zh-CN\messenger\folderprops.ftl

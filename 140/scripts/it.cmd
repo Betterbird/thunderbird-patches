@@ -224,3 +224,9 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "<!ENTITY storeOnUpdatedInfo.label \"Per feed Atom o JSON con il tag "'&lt;updated&gt;'". Se il publisher cambia il valore, salva l’articolo invece di considerarlo un duplicato.\">" >> chrome\it\locale\it\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.label \"Salva un archivio della pagina web insieme all’articolo\">" >> chrome\it\locale\it\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\it\locale\it\messenger-newsblog\feed-subscriptions.dtd
+
+:: Original strings:
+:: run-filters-on-incoming-msgs =
+::   .label = Run filters on incoming messages
+%lecho% "run-filters-on-incoming-msgs ="                    >> localization\it\messenger\folderprops.ftl
+%lecho% "  .label = Esegui i filtri sui messaggi in arrivo" >> localization\it\messenger\folderprops.ftl
