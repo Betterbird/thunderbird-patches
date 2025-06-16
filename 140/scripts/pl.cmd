@@ -219,8 +219,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"Zapisuj zaktualizowane artykuły\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"Zachowuj zaktualizowane artykuły\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                           >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Dla kanałów Atom lub JSON z tagiem "'&lt;updated&gt;'". Jeśli wydawca zmieni wartość, artykuł zostanie zapisany zamiast potraktowania go jako duplikat.\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.label \"Zapisz archiwum strony internetowej razem z artykułem\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Dla kanałów Atom lub JSON z tagiem "'&lt;updated&gt;'". Jeśli wydawca zmieni wartość, zachowuj artykuł zamiast potraktować go jako duplikat.\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"Przechowuj archiwum strony internetowej razem z artykułem\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
 %lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\pl\locale\pl\messenger-newsblog\feed-subscriptions.dtd
