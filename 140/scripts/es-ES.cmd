@@ -2,6 +2,10 @@
 set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Script will only work if Windows system locale is set to UTF-8 !!
 
+:: Fix bad translations.
+sed -i -e 's/label = Ir al campo Cc/label = Mover al campo Cc/' localization\es-ES\messenger\messengercompose\messengercompose.ftl
+sed -i -e 's/label = Ir al campo Bcc/label = Mover al campo Bcc/' localization\es-ES\messenger\messengercompose\messengercompose.ftl
+
 :: Original strings:
 :: groupButtonTooltipText=Add a new group
 %lecho% "groupButtonTooltipText=Agregar un nuevo grupo" >> chrome\es-ES\locale\es-ES\messenger\search.properties
