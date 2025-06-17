@@ -229,4 +229,4 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: run-filters-on-incoming-msgs =
 ::   .label = Run filters on incoming messages
 %lecho% "run-filters-on-incoming-msgs ="         >> localization\ja\messenger\folderprops.ftl
-%lecho% "  .label = 受信メッセージにフィルターを実行する" >> localization\ja\messenger\folderprops.ftl
+%lecho% "  .label = 新着メッセージにフィルターを適用する" >> localization\ja\messenger\folderprops.ftl
