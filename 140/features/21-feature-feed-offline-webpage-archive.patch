@@ -1,7 +1,7 @@
 # HG changeset patch
 # User alta88@fixall.com
 # Date 1750012349 -7200
-# Parent  db9618f7c55f9127fedb12ea56dc591300a8c316
+# Parent  35dbde4f8026c31dc3df0d85f5076a1e7c4deaf1
 Feed enhancements
 - Enable optional store of the feed article web page with the message
 - Bug 308436
@@ -106,27 +106,18 @@ diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/new
 diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
 --- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
 +++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
-@@ -7,15 +7,19 @@ import { MailServices } from "resource:/
+@@ -7,8 +7,10 @@ import { MailServices } from "resource:/
  
  const lazy = {};
  ChromeUtils.defineESModuleGetters(lazy, {
    FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
 +  ReaderMode: "moz-src:///toolkit/components/reader/ReaderMode.sys.mjs",
++  Readerable: "resource://gre/modules/Readerable.sys.mjs",
  });
  
  export function FeedItem() {
    this.mDate = lazy.FeedUtils.getValidRFC5322Date();
-   this.mParserUtils = Cc["@mozilla.org/parserutils;1"].getService(
-     Ci.nsIParserUtils
-   );
-+  this.mCharsetConv = Cc["@mozilla.org/charset-converter-manager;1"].getService(
-+    Ci.nsICharsetConverterManager
-+  );
- }
- 
- FeedItem.prototype = {
-   // Only for IETF Atom.
-@@ -152,9 +156,9 @@ FeedItem.prototype = {
+@@ -152,9 +154,9 @@ FeedItem.prototype = {
     * Writes the item to the folder as a message and updates the feeditems db.
     *
     * @returns {void}
@@ -137,7 +128,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
      // this.mUrl and this.contentBase contain plain text.
  
      let stored = false;
-@@ -184,9 +188,9 @@ FeedItem.prototype = {
+@@ -184,9 +186,9 @@ FeedItem.prototype = {
        content = content.replace(/%TITLE%/, this.title);
        content = content.replace(/%BASE%/, this.htmlEscape(this.contentBase));
        content = content.replace(/%CONTENT%/, this.content);
@@ -148,7 +139,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
        stored = true;
      }
  
-@@ -249,9 +253,9 @@ FeedItem.prototype = {
+@@ -249,9 +251,9 @@ FeedItem.prototype = {
      }
      resource.stored = true;
    },
@@ -159,7 +150,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
        this.feed.folder || this.feed.server.rootFolder
      );
      // The subject may contain HTML entities.  Convert these to their unencoded
-@@ -315,9 +319,9 @@ FeedItem.prototype = {
+@@ -315,9 +317,9 @@ FeedItem.prototype = {
        "Content-Base: " +
        this.mURL +
        "\n";
@@ -170,7 +161,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
        source +=
          'Content-Type: multipart/mixed; boundary="' +
          this.ENCLOSURE_HEADER_BOUNDARY_PREFIX +
-@@ -332,8 +336,10 @@ FeedItem.prototype = {
+@@ -332,8 +334,10 @@ FeedItem.prototype = {
          "\n" +
          "Content-Transfer-Encoding: 8bit\n" +
          this.content;
@@ -181,7 +172,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
          source += enclosure.convertToAttachment(boundaryID);
        });
  
-@@ -478,8 +484,98 @@ FeedItem.prototype = {
+@@ -478,8 +482,158 @@ FeedItem.prototype = {
        aMsgDBHdr.folder.addKeywordsToMessages([aMsgDBHdr], keys.join(" "));
      }
    },
@@ -194,15 +185,19 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +    if (!this.feed.storeWebPageArchive) {
 +      return "";
 +    }
++    this.feed.addLog("log", `createWebPageArchivePart: url ${this.url}`);
 +
-+    // Reader hardcodes charset. The fontLang for UTF-8 is x-unicode in prefs.
-+    const charSet = "UTF-8";
-+    let fontLang = "x-unicode";
-+    try {
-+      fontLang = this.mCharsetConv.getCharsetLangGroup(charSet);
-+    } catch (exception) {}
++    // Reader hardcodes charSet as do feeds. The fontLang for UTF-8 is
++    // x-unicode in prefs. If using the raw web page doc, derive fontLang from
++    // the doc charSet using nsICharsetConverterManager.getCharsetLangGroup().
++    const charSet = this.characterSet;
++    const fontLang = "x-unicode";
 +    const descType = "feed-webpage-archive";
 +    const name = "Web Page Archive";
++
++    // Store an archive even for problem pages, unless they fail to parse.
++    // We could store the raw web page, but poor UX will likely not be worth it.
++    lazy.Readerable._blockedHosts = [];
 +
 +    const article = await lazy.ReaderMode.downloadAndParseDocument(
 +      this.url
@@ -213,17 +208,32 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +      );
 +      return "";
 +    });
-+    if (!article.content) {
++    if (!article?.content) {
 +      this.feed.addLog(
 +        "warn",
-+        `createWebPageArchivePart: could not get reader doc for url, ${this.url}`
++        `createWebPageArchivePart: could not get reader article for url, ${this.url}`
 +      );
 +      return "";
 +    }
 +
-+    const title = article.title || name;
++    // While most sites will include the title, some will set it by script only
++    // after a load. So use the feed title first (Subject) rather than doc title
++    // (eg reddit).
++    const title = this.title || article.title || name;
++    const byline =
++      article.byline ||
++      this.htmlEscape(this.author.map(a => a.replace(/^<|>$/g, "")).join(", "));
++    const fileName = lazy.FeedUtils.getSanitizedFolderName(
++      null,
++      title,
++      title,
++      false
++    ).substr(0, 200);
 +    const lang = article.lang || "";
++    const url = article.url || this.url;
++    const host = this.stripHost(url);
 +
++    // From aboutReader.html in toolkit.
 +    const ARCHIVE_TEMPLATE =
 +      `<!DOCTYPE html>\n` +
 +      `<html>\n` +
@@ -231,16 +241,29 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +      `    <title>${title}</title>\n` +
 +      `    <meta content="text/html; charset=${charSet}" http-equiv="content-type"/>\n` +
 +      `    <meta name="viewport" content="width=device-width; user-scalable=0" />\n` +
++      '    <link rel="stylesheet" href="chrome://messenger/skin/messageBody.css" />' +
 +      `  </head>\n` +
 +      `  <body>\n` +
 +      `    <div class="container">\n` +
-+      `      <div class="content moz-text-html" lang="${fontLang}"></div>\n` +
++      `      <div class="header reader-header">\n` +
++      `        <a class="domain reader-domain" href="${url}">${host}</a>\n` +
++      `        <div class="domain-border"></div>\n` +
++      `        <h1 class="reader-title">${title}</h1>\n` +
++      `        <div class="credits reader-credits">${byline}</div>\n` +
++      `        <div class="meta-data">\n` +
++      `          <div class="reader-estimated-time"></div>\n` +
++      `        </div>\n` +
++      `      </div>\n` +
++      `      <hr />\n` +
++      `      <div class="content">\n` +
++      `        <div class="moz-reader-content moz-text-html" lang="${fontLang}"></div>\n` +
++      `      </div>\n` +
 +      `    </div>\n` +
 +      `  </body>\n` +
 +      `</html>\n`;
 +
 +    const doc = new DOMParser().parseFromString(ARCHIVE_TEMPLATE, "text/html");
-+    const contentElement = doc.querySelector(".content");
++    const contentElement = doc.querySelector(".moz-reader-content");
 +    const contentFragment = this.mParserUtils.parseFragment(
 +      article.content,
 +      Ci.nsIParserUtils.SanitizerDropForms |
@@ -266,7 +289,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +      ` charset=${charSet};` +
 +      ` size=${htmlStr.length}\n` +
 +      `Content-Disposition: attachment;` +
-+      ` filename*=${charSet}'${lang}'${title}.html\n` +
++      ` filename*=${charSet}'${lang}'${fileName}.html\n` +
 +      `Content-Description: name="${name}";` +
 +      ` ${descType}="${this.url}"\n` +
 +      "\n" +
@@ -274,6 +297,34 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +      "\n";
 +
 +    return part;
++  },
++
++  // This function is the JS version of Java's StringUtils.stripCommonSubdomains.
++  stripHost(url, doc) {
++    if (!url) {
++      return url;
++    }
++    try {
++      const host = Services.io.newURI(url).host;
++      let start = 0;
++      if (host.startsWith("www.")) {
++        start = 4;
++      } else if (host.startsWith("m.")) {
++        start = 2;
++      } else if (host.startsWith("mobile.")) {
++        start = 7;
++      }
++      return host.substring(start);
++    } catch (exception) {
++      // Try document domain?
++      if (!doc?.URL) {
++        return url;
++      }
++      url = doc.URL;
++      url = url.substring(url.indexOf("%2F") + 6);
++      url = url.substring(0, url.indexOf("%2F"));
++      return url;
++    }
 +  },
 +
    htmlEscape(s) {
