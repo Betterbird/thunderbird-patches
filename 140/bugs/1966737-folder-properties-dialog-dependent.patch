@@ -1,0 +1,123 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1751105540 -7200
+# Node ID bb5e9710827a683c5982af672812872923a7993d
+# Parent  e6f4f04a8ac7d7c22e47b59bf93395427e8444df
+Bug 1966737 - Open folder properties as dependent, not modal dialog. r=darktrojan
+
+Modal dialogs are unable to refresh their opening windows. Opening the dialog
+as dependent and freezing the about3Pane for user interaction seems to be a
+suitable solution.
+
+This allows for immediate status bar updates and avoids the partially blank
+thread pane when the "Repair Folder" button is clicked.
+
+Differential Revision: https://phabricator.services.mozilla.com/D254351
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -3644,18 +3644,37 @@ var folderPane = {
+       return;
+     }
+     const title = messengerBundle.GetStringFromName("folderProperties");
+ 
++    // If the main window has been closed by the user, make sure that the
++    // folder properties dialog is removed as well,
++    let folderPropertiesDialog = null;
++    const onMainWindowUnload = () => {
++      folderPropertiesDialog.close();
++    };
++    window.addEventListener("unload", onMainWindowUnload);
++
++    // Save the focus and freeze the about3Pane.
++    const prevFocusedElement = document.activeElement;
++    document.documentElement.setAttribute("inert", "true");
++
+     function editFolderCallback(newName, oldName) {
+       if (newName != oldName) {
+         folder.rename(newName, top.msgWindow);
+       }
+     }
+ 
+-    window.openDialog(
++    function unloadDialogCallback() {
++      // Unfreeze about3Pane and restore focus.
++      document.documentElement.removeAttribute("inert");
++      prevFocusedElement?.focus();
++      window.removeEventListener("unload", onMainWindowUnload);
++    }
++
++    folderPropertiesDialog = window.openDialog(
+       "chrome://messenger/content/folderProps.xhtml",
+       "",
+-      "chrome,modal,centerscreen",
++      "chrome,dependent,centerscreen",
+       {
+         folder,
+         serverType: folder.server.type,
+         msgWindow: top.msgWindow,
+@@ -3663,8 +3682,9 @@ var folderPane = {
+         okCallback: editFolderCallback,
+         tabID,
+         name: folder.prettyName,
+         rebuildSummaryCallback: this.rebuildFolderSummary,
++        unloadCallback: unloadDialogCallback,
+       }
+     );
+   },
+ 
+diff --git a/mail/base/test/browser/browser_folderPaneContext.js b/mail/base/test/browser/browser_folderPaneContext.js
+--- a/mail/base/test/browser/browser_folderPaneContext.js
++++ b/mail/base/test/browser/browser_folderPaneContext.js
+@@ -613,8 +613,10 @@ add_task(async function testPropertiesSe
+     }
+   );
+   await rightClickAndActivate(plainFolder, "folderPaneContext-properties");
+   await folderPropsPromise;
++  // Wait for removing 'inert' attribute taking effect.
++  await new Promise(resolve => requestAnimationFrame(resolve));
+ 
+   const virtualPropsPromise = BrowserTestUtils.promiseAlertDialog(
+     undefined,
+     "chrome://messenger/content/virtualFolderProperties.xhtml",
+diff --git a/mail/base/test/browser/browser_folderTreeProperties.js b/mail/base/test/browser/browser_folderTreeProperties.js
+--- a/mail/base/test/browser/browser_folderTreeProperties.js
++++ b/mail/base/test/browser/browser_folderTreeProperties.js
+@@ -214,8 +214,10 @@ async function openFolderProperties(row)
+         {},
+         dialogWindow
+       );
+       await windowClosedPromise;
++      // Wait for removing 'inert' attribute taking effect.
++      await new Promise(resolve => requestAnimationFrame(resolve));
+     },
+     async cancel() {
+       const windowClosedPromise =
+         BrowserTestUtils.domWindowClosed(dialogWindow);
+@@ -224,8 +226,10 @@ async function openFolderProperties(row)
+         {},
+         dialogWindow
+       );
+       await windowClosedPromise;
++      // Wait for removing 'inert' attribute taking effect.
++      await new Promise(resolve => requestAnimationFrame(resolve));
+     },
+   };
+ }
+ 
+diff --git a/mailnews/base/content/folderProps.js b/mailnews/base/content/folderProps.js
+--- a/mailnews/base/content/folderProps.js
++++ b/mailnews/base/content/folderProps.js
+@@ -18,8 +18,11 @@ var gLockedPref = null;
+ 
+ var gDefaultColor = "";
+ 
+ window.addEventListener("load", folderPropsOnLoad);
++// This ensures that the opening about3Pane is unfreezed as soon as this dialog
++// is closed.
++window.addEventListener("unload", window.arguments[0].unloadCallback);
+ document.addEventListener("dialogaccept", folderPropsOKButton);
+ document.addEventListener("dialogcancel", folderCancelButton);
+ 
+ /**
