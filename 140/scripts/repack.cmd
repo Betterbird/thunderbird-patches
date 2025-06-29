@@ -50,7 +50,7 @@ mv %~1\omni.ja core\omni.ja
 7z u betterbird-%~2.%~1.win64.installer.exe core\omni.ja
 
 :: Sign
-C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "Set-AuthenticodeSignature -FilePath betterbird-%~2.%~1.win64.installer.exe -Certificate (Get-ChildItem -Path Cert:\CurrentUser\My\ -CodeSigningCert)"
+C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "Set-AuthenticodeSignature -FilePath betterbird-%~2.%~1.win64.installer.exe -Certificate (Get-ChildItem -Path Cert:\CurrentUser\My\ -CodeSigningCert) -TimestampServer http://timestamp.digicert.com"
 
 :: Keep omni.ja for later
 mkdir omni-win
