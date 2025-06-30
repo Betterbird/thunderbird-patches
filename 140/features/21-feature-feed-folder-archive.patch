@@ -1,0 +1,722 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1751321150 -7200
+# Parent  13b37427057d6188c3e27e33057f1ef9479e6804
+Feed Enhancements - implement Archive option for feed accounts
+- Messages in a feed account are archived according to account settings rather
+ than default identity settings.
+- A feed message in a non feed account follows its account archive options.
+- Bug 1360858.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/modules/MessageArchiver.sys.mjs b/mail/modules/MessageArchiver.sys.mjs
+--- a/mail/modules/MessageArchiver.sys.mjs
++++ b/mail/modules/MessageArchiver.sys.mjs
+@@ -5,8 +5,9 @@
+ import { MailServices } from "resource:///modules/MailServices.sys.mjs";
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
++  FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+ });
+ 
+ export function MessageArchiver() {
+@@ -46,11 +47,14 @@ MessageArchiver.canArchive = function (m
+       return folderIdentity.archiveEnabled;
+     }
+ 
+     if (folder.server) {
+-      const serverIdentities = MailServices.accounts.getIdentitiesForServer(
+-        folder.server
++      const isFeedServer = lazy.FeedUtils.FEED_ACCOUNT_TYPES.includes(
++        folder.server.type
+       );
++      const serverIdentities = isFeedServer
++        ? lazy.FeedUtils.getIdentityForHeader(messages[0])
++        : MailServices.accounts.getIdentitiesForServer(folder.server);
+ 
+       // Do all identities have the same archiveEnabled setting?
+       if (serverIdentities.every(id => id.archiveEnabled)) {
+         return true;
+@@ -64,9 +68,14 @@ MessageArchiver.canArchive = function (m
+ 
+   // Either we've selected a small number of messages or we just can't
+   // fast-path the result; examine all the messages.
+   return messages.every(function (msg) {
+-    const [identity] = lazy.MailUtils.getIdentityForHeader(msg);
++    const isFeedServer = lazy.FeedUtils.FEED_ACCOUNT_TYPES.includes(
++      msg.folder?.server?.type
++    );
++    const [identity] = isFeedServer
++      ? lazy.FeedUtils.getIdentityForHeader(msg)
++      : lazy.MailUtils.getIdentityForHeader(msg);
+     return Boolean(identity && identity.archiveEnabled);
+   });
+ };
+ 
+@@ -105,13 +114,16 @@ MessageArchiver.prototype = {
+       let archiveGranularity;
+       let archiveKeepFolderStructure;
+       let archiveRecreateInbox;
+ 
+-      const [identity] = lazy.MailUtils.getIdentityForHeader(msgHdr);
+-      if (!identity || msgHdr.folder.server.type == "rss") {
+-        // If no identity, or a server (RSS) which doesn't have an identity
+-        // and doesn't want the default unrelated identity value, figure
+-        // this out based on the default identity prefs.
++      const isFeedServer = lazy.FeedUtils.FEED_ACCOUNT_TYPES.includes(
++        msgHdr.folder?.server?.type
++      );
++      const [identity] = isFeedServer
++        ? lazy.FeedUtils.getIdentityForHeader(msgHdr)
++        : lazy.MailUtils.getIdentityForHeader(msgHdr);
++      if (!identity) {
++        // If no identity, figure this out based on the default identity prefs.
+         const enabled = Services.prefs.getBoolPref(
+           "mail.identity.default.archive_enabled"
+         );
+         if (!enabled) {
+diff --git a/mail/themes/shared/mail/feedSubscribe.css b/mail/themes/shared/mail/feedSubscribe.css
+--- a/mail/themes/shared/mail/feedSubscribe.css
++++ b/mail/themes/shared/mail/feedSubscribe.css
+@@ -1,12 +1,12 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-@import url("chrome://global/skin/global.css");
+-@import url("chrome://messenger/skin/variables.css");
+ @import url("chrome://messenger/skin/folderColors.css");
+ @import url("chrome://messenger/skin/shared/list-container.css");
++@import url("chrome://messenger/skin/icons.css");
++@import url("chrome://messenger/skin/folderMenus.css");
+ 
+ :root {
+   --listbox-border-radius: 3px;
+   --sidebar-background: var(--sidebar-background-color, var(--foldertree-background));
+@@ -286,28 +286,38 @@ label:has([hidden]) {
+   padding: 0;
+ }
+ 
+ input[type="number"] {
+-  margin: 2px 4px;
+   &.size3 {
+-    width: calc(3ch + 44px);
++    width: calc(3ch + 55px);
+   }
+ }
+ 
+ .icon-info {
+-  margin: var(--button-margin);
++  margin: 6px; /* var(--button-margin);*/
+   vertical-align: middle;
+-  content: var(--icon-info);
+-  fill: transparent;
+-  stroke: currentColor;
+-  -moz-context-properties: fill, stroke;
+   cursor: help;
+ }
+ 
+ #autotagPrefix {
+   max-width: 15em;
+ }
+ 
++/* Account Manager specific rules */
++#feedOptionsGridAccount {
++  display: grid;
++  grid-template-columns: auto auto;
++  align-items: start;
++}
++
++#feedOptionsGridAccount details {
++  margin-block-start: 10px;
++}
++
++#feedOptionsGridAccount legend {
++  display: inline;
++}
++
+ /* UI Density customization - match folderPane. */
+ 
+ :root[uidensity="compact"] {
+   & #folderTree > #folderTreeChildren::-moz-tree-row {
+diff --git a/mailnews/base/prefs/content/am-archiveoptions.js b/mailnews/base/prefs/content/am-archiveoptions.js
+--- a/mailnews/base/prefs/content/am-archiveoptions.js
++++ b/mailnews/base/prefs/content/am-archiveoptions.js
+@@ -23,8 +23,9 @@ function onLoadArchiveOptions() {
+   kfs.checked = gIdentity.archiveKeepFolderStructure;
+   kfs.addEventListener("command", updateArchiveExample);
+ 
+   const ri = document.getElementById("archiveRecreateInbox");
++  ri.hidden = !("archiveRecreateInbox" in gIdentity);
+   ri.checked = gIdentity.archiveRecreateInbox;
+   ri.addEventListener("command", updateArchiveExample);
+ 
+   updateArchiveExample();
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -1422,8 +1422,102 @@ export var FeedUtils = {
+     return newOptions;
+   },
+ 
+   /**
++   * Archive options.
++   */
++  _archiveOptionsDefault: {
++    version: 1,
++    archiveEnabled: false,
++    archivesFolderURI: null,
++    archiveGranularity: 1,
++    archiveKeepFolderStructure: false,
++    // Don't include this in order to hide the item in Archive options.
++    //archiveRecreateInbox: false,
++    archivesFolderPickerMode: 0,
++  },
++
++  get archiveOptionsTemplate() {
++    // Copy the object.
++    return JSON.parse(JSON.stringify(this._archiveOptionsDefault));
++  },
++
++  getArchiveOptionsAcct(server) {
++    if (!this.FEED_ACCOUNT_TYPES.includes(server.type)) {
++      return [null, false];
++    }
++
++    const archiveOptionsAcctPref =
++      "mail.server." + server.key + ".archive_options";
++
++    try {
++      const archiveOptions = JSON.parse(
++        Services.prefs.getCharPref(archiveOptionsAcctPref)
++      );
++      const locked = Services.prefs.prefIsLocked(archiveOptionsAcctPref);
++      return [archiveOptions, locked];
++    } catch (exception) {}
++
++    return [this.archiveOptionsTemplate, false];
++  },
++
++  setArchiveOptionsAcct(server, archiveOptions) {
++    const archiveOptionsAcctPref =
++      "mail.server." + server.key + ".archive_options";
++    archiveOptions = archiveOptions || this.archiveOptionsTemplate;
++    Services.prefs.setCharPref(
++      archiveOptionsAcctPref,
++      JSON.stringify(archiveOptions)
++    );
++  },
++
++  /*
++   * This returns a pseudo identity object for a msgHdr whose owning account
++   * server is a feed server. The object has members necessary for:
++   * 1. MessageArchiver
++   *
++   * @param {nsIMsgDbHdr} msgHdr - The message.
++   * @returns {object} pseudoIdentity
++   */
++  getIdentityForHeader(msgHdr) {
++    const server = msgHdr?.folder?.server;
++    if (!server) {
++      return [{}];
++    }
++    const [archiveOptionsAcct] = this.getArchiveOptionsAcct(server);
++    if (!archiveOptionsAcct) {
++      this.log.warn(
++        `getIdentityForHeader: no archive options for server key, ${server.key}`
++      );
++      return [{}];
++    }
++
++    // Test the stored archives folder. If there is no value, archiving is
++    // disabled until the user chooses a valid folder in Account Manager.
++    // See am-newsblog.js.
++    if (
++      archiveOptionsAcct.archiveEnabled &&
++      !archiveOptionsAcct.archivesFolderURI
++    ) {
++      archiveOptionsAcct.archiveEnabled = false;
++    }
++
++    const pseudoIdentity = new Object(archiveOptionsAcct);
++    pseudoIdentity.getOrCreateArchivesFolder = function () {
++      try {
++        return lazy.MailUtils.getOrCreateFolder(this.archivesFolderURI);
++      } catch (exception) {
++        FeedUtils.log.warn(
++          `getIdentityForHeader: failed to getOrCreate archive folder, ` +
++            `archivesFolderURI ${this.archivesFolderURI}`
++        );
++        return [{}];
++      }
++    };
++    return [pseudoIdentity];
++  },
++
++  /**
+    * A generalized recursive melder of two objects. Getters/setters not included.
+    */
+   Mixins: {
+     meld(source, keep, replace) {
+diff --git a/mailnews/extensions/newsblog/am-newsblog.js b/mailnews/extensions/newsblog/am-newsblog.js
+--- a/mailnews/extensions/newsblog/am-newsblog.js
++++ b/mailnews/extensions/newsblog/am-newsblog.js
+@@ -7,8 +7,11 @@
+ 
+ var { FeedUtils } = ChromeUtils.importESModule(
+   "resource:///modules/FeedUtils.sys.mjs"
+ );
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
+ ChromeUtils.defineESModuleGetters(this, {
+   AccountManagerUtils: "resource:///modules/AccountManagerUtils.sys.mjs",
+ });
+ 
+@@ -19,9 +22,16 @@ var gAccount,
+   gStoreOnUpdated,
+   gStoreWebPageArchive,
+   gAutotagEnable,
+   gAutotagUsePrefix,
+-  gAutotagPrefix;
++  gAutotagPrefix,
++  gArchiveEnabled,
++  gArchiveRadioGroup,
++  gArchiveAccountPicker,
++  gArchiveFolderPicker;
++var gArchiveOptionsAcct;
++var gDefaultPickerMode = 0; // Account picker.
++var gArchivesFolderWithDelim = "/Archives";
+ var AMUtils;
+ 
+ /**
+  * Initialize am-newsblog account settings page when it gets shown.
+@@ -29,8 +39,9 @@ var AMUtils;
+  *
+  * @returns {void}
+  */
+ function onInit() {
++  FeedUtils.log.debug("onInit");
+   setAccountTitle();
+   setServerColor();
+ 
+   const optionsAcct = FeedUtils.getOptionsAcct(gAccount.incomingServer);
+@@ -63,8 +74,25 @@ function onInit() {
+   gAutotagUsePrefix.checked = optionsAcct.category.prefixEnabled;
+   gAutotagPrefix.disabled =
+     gAutotagUsePrefix.disabled || !gAutotagUsePrefix.checked;
+   gAutotagPrefix.value = optionsAcct.category.prefix;
++
++  // Message Archives section.
++  var locked;
++  [gArchiveOptionsAcct, locked] = FeedUtils.getArchiveOptionsAcct(
++    gAccount.incomingServer
++  );
++  gArchiveEnabled = document.getElementById("archiveEnabled");
++  gArchiveRadioGroup = document.getElementById("messageArchives");
++  gArchiveAccountPicker = document.getElementById("archiveAccountPicker");
++  gArchiveFolderPicker = document.getElementById("archiveFolderPicker");
++
++  gArchiveEnabled.checked = gArchiveOptionsAcct.archiveEnabled;
++  gArchiveEnabled.disabled = locked;
++  gArchiveRadioGroup.value = gArchiveOptionsAcct.archivesFolderPickerMode;
++
++  setArchiveItems();
++  setArchiveFolders();
+ }
+ 
+ function onPreInit(account) {
+   gAccount = account;
+@@ -101,9 +129,9 @@ function setAccountTitle() {
+   title.setAttribute("value", titleValue);
+   document.title = titleValue;
+ }
+ 
+-function setPrefs(aNode) {
++function setPrefs(aNode, aEvent) {
+   const optionsAcct = FeedUtils.getOptionsAcct(gAccount.incomingServer);
+   switch (aNode.id) {
+     case "doBiff":
+       FeedUtils.pauseFeedFolderUpdates(
+@@ -144,11 +172,52 @@ function setPrefs(aNode) {
+       break;
+     case "autotagPrefix":
+       optionsAcct.category.prefix = aNode.value;
+       break;
++    case "archiveEnabled":
++      gArchiveOptionsAcct.archiveEnabled = aNode.checked;
++      if (!gArchiveOptionsAcct.archiveEnabled) {
++        clearArchivePref();
++        return;
++      }
++      setArchiveItems();
++      break;
++    case "archiveSelectAccount":
++      gArchiveOptionsAcct.archivesFolderPickerMode = +aNode.value;
++      gArchiveOptionsAcct.archivesFolderURI =
++        gArchiveAccountPicker.folder.URI + gArchivesFolderWithDelim;
++      setArchiveFolderPickers();
++      break;
++    case "archiveSelectFolder":
++      gArchiveOptionsAcct.archivesFolderPickerMode = +aNode.value;
++      gArchiveOptionsAcct.archivesFolderURI =
++        gArchiveFolderPicker.folder?.URI ?? null;
++      setArchiveFolderPickers();
++      break;
++    case "archiveAccountPicker":
++    case "archiveFolderPicker": {
++      const folder = aEvent.target._folder;
++      aNode.folder = folder;
++      aNode.menupopup.selectFolder(folder);
++      updateArchiveHierarchyButton(folder);
++      gArchiveOptionsAcct.archivesFolderURI =
++        gArchiveRadioGroup.value == gDefaultPickerMode
++          ? aNode.folder.URI + gArchivesFolderWithDelim
++          : (aNode.folder?.URI ?? null);
++      break;
++    }
+   }
+ 
+-  FeedUtils.setOptionsAcct(gAccount.incomingServer, optionsAcct);
++  FeedUtils.log.debug(aNode.id);
++  if (!aNode.id.startsWith("archive")) {
++    FeedUtils.setOptionsAcct(gAccount.incomingServer, optionsAcct);
++  } else {
++    FeedUtils.log.debug(gArchiveOptionsAcct);
++    FeedUtils.setArchiveOptionsAcct(
++      gAccount.incomingServer,
++      gArchiveOptionsAcct
++    );
++  }
+ }
+ 
+ function setServerColor() {
+   const colorInput = document.getElementById("serverColor");
+@@ -168,4 +237,140 @@ function setServerColor() {
+ function resetServerColor() {
+   document.getElementById("serverColor").value = AMUtils.defaultServerColor;
+   AMUtils.resetServerColor();
+ }
++/*
++ * Set the folder pickers according to the stored archivesFolderURI pref.
++ * Exception handling is as follows:
++ * 1. If a folder has been deleted, and archiving is enabled, the folder will
++ *    be recreated according to the stored archivesFolderURI value.
++ * 2. If a folder has been deleted, and the user views the archive page, the
++ *    value will be stored as null *if* the radio preference was Other.
++ * 3. If the user chooses Other, and fails to select a folder, the value will be
++ *    stored as null.
++ * 4. A missing archivesFolderURI will cause the caller to disable archiving
++ *    until the user corrects the preference, if Other was selected.
++ * 5. A folder cannot be the root account folder; createStorageIfMissing() fails.
++ */
++function setArchiveFolders() {
++  const pickerMode = gArchiveRadioGroup.value;
++  let folderURL = gArchiveOptionsAcct.archivesFolderURI;
++  let folderNotFound = false;
++  FeedUtils.log.debug(folderURL);
++  // Get message folder from the given uri.
++  if (!folderURL) {
++    // No preference set. Get a default for account picker.
++    folderNotFound = true;
++    folderURL = gAccount.incomingServer.rootMsgFolder.URI;
++  }
++  let folder = MailServices.folderLookup.getFolderForURL(folderURL);
++  if (!folder) {
++    // We had a URI but it points to a non-existent account or folder.
++    // Set the account picker to the account of the URI. We cannot use
++    // newURI().prePath; newURI lowercases the prePath.
++    folderNotFound = true;
++    try {
++      const rootURI = folderURL.split(
++        Services.io.newURI(folderURL).filePath
++      )[0];
++      folder = MailServices.folderLookup.getFolderForURL(rootURI);
++    } catch {
++      // Former URI account may not exist. Current account root must exist.
++      // Note that a feed-only installation does not need localFoldersServer.
++      folderURL = gAccount.incomingServer.rootMsgFolder.URI;
++      folder = MailServices.folderLookup.getFolderForURL(folderURL);
++    }
++  }
++  FeedUtils.log.debug(folder?.URI);
++
++  // In first time cases where a folder is created the menupopup may have no
++  // children and show "No available folders" incorrectly.
++  gArchiveAccountPicker.menupopup._ensureInitialized();
++  const accountFolder = folder?.server.rootFolder ?? "";
++  gArchiveAccountPicker.menupopup.selectFolder(accountFolder);
++  gArchiveAccountPicker.folder = accountFolder;
++
++  gArchiveFolderPicker.menupopup._ensureInitialized();
++  // If there is no folder or using the account picker, show "Choose Folder".
++  const otherFolder =
++    pickerMode == gDefaultPickerMode || folderNotFound ? "" : folder;
++  gArchiveFolderPicker.menupopup.selectFolder(otherFolder);
++  gArchiveFolderPicker.folder = otherFolder;
++
++  // Reset the pref with the default for account picker, if enabled.
++  if (folderNotFound) {
++    if (gArchiveEnabled.checked) {
++      setPrefs(gArchiveRadioGroup.selectedItem);
++      return;
++    }
++    // Make sure the local pref object is updated, in case of enablement.
++    gArchiveOptionsAcct.archivesFolderURI =
++      accountFolder.URI + gArchivesFolderWithDelim;
++  }
++
++  setArchiveFolderPickers();
++}
++
++function setArchiveItems() {
++  const disable = !gArchiveEnabled.checked || gArchiveEnabled.disabled;
++  document.querySelectorAll(".depends-on-archive").forEach(node => {
++    node.disabled = disable;
++  });
++  setArchiveFolderPickers();
++}
++
++function setArchiveFolderPickers() {
++  const disable = !gArchiveEnabled.checked || gArchiveEnabled.disabled;
++  FeedUtils.log.debug(`setArchiveFolderPickers: ${gArchiveRadioGroup.value}`);
++  switch (gArchiveRadioGroup.value) {
++    case "0":
++      gArchiveAccountPicker.disabled = disable;
++      gArchiveFolderPicker.disabled = true;
++      updateArchiveHierarchyButton(gArchiveAccountPicker.folder);
++      break;
++    case "1":
++      gArchiveAccountPicker.disabled = true;
++      gArchiveFolderPicker.disabled = disable;
++      updateArchiveHierarchyButton(gArchiveFolderPicker.folder);
++      break;
++  }
++}
++
++function clearArchivePref() {
++  const archiveOptionsAcctPref =
++    "mail.server." + gAccount.incomingServer.key + ".archive_options";
++  Services.prefs.clearUserPref(archiveOptionsAcctPref);
++  setArchiveItems();
++}
++
++function updateArchiveHierarchyButton(archiveFolder) {
++  if (!archiveFolder) {
++    return;
++  }
++  const disable = !gArchiveEnabled.checked || gArchiveEnabled.disabled;
++  const isGmailImap =
++    archiveFolder.server.type == "imap" &&
++    archiveFolder.server.QueryInterface(Ci.nsIImapIncomingServer).isGMailServer;
++  document.getElementById("archiveHierarchyButton").disabled =
++    disable || isGmailImap;
++}
++
++/**
++ * Open a dialog to edit the folder hierarchy used when archiving messages.
++ * Pass in the pseudo identity object.
++ */
++function ChangeArchiveHierarchy() {
++  const identity = gArchiveOptionsAcct;
++  const save = () => {
++    delete identity.archiveRecreateInbox;
++    gArchiveOptionsAcct = identity;
++    FeedUtils.setArchiveOptionsAcct(
++      gAccount.incomingServer,
++      gArchiveOptionsAcct
++    );
++  };
++  parent.gSubDialog.open(
++    "chrome://messenger/content/am-archiveoptions.xhtml",
++    { closingCallback: save },
++    { identity }
++  );
++}
+diff --git a/mailnews/extensions/newsblog/am-newsblog.xhtml b/mailnews/extensions/newsblog/am-newsblog.xhtml
+--- a/mailnews/extensions/newsblog/am-newsblog.xhtml
++++ b/mailnews/extensions/newsblog/am-newsblog.xhtml
+@@ -9,9 +9,11 @@
+ %feedDTD;
+ <!ENTITY % accountNoIdentDTD SYSTEM "chrome://messenger/locale/am-serverwithnoidentities.dtd">
+ %accountNoIdentDTD;
+ <!ENTITY % accountServerTopDTD SYSTEM "chrome://messenger/locale/am-server-top.dtd">
+-%accountServerTopDTD; ]>
++%accountServerTopDTD;
++<!ENTITY % accountCopiesDTD SYSTEM "chrome://messenger/locale/am-copies.dtd">
++%accountCopiesDTD; ]>
+ 
+ <html
+   xmlns="http://www.w3.org/1999/xhtml"
+   xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+@@ -125,11 +127,15 @@
+       </html:div>
+ 
+       <separator class="thin" />
+ 
+-      <html:div>
+-        <html:fieldset>
+-          <html:legend>&newFeedSettings.label;</html:legend>
++      <html:form id="feedOptionsGridAccount">
++        <html:details>
++          <html:summary
++            ><html:legend>&newFeedSettings.label;</html:legend></html:summary
++          >
++
++          <separator class="thin" />
+ 
+           <hbox align="center">
+             <checkbox
+               id="updateEnabled"
+@@ -216,20 +222,18 @@
+               placeholder="&autoTagPrefix.placeholder;"
+               onchange="setPrefs(this)"
+             />
+           </hbox>
+-        </html:fieldset>
+-      </html:div>
+-
+-      <separator class="thin" />
++        </html:details>
+ 
+-      <hbox pack="end">
+-        <button
+-          label="&manageSubscriptions.label;"
+-          accesskey="&manageSubscriptions.accesskey;"
+-          oncommand="openSubscriptionsDialog(gAccount.incomingServer.rootFolder);"
+-        />
+-      </hbox>
++        <hbox pack="end">
++          <button
++            label="&manageSubscriptions.label;"
++            accesskey="&manageSubscriptions.accesskey;"
++            oncommand="openSubscriptionsDialog(gAccount.incomingServer.rootFolder);"
++          />
++        </hbox>
++      </html:form>
+ 
+       <separator class="thin" />
+ 
+       <html:div>
+@@ -244,10 +248,8 @@
+             prefattribute="value"
+             prefstring="mail.server.%serverkey%.empty_trash_on_exit"
+           />
+ 
+-          <separator class="thin" />
+-
+           <vbox>
+             <hbox align="center">
+               <label
+                 id="server.localPathLabel"
+@@ -276,7 +278,88 @@
+             </hbox>
+           </vbox>
+         </html:fieldset>
+       </html:div>
++
++      <separator class="thin" />
++
++      <html:form>
++        <html:fieldset id="archivesGroup">
++          <html:legend>&archivesTitle.label;</html:legend>
++
++          <hbox pack="start">
++            <checkbox
++              id="archiveEnabled"
++              label="&keepArchives.label;"
++              accesskey="&keepArchives.accesskey;"
++              oncommand="setPrefs(this);"
++            />
++          </hbox>
++
++          <radiogroup id="messageArchives" class="depends-on-archive">
++            <hbox class="specialFolderPickerGrid">
++              <vbox>
++                <hbox flex="1" align="center">
++                  <radio
++                    id="archiveSelectAccount"
++                    value="0"
++                    label="&archivesFolderOn.label;"
++                    accesskey="&archivesFolderOn.accesskey;"
++                    oncommand="setPrefs(this);"
++                  />
++                </hbox>
++                <hbox flex="1" align="center">
++                  <radio
++                    id="archiveSelectFolder"
++                    value="1"
++                    label="&archiveInOtherFolder.label;"
++                    accesskey="&archiveInOtherFolder.accesskey;"
++                    oncommand="setPrefs(this);"
++                  />
++                </hbox>
++              </vbox>
++              <vbox flex="1">
++                <menulist
++                  id="archiveAccountPicker"
++                  class="folderMenuItem depends-on-archive"
++                  aria-labelledby="archive_selectAccount"
++                >
++                  <menupopup
++                    is="folder-menupopup"
++                    id="archivesAccountPopup"
++                    mode="filing"
++                    expandFolders="false"
++                    oncommand="setPrefs(this.parentElement, event);"
++                  />
++                </menulist>
++                <menulist
++                  id="archiveFolderPicker"
++                  class="folderMenuItem depends-on-archive"
++                  aria-labelledby="archive_selectFolder"
++                  displayformat="verbose"
++                >
++                  <menupopup
++                    is="folder-menupopup"
++                    id="archivesFolderPopup"
++                    mode="filing"
++                    class="menulist-menupopup"
++                    showFileHereLabel="true"
++                    oncommand="setPrefs(this.parentElement, event);"
++                  />
++                </menulist>
++              </vbox>
++            </hbox>
++          </radiogroup>
++          <hbox pack="end">
++            <button
++              id="archiveHierarchyButton"
++              class="depends-on-archive"
++              label="&archiveHierarchyButton.label;"
++              accesskey="&archiveHierarchyButton.accesskey;"
++              oncommand="ChangeArchiveHierarchy();"
++            />
++          </hbox>
++        </html:fieldset>
++      </html:form>
+     </vbox>
+   </html:body>
+ </html>
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.xhtml b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+--- a/mailnews/extensions/newsblog/feed-subscriptions.xhtml
++++ b/mailnews/extensions/newsblog/feed-subscriptions.xhtml
+@@ -24,10 +24,11 @@
+     <meta
+       http-equiv="Content-Security-Policy"
+       content="default-src chrome:; script-src chrome: 'unsafe-inline'; style-src chrome: 'unsafe-inline'; img-src chrome: data:"
+     />
+-    <link rel="stylesheet" href="chrome://messenger/skin/icons.css" />
+-    <link rel="stylesheet" href="chrome://messenger/skin/folderMenus.css" />
++    <link rel="stylesheet" href="chrome://global/skin/global.css" />
++    <link rel="stylesheet" href="chrome://messenger/skin/widgets.css" />
++    <link rel="stylesheet" href="chrome://messenger/skin/variables.css" />
+     <link
+       rel="stylesheet"
+       href="chrome://messenger-newsblog/skin/feed-subscriptions.css"
+     />
