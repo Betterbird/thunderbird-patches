@@ -1,8 +1,13 @@
+@if not exist betterbird-%~2.en-US.linux-x86_64.tar.xz (
+  @echo Error: betterbird-%~2.en-US.linux-x86_64.tar.xz does not exist. Exiting.
+  @exit /b 1
+)
+
 mkdir %~1
 cd %~1
 
 :: Unpack original
-7z e ..\betterbird-%~2.en-US.linux-x86_64.tar.bz2
+7z e ..\betterbird-%~2.en-US.linux-x86_64.tar.xz
 7z e betterbird-%~2.en-US.linux-x86_64.tar betterbird\omni.ja
 mv betterbird-%~2.en-US.linux-x86_64.tar ..\
 move omni.ja ..\omni.ja
@@ -50,7 +55,7 @@ mv betterbird-%~2.en-US.linux-x86_64.tar betterbird-%~2.%~1.linux-x86_64.tar
 mkdir betterbird
 mv %~1\omni.ja betterbird\omni.ja
 7z u betterbird-%~2.%~1.linux-x86_64.tar betterbird\omni.ja
-7z a betterbird-%~2.%~1.linux-x86_64.tar.bz2 betterbird-%~2.%~1.linux-x86_64.tar
+7z a betterbird-%~2.%~1.linux-x86_64.tar.xz betterbird-%~2.%~1.linux-x86_64.tar
 rm betterbird-%~2.%~1.linux-x86_64.tar
 rmdir /s /q betterbird
 rmdir /s /q %~1

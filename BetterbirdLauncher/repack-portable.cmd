@@ -1,6 +1,11 @@
 :: %~1 - locale
 :: %~2 - version
 
+@if not exist betterbird-%~2.%~1.win64.installer.exe (
+  @echo Error: betterbird-%~2.%~1.win64.installer.exe does not exist. Exiting.
+  @exit /b 1
+)
+
 7z x betterbird-%~2.%~1.win64.installer.exe
 rm setup.exe
 
