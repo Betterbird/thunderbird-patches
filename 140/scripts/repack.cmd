@@ -29,7 +29,7 @@ rm -rf chrome\en-US
 rm -rf localization\en-US
 
 :: lessecho uses LR instead of CRLF
-lessecho %~1> update.locale
+lessecho %~1> default.locale
 lessecho %~1> res\multilocale.txt
 
 :: Edit chrome\chrome.manifest
