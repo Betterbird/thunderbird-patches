@@ -1,3 +1,8 @@
+@if not exist betterbird-%~2.en-US.linux-x86_64.tar.xz (
+  @echo Error: betterbird-%~2.en-US.linux-x86_64.tar.xz does not exist. Exiting.
+  @exit /b 1
+)
+
 mkdir %~1
 cd %~1
 

@@ -1,3 +1,8 @@
+@if not exist betterbird-%~2.en-US.win64.installer.exe (
+  @echo Error: betterbird-%~2.en-US.win64.installer.exe does not exist. Exiting.
+  @exit /b 1
+)
+
 mkdir langpacks
 cd langpacks
 
