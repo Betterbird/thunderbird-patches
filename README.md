@@ -3,7 +3,7 @@ Betterbird is a fork of Mozilla Thunderbird. Here are the patches that provide a
 
 ## Building Betterbird
 These instruction assume that you know how to build Thunderbird. The following instructions are specific to Betterbird.
-`NN` stands for the version you want to build. Currently `115` and `128` are supported.
+`NN` stands for the version you want to build. Currently `128` and `140` are supported.
 
 The build process is automated for Windows, Linux and Mac via a [build script](./build/build.sh).
 The development environment needs to be set up depending on the platform.
@@ -35,14 +35,21 @@ Please note that the [Ansible-betterbird](https://github.com/4ch1m/ansible-bette
 Mac users follow these instructions:
 You need to install Xcode from the Apple App Store or [developer.apple.com/download/](https://developer.apple.com/download/)
 (which requires an Apple ID). Note the dependency of Xcode version and macOS version (details [here](https://xcodereleases.com/)).
-On our latest development machine we're using macOS 12.6.6 (Monterey) with Xcode 13.4.1.
-Then follow the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html) copied below,
+
+We are using this hardware for building:
+1. Betterbird 128 on Mac Intel: macOS 12.6.6 (Monterey) with Xcode 13.4.1 and SDK 14.4
+1. Betterbird 128 on Mac Silicon: macOS 15.2/15.5 (Sequoia) with Xcode 16.2 and SDK 14.4/15.2
+1. Betterbird 140 on Mac Intel: macOS 15.5 (Sequoia) with Xcode 16.4 and SDK 15.5
+1. Betterbird 140 on Mac Silicon: TBA.
+
+Then follow the first part of the (previous) [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html) copied below,
 the [Thunderbird documentation](https://developer.thunderbird.net/thunderbird-development/building-thunderbird/macos-build-prerequisites)
 is incomplete:
-1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
+1. Install Homebrew: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`.
+Note that latest Homebrew may install cargo and rust into `/usr/local/bin`.
+This needs to be removed (remove links) in order not to clash with `rustup-init` below.
 1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`
-1. If necessary, add Xcode to the PATH: Add `export PATH=/opt/homebrew/bin:$PATH` to `.zshrc` in the home directory.
-1. Install Mercurial: `echo 'export PATH="'"$(python3 -m site --user-base)"'/bin:$PATH"' >> ~/.zshenv` and `python3 -m pip install --user mercurial`
+1. Install Mercurial: `brew install hg`
 1. In a new shell: `hg version`
 1. Install Rust: `brew install rustup`
 1. In a new shell: `rustup-init` and `rustup override set 1.XX.0`, see `NN/NN.sh` for the required version
