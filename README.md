@@ -37,10 +37,9 @@ You need to install Xcode from the Apple App Store or [developer.apple.com/downl
 (which requires an Apple ID). Note the dependency of Xcode version and macOS version (details [here](https://xcodereleases.com/)).
 
 We are using this hardware for building:
-1. Betterbird 128 on Mac Intel: macOS 12.6.6 (Monterey) with Xcode 13.4.1 and SDK 14.4
-1. Betterbird 128 on Mac Silicon: macOS 15.2/15.5 (Sequoia) with Xcode 16.2 and SDK 14.4/15.2
-1. Betterbird 140 on Mac Intel: macOS 15.5 (Sequoia) with Xcode 16.4 and SDK 15.5
-1. Betterbird 140 on Mac Silicon: TBA.
+1. Betterbird 128 on Mac Intel: macOS 12.6.6 (Monterey) with Xcode 13.4.1 and SDK 14.4 (`.mozbuild`)
+1. Betterbird 128 on Mac Silicon: macOS 15.2/15.5 (Sequoia) with Xcode 16.2/16.4 and SDK 14.4 (`.mozbuild`)
+1. Betterbird 140 on Mac Intel and Silicon: macOS 15.5 (Sequoia) with Xcode 16.4 and SDK 15.5 (Xcode)
 
 Then follow the first part of the (previous) [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html) copied below,
 the [Thunderbird documentation](https://developer.thunderbird.net/thunderbird-development/building-thunderbird/macos-build-prerequisites)
@@ -49,6 +48,7 @@ is incomplete:
 Note that latest Homebrew may install cargo and rust into `/usr/local/bin`.
 This needs to be removed (remove links) in order not to clash with `rustup-init` below.
 1. Xcode modifications: `sudo xcode-select --switch /Applications/Xcode.app` and `sudo xcodebuild -license`
+1. If necessary, add Xcode to the PATH: Add `export PATH=/opt/homebrew/bin:$PATH` to `.zshenv` in the home directory.
 1. Install Mercurial: `brew install hg`
 1. In a new shell: `hg version`
 1. Install Rust: `brew install rustup`
