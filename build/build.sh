@@ -47,6 +47,11 @@ if ! [ -d thunderbird-patches/"$1" ]; then
 fi
 
 VERSION="$1"
+if [ "$VERSION" -ge 140 ]; then
+  ARCHIVE_SUFFIX="tar.xz"
+else
+  ARCHIVE_SUFFIX="tar.bz2"
+fi
 UNAME=$(uname)
 # uname -i doesn't work on Mac.
 UNAME_ARCH="unknown"
@@ -326,12 +331,12 @@ if [ "$UNAME" = "Linux" ]; then
     echo
     echo "======================================================="
     echo "Find your archive here"
-    ls $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.tar.bz2
+    ls $MOZILLA_DIR/obj-x86_64-pc-linux-gnu/dist/*.$ARCHIVE_SUFFIX
   elif [ "$UNAME_ARCH" = "aarch64" ]; then
     echo
     echo "======================================================="
     echo "Find your archive here"
-    ls $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.tar.bz2
+    ls $MOZILLA_DIR/obj-aarch64-unknown-linux-gnu/dist/*.$ARCHIVE_SUFFIX
   fi
 elif [ "$UNAME" = "Darwin" ] && [ "$UNAME_ARCH" = "x86_64" ]; then
   echo
