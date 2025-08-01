@@ -234,3 +234,13 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 ::   .label = Run filters on incoming messages
 %lecho% "run-filters-on-incoming-msgs ="                        >> localization\es-ES\messenger\folderprops.ftl
 %lecho% "  .label = Ejecutar filtros en los mensajes entrantes" >> localization\es-ES\messenger\folderprops.ftl
+
+:: Original strings:
+:: carddav-directory-sync-warning =
+::    CardDAV: Some data dropped was by the server, please check the Error Console for details
+::carddav-directory-sync-failed =
+::    CardDAV: Synchronisation with the server failed, please check the Error Console for details
+%lecho% "carddav-directory-sync-warning =" >> localization\es-ES\messenger\addressbook\abCardDAVProperties.ftl
+%lecho% "    CardDAV: Algunos datos fueron descartados por el servidor, por favor consulte la Consola de errores para más detalles" >> localization\es-ES\messenger\addressbook\abCardDAVProperties.ftl
+%lecho% "carddav-directory-sync-failed =" >> localization\es-ES\messenger\addressbook\abCardDAVProperties.ftl
+%lecho% "    CardDAV: Falló la sincronización con el servidor, por favor consulte la Consola de errores para más detalles" >> localization\es-ES\messenger\addressbook\abCardDAVProperties.ftl
