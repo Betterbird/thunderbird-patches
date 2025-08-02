@@ -57,7 +57,7 @@ mv %~1\omni.ja core\omni.ja
 @if exist betterbird-%~2.%~1.win64.installer-unsigned.exe (
   @echo "Replacing setup.exe"
   7z e betterbird-%~2.%~1.win64.installer-unsigned.exe setup.exe
-  7z u betterbird-%~2.%~1.win64.installer.exe setup.exe
+  7z a betterbird-%~2.%~1.win64.installer.exe setup.exe
   rm setup.exe
 )
 
