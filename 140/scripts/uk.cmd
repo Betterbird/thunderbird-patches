@@ -237,6 +237,6 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 ::carddav-directory-sync-failed =
 ::    CardDAV: Synchronisation with the server failed, please check the Error Console for details
 %lecho% "carddav-directory-sync-warning =" >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
-%lecho% "    CardDAV: Деякі дані були видалені сервером. Перевірте консоль помилок для отримання подробиць" >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
+%lecho% "    CardDAV: Деякі дані були видалені сервером. Перевірте консоль помилок для отримання подробиць." >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "carddav-directory-sync-failed =" >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
-%lecho% "    CardDAV: Не вдалося виконати синхронізацію з сервером. Перевірте консоль помилок для отримання подробиць" >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
+%lecho% "    CardDAV: Не вдалося виконати синхронізацію з сервером. Перевірте консоль помилок для отримання подробиць." >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
