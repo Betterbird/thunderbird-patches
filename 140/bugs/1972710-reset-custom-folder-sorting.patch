@@ -1,0 +1,254 @@
+# HG changeset patch
+# User Alessandro Castellani <alessandro@thunderbird.net>
+# Date 1754771836 -7200
+# Node ID 8be05592162bd8777f46a45a858c0532f26a87d4
+# Parent  7fb4010887b8673d30f33be752081876bbd74f80
+Bug 1972710 - Implement an option to reset all custom folder sorting. r=darktrojan
+
+#### How to test
+
+- Reorder some folders in a random order.
+- Right click on the server row in the folder pane.
+- Select `Reset Folder Order` from the context menu.
+- Ensure that the sorting order is restored to the original alphabetical.
+
+### Important
+It is currently not possible to restore the position of folders that have been dropped inside other folders, effectively changing their parentFolder, as we don't retain the original parent.
+
+Differential Revision: https://phabricator.services.mozilla.com/D254439
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -637,8 +637,10 @@ var folderPaneContextMenu = {
+     this._showMenuItem("folderPaneContext-filters", isServer);
+ 
+     this._showMenuItem("folderPaneContext-manageTags", isSmartTagsFolder);
+ 
++    this._showMenuItem("folderPaneContext-resetSort", isServer);
++
+     // If source folder is virtual, allow only "move" within its own server.
+     // Don't show "copy" and "again" and don't show "recent" and "favorite".
+     // Also, check if this is a top-level smart folder, e.g., virtual "Inbox"
+     // in unified folder view or a Tags folder. If so, don't show "move".
+@@ -704,8 +706,9 @@ var folderPaneContextMenu = {
+     this._showMenuItem("folderPaneContext-markAllFoldersRead", false);
+     this._showMenuItem("folderPaneContext-settings", false);
+     this._showMenuItem("folderPaneContext-filters", false);
+     this._showMenuItem("folderPaneContext-manageTags", false);
++    this._showMenuItem("folderPaneContext-resetSort", false);
+ 
+     // Show only the standard commands that don't require special conditions.
+     this._showMenuItem("folderPaneContext-openNewTab", true);
+     this._showMenuItem("folderPaneContext-openNewWindow", true);
+@@ -901,8 +904,11 @@ var folderPaneContextMenu = {
+         break;
+       case "folderPaneContext-manageTags":
+         goDoCommand("cmd_manageTags");
+         break;
++      case "folderPaneContext-resetSort":
++        folderPane.clearUserSortOrder(folder);
++        break;
+       default: {
+         // Handle folder context menu items move to, copy to.
+         let isMove = !!event.target.closest("#folderPaneContext-moveMenu");
+         const isCopy = !!event.target.closest("#folderPaneContext-copyMenu");
+@@ -1285,29 +1291,9 @@ var folderPane = {
+         this.addFolder(null, server.rootFolder);
+       },
+ 
+       _recurseSubFolders(parentFolder) {
+-        let subFolders;
+-        try {
+-          subFolders = parentFolder.subFolders;
+-        } catch (ex) {
+-          console.error(
+-            new Error(
+-              `Unable to access the subfolders of ${parentFolder.URI}`,
+-              { cause: ex }
+-            )
+-          );
+-        }
+-        if (!subFolders?.length) {
+-          return;
+-        }
+-
+-        for (let i = 0; i < subFolders.length; i++) {
+-          const folder = subFolders[i];
+-          if (folderPane._isGmailFolder(folder)) {
+-            subFolders.splice(i, 1, ...folder.subFolders);
+-          }
+-        }
++        const subFolders = folderPane._getSubFolders(parentFolder);
+ 
+         subFolders.sort((a, b) => a.compareSortKeys(b));
+ 
+         for (const folder of subFolders) {
+@@ -2349,28 +2335,9 @@ var folderPane = {
+    * @param {folderFilterCallback} [filterFunction] - Optional callback to add
+    *   only some subfolders to the row.
+    */
+   _addSubFolders(parentFolder, parentRow, modeName, filterFunction) {
+-    let subFolders;
+-    try {
+-      subFolders = parentFolder.subFolders;
+-    } catch (ex) {
+-      console.error(
+-        new Error(`Unable to access the subfolders of ${parentFolder.URI}`, {
+-          cause: ex,
+-        })
+-      );
+-    }
+-    if (!subFolders?.length) {
+-      return;
+-    }
+-
+-    for (let i = 0; i < subFolders.length; i++) {
+-      const folder = subFolders[i];
+-      if (this._isGmailFolder(folder)) {
+-        subFolders.splice(i, 1, ...folder.subFolders);
+-      }
+-    }
++    const subFolders = this._getSubFolders(parentFolder);
+ 
+     subFolders.sort((a, b) => a.compareSortKeys(b));
+ 
+     for (const folder of subFolders) {
+@@ -4157,8 +4124,71 @@ var folderPane = {
+     }
+   },
+ 
+   /**
++   * Find all first level subfolders of a parent folder and skip the Gmail ghost
++   * folder.
++   *
++   * @param {nsIMsgFolder} parentFolder
++   * @returns {nsIMsgFolder[]} - Array of found folders.
++   */
++  _getSubFolders(parentFolder) {
++    let subFolders;
++    try {
++      subFolders = parentFolder.subFolders;
++    } catch (ex) {
++      console.error(
++        new Error(`Unable to access the subfolders of ${parentFolder.URI}`, {
++          cause: ex,
++        })
++      );
++    }
++    if (!subFolders?.length) {
++      return [];
++    }
++
++    for (let i = 0; i < subFolders.length; i++) {
++      const folder = subFolders[i];
++      if (this._isGmailFolder(folder)) {
++        subFolders.splice(i, 1, ...folder.subFolders);
++      }
++    }
++
++    return subFolders;
++  },
++
++  /**
++   * Clear any previously applied custom sort order to all the child folders of
++   * a parent.
++   *
++   * @param {nsIMsgFolder} parentFolder
++   */
++  clearUserSortOrder(parentFolder) {
++    const folders = [];
++    for (const folder of this._getSubFolders(parentFolder)) {
++      if (folder.userSortOrder == Ci.nsIMsgFolder.NO_SORT_VALUE) {
++        continue;
++      }
++
++      folder.userSortOrder = Ci.nsIMsgFolder.NO_SORT_VALUE;
++      folders.push(folder);
++
++      if (folder.hasSubFolders) {
++        this.clearUserSortOrder(folder);
++      }
++    }
++
++    for (const changedFolder of folders) {
++      this.setOrderToRowInAllModes(changedFolder, changedFolder.sortOrder);
++      this.refreshFolderPaneUI(changedFolder);
++    }
++
++    window.dispatchEvent(
++      new CustomEvent("folder-sort-order-restored", { bubbles: true })
++    );
++  },
++
++  /**
+    * Set folder sort order to rows for the folder.
+    *
+    * @param {nsIMsgFolder} folder
+    * @param {integer} order
+@@ -4272,12 +4302,21 @@ var folderPane = {
+     }
+     folder.userSortOrder = folderOrder; // Update DB.
+     folderPane.setOrderToRowInAllModes(folder, folderOrder); // Update row info.
+ 
++    this.refreshFolderPaneUI(folder);
++  },
++
++  /**
++   * Refresh the folder pane UI to ensure that the recently moved folders are
++   * properly sorted.
++   *
++   * @param {nsIMsgFolder} folder
++   */
++  refreshFolderPaneUI(folder) {
+     // Update folder pane UI.
+     const movedFolderURI = folder.URI;
+-    const modeNames = folderPane.activeModes;
+-    for (const name of modeNames) {
++    for (const name of this.activeModes) {
+       // Find a parent UI element of folder in this mode.
+       // Note that the parent folder on the DB may not be the parent UI element
+       // (as is the case with Gmail). So we find the parent UI element by
+       // querying the CSS selector.
+diff --git a/mail/base/content/about3Pane.xhtml b/mail/base/content/about3Pane.xhtml
+--- a/mail/base/content/about3Pane.xhtml
++++ b/mail/base/content/about3Pane.xhtml
+@@ -493,8 +493,11 @@
+     <menuitem id="folderPaneContext-manageTags"
+               class="menuitem-iconic"
+               label="&manageTags.label;"
+               accesskey="&manageTags.accesskey;"/>
++    <menuitem id="folderPaneContext-resetSort"
++              class="menuitem-iconic"
++              data-l10n-id="folder-pane-context-reset-sort"/>
+     <menuseparator/>
+   </menupopup>
+   <tooltip id="qfb-text-search-upsell">
+     <div id="qfb-upsell-line-one"
+diff --git a/mail/base/test/browser/browser_folderPaneContext.js b/mail/base/test/browser/browser_folderPaneContext.js
+--- a/mail/base/test/browser/browser_folderPaneContext.js
++++ b/mail/base/test/browser/browser_folderPaneContext.js
+@@ -76,8 +76,9 @@ const folderPaneContextData = {
+   "folderPaneContext-markAllFoldersRead": [...servers],
+   "folderPaneContext-settings": [...servers],
+   "folderPaneContext-filters": [...servers],
+   "folderPaneContext-manageTags": ["tags"],
++  "folderPaneContext-resetSort": [...servers],
+ };
+ 
+ let nntpServer;
+ 
+diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/messenger/about3Pane.ftl
+--- a/mail/locales/en-US/messenger/about3Pane.ftl
++++ b/mail/locales/en-US/messenger/about3Pane.ftl
+@@ -626,4 +626,10 @@ folder-pane-context-mark-folder-read =
+       [one] Mark Folder Read
+       *[other] Mark Folders Read
+     }
+   .accesskey = k
++
++# Note: We also use the R accesskey for the Rename label but both can't be
++# visible at the same time, so it's safe.
++folder-pane-context-reset-sort =
++  .label = Reset Folder Order
++  .accesskey = R
