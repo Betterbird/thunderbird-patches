@@ -240,3 +240,11 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "    CardDAV: 一部のデータがサーバーから削除されました。詳細はエラーコンソールをご確認ください" >> localization\ja\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "carddav-directory-sync-failed =" >> localization\ja\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "    CardDAV: サーバーとの同期に失敗しました。詳細はエラーコンソールをご確認ください" >> localization\ja\messenger\addressbook\abCardDAVProperties.ftl
+
+:: Strings for bug 1972710:
+:: folder-pane-context-reset-sort =
+::   .label = Reset Folder Order
+::   .accesskey = R
+%lecho% "folder-pane-context-reset-sort =" >> localization\ja\messenger\about3Pane.ftl
+%lecho% "  .label = フォルダーの並び順をリセット"    >> localization\ja\messenger\about3Pane.ftl
+%lecho% "  .accesskey = R"                 >> localization\ja\messenger\about3Pane.ftl

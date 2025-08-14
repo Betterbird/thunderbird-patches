@@ -240,3 +240,11 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "    CardDAV : Certaines données ont été ignorées par le serveur, veuillez consulter la console d’erreurs pour plus de détails" >> localization\fr\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "carddav-directory-sync-failed =" >> localization\fr\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "    CardDAV : Échec de la synchronisation avec le serveur, veuillez consulter la console d’erreurs pour plus de détails" >> localization\fr\messenger\addressbook\abCardDAVProperties.ftl
+
+:: Strings for bug 1972710:
+:: folder-pane-context-reset-sort =
+::   .label = Reset Folder Order
+::   .accesskey = R
+%lecho% "folder-pane-context-reset-sort ="              >> localization\fr\messenger\about3Pane.ftl
+%lecho% "  .label = Réinitialiser l’ordre des dossiers" >> localization\fr\messenger\about3Pane.ftl
+%lecho% "  .accesskey = R"                              >> localization\fr\messenger\about3Pane.ftl

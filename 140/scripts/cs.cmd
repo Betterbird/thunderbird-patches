@@ -244,3 +244,11 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "    CardDAV: Některá data byla serverem odstraněna, podrobnosti naleznete v konzoli chyb" >> localization\cs\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "carddav-directory-sync-failed =" >> localization\cs\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "    CardDAV: Synchronizace se serverem selhala, podrobnosti naleznete v konzoli chyb" >> localization\cs\messenger\addressbook\abCardDAVProperties.ftl
+
+:: Strings for bug 1972710:
+:: folder-pane-context-reset-sort =
+::   .label = Reset Folder Order
+::   .accesskey = R
+%lecho% "folder-pane-context-reset-sort =" >> localization\cs\messenger\about3Pane.ftl
+%lecho% "  .label = Obnovit pořadí složek" >> localization\cs\messenger\about3Pane.ftl
+%lecho% "  .accesskey = n"                 >> localization\cs\messenger\about3Pane.ftl

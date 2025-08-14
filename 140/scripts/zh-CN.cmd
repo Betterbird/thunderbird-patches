@@ -240,3 +240,11 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "    CardDAV：服务器丢弃了部分数据，请查看错误控制台以获取详细信息" >> localization\zh-CN\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "carddav-directory-sync-failed =" >> localization\zh-CN\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "    CardDAV：与服务器的同步失败，请查看错误控制台以获取详细信息" >> localization\zh-CN\messenger\addressbook\abCardDAVProperties.ftl
+
+:: Strings for bug 1972710:
+:: folder-pane-context-reset-sort =
+::   .label = Reset Folder Order
+::   .accesskey = R
+%lecho% "folder-pane-context-reset-sort =" >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "  .label = 重置文件夹顺序"          >> localization\zh-CN\messenger\about3Pane.ftl
+%lecho% "  .accesskey = R"                 >> localization\zh-CN\messenger\about3Pane.ftl

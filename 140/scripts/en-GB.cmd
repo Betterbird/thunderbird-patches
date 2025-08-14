@@ -139,3 +139,8 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "    CardDAV: Some data was dropped by the server, please check the Error Console for details" >> localization\en-GB\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "carddav-directory-sync-failed =" >> localization\en-GB\messenger\addressbook\abCardDAVProperties.ftl
 %lecho% "    CardDAV: Synchronisation with the server failed, please check the Error Console for details" >> localization\en-GB\messenger\addressbook\abCardDAVProperties.ftl
+
+:: Strings for bug 1972710:
+%lecho% "folder-pane-context-reset-sort =" >> localization\en-GB\messenger\about3Pane.ftl
+%lecho% "  .label = Reset Folder Order"    >> localization\en-GB\messenger\about3Pane.ftl
+%lecho% "  .accesskey = R"                 >> localization\en-GB\messenger\about3Pane.ftl
