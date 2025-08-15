@@ -246,5 +246,5 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 ::   .label = Reset Folder Order
 ::   .accesskey = R
 %lecho% "folder-pane-context-reset-sort =" >> localization\uk\messenger\about3Pane.ftl
-%lecho% "  .label = Reset Folder Order"    >> localization\uk\messenger\about3Pane.ftl
-%lecho% "  .accesskey = R"                 >> localization\uk\messenger\about3Pane.ftl
+%lecho% "  .label = Скинути порядок папок" >> localization\uk\messenger\about3Pane.ftl
+%lecho% "  .accesskey = К"                 >> localization\uk\messenger\about3Pane.ftl
