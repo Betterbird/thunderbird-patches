@@ -13,7 +13,7 @@ move omni.ja ..\omni.ja
 del ..\omni.ja
 
 :: Get language pack
-wget http://ftp.mozilla.org/pub/thunderbird/candidates/140.1.0esr-candidates/build1/linux-x86_64/xpi/%~1.xpi
+wget http://ftp.mozilla.org/pub/thunderbird/candidates/140.2.0esr-candidates/build1/linux-x86_64/xpi/%~1.xpi
 
 :: Remove stuff we don't want from the language pack
 7z d %~1.xpi manifest.json
