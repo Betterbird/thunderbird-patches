@@ -4,9 +4,8 @@
 # https://github.com/risaer/betterbird-dirty-update/blob/main/updateBetterbird.sh
 
 # Configuration
-lang="en-US"  # Language options: en-US, de, fr, es-AR, ja, it, pt-BR.
+lang="en-US"  # Language options: en-US, de, fr, es-ES, ja, it, nl, pt-BR, ru.
 version="release"  # Version options: previous, release, latest, future. Only 'release' is guaranteed to work.
-shaFile="https://www.betterbird.eu/downloads/sha256-128.txt"  # Name of sha256 file
 tmpDir="$HOME/tmp/betterbird"
 tmpFile=""  # Will be filled by script.
 tmpLocFile="$tmpDir/download.txt"
@@ -48,6 +47,9 @@ downloadUpdate() {
   wget -q -O "$tmpLocFile" "https://www.betterbird.eu/downloads/getloc.php?os=linux&lang=$lang&version=$version"
   read -r fileToDownload < "$tmpLocFile"
   fileToDownload=$(basename "$fileToDownload")
+  # extract major version (3 characters after "betterbird-")
+  major=${fileToDownload:11:3}
+  shaFile="https://www.betterbird.eu/downloads/sha256-${major}.txt"  # Name of sha256 file
   echoLog "Download found: $fileToDownload."
   tmpFile="$tmpDir/$fileToDownload"
 
@@ -94,7 +96,7 @@ backup() {
 
 extract() {
   rm -rf "$installDir/betterbird"
-  tar xjf "$tmpFile" -C "$installDir"
+  tar xf "$tmpFile" -C "$installDir"
   echoLog "Extracted to $installDir/betterbird."
 }
 
