@@ -1,0 +1,118 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1756374675 -7200
+# Node ID 8e18be555b125db5ec77e3e2c23cc5880194097e
+# Parent  e3ead4d83aa0f633710d5a7e1301e34a3c22d1fd
+Bug 1367034 - Update time stamps for manually created folders. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D262419
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -3513,11 +3513,11 @@ var folderPane = {
+           Ci.nsIMsgFolderNotificationService.folderAdded
+         );
+       });
+       parentFolder.createSubfolder(subfolderName, top.msgWindow);
++      const newFolder = await promiseNewFolder;
+       if (!parentFolder.isServer) {
+         // Inherit view/sort/columns from parent folder.
+-        const newFolder = await promiseNewFolder;
+         const parentInfo = parentFolder.msgDatabase.dBFolderInfo;
+         const newInfo = newFolder.msgDatabase.dBFolderInfo;
+         newInfo.viewFlags = parentInfo.viewFlags;
+         newInfo.sortType = parentInfo.sortType;
+@@ -3526,8 +3526,9 @@ var folderPane = {
+           "columnStates",
+           parentInfo.getCharProperty("columnStates")
+         );
+       }
++      newFolder.updateTimestamps(true);
+     };
+ 
+     window.openDialog(
+       "chrome://messenger/content/newFolderDialog.xhtml",
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -907,5 +907,12 @@ interface nsIMsgFolder : nsISupports {
+    * Protocol type, i.e. "pop3", "imap", "nntp", "none", etc
+    * used to construct URLs for this account type.
+    */
+   readonly attribute ACString incomingServerType;
++
++  /**
++   * Set the MRUTime property of the folder, and if userInitiated is true, set
++   * the MRMTime property as well. The latter should only be updated when the
++   * user moves or copies new messages into the folder.
++   */
++  void updateTimestamps(in boolean userInitiated);
+ };
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -5531,20 +5531,20 @@ nsresult nsMsgDBFolder::GetMsgPreviewTex
+   msgHdr->SetStringProperty("preview", msgBody);
+   return rv;
+ }
+ 
+-void nsMsgDBFolder::UpdateTimestamps(bool allowUndo) {
++NS_IMETHODIMP nsMsgDBFolder::UpdateTimestamps(bool userInitiated) {
+   if (!(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Junk))) {
+     SetMRUTime();
+-    if (allowUndo)  // This is a proxy for a user-initiated act.
+-    {
++    if (userInitiated) {
+       bool isArchive;
+       IsSpecialFolder(nsMsgFolderFlags::Archive, true, &isArchive);
+       if (!isArchive) {
+         SetMRMTime();
+       }
+     }
+   }
++  return NS_OK;
+ }
+ 
+ void nsMsgDBFolder::SetMRUTime() {
+   uint32_t seconds;
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -191,10 +191,8 @@ class nsMsgDBFolder : public nsSupportsW
+   nsresult PerformBiffNotifications(
+       void);  // if there are new, non spam messages, do biff
+   nsresult CloseDB();
+ 
+-  // Helper function for Move code to call to update the MRU and MRM time.
+-  void UpdateTimestamps(bool allowUndo);
+   void SetMRUTime();
+   void SetMRMTime();
+   /**
+    * Clear all processing flags, presumably because message keys are no longer
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -6957,8 +6957,9 @@ nsImapMailFolder::CopyMessages(
+     bool isMove, nsIMsgWindow* msgWindow, nsIMsgCopyServiceListener* listener,
+     bool isFolder,  // isFolder for future use when we do cross-server folder
+                     // move/copy
+     bool allowUndo) {
++  // If allowUndo is true, this should be a user-initiated action.
+   UpdateTimestamps(allowUndo);
+ 
+   nsresult rv;
+   nsCOMPtr<nsISupports> srcSupport = do_QueryInterface(srcFolder);
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -1345,8 +1345,9 @@ nsMsgLocalMailFolder::CopyMessages(nsIMs
+     if (isMove) srcFolder->NotifyFolderEvent(kDeleteOrMoveMsgFailed);
+     return OnCopyCompleted(srcSupport, false);
+   }
+ 
++  // If allowUndo is true, this should be a user-initiated action.
+   UpdateTimestamps(allowUndo);
+   nsCString protocolType;
+   rv = srcFolder->GetURI(protocolType);
+   protocolType.SetLength(protocolType.FindChar(':'));
