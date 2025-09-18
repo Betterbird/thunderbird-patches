@@ -1,0 +1,209 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1758237392 -7200
+# Parent  094f09e5394c3967fe2db9f68a80163072537f8f
+NNN29 - Use catch-all address also for forwarding.
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -5023,12 +5023,17 @@ async function ComposeStartup() {
+   }
+ 
+   // Here we set the From from the original message, be it a draft or another
+   // message, for example a template, we want to "edit as new".
+-  // Only do this if the message is our own draft or template or any type of reply.
++  // Only do this if the message is our own draft or template.
++  // Note that the catchAll implementation also added:
++  // ... or any type of reply.
++  // And we're not sure that this is right.
++  // Anyway, it won't be made worse by adding "forward inline" here.
+   if (
+     params.composeFields.from &&
+     (params.composeFields.creatorIdentityKey ||
++      gComposeType == Ci.nsIMsgCompType.ForwardInline ||
+       gComposeType == Ci.nsIMsgCompType.Reply ||
+       gComposeType == Ci.nsIMsgCompType.ReplyAll ||
+       gComposeType == Ci.nsIMsgCompType.ReplyToSender ||
+       gComposeType == Ci.nsIMsgCompType.ReplyToGroup ||
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -345,9 +345,9 @@ nsMsgComposeService::OpenComposeWindow(
+         uriToOpen,
+         type == nsIMsgCompType::ForwardInline || type == nsIMsgCompType::Draft
+             ? nsMimeOutput::nsMimeMessageDraftOrTemplate
+             : nsMimeOutput::nsMimeMessageEditorTemplate,
+-        identity, originalMsgURI, origMsgHdr,
++        identity, from, originalMsgURI, origMsgHdr,
+         type == nsIMsgCompType::ForwardInline,
+         format == nsIMsgCompFormat::OppositeOfDefault, aMsgWindow,
+         autodetectCharset);
+   }
+@@ -903,9 +903,10 @@ nsMsgComposeService::ForwardMessage(cons
+ 
+   if (aForwardType == nsIMsgComposeService::kForwardInline)
+     return RunMessageThroughMimeDraft(
+         uriToOpen, nsMimeOutput::nsMimeMessageDraftOrTemplate, identity,
+-        uriToOpen, aMsgHdr, true, forwardTo, false, aMsgWindow, false);
++        EmptyCString(), uriToOpen, aMsgHdr, true, forwardTo, false, aMsgWindow,
++        false);
+ 
+   nsCOMPtr<mozIDOMWindowProxy> parentWindow;
+   if (aMsgWindow) {
+     nsCOMPtr<nsIDocShell> docShell;
+@@ -1119,13 +1120,14 @@ nsMsgComposeService::GetMsgComposeForDoc
+  * contents for a draft or template.
+  */
+ nsresult nsMsgComposeService::LoadDraftOrTemplate(
+     const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-    nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+-    nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, bool overrideComposeFormat,
+-    nsIMsgWindow* aMsgWindow, bool autodetectCharset) {
++    nsIMsgIdentity* aIdentity, const nsACString& from,
++    const nsACString& aOriginalMsgURI, nsIMsgDBHdr* aOrigMsgHdr,
++    bool aForwardInline, bool overrideComposeFormat, nsIMsgWindow* aMsgWindow,
++    bool autodetectCharset) {
+   return RunMessageThroughMimeDraft(
+-      aMsgURI, aOutType, aIdentity, aOriginalMsgURI, aOrigMsgHdr,
++      aMsgURI, aOutType, aIdentity, from, aOriginalMsgURI, aOrigMsgHdr,
+       aForwardInline, EmptyString(), overrideComposeFormat, aMsgWindow,
+       autodetectCharset);
+ }
+ 
+@@ -1153,10 +1155,11 @@ nsresult nsMsgComposeService::LoadDraftO
+  * @param aMsgWindow msgWindow to pass into LoadMessage.
+  */
+ nsresult nsMsgComposeService::RunMessageThroughMimeDraft(
+     const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-    nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+-    nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, const nsAString& aForwardTo,
++    nsIMsgIdentity* aIdentity, const nsACString& from,
++    const nsACString& aOriginalMsgURI, nsIMsgDBHdr* aOrigMsgHdr,
++    bool aForwardInline, const nsAString& aForwardTo,
+     bool aOverrideComposeFormat, nsIMsgWindow* aMsgWindow,
+     bool autodetectCharset) {
+   nsCOMPtr<nsIMsgMessageService> messageService;
+   nsresult rv =
+@@ -1177,8 +1180,9 @@ nsresult nsMsgComposeService::RunMessage
+     mimeConverter->SetForwardToAddress(aForwardTo);
+   }
+   mimeConverter->SetOverrideComposeFormat(aOverrideComposeFormat);
+   mimeConverter->SetIdentity(aIdentity);
++  mimeConverter->SetFrom(from);
+   mimeConverter->SetOriginalMsgURI(aOriginalMsgURI);
+   mimeConverter->SetOrigMsgHdr(aOrigMsgHdr);
+ 
+   nsCOMPtr<nsIURI> url;
+diff --git a/mailnews/compose/src/nsMsgComposeService.h b/mailnews/compose/src/nsMsgComposeService.h
+--- a/mailnews/compose/src/nsMsgComposeService.h
++++ b/mailnews/compose/src/nsMsgComposeService.h
+@@ -33,16 +33,18 @@ class nsMsgComposeService : public nsIMs
+   nsresult GetTo3PaneWindow();
+ 
+   nsresult LoadDraftOrTemplate(
+       const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-      nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+-      nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, bool overrideComposeFormat,
+-      nsIMsgWindow* aMsgWindow, bool autodetectCharset);
++      nsIMsgIdentity* aIdentity, const nsACString& from,
++      const nsACString& aOriginalMsgURI, nsIMsgDBHdr* aOrigMsgHdr,
++      bool aForwardInline, bool overrideComposeFormat, nsIMsgWindow* aMsgWindow,
++      bool autodetectCharset);
+ 
+   nsresult RunMessageThroughMimeDraft(
+       const nsACString& aMsgURI, nsMimeOutputType aOutType,
+-      nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+-      nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, const nsAString& forwardTo,
++      nsIMsgIdentity* aIdentity, const nsACString& from,
++      const nsACString& aOriginalMsgURI, nsIMsgDBHdr* aOrigMsgHdr,
++      bool aForwardInline, const nsAString& forwardTo,
+       bool overrideComposeFormat, nsIMsgWindow* aMsgWindow,
+       bool autodetectCharset);
+ 
+   // hash table mapping dom windows to nsIMsgCompose objects
+diff --git a/mailnews/mime/public/nsIMimeStreamConverter.idl b/mailnews/mime/public/nsIMimeStreamConverter.idl
+--- a/mailnews/mime/public/nsIMimeStreamConverter.idl
++++ b/mailnews/mime/public/nsIMimeStreamConverter.idl
+@@ -84,7 +84,8 @@ interface nsIMimeStreamConverter : nsISu
+   /**
+    * This is used for OpenDraft, OpenEditorTemplate and Forward inline (which use OpenDraft)
+    */
+   attribute nsIMsgIdentity identity;
++  attribute AUTF8String from;
+   attribute AUTF8String originalMsgURI;
+   attribute nsIMsgDBHdr origMsgHdr;
+ };
+diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
+--- a/mailnews/mime/src/mimedrft.cpp
++++ b/mailnews/mime/src/mimedrft.cpp
+@@ -1199,8 +1199,9 @@ static void mime_parse_stream_complete(n
+   //
+   if (mdd->headers) {
+     subj = MimeHeaders_get(mdd->headers, HEADER_SUBJECT, false, false);
+     if (forward_inline) {
++      if (!mdd->from.IsEmpty()) from = ToNewCString(mdd->from);
+       if (subj) {
+         nsresult rv;
+         nsCOMPtr<nsIPrefBranch> prefBranch(
+             do_GetService(NS_PREFSERVICE_CONTRACTID, &rv));
+@@ -2052,8 +2053,9 @@ extern "C" void* mime_bridge_create_draf
+   newPluginObj2->GetForwardInlineFilter(&mdd->forwardInlineFilter);
+   newPluginObj2->GetForwardToAddress(mdd->forwardToAddress);
+   newPluginObj2->GetOverrideComposeFormat(&mdd->overrideComposeFormat);
+   newPluginObj2->GetIdentity(getter_AddRefs(mdd->identity));
++  newPluginObj2->GetFrom(mdd->from);
+   newPluginObj2->GetOriginalMsgURI(mdd->originalMsgURI);
+   newPluginObj2->GetOrigMsgHdr(getter_AddRefs(mdd->origMsgHdr));
+   mdd->format_out = format_out;
+   mdd->options = new MimeDisplayOptions;
+diff --git a/mailnews/mime/src/mimemoz2.h b/mailnews/mime/src/mimemoz2.h
+--- a/mailnews/mime/src/mimemoz2.h
++++ b/mailnews/mime/src/mimemoz2.h
+@@ -120,8 +120,9 @@ class mime_draft_data {
+   bool forwardInlineFilter;
+   bool overrideComposeFormat;  // Override compose format (for forward inline).
+   nsString forwardToAddress;
+   nsCOMPtr<nsIMsgIdentity> identity;
++  nsCString from;
+   nsCString originalMsgURI;  // the original URI of the message we are currently
+                              // processing
+   nsCOMPtr<nsIMsgDBHdr> origMsgHdr;
+   bool autodetectCharset;  // Used to indicate pending autodetection while
+diff --git a/mailnews/mime/src/nsStreamConverter.cpp b/mailnews/mime/src/nsStreamConverter.cpp
+--- a/mailnews/mime/src/nsStreamConverter.cpp
++++ b/mailnews/mime/src/nsStreamConverter.cpp
+@@ -684,8 +684,20 @@ nsStreamConverter::SetIdentity(nsIMsgIde
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
++nsStreamConverter::SetFrom(const nsACString& from) {
++  mFrom = from;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsStreamConverter::GetFrom(nsACString& from) {
++  from = mFrom;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
+ nsStreamConverter::SetOriginalMsgURI(const nsACString& originalMsgURI) {
+   mOriginalMsgURI = originalMsgURI;
+   return NS_OK;
+ }
+diff --git a/mailnews/mime/src/nsStreamConverter.h b/mailnews/mime/src/nsStreamConverter.h
+--- a/mailnews/mime/src/nsStreamConverter.h
++++ b/mailnews/mime/src/nsStreamConverter.h
+@@ -80,8 +80,9 @@ class nsStreamConverter : public nsIStre
+   bool mForwardInlineFilter;
+   bool mOverrideComposeFormat;
+   nsString mForwardToAddress;
+   nsCOMPtr<nsIMsgIdentity> mIdentity;
++  nsCString mFrom;
+   nsCString mOriginalMsgURI;
+   nsCOMPtr<nsIMsgDBHdr> mOrigMsgHdr;
+ 
+   nsCString mFromType;
