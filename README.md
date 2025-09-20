@@ -126,12 +126,12 @@ Information you need to supply:
 8. Check whether the problem reproduces with all add-ons switched off: `Help > Troubleshoot Mode`. Reset the startup cache: `Help > Troubleshooting Information, Clear startup cache`.
 9. Have you manipulated any preferences, perhaps via `user.js`? Are you using `userChrome.css` or `userContent.css`?
 10. For performance issues, submit a (startup) performance profile, see Mozilla's documentation for details. Note that after capturing the profile via `Tools > Developer Tools > Developer Toolbox, Performance`, you need to click `Upload local profile`, but instead of uploading to Mozilla, click `Download`. Then submit the data to our support, for big files, use a file transfer service.
-11. Have you tried using the `Repair Folder` function on the folder's property panel? That's for issues with specific folders, like
-  - messages not displaying correctly
-  - receiving mail into the folder (if it's an Inbox) not working
-  - filters on the folder not working
-  - search not finding messages
-  - selection or action on selected messages not working
+11. For issues with specific folders, have you tried using the `Repair Folder` function on the folder's property panel? These issues include:
+messages not displaying correctly,
+receiving mail into the folder (if it's an Inbox) not working,
+filters on the folder not working,
+search not finding messages,
+selection or action on selected messages not working.
 12. Does the issue happen in Thunderbird when run on the same profile? Comparisons with Thunderbird running on a different profile are not meaningful. This question of course doesn't apply to Betterbird-only features.
 13. For "can't send" or "can't receive" problems, disable your anti-virus program, either for the Betterbird executable, or its installation directory or both. Generally it's not necessary and not recommended to exclude your profile from the anti-virus protection, unless you're experiencing **sluggishness** which may be related to anti-virus scan delays.
 14. Note that profiles on network drives are only partly supported, profiles in Dropbox folders don't work at all.
