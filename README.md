@@ -119,16 +119,23 @@ Information you need to supply:
 1. Operating system and version of operating system. For Linux, distribution and desktop environment as well as graphic interface (X11/Wayland).
 2. State your anti-virus program, if any.
 3. State your hardware: RAM, disk size, type of fixed disk (SSD, etc.).
-4. Version of Betterbird. For Linux, how it was installed: FlatPak, Arch Linux AUR, installed from `.tar.bz2`, maybe via our installation script.
+4. Version of Betterbird. For Linux, how it was installed: FlatPak, Arch Linux AUR, installed from `.tar.xz` (formerly `.tar.bz2`), maybe via our [installation script](https://github.com/Betterbird/thunderbird-patches/blob/main/install-on-linux/install-betterbird.sh).
 5. State how many accounts you have and of which type and state with which account type the issue happens: IMAP, POP, Feeds, News, Chat. For IMAP, state whether the folder producing the problem is synchronised for offline use or not. For all account types: How many messages? How big is the folder in KB, MB or GB. This is especially important for performance issues.
 6. State whether you have configured any online services, like CalDAV calendars or CardDAV address books, potentially via NextCloud.
-7. Check whether the problem reproduces with all add-ons switched off: `Help > Troubleshoot Mode`. Reset the startup cache: `Help > Troubleshooting Information, Clear startup cache`.
-8. Have you manipulated any preferences, perhaps via `user.js`? Are you using `userChrome.css` or `userContent.css`?
-9. For performance issues, submit a (startup) performance profile, see Mozilla's documentation for details. Note that after capturing the profile via `Tools > Developer Tools > Developer Toolbox, Performance`, you need to click `Upload local profile`, but instead of uploading to Mozilla, click `Download`. Then submit the data to our support, for big files, use a file transfer service.
-10. Does the issue happen in Thunderbird when run on the same profile? Comparisons with Thunderbird running on a different profile are not meaningful. This question of course doesn't apply to Betterbird-only features.
-11. For "can't send" or "can't receive" problems, disable your anti-virus program, either for the Betterbird executable, or its installation directory or both. Generally it's not necessary and not recommended to exclude your profile from the anti-virus protection, unless you're experiencing **sluggishness** which may be related to anti-virus scan delays.
-12. Note that profiles on network drives are only partly supported, profiles in Dropbox folders don't work at all.
-13. **Be smart!** We leave it to your own judgement which information is relevant for your particular case.
+7. Check whether there are relevant entries in the Error Console: `Tools > Developer Tools > Error Console`. You can clear the console before reproducing the problem by clicking on the trash can icon on the top left. You can enable timestamps by clicking on the gear/sprocket icon on the top right.
+8. Check whether the problem reproduces with all add-ons switched off: `Help > Troubleshoot Mode`. Reset the startup cache: `Help > Troubleshooting Information, Clear startup cache`.
+9. Have you manipulated any preferences, perhaps via `user.js`? Are you using `userChrome.css` or `userContent.css`?
+10. For performance issues, submit a (startup) performance profile, see Mozilla's documentation for details. Note that after capturing the profile via `Tools > Developer Tools > Developer Toolbox, Performance`, you need to click `Upload local profile`, but instead of uploading to Mozilla, click `Download`. Then submit the data to our support, for big files, use a file transfer service.
+11. Have you tried using the `Repair Folder` function on the folder's property panel? That's for issues with specific folders, like
+  - messages not displaying correctly
+  - receiving mail into the folder (if it's an Inbox) not working
+  - filters on the folder not working
+  - search not finding messages
+  - selection or action on selected messages not working
+12. Does the issue happen in Thunderbird when run on the same profile? Comparisons with Thunderbird running on a different profile are not meaningful. This question of course doesn't apply to Betterbird-only features.
+13. For "can't send" or "can't receive" problems, disable your anti-virus program, either for the Betterbird executable, or its installation directory or both. Generally it's not necessary and not recommended to exclude your profile from the anti-virus protection, unless you're experiencing **sluggishness** which may be related to anti-virus scan delays.
+14. Note that profiles on network drives are only partly supported, profiles in Dropbox folders don't work at all.
+15. **Be smart!** We leave it to your own judgement which information is relevant for your particular case.
 
 ## Translations
 
