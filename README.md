@@ -139,4 +139,4 @@ selection or action on selected messages not working.
 
 ## Translations
 
-Translation strings are found [here](./102/scripts).
+Translation strings are found [here](./140/scripts).
