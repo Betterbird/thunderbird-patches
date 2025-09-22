@@ -28,6 +28,10 @@ rm -f %~1.xpi
 mv chrome\en-US\locale\branding chrome\%~1\locale\branding\
 mv localization\en-US\branding\ localization\%~1\branding\
 
+:: Move some Devtools stuff which isn't localised at all and therefore not in the language packs.
+mv localization\en-US\devtools\server\ localization\%~1\devtools\server\
+mv localization\en-US\devtools\startup\ localization\%~1\devtools\startup\
+
 :: Remove original en-US locale, experiments showed that it isn't used as fallback
 :: when left in omni.ja. Leaving chrome/en-US even switched to that locale.
 rm -rf chrome\en-US
