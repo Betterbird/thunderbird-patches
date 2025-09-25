@@ -1,0 +1,163 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1758807450 -7200
+# Node ID 99e3433eb30509bff5bb99329928463e4093987f
+# Parent  3ce60c15eb0075657eb1467ade62ff5eafe91c67
+Bug 1985610 - Disable Delete key from deleting signed/encrypted emails. r=babolivier
+
+Just making hitting Delete on an attachment do nothing.
+If I disabled the command, Delete would try next controller => message deleted while the focus was on the attachment.
+
+Differential Revision: https://phabricator.services.mozilla.com/D264375
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -1631,36 +1631,32 @@ function outputEmailAddresses(headerEntr
+ 
+ /**
+  * Return true if possible attachments in the currently loaded message can be
+  * deleted/detached.
++ * This is a message level check. Individual attachments need to be checked
++ * separately (for whether they are already deleted or detached).
++ *
++ * @returns {boolean} true if delete/detach is possible.
+  */
+ function CanDetachAttachments() {
+-  var canDetach =
++  let canDetach =
+     gFolder && // We can't detach from loaded eml files yet.
+     !gFolder.isSpecialFolder(Ci.nsMsgFolderFlags.Newsgroup, false) &&
+     (!gFolder.isSpecialFolder(Ci.nsMsgFolderFlags.ImapBox, false) ||
+       MailOfflineMgr.isOnline());
+   if (canDetach && "content-type" in currentHeaderData) {
+-    canDetach = !ContentTypeIsSMIME(
+-      currentHeaderData["content-type"].headerValue
+-    );
++    const contentType = currentHeaderData["content-type"].headerValue;
++    // Don't allow for S/MIME messages.
++    // S/MIME is application/pkcs7-mime and application/pkcs7-signature
++    // - also match application/x-pkcs7-mime and application/x-pkcs7-signature.
++    canDetach = !/application\/(x-)?pkcs7-(mime|signature)/.test(contentType);
+   }
+   if (canDetach) {
+     canDetach = Enigmail.hdrView.enigCanDetachAttachments();
+   }
+-
+   return canDetach;
+ }
+ 
+-/**
+- * Return true if the content type is an S/MIME one.
+- */
+-function ContentTypeIsSMIME(contentType) {
+-  // S/MIME is application/pkcs7-mime and application/pkcs7-signature
+-  // - also match application/x-pkcs7-mime and application/x-pkcs7-signature.
+-  return /application\/(x-)?pkcs7-(mime|signature)/.test(contentType);
+-}
+-
+ function onShowAttachmentToolbarContextMenu() {
+   const expandBar = document.getElementById("context-expandAttachmentBar");
+   const expanded = Services.prefs.getBoolPref(
+     "mailnews.attachments.display.start_expanded"
+@@ -1834,17 +1830,16 @@ var AttachmentListController = {
+     }
+   },
+ 
+   doCommand(command) {
+-    // If the user invoked a key short cut then it is possible that we got here
++    // If the user invoked a key shortcut then it is possible that we got here
+     // for a command which is really disabled. kick out if the command should
+     // be disabled.
+     if (!this.isCommandEnabled(command)) {
+       return;
+     }
+ 
+-    var attachmentList = document.getElementById("attachmentList");
+-
++    const attachmentList = document.getElementById("attachmentList");
+     switch (command) {
+       case "cmd_selectAll":
+         attachmentList.selectAll();
+         return;
+@@ -2381,8 +2376,18 @@ function HandleMultipleAttachments(attac
+     attachmentMessageUriArray[actionIndex] = attachment.uri;
+     ++actionIndex;
+   }
+ 
++  if (!attachments.every(attachment => attachment.isAllowedURL)) {
++    return;
++  }
++
++  const canDetach =
++    CanDetachAttachments() &&
++    attachments.every(
++      attachment => attachment.hasFile && !attachment.isExternalAttachment
++    );
++
+   // The list has been built. Now call our action code...
+   switch (action) {
+     case "save":
+       top.messenger.saveAllAttachments(
+@@ -2392,8 +2397,11 @@ function HandleMultipleAttachments(attac
+         attachmentMessageUriArray
+       );
+       return;
+     case "detach":
++      if (!canDetach) {
++        return;
++      }
+       // "detach" on a multiple selection of attachments is so far not really
+       // supported. As a workaround, resort to normal detach-"all". See also
+       // the comment on 'detaching a multiple selection of attachments' below.
+       if (attachments.length == 1) {
+@@ -2408,8 +2416,11 @@ function HandleMultipleAttachments(attac
+         );
+       }
+       return;
+     case "delete":
++      if (!canDetach) {
++        return;
++      }
+       top.messenger.detachAllAttachments(
+         attachmentContentTypeArray,
+         attachmentUrlArray,
+         attachmentDisplayNameArray,
+diff --git a/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js b/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
+--- a/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
++++ b/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
+@@ -508,8 +508,13 @@ Enigmail.hdrView = {
+     }
+     msgHdr.setUint32Property("enigmail", Enigmail.msg.securityInfo.statusFlags);
+   },
+ 
++  /**
++   * Checks - message level - whether delete/detach should be possible.
++   *
++   * @returns {boolean} true if delete/detach is possible.
++   */
+   enigCanDetachAttachments() {
+     let canDetach = true;
+     if (
+       Enigmail.msg.securityInfo &&
+diff --git a/mail/test/browser/openpgp/browser_viewMessage.js b/mail/test/browser/openpgp/browser_viewMessage.js
+--- a/mail/test/browser/openpgp/browser_viewMessage.js
++++ b/mail/test/browser/openpgp/browser_viewMessage.js
+@@ -225,8 +225,17 @@ add_task(async function testOpenForwarde
+     !OpenPGPTestUtils.hasEncryptedIconState(aboutMessage.document, "ok"),
+     "encrypted icon is not displayed"
+   );
+ 
++  // Delete should not work.
++  EventUtils.synthesizeMouseAtCenter(
++    aboutMessage.document.getElementById("attachmentBar"),
++    { clickCount: 1 },
++    aboutMessage
++  );
++  EventUtils.synthesizeKey("VK_DELETE", {}, aboutMessage);
++  await TestUtils.waitForTick();
++
+   const newWindowPromise = promise_new_window("mail:messageWindow");
+   EventUtils.synthesizeMouseAtCenter(
+     aboutMessage.document.getElementById("attachmentName"),
+     { clickCount: 1 },
