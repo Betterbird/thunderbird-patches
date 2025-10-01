@@ -119,7 +119,7 @@ Information you need to supply:
 1. Operating system and version of operating system. For Linux, distribution and desktop environment as well as graphic interface (X11/Wayland).
 2. State your anti-virus program, if any.
 3. State your hardware: RAM, disk size, type of fixed disk (SSD, etc.).
-4. Version of Betterbird. For Linux, how it was installed: FlatPak, Arch Linux AUR, installed from `.tar.xz` (formerly `.tar.bz2`), maybe via our [installation script](https://github.com/Betterbird/thunderbird-patches/blob/main/install-on-linux/install-betterbird.sh).
+4. Version of Betterbird. Localised or English-US? For Linux, how it was installed: FlatPak, Arch Linux AUR, installed from `.tar.xz` (formerly `.tar.bz2`), maybe via our [installation script](https://github.com/Betterbird/thunderbird-patches/blob/main/install-on-linux/install-betterbird.sh).
 5. State how many accounts you have and of which type and state with which account type the issue happens: IMAP, POP, Feeds, News, Chat. For IMAP, state whether the folder producing the problem is synchronised for offline use or not. For all account types: How many messages? How big is the folder in KB, MB or GB. This is especially important for performance issues.
 6. State whether you have configured any online services, like CalDAV calendars or CardDAV address books, potentially via NextCloud.
 7. Check whether there are relevant entries in the Error Console: `Tools > Developer Tools > Error Console`. You can clear the console before reproducing the problem by clicking on the trash can icon on the top left. You can enable timestamps by clicking on the gear/sprocket icon on the top right.
