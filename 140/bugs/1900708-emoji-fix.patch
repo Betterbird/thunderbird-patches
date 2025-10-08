@@ -1,0 +1,132 @@
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1759957129 -7200
+# Node ID 52bb4edba5c2e2dce46b5ad392db51e6a2f3355b
+# Parent  912ed2184c33ba6fd3ba53d45a34ac7f1b8b8637
+Bug 1900708 - Allow U+200D and U+FE0E/U+FE0F characters in header sanitisation to allow emoji sequences. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D266933
+
+diff --git a/mailnews/mime/jsmime/jsmime.mjs b/mailnews/mime/jsmime/jsmime.mjs
+--- a/mailnews/mime/jsmime/jsmime.mjs
++++ b/mailnews/mime/jsmime/jsmime.mjs
+@@ -301,9 +301,11 @@ const JsMIMEheaderparser = function () {
+   var headerparser = {};
+ 
+   /**
+    * Clean up characters that could cause display problems since they
+-   * are not displayed.
++   * are not displayed. Undisplayed characters could be used to break up runs
++   * of ordinary white-space characters (that would otherwise be collapsed to
++   * prevent spoofing attacks), so we remove them.
+    *
+    * @param {string} token - The string to be cleaned.
+    * @returns {string} The cleaned string.
+    */
+@@ -331,10 +333,12 @@ const JsMIMEheaderparser = function () {
+     // https://www.fileformat.info/info/unicode/category/Mn/list.htm
+     // https://mothereff.in/regexpu#input=/\p{Mn}/u&unicodePropertyEscape=1
+     // This is a bit more complicated as some of them could be "real", so we'll
+     // only remove the ones that are known to show as blank.
++    // The text variation selector (\uFE0E) and emoji variation selector
++    // (\uFE0F) are allowed.
+     token = token.replace(
+-      /[\u034F\u17B4\u17B5\u180B-\u180D\uFE00-\uFE0F]/g,
++      /[\u034F\u17B4\u17B5\u180B-\u180D\uFE00-\uFE0D]/g,
+       ""
+     );
+     // \uE0100-\uE01EF need to be written using their surrogate code point pairs
+     // until extended Unicode escapes are supported in regexps.
+@@ -354,18 +358,31 @@ const JsMIMEheaderparser = function () {
+     // Remove all of these except for \u0600-\u0605.
+     // XXX: We replace these with spaces (" "), not empty strings ("").
+     // Notably, for zero width space (\u200B) replacing with empty space
+     // would later drop real spaces surrounding it. Dunno why.
++    // The zero-width joiner (\u200D) is allowed for emoji sequences.
+     token = token.replace(
+-      /(?:[\xAD\u061C\u06DD\u070F\u08E2\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804[\uDCBD\uDCCD]|\uD80D[\uDC30-\uDC38]|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F])/g,
++      /(?:[\xAD\u061C\u06DD\u070F\u08E2\u180E\u200B\u200C\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804[\uDCBD\uDCCD]|\uD80D[\uDC30-\uDC38]|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F])/g,
+       " "
+     );
+ 
+     // -- case E: problematic symbols
+     // https://www.fileformat.info/info/unicode/category/So/list.htm
+     // Replace U+2800 BRAILLE PATTERN BLANK with space.
+     token = token.replace(/\u2800/g, " ");
+ 
++    // Now handle special cases we allowed above.
++
++    // Replace the zero-width joiner, but only if it's now preceeded or
++    // followed by a space added above.
++    token = token.replace(/(^| )\u200D|\u200D( |$)/g, " ");
++
++    // Replace text and/or emoji variation selectors, but only at the
++    // start of the token, or after a space added above.
++    token = token.replace(/(^| )[\uFE0E\uFE0F]+/g, " ");
++    // Remove consecutive variation selectors, keeping the first.
++    token = token.replace(/([\uFE0E\uFE0F])[\uFE0E\uFE0F]+/g, "$1");
++
+     return token;
+   }
+ 
+   /**
+diff --git a/mailnews/mime/jsmime/test/unit/test_header.js b/mailnews/mime/jsmime/test/unit/test_header.js
+--- a/mailnews/mime/jsmime/test/unit/test_header.js
++++ b/mailnews/mime/jsmime/test/unit/test_header.js
+@@ -919,8 +919,56 @@ define(function (require) {
+               email: "foe@example.com",
+             },
+           ],
+         ],
++
++        // Emoji sequence containing a zero-width joiner. This requires both
++        // the ZWJ (\u200D) and emoji variation selector (\uFE0F) to be allowed.
++        [
++          "Emojis are complicated \u{1F926}\u200D\u2642\uFE0F <emoji@example.com>",
++          [
++            {
++              name: "Emojis are complicated 🤦‍♂️",
++              email: "emoji@example.com",
++            },
++          ],
++        ],
++        // Check that both text variation selector (\uFE0E) and emoji variation
++        // selector (\uFE0F) are working.
++        [
++          "Text \u2640\uFE0E Emoji \u2640\uFE0F <emoji@example.com>",
++          [
++            {
++              name: "Text ♀︎ Emoji ♀️",
++              email: "emoji@example.com",
++            },
++          ],
++        ],
++        // Text and emoji variation selectors should be removed unless they
++        // follow a printable character.
++        [
++          "\uFE0E\u200B\uFE0F\uFE0F\u200BSneaky",
++          [{ name: "Sneaky", email: "" }],
++        ],
++        [
++          "Naughty\uFE0E\uFE0F\u200B\uFE0F\uFE0F\u200B\uFE0E!",
++          [{ name: "Naughty\uFE0E !", email: "" }],
++        ],
++        [
++          "Mostly\uFE0E\u200B\uFE0Fharmless - \uFE0E \uFE0F\uFE0E or is it?",
++          [{ name: "Mostly\uFE0E harmless - or is it?", email: "" }],
++        ],
++        // Zero-width joiners adjacent to other characters we're sanitising.
++        // The joiners should be removed.
++        [
++          "Before\u200B\u200DAfter\u200D\u200BBoth\u200B\u200D\u200B",
++          [{ name: "Before After Both", email: "" }],
++        ],
++        // A zero-width joiner next to printable characters.
++        [
++          "This\u200D \u200D \u200D \u200Dis bad",
++          [{ name: "This is bad", email: "" }],
++        ],
+       ];
+       header_tests.forEach(function (data) {
+         arrayTest(data, function () {
+           assert.deepEqual(
