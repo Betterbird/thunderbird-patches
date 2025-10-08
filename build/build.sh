@@ -103,11 +103,11 @@ else
   hg clone $COMM_REPO comm || exit 1
 fi
 
-if [ "$UNAME" = "Windows" ] && [ "$DELRES" = "delres" ] && [ -d obj-x86_64-pc-mingw32 ]; then
+if [ "$UNAME" = "Windows" ] && [ "$DELRES" = "delres" ] && [ -d obj-x86_64-pc-windows-msvc ]; then
   echo
   echo "======================================================="
   echo "Deleting .rc and .res files"
-  cd obj-x86_64-pc-mingw32
+  cd obj-x86_64-pc-windows-msvc
   # del /s is much faster than find.
   /C/Windows/system32/cmd.exe /C"del/s *.rc"
   /C/Windows/system32/cmd.exe /C"del/s *.res"
@@ -284,11 +284,11 @@ fi
 echo
 echo "======================================================="
 echo "Starting the build"
-if [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-mingw32 ]; then
+if [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-windows-msvc ]; then
   echo
   echo "======================================================="
   echo "Deleting .rc and .res files"
-  cd obj-x86_64-pc-mingw32
+  cd obj-x86_64-pc-windows-msvc
   # del /s is much faster than find.
   /C/Windows/system32/cmd.exe /C"del/s *.rc"
   /C/Windows/system32/cmd.exe /C"del/s *.res"
@@ -308,8 +308,8 @@ if [ "$NOCLOBBER" = "noclobber" ]; then
     touch obj-x86_64-apple-darwin/CLOBBER
   elif [ "$UNAME" = "Darwin" ] && [ -d obj-aarch64-apple-darwin ] && [ "$UNAME_ARCH" = "arm64" ]; then
     touch obj-aarch64-apple-darwin/CLOBBER
-  elif [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-mingw32 ]; then
-    touch obj-x86_64-pc-mingw32/CLOBBER
+  elif [ "$UNAME" = "Windows" ] && [ -d obj-x86_64-pc-windows-msvc ]; then
+    touch obj-x86_64-pc-windows-msvc/CLOBBER
   fi
 else
   echo
@@ -352,5 +352,5 @@ elif [ "$UNAME" = "Windows" ]; then
   echo
   echo "======================================================="
   echo "Find your disk image here"
-  ls $MOZILLA_DIR/obj-x86_64-pc-mingw32/dist/install/sea/*.installer.exe
+  ls $MOZILLA_DIR/obj-x86_64-pc-windows-msvc/dist/install/sea/*.installer.exe
 fi
