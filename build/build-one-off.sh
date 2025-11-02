@@ -81,13 +81,7 @@ if [ -d $MOZILLA_DIR ]; then
   rm -rf $MOZILLA_DIR
 fi
 
-if [ "$VERSION" = "115" ]; then
-  APPDATA_FILE="thunderbird-patches/metadata/eu.betterbird.Betterbird.115.appdata.xml"
-else
-  APPDATA_FILE="thunderbird-patches/metadata/eu.betterbird.Betterbird.appdata.xml"
-  echo "This script only works for the 115 build, see: https://bugzilla.mozilla.org/show_bug.cgi?id=1798746."
-  exit 1
-fi
+APPDATA_FILE="thunderbird-patches/metadata/eu.betterbird.Betterbird.$VERSION.appdata.xml"
 SOURCE=$(cat $APPDATA_FILE | sed -rz 's@.+<artifact type="source">\s*<location>([^<]+)<\/location>.+@\1@')
 
 echo
@@ -100,7 +94,7 @@ echo
 echo "======================================================="
 echo "Unpacking $ARCHIVE"
 tar -xf $ARCHIVE
-mv "${ARCHIVE%.source.tar.xz}" $MOZILLA_DIR
+mv "${ARCHIVE%esr.source.tar.xz}" $MOZILLA_DIR
 
 cd $MOZILLA_DIR
 pwd
