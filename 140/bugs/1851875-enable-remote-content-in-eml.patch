@@ -1,0 +1,233 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1762544899 -3600
+# Node ID e38e12f34c46a01a0b546923847b3c3344367e7c
+# Parent  a41451cffafc46926170bd1546cd63c51682eec8
+Bug 1851875 - Enable 'Show remote content' for .EML messages. r=mkmelin
+
+
+- Provide an `nsMsgFileHdr` also for 'mailbox-message' URIs identifying a
+  single file message.
+- Have `nsMsgFileHdr` maintain a static allow list containing the file names of
+  the messages set to show remote content. This list won't be persisted after
+  the app has shut down.
+
+Differential Revision: https://phabricator.services.mozilla.com/D265349
+
+diff --git a/mail/test/browser/content-policy/browser_generalContentPolicy.js b/mail/test/browser/content-policy/browser_generalContentPolicy.js
+--- a/mail/test/browser/content-policy/browser_generalContentPolicy.js
++++ b/mail/test/browser/content-policy/browser_generalContentPolicy.js
+@@ -371,9 +371,9 @@ async function checkStandaloneMessageWin
+ }
+ 
+ /**
+  * Check remote content in stand-alone message window loaded from .eml file.
+- * Make sure there's a notification bar.
++ * Make sure there's a notification bar and allowing remote content works.
+  */
+ async function checkEMLMessageWindow(test, emlFile) {
+   const msgc = await open_message_from_file(emlFile);
+   const aboutMessage = get_about_message(msgc);
+@@ -383,9 +383,32 @@ async function checkEMLMessageWindow(tes
+   if (aboutMessage.document.getElementById("mail-notification-top").collapsed) {
+     throw new Error(test.type + " content notification bar not shown.");
+   }
+ 
+-  // Clean up, close the window
++  if (
++    await test.checkForAllowed(
++      aboutMessage
++        .getMessagePaneBrowser()
++        .contentDocument.getElementById("testelement")
++    )
++  ) {
++    throw new Error(`${test.type} has not been blocked in EML message window.`);
++  }
++
++  await showRemoteContent(aboutMessage);
++
++  if (
++    !(await test.checkForAllowed(
++      aboutMessage
++        .getMessagePaneBrowser()
++        .contentDocument.getElementById("testelement")
++    ))
++  ) {
++    throw new Error(
++      `${test.type} has been unexpectedly blocked in EML message window.`
++    );
++  }
++
+   await BrowserTestUtils.closeWindow(msgc);
+ }
+ 
+ /**
+@@ -414,17 +437,16 @@ async function saveAsEMLFile(msgNo) {
+   await new Promise(resolve => setTimeout(resolve, 5000));
+   return file;
+ }
+ 
+-async function allowRemoteContentAndCheck(test) {
+-  if (test.neverAllowed) {
+-    return;
+-  }
+-  info(`Checking allow remote content; test=${test.type}`);
+-  await addMsgToFolderAndCheckContent(folder, test);
+-
+-  const aboutMessage = get_about_message();
+-
++/**
++ * Helper function to click the "Show remote content in this message" option
++ * in the notification bar.
++ *
++ * @param {Window} aboutMessage - The about:message window showing the
++ *   notification.
++ */
++async function showRemoteContent(aboutMessage) {
+   // Click on the allow remote content button
+   const kBoxId = "mail-notification-top";
+   const kNotificationValue = "remoteContent";
+   await wait_for_notification_to_show(aboutMessage, kBoxId, kNotificationValue);
+@@ -446,10 +468,20 @@ async function allowRemoteContentAndChec
+     .activateItem(
+       aboutMessage.document.getElementById("remoteContentOptionAllowForMsg")
+     );
+   await wait_for_notification_to_stop(aboutMessage, kBoxId, kNotificationValue);
++  await wait_for_message_display_completion(window, true);
++}
+ 
+-  await wait_for_message_display_completion(window, true);
++async function allowRemoteContentAndCheck(test) {
++  if (test.neverAllowed) {
++    return;
++  }
++  info(`Checking allow remote content; test=${test.type}`);
++  await addMsgToFolderAndCheckContent(folder, test);
++
++  const aboutMessage = get_about_message();
++  await showRemoteContent(aboutMessage);
+ 
+   if (
+     !(await test.checkForAllowed(
+       aboutMessage
+diff --git a/mailnews/local/src/nsMailboxService.cpp b/mailnews/local/src/nsMailboxService.cpp
+--- a/mailnews/local/src/nsMailboxService.cpp
++++ b/mailnews/local/src/nsMailboxService.cpp
+@@ -496,22 +496,31 @@ NS_IMETHODIMP
+ nsMailboxService::MessageURIToMsgHdr(const nsACString& uri,
+                                      nsIMsgDBHdr** _retval) {
+   NS_ENSURE_ARG_POINTER(_retval);
+ 
++  // When an .eml message file is loaded, nsMailboxService::FetchMessage
++  // creates a new 'mailbox' URI  including a 'number=0' search part from the
++  // original 'file' URI spec, which is subsequently returned as
++  //'mailbox-message' URI with additional `#0' by nsMailboxUrl::GetUri.
++  if (StringBeginsWith(uri, "mailbox-message:"_ns) &&
++      StringEndsWith(uri, "number=0#0"_ns)) {
++    nsAutoCString uriString(uri);
++    uriString.Replace(0, 16, "file:"_ns);
++    nsCOMPtr<nsIMsgDBHdr> msgHdr = new nsMsgFileHdr(uriString);
++    msgHdr.forget(_retval);
++    return NS_OK;
++  }
++
+   if (StringBeginsWith(uri, "file:"_ns)) {
+     nsCOMPtr<nsIMsgDBHdr> msgHdr = new nsMsgFileHdr(uri);
+     msgHdr.forget(_retval);
+     return NS_OK;
+   }
+ 
+-  nsresult rv = NS_OK;
+-
+   nsCOMPtr<nsIMsgFolder> folder;
+   nsMsgKey msgKey;
+ 
+-  rv = DecomposeMailboxURI(uri, getter_AddRefs(folder), &msgKey);
++  nsresult rv = DecomposeMailboxURI(uri, getter_AddRefs(folder), &msgKey);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  rv = folder->GetMessageHeader(msgKey, _retval);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-  return NS_OK;
++  return folder->GetMessageHeader(msgKey, _retval);
+ }
+diff --git a/mailnews/local/src/nsMsgFileHdr.cpp b/mailnews/local/src/nsMsgFileHdr.cpp
+--- a/mailnews/local/src/nsMsgFileHdr.cpp
++++ b/mailnews/local/src/nsMsgFileHdr.cpp
+@@ -104,8 +104,19 @@ nsresult nsMsgFileHdr::ReadFile() {
+ 
+   return rv;
+ }
+ 
++nsresult nsMsgFileHdr::InitFileName() {
++  if (!mFileName.IsEmpty()) {
++    return nsresult::NS_OK;
++  }
++
++  nsCOMPtr<nsIURI> uri;
++  NS_NewURI(getter_AddRefs(uri), mUri);
++  nsCOMPtr<nsIFileURL> fileUrl = do_QueryInterface(uri);
++  return fileUrl->GetFileName(mFileName);
++}
++
+ NS_IMETHODIMP nsMsgFileHdr::SetStringProperty(const char* propertyName,
+                                               const nsACString& propertyValue) {
+   return NS_OK;
+ }
+@@ -128,14 +139,23 @@ NS_IMETHODIMP nsMsgFileHdr::GetUint32Pro
+ 
+     PRTime modifiedTime;
+     mFile->GetLastModifiedTime(&modifiedTime);
+     *_retval = PRTimeToSeconds(modifiedTime);
++  } else if (!strcmp(propertyName, "remoteContentPolicy")) {
++    InitFileName();
++    *_retval = RemoteAllowList().Contains(mFileName) ? kAllowRemoteContent
++                                                     : kNoRemoteContentPolicy;
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgFileHdr::SetUint32Property(const char* propertyName,
+                                               uint32_t propertyVal) {
++  if (!strcmp(propertyName, "remoteContentPolicy") &&
++      propertyVal == kAllowRemoteContent) {
++    InitFileName();
++    RemoteAllowList().Insert(mFileName);
++  }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgFileHdr::GetIsRead(bool* aIsRead) { return NS_OK; }
+diff --git a/mailnews/local/src/nsMsgFileHdr.h b/mailnews/local/src/nsMsgFileHdr.h
+--- a/mailnews/local/src/nsMsgFileHdr.h
++++ b/mailnews/local/src/nsMsgFileHdr.h
+@@ -22,11 +22,14 @@ class nsMsgFileHdr : public nsIMsgDBHdr 
+  private:
+   virtual ~nsMsgFileHdr();
+ 
+   nsresult ReadFile();
++  nsresult InitFileName();
+ 
+   nsCString mUri;
+   nsCOMPtr<nsIFile> mFile;
++  nsCString mFileName;
++
+   nsCString mAuthor;
+   nsString mDecodedAuthor;
+   nsCString mSubject;
+   nsString mDecodedSubject;
+@@ -36,7 +39,14 @@ class nsMsgFileHdr : public nsIMsgDBHdr 
+   nsCString mBccList;
+   PRTime mDate;
+   nsCString mMessageID;
+   uint32_t mFlags;
++
++  static constexpr uint32_t kNoRemoteContentPolicy = 0;
++  static constexpr uint32_t kAllowRemoteContent = 2;
++  static nsTHashSet<nsCString>& RemoteAllowList() {
++    static nsTHashSet<nsCString> sRemoteAllowList;
++    return sRemoteAllowList;
++  };
+ };
+ 
+ #endif
