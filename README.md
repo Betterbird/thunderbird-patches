@@ -11,7 +11,7 @@ The development environment needs to be set up depending on the platform.
 Linux x86-64 users follow the following instructions.
 To build successfully on Linux, you need at least 16 GB of memory or swap space.
 We executed the steps successfully on a Ubuntu 20.04 cloud server (Hetzner CPX41, 8 CPUs, 16 GB RAM, 240 GB disk)
-and also using Ubuntu 24.04 on a VM (8 CPUs, 20 GB RAM, 90 GB disk).
+and also using Ubuntu 22.04 on a VM (8 CPUs, 24 GB RAM, 90 GB disk).
 Building for aarch64 (aka arm64) is also supported. You need to run the build on a aarch64 machine (which you can hire at Amazon EC2).
 Sadly `./mach bootstrap` doesn't work on Linux/aarch64, so please read [here](./build/build-env-aarch64.MD).
 This follows the first part of the [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/linux_build.html) copied below:
