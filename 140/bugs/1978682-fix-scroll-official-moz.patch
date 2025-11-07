@@ -1,0 +1,168 @@
+# HG changeset patch
+# User Hiroyuki Ikezoe <hikezoe.birchill@mozilla.com>
+# Date 1762540400 -3600
+# Node ID 12fef475aebdd49e6e81fbf55c28d52a4b7f1588
+# Parent  bf44141de1a916dad390b7a1e788435cf3f7d329
+Bug 1978682 - Use ScrollPositionUpdate::mSource as the scroll origin of relavei/instant scroll position updates if the APZC is default. r=botond
+
+Differential Revision: https://phabricator.services.mozilla.com/D269175
+
+diff --git a/gfx/layers/FrameMetrics.cpp b/gfx/layers/FrameMetrics.cpp
+--- a/gfx/layers/FrameMetrics.cpp
++++ b/gfx/layers/FrameMetrics.cpp
+@@ -164,13 +164,20 @@ bool FrameMetrics::ApplyScrollUpdateFrom
+   return offsetChanged;
+ }
+ 
+ CSSPoint FrameMetrics::ApplyRelativeScrollUpdateFrom(
+-    const ScrollPositionUpdate& aUpdate) {
++    const ScrollPositionUpdate& aUpdate, IsDefaultApzc aIsDefaultApzc) {
+   MOZ_ASSERT(aUpdate.GetType() == ScrollUpdateType::Relative);
+   MOZ_ASSERT(aUpdate.GetMode() != ScrollMode::Smooth &&
+              aUpdate.GetMode() != ScrollMode::SmoothMsd);
+-  CSSPoint origin = GetVisualScrollOffset();
++
++  // If the APZC is default, i.e. newly created one, any relative instant
++  // scroll position update has been already reflected as the visual scroll
++  // offset, so we use the mSource in this ScrollPositionUpdate, which is the
++  // original scroll offset when this relative scroll update operation happened
++  // on the content.
++  CSSPoint origin =
++      bool(aIsDefaultApzc) ? aUpdate.GetSource() : GetVisualScrollOffset();
+   CSSPoint delta = (aUpdate.GetDestination() - aUpdate.GetSource());
+   SetVisualScrollOffset(origin + delta);
+   return GetVisualScrollOffset() - origin;
+ }
+diff --git a/gfx/layers/FrameMetrics.h b/gfx/layers/FrameMetrics.h
+--- a/gfx/layers/FrameMetrics.h
++++ b/gfx/layers/FrameMetrics.h
+@@ -254,9 +254,14 @@ struct FrameMetrics {
+    * scrollable region.
+    *
+    * @returns The clamped scroll offset delta that was applied
+    */
+-  CSSPoint ApplyRelativeScrollUpdateFrom(const ScrollPositionUpdate& aUpdate);
++  enum class IsDefaultApzc {
++    No,
++    Yes,
++  };
++  CSSPoint ApplyRelativeScrollUpdateFrom(const ScrollPositionUpdate& aUpdate,
++                                         IsDefaultApzc aIsDefaultApzc);
+ 
+   CSSPoint ApplyPureRelativeScrollUpdateFrom(
+       const ScrollPositionUpdate& aUpdate);
+ 
+diff --git a/gfx/layers/apz/src/AsyncPanZoomController.cpp b/gfx/layers/apz/src/AsyncPanZoomController.cpp
+--- a/gfx/layers/apz/src/AsyncPanZoomController.cpp
++++ b/gfx/layers/apz/src/AsyncPanZoomController.cpp
+@@ -5935,12 +5935,13 @@ void AsyncPanZoomController::NotifyLayer
+ 
+     Maybe<CSSPoint> relativeDelta;
+     if (scrollUpdate.GetType() == ScrollUpdateType::Relative) {
+       APZC_LOG(
+-          "%p relative updating scroll offset from %s by %s\n", this,
+-          ToString(Metrics().GetVisualScrollOffset()).c_str(),
++          "%p relative updating scroll offset from %s by %s, isDefault(%d)\n",
++          this, ToString(Metrics().GetVisualScrollOffset()).c_str(),
+           ToString(scrollUpdate.GetDestination() - scrollUpdate.GetSource())
+-              .c_str());
++              .c_str(),
++          isDefault);
+ 
+       scrollOffsetUpdated = true;
+ 
+       // It's possible that the main thread has ignored an APZ scroll offset
+@@ -5952,10 +5953,10 @@ void AsyncPanZoomController::NotifyLayer
+         needContentRepaint = true;
+         contentRepaintType = RepaintUpdateType::eUserAction;
+       }
+ 
+-      relativeDelta =
+-          Some(Metrics().ApplyRelativeScrollUpdateFrom(scrollUpdate));
++      relativeDelta = Some(Metrics().ApplyRelativeScrollUpdateFrom(
++          scrollUpdate, FrameMetrics::IsDefaultApzc{isDefault}));
+       Metrics().RecalculateLayoutViewportOffset();
+     } else if (scrollUpdate.GetType() == ScrollUpdateType::PureRelative) {
+       APZC_LOG("%p pure-relative updating scroll offset from %s by %s\n", this,
+                ToString(Metrics().GetVisualScrollOffset()).c_str(),
+diff --git a/gfx/layers/apz/test/gtest/TestBasic.cpp b/gfx/layers/apz/test/gtest/TestBasic.cpp
+--- a/gfx/layers/apz/test/gtest/TestBasic.cpp
++++ b/gfx/layers/apz/test/gtest/TestBasic.cpp
+@@ -387,9 +387,9 @@ TEST_F(APZCBasicTester, MultipleSmoothSc
+     lastOffset = offset;
+   }
+ }
+ 
+-TEST_F(APZCBasicTester, NotifyLayersUpdate_WithScrollUpdates) {
++TEST_F(APZCBasicTester, NotifyLayersUpdate_WithScrollUpdate) {
+   // Set an empty metadata as if the APZC is now newly created.
+   // This replicates when a document in a background tab now becomes forground.
+   ScrollMetadata metadata;
+   apzc->SetScrollMetadata(metadata);
+@@ -412,9 +412,9 @@ TEST_F(APZCBasicTester, NotifyLayersUpda
+       CSSPoint::ToAppUnits(CSSPoint(10, 10)),
+       CSSPoint::ToAppUnits(CSSPoint(15, 15))));
+   metadata.SetScrollUpdates(scrollUpdates);
+   metrics.SetScrollGeneration(scrollUpdates.LastElement().GetGeneration());
+-  // With the above scroll updates, now the layout/visual scroll offsets (on the
++  // With the above scroll update, now the layout/visual scroll offsets (on the
+   // main-thread) need to be updated.
+   metrics.SetVisualScrollOffset(CSSPoint(15, 15));
+   metrics.SetLayoutViewport(CSSRect(15, 15, 10, 10));
+ 
+@@ -423,12 +423,51 @@ TEST_F(APZCBasicTester, NotifyLayersUpda
+                             /*thisLayerTreeUpdated=*/true);
+ 
+   // The layout/visual scroll ofsets and the relative scroll update need to be
+   // reflected.
+-  ASSERT_EQ(apzc->GetFrameMetrics().GetLayoutScrollOffset(), CSSPoint(20, 20))
+-      << "If the actual value is (15, 15), you fixed bug 1978682, thanks!";
+-  ASSERT_EQ(apzc->GetFrameMetrics().GetVisualScrollOffset(), CSSPoint(20, 20))
+-      << "If the actual value is (15, 15), you fixed bug 1978682, thanks!";
++  ASSERT_EQ(apzc->GetFrameMetrics().GetLayoutScrollOffset(), CSSPoint(15, 15));
++  ASSERT_EQ(apzc->GetFrameMetrics().GetVisualScrollOffset(), CSSPoint(15, 15));
++}
++
++TEST_F(APZCBasicTester, NotifyLayersUpdate_WithMultipleScrollUpdates) {
++  // Set an empty metadata as if the APZC is now newly created.
++  // This replicates when a document in a background tab now becomes foreground.
++  ScrollMetadata metadata;
++  apzc->SetScrollMetadata(metadata);
++  ASSERT_TRUE(apzc->GetScrollMetadata().IsDefault());
++
++  FrameMetrics& metrics = metadata.GetMetrics();
++  metrics.SetDisplayPort(CSSRect(0, 0, 10, 10));
++  metrics.SetCompositionBounds(ParentLayerRect(0, 0, 10, 10));
++  metrics.SetScrollableRect(CSSRect(0, 0, 100, 100));
++
++  metrics.SetVisualScrollOffset(CSSPoint(0, 0));
++  metrics.SetLayoutViewport(CSSRect(0, 0, 10, 10));
++  metrics.SetScrollId(ScrollableLayerGuid::START_SCROLL_ID);
++
++  AutoTArray<ScrollPositionUpdate, 2> scrollUpdates;
++  // Append a new scroll frame as if the scroll frame was reconstructed.
++  scrollUpdates.AppendElement(ScrollPositionUpdate::NewScrollframe(
++      CSSPoint::ToAppUnits(CSSPoint(0, 0))));
++  // Append a new relative scroll update (0, 0) -> (20, 20).
++  scrollUpdates.AppendElement(ScrollPositionUpdate::NewRelativeScroll(
++      CSSPoint::ToAppUnits(CSSPoint(0, 0)),
++      CSSPoint::ToAppUnits(CSSPoint(20, 20))));
++  metadata.SetScrollUpdates(scrollUpdates);
++  metrics.SetScrollGeneration(scrollUpdates.LastElement().GetGeneration());
++  // With the above scroll updates, now the layout/visual scroll offsets (on the
++  // main-thread) need to be updated.
++  metrics.SetVisualScrollOffset(CSSPoint(20, 20));
++  metrics.SetLayoutViewport(CSSRect(20, 20, 10, 10));
++
++  // It's not first-paint when switching tab.
++  apzc->NotifyLayersUpdated(metadata, /*isFirstPaint=*/false,
++                            /*thisLayerTreeUpdated=*/true);
++
++  // The layout/visual scroll ofsets and the relative scroll update need to be
++  // reflected.
++  ASSERT_EQ(apzc->GetFrameMetrics().GetLayoutScrollOffset(), CSSPoint(20, 20));
++  ASSERT_EQ(apzc->GetFrameMetrics().GetVisualScrollOffset(), CSSPoint(20, 20));
+ }
+ 
+ class APZCSmoothScrollTester : public APZCBasicTester {
+  public:
