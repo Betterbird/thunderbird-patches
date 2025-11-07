@@ -1,0 +1,112 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1762543218 -3600
+# Node ID 3ecad99805d767e50d16c48cc91d37449b1dffd4
+# Parent  37b022163264df8287165663125e043a38599db6
+Bug 1829728 - Disambiguate folders with the same name in 'Recent Destinations' and 'Favorites' submenu. r=freaktechnik
+
+If the submenu contains multiple folders with the same name, show the full path
+for them. Only append the account name if they are from different accounts.
+Overlong labels are shortened at the beginning.
+
+Additionally, always provide a tooltip showing the full path and account name.
+
+Differential Revision: https://phabricator.services.mozilla.com/D268509
+
+diff --git a/mail/themes/shared/mail/folderMenus.css b/mail/themes/shared/mail/folderMenus.css
+--- a/mail/themes/shared/mail/folderMenus.css
++++ b/mail/themes/shared/mail/folderMenus.css
+@@ -104,5 +104,15 @@
+     -moz-context-properties: fill, stroke;
+     fill: color-mix(in srgb, currentColor 20%, transparent);
+     stroke: currentColor;
+   }
++
++  :is(label, description)[value][crop="start"]::before {
++    /* Mark text as isolated LTR to preserve punctuation/numeric order. */
++    content: "\2066" -moz-label-content "\2069";
++  }
++
++  :is(label, description)[value][crop="start"]:-moz-locale-dir(rtl)::before {
++     /* Mark text as isolated RTL to preserve punctuation/numeric order. */
++    content: "\2067" -moz-label-content "\2069";
++  }
+ }
+diff --git a/mailnews/base/content/folder-menupopup.js b/mailnews/base/content/folder-menupopup.js
+--- a/mailnews/base/content/folder-menupopup.js
++++ b/mailnews/base/content/folder-menupopup.js
+@@ -607,37 +607,46 @@
+         // with quadratic complexity when sorting by name.
+         const specialFoldersMap = specialFolders.map(folder => {
+           return {
+             folder,
+-            name: folder.prettyName,
++            folderName: folder.prettyName,
++            folderPath: folder.prettyPath,
++            serverName: folder.server.prettyName,
+           };
+         });
+ 
+         // Because we're scanning across multiple accounts, we can end up with
+         // several folders with the same name. Find those dupes.
+         const dupeNames = new Set();
+-        for (let i = 0; i < specialFoldersMap.length; i++) {
+-          for (let j = i + 1; j < specialFoldersMap.length; j++) {
+-            if (specialFoldersMap[i].name == specialFoldersMap[j].name) {
+-              dupeNames.add(specialFoldersMap[i].name);
++        const dupeNamesAcrossAccounts = new Set();
++        for (const [name, foldersWithSameName] of Object.entries(
++          Object.groupBy(specialFoldersMap, ({ folderName }) => folderName)
++        )) {
++          if (foldersWithSameName.length > 1) {
++            dupeNames.add(name);
++            if (
++              Object.keys(
++                Object.groupBy(
++                  foldersWithSameName,
++                  ({ serverName }) => serverName
++                )
++              ).length > 1
++            ) {
++              dupeNamesAcrossAccounts.add(name);
+             }
+           }
+         }
+ 
+         for (const folderItem of specialFoldersMap) {
+           // If this folder name appears multiple times in the recent list,
+-          // append the server name to disambiguate.
+-          // TODO:
+-          //  - maybe this could use verboseFolderFormat from messenger.properties
+-          //  instead of hardcoded " - ".
+-          //  - disambiguate folders with same name in same account
+-          //  (in different subtrees).
+-          let label = folderItem.name;
+-          if (dupeNames.has(label)) {
+-            label += " - " + folderItem.folder.server.prettyName;
+-          }
+-
+-          folderItem.label = label;
++          // use the path name and, if necessary, append the the server name
++          // to disambiguate.
++          folderItem.label = dupeNames.has(folderItem.folderName)
++            ? folderItem.folderPath +
++              (dupeNamesAcrossAccounts.has(folderItem.folderName)
++                ? ` - ${folderItem.serverName}`
++                : "")
++            : folderItem.folderName;
+         }
+ 
+         // If appropriate, sort the entries alphabetically.
+         if (specialType != "recent") {
+@@ -649,8 +658,10 @@
+         // Create entries for each of the special folders.
+         for (const folderItem of specialFoldersMap) {
+           const attributes = {
+             label: folderItem.label,
++            tooltiptext: `${folderItem.folderPath} - ${folderItem.serverName}`,
++            crop: "start",
+             ...this._getCssSelectorAttributes(folderItem.folder),
+           };
+ 
+           submenu.childWrapper.appendChild(
