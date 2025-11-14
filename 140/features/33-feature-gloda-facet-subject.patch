@@ -1,0 +1,176 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1763150605 -3600
+# Parent  29246abe7f6dfd3c40c4869df357def146a41201
+Feature: Add boolean Gloda facets 'Subject' and 'Body'.
+
+diff --git a/mail/base/content/glodaFacetView.xhtml b/mail/base/content/glodaFacetView.xhtml
+--- a/mail/base/content/glodaFacetView.xhtml
++++ b/mail/base/content/glodaFacetView.xhtml
+@@ -43,8 +43,20 @@
+       <div class="facets facets-sidebar" id="facets">
+         <h1 id="filter-header-label">&glodaFacetView.filters.label;</h1>
+         <div>
+           <facet-boolean
++            id="facet-_subjectMatches"
++            type="boolean"
++            attr="subjectMatches2"
++            uninitialized="true"
++          />
++          <facet-boolean
++            id="facet-_bodyMatches"
++            type="boolean"
++            attr="_bodyMatches"
++            uninitialized="true"
++          /><br />
++          <facet-boolean
+             id="facet-fromMe"
+             type="boolean"
+             attr="fromMe"
+             uninitialized="true"
+diff --git a/mail/locales/en-US/chrome/messenger/gloda.properties b/mail/locales/en-US/chrome/messenger/gloda.properties
+--- a/mail/locales/en-US/chrome/messenger/gloda.properties
++++ b/mail/locales/en-US/chrome/messenger/gloda.properties
+@@ -82,8 +82,11 @@ gloda.message.attr.fromMe.facetNameLabel
+ # LOCALIZATION NOTE (gloda.message.attr.toMe.*): Stores everyone involved
+ #  with the message.  This means from/to/cc/bcc.
+ gloda.message.attr.toMe.facetNameLabel=To Me
+ 
++gloda.message.attr._subjectMatches.facetNameLabel=Subject
++gloda.message.attr._bodyMatches.facetNameLabel=Body
++
+ # LOCALIZATION NOTE (gloda.message.attr.involves.*): Stores everyone involved
+ #  with the message.  This means from/to/cc/bcc.
+ gloda.message.attr.involves.facetNameLabel=People
+ gloda.message.attr.involves.includeLabel=involving any of:
+diff --git a/mail/themes/shared/mail/glodaFacetView.css b/mail/themes/shared/mail/glodaFacetView.css
+--- a/mail/themes/shared/mail/glodaFacetView.css
++++ b/mail/themes/shared/mail/glodaFacetView.css
+@@ -233,8 +233,10 @@ h3 {
+ }
+ 
+ /* === Boolean Facet === */
+ 
++#facet-_bodyMatches,
++#facet-_subjectMatches,
+ #facet-fromMe,
+ #facet-toMe,
+ #facet-star,
+ #facet-attachmentTypes {
+diff --git a/mailnews/db/gloda/modules/GlodaDataModel.sys.mjs b/mailnews/db/gloda/modules/GlodaDataModel.sys.mjs
+--- a/mailnews/db/gloda/modules/GlodaDataModel.sys.mjs
++++ b/mailnews/db/gloda/modules/GlodaDataModel.sys.mjs
+@@ -490,9 +490,11 @@ export function GlodaMessage(
+   aJsonText,
+   aNotability,
+   aSubject,
+   aIndexedBodyText,
+-  aAttachmentNames
++  aAttachmentNames,
++  aSubjectMatches,
++  aBodyMatches
+ ) {
+   // _datastore is now set on the prototype by GlodaDatastore
+   this._id = aID;
+   this._folderID = aFolderID;
+@@ -505,8 +507,16 @@ export function GlodaMessage(
+   this._notability = aNotability;
+   this._subject = aSubject;
+   this._indexedBodyText = aIndexedBodyText;
+   this._attachmentNames = aAttachmentNames;
++  // Who understands Gloda? If this is used in a facet,
++  // the value needs to be iterable.
++  if (aSubjectMatches) {
++    this._subjectMatches = [true] ;
++  }
++  if (aBodyMatches) {
++    this._bodyMatches = [true];
++  }
+ 
+   // only set _deleted if we're deleted, otherwise the undefined does our
+   //  speaking for us.
+   if (aDeleted) {
+diff --git a/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs b/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
+--- a/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
++++ b/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
+@@ -2983,8 +2983,31 @@ export var GlodaDatastore = {
+       }
+       // we ignore 12, author
+       // we ignore 13, recipients
+     }
++    let subjectMatched = false;
++    let bodyMatched = false;
++    if (
++      aRow.numEntries >= 15 &&
++      aRow.getTypeOfIndex(14) == Ci.mozIStorageValueArray.VALUE_TYPE_TEXT
++    ) {
++      // console.log("=== offsets", aRow.getString(14));
++      const offsets = aRow.getString(14).split(" ");
++      // The offset have this format: column number, token position, offset length.
++      // For example when matching "text", length 4, the following indicates matches
++      // on column 0 (body) and column 1 (subject).
++      // 0 0 0 4 1 0 0 4.
++      // Match on attachment name, author and recipients would be indicated by 2, 3 and 4.
++      for (let i = 0; i < offsets.length; i = i + 4) {
++        if (offsets[i] == 0) {
++          bodyMatched = true;
++          // console.log("=== matched on body", indexedBodyText);
++        } else if (offsets[i] == 1) {
++          subjectMatched = true;
++          // console.log("=== matched on subject", subject);
++        }
++      }
++    }
+     return new GlodaMessage(
+       this,
+       aRow.getInt64(0),
+       folderId,
+@@ -2997,9 +3020,11 @@ export var GlodaDatastore = {
+       jsonText,
+       aRow.getInt64(8),
+       subject,
+       indexedBodyText,
+-      attachmentNames
++      attachmentNames,
++      subjectMatched,
++      bodyMatched
+     );
+   },
+ 
+   get _updateMessagesMarkDeletedByFolderID() {
+diff --git a/mailnews/db/gloda/modules/GlodaFundAttr.sys.mjs b/mailnews/db/gloda/modules/GlodaFundAttr.sys.mjs
+--- a/mailnews/db/gloda/modules/GlodaFundAttr.sys.mjs
++++ b/mailnews/db/gloda/modules/GlodaFundAttr.sys.mjs
+@@ -415,8 +415,32 @@ export var GlodaFundAttr = {
+       singular: false,
+       subjectNouns: [GlodaConstants.NOUN_MESSAGE],
+       objectNoun: GlodaConstants.NOUN_PARAM_IDENTITY,
+     }); // not-tested
++    this._attrSubjectFacet = Gloda.defineAttribute({
++      provider: this,
++      extensionName: GlodaConstants.BUILT_IN,
++      attributeType: GlodaConstants.kAttrFundamental,
++      attributeName: "_subjectMatches",
++      facet: {
++        type: "nonempty?"
++      },
++      singular: false,
++      subjectNouns: [GlodaConstants.NOUN_MESSAGE],
++      objectNoun: GlodaConstants.NOUN_STRING,
++    });
++    this._attrSubjectFacet = Gloda.defineAttribute({
++      provider: this,
++      extensionName: GlodaConstants.BUILT_IN,
++      attributeType: GlodaConstants.kAttrFundamental,
++      attributeName: "_bodyMatches",
++      facet: {
++        type: "nonempty?"
++      },
++      singular: false,
++      subjectNouns: [GlodaConstants.NOUN_MESSAGE],
++      objectNoun: GlodaConstants.NOUN_STRING,
++    });
+ 
+     // -- Mailing List
+     // Non-singular, but a hard call.  Namely, it is obvious that a message can
+     //  be addressed to multiple mailing lists.  However, I don't see how you
