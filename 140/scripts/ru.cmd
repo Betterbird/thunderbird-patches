@@ -248,3 +248,17 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "folder-pane-context-reset-sort ="  >> localization\ru\messenger\about3Pane.ftl
 %lecho% "  .label = Сбросить порядок папок" >> localization\ru\messenger\about3Pane.ftl
 %lecho% "  .accesskey = К"                  >> localization\ru\messenger\about3Pane.ftl
+
+:: Strings for searching all mail accounts:
+:: search-all-mail-accounts =
+::   .label = Search all mail accounts
+::   .accesskey = m
+%lecho% "search-all-mail-accounts ="                  >> localization\ru\messenger\messenger.ftl
+%lecho% "  .label = Поиск по всем почтовым аккаунтам" >> localization\ru\messenger\messenger.ftl
+%lecho% "  .accesskey = п"                            >> localization\ru\messenger\messenger.ftl
+
+:: New Gloda facets:
+:: gloda.message.attr._subjectMatches.facetNameLabel=Subject
+:: gloda.message.attr._bodyMatches.facetNameLabel=Body
+%lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Тема" >> chrome\ru\locale\ru\messenger\gloda.properties
+%lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Телу"    >> chrome\ru\locale\ru\messenger\gloda.properties

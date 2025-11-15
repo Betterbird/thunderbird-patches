@@ -144,3 +144,12 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "folder-pane-context-reset-sort =" >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "  .label = Reset Folder Order"    >> localization\en-GB\messenger\about3Pane.ftl
 %lecho% "  .accesskey = R"                 >> localization\en-GB\messenger\about3Pane.ftl
+
+:: Strings for searching all mail accounts:
+search-all-mail-accounts =
+  .label = Search all mail accounts
+  .accesskey = m
+
+:: New Gloda facets:
+%lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Subject" >> chrome\en-GB\locale\en-GB\messenger\gloda.properties
+%lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Body"       >> chrome\en-GB\locale\en-GB\messenger\gloda.properties

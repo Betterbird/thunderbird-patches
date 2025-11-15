@@ -248,3 +248,17 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "folder-pane-context-reset-sort ="     >> localization\it\messenger\about3Pane.ftl
 %lecho% "  .label = Reimposta ordine cartelle" >> localization\it\messenger\about3Pane.ftl
 %lecho% "  .accesskey = R"                     >> localization\it\messenger\about3Pane.ftl
+
+:: Strings for searching all mail accounts:
+:: search-all-mail-accounts =
+::   .label = Search all mail accounts
+::   .accesskey = m
+%lecho% "search-all-mail-accounts ="                     >> localization\it\messenger\messenger.ftl
+%lecho% "  .label = Cerca in tutti gli account di posta" >> localization\it\messenger\messenger.ftl
+%lecho% "  .accesskey = p"                               >> localization\it\messenger\messenger.ftl
+
+:: New Gloda facets:
+:: gloda.message.attr._subjectMatches.facetNameLabel=Subject
+:: gloda.message.attr._bodyMatches.facetNameLabel=Body
+%lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Oggetto" >> chrome\it\locale\it\messenger\gloda.properties
+%lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Corpo"      >> chrome\it\locale\it\messenger\gloda.properties

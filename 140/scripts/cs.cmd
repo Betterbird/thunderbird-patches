@@ -252,3 +252,17 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "folder-pane-context-reset-sort =" >> localization\cs\messenger\about3Pane.ftl
 %lecho% "  .label = Obnovit pořadí složek" >> localization\cs\messenger\about3Pane.ftl
 %lecho% "  .accesskey = n"                 >> localization\cs\messenger\about3Pane.ftl
+
+:: Strings for searching all mail accounts:
+:: search-all-mail-accounts =
+::   .label = Search all mail accounts
+::   .accesskey = m
+%lecho% "search-all-mail-accounts ="                      >> localization\cs\messenger\messenger.ftl
+%lecho% "  .label = Vyhledat ve všech e-mailových účtech" >> localization\cs\messenger\messenger.ftl
+%lecho% "  .accesskey = m"                                >> localization\cs\messenger\messenger.ftl
+
+:: New Gloda facets:
+:: gloda.message.attr._subjectMatches.facetNameLabel=Subject
+:: gloda.message.attr._bodyMatches.facetNameLabel=Body
+%lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Předmět" >> chrome\cs\locale\cs\messenger\gloda.properties
+%lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Tělo"       >> chrome\cs\locale\cs\messenger\gloda.properties
