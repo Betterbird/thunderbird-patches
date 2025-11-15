@@ -255,7 +255,7 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 ::   .accesskey = m
 %lecho% "search-all-mail-accounts ="                     >> localization\it\messenger\messenger.ftl
 %lecho% "  .label = Cerca in tutti gli account di posta" >> localization\it\messenger\messenger.ftl
-%lecho% "  .accesskey = p"                               >> localization\it\messenger\messenger.ftl
+%lecho% "  .accesskey = s"                               >> localization\it\messenger\messenger.ftl
 
 :: New Gloda facets:
 :: gloda.message.attr._subjectMatches.facetNameLabel=Subject
