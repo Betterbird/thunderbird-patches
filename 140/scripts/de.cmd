@@ -2,6 +2,9 @@
 set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Script will only work if Windows system locale is set to UTF-8 !!
 
+:: Fix strings in appstrings.properties.
+sed -i -e 's/Thunderbird/Betterbird/' chrome\de\locale\de\messenger\appstrings.properties
+
 :: Fix a bad translation
 sed -i -e 's/label = Organisator/label = Organisieren/' localization\de\messenger\messenger.ftl
 

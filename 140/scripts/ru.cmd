@@ -2,6 +2,9 @@
 set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Script will only work if Windows system locale is set to UTF-8 !!
 
+:: Fix strings in appstrings.properties.
+sed -i -e 's/Thunderbird/Betterbird/' chrome\ru\locale\ru\messenger\appstrings.properties
+
 :: Original strings:
 :: groupButtonTooltipText=Add a new group
 %lecho% "groupButtonTooltipText=Добавить новую группу" >> chrome\ru\locale\ru\messenger\search.properties
