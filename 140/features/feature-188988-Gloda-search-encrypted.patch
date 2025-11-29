@@ -1,13 +1,13 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1744484837 -7200
-# Parent  7dd4d4f6dc3ba8efc4a688f175e1c4da830aa442
+# Parent  3d226e434375b221ee28cd25baada9cd0e274493
 Bug 188988 - Switch on indexing of encrypted parts in Gloda depending on pref.
 
 diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
 --- a/mail/components/preferences/general.inc.xhtml
 +++ b/mail/components/preferences/general.inc.xhtml
-@@ -1142,8 +1142,13 @@
+@@ -1078,8 +1078,13 @@
            <checkbox id="enableGloda"
                      preference="mailnews.database.global.indexer.enabled"
                      data-l10n-id="enable-gloda-search-label"/>
@@ -24,7 +24,7 @@ diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/pre
 diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
 --- a/mail/components/preferences/general.js
 +++ b/mail/components/preferences/general.js
-@@ -73,8 +73,9 @@ Preferences.addAll([
+@@ -79,8 +79,9 @@ Preferences.addAll([
    { id: "mail.display_glyph", type: "bool" },
    { id: "font.language.group", type: "wstring" },
    { id: "intl.regional_prefs.use_os_locales", type: "bool" },
@@ -37,7 +37,7 @@ diff --git a/mail/components/preferences/general.js b/mail/components/preference
 diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
 --- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
 +++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
-@@ -771,8 +771,28 @@ MimeDecryptHandler.prototype = {
+@@ -766,8 +766,28 @@ MimeDecryptHandler.prototype = {
    extractEncryptedHeaders() {
      this.decryptedHeaders = lazy.EnigmailMime.extractProtectedHeaders(
        this.decryptedData
@@ -69,7 +69,7 @@ diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/
 diff --git a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
 --- a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
 +++ b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
-@@ -478,8 +478,30 @@ MimeVerify.prototype = {
+@@ -477,8 +477,30 @@ MimeVerify.prototype = {
        this.signedData
      );
      this.returnData(this.signedData);
@@ -103,7 +103,7 @@ diff --git a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs b/mail/e
 diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
 --- a/mail/locales/en-US/messenger/preferences/preferences.ftl
 +++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
-@@ -243,8 +243,11 @@ mail-browse-sound-button =
+@@ -241,8 +241,11 @@ mail-browse-sound-button =
  enable-gloda-search-label =
      .label = Enable Global Search and Indexer
      .accesskey = G
@@ -118,7 +118,19 @@ diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/loc
 diff --git a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs b/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
 --- a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
 +++ b/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
-@@ -132,9 +132,11 @@ MimeMessageEmitter.prototype = {
+@@ -48,8 +48,11 @@ export function MimeMessageEmitter() {
+   );
+   this._utils = ChromeUtils.importESModule(
+     "resource:///modules/gloda/GlodaUtils.sys.mjs"
+   );
++  this._enigMailVerify = ChromeUtils.importESModule(
++    "chrome://openpgp/content/modules/mimeVerify.sys.mjs"
++  );
+ 
+   this._url = null;
+   this._partRE = this._utils.GlodaUtils.PART_RE;
+ 
+@@ -132,9 +135,20 @@ MimeMessageEmitter.prototype = {
        //  content-type needs to get clobbered by the actual content-type of
        //  the enclosed message.
        this._writeBody = false;
@@ -127,6 +139,15 @@ diff --git a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs b/mailnews/
 +    } else if (contentTypeNoParams.startsWith("multipart/") ||
 +               contentTypeNoParams == "application/pkcs7-mime" ||
 +               contentTypeNoParams == "application/x-pkcs7-mime") {
++      // Unregister PGP's multipart/signed handler, or it will be used for
++      // S/MIME's multipart/signed since PGP registers
++      // @mozilla.org/mimecth;1?type=multipart/signed. What a mess!
++      // See wrong-class-creation.patch for debugging.
++      // Note that this is only necessary after
++      // https://bugzilla.mozilla.org/show_bug.cgi?id=1880242 changed the sink architecture.
++      // https://bugzilla.mozilla.org/show_bug.cgi?id=1773772 changed the registration.
++      this._enigMailVerify.EnigmailVerify.unregisterPGPMimeHandler();
++
        // this is going to fall-down with TNEF encapsulation and such, we really
        // need to just be consuming the object model.
        this._curPart = new this._mimeMsg.MimeContainer(contentTypeNoParams);
@@ -134,7 +155,7 @@ diff --git a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs b/mailnews/
 diff --git a/mailnews/db/gloda/modules/IndexMsg.sys.mjs b/mailnews/db/gloda/modules/IndexMsg.sys.mjs
 --- a/mailnews/db/gloda/modules/IndexMsg.sys.mjs
 +++ b/mailnews/db/gloda/modules/IndexMsg.sys.mjs
-@@ -3093,16 +3093,25 @@ export var GlodaMsgIndexer = {
+@@ -3120,16 +3120,25 @@ export var GlodaMsgIndexer = {
      if (
        aMsgHdr.flags & Ci.nsMsgMessageFlags.Offline ||
        aMsgHdr.folder instanceof Ci.nsIMsgLocalMailFolder
@@ -163,7 +184,7 @@ diff --git a/mailnews/db/gloda/modules/IndexMsg.sys.mjs b/mailnews/db/gloda/modu
        aMimeMsg = (yield GlodaConstants.kWorkAsync)[1];
      } else {
        this._log.debug("  * Message is not offline -- only headers indexed");
-@@ -3317,9 +3326,18 @@ export var GlodaMsgIndexer = {
+@@ -3344,9 +3353,18 @@ export var GlodaMsgIndexer = {
      if (insertFulltext) {
        curMsg._isNew = true;
      }
@@ -186,7 +207,7 @@ diff --git a/mailnews/db/gloda/modules/IndexMsg.sys.mjs b/mailnews/db/gloda/modu
 diff --git a/mailnews/db/gloda/modules/MimeMessage.sys.mjs b/mailnews/db/gloda/modules/MimeMessage.sys.mjs
 --- a/mailnews/db/gloda/modules/MimeMessage.sys.mjs
 +++ b/mailnews/db/gloda/modules/MimeMessage.sys.mjs
-@@ -711,9 +711,9 @@ export function MimeUnknown(contentType)
+@@ -714,9 +714,9 @@ export function MimeUnknown(contentType)
    //  the recursive size computations to fail.
    this._size = 0;
    this.isEncrypted = false;
@@ -197,7 +218,7 @@ diff --git a/mailnews/db/gloda/modules/MimeMessage.sys.mjs b/mailnews/db/gloda/m
    // topmost part.
    this.parts = [];
  }
-@@ -774,8 +774,26 @@ MimeUnknown.prototype = {
+@@ -777,8 +777,26 @@ MimeUnknown.prototype = {
    },
    toString() {
      return "Unknown: " + this.contentType;
@@ -227,7 +248,7 @@ diff --git a/mailnews/db/gloda/modules/MimeMessage.sys.mjs b/mailnews/db/gloda/m
 diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
 --- a/mailnews/mailnews.js
 +++ b/mailnews/mailnews.js
-@@ -1099,8 +1099,10 @@ pref("gloda.loglevel", "Warn");
+@@ -1105,8 +1105,10 @@ pref("gloda.loglevel", "Warn");
  pref("gloda.test.loglevel", "Warn");
  // Rate of growth of the gloda cache, whose maximum value is 8 MiB and max is 64 MiB.
  // See more: https://developer.mozilla.org/en/Thunderbird/gloda#Cache_Size"

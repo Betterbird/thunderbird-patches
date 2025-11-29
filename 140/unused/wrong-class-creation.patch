@@ -1,0 +1,133 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1764419770 -3600
+# Parent  1d1303a45bb2b83e00c977bd1c661a42a4cb1977
+Patch to demonstrate that wrong classes may be used for S/MIME.
+
+Just for the record:
+
+Code to dump out the JS stack in C++:
+#include "xpcpublic.h"
+  xpc_DumpJSStack(true, true, false);
+
+Code to dump out the call stack in C++, courtesy of ChatGPT:
+#include <windows.h>
+#include <dbghelp.h>
+#include <stdio.h>
+
+#pragma comment(lib, "dbghelp.lib")
+
+void DumpStack() {
+  HANDLE process = GetCurrentProcess();
+  HANDLE thread  = GetCurrentThread();
+
+  SymInitialize(process, NULL, TRUE);
+
+  CONTEXT context = {};
+  RtlCaptureContext(&context);
+
+  STACKFRAME64 frame = {};
+  DWORD machine;
+
+#ifdef _M_X64
+  machine = IMAGE_FILE_MACHINE_AMD64;
+  frame.AddrPC.Offset    = context.Rip;
+  frame.AddrFrame.Offset = context.Rbp;
+  frame.AddrStack.Offset = context.Rsp;
+#else
+  machine = IMAGE_FILE_MACHINE_I386;
+  frame.AddrPC.Offset    = context.Eip;
+  frame.AddrFrame.Offset = context.Ebp;
+  frame.AddrStack.Offset = context.Esp;
+#endif
+
+  frame.AddrPC.Mode    = AddrModeFlat;
+  frame.AddrFrame.Mode = AddrModeFlat;
+  frame.AddrStack.Mode = AddrModeFlat;
+
+  while (StackWalk64(
+    machine, process, thread, &frame, &context, NULL,
+    SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
+    DWORD64 address = frame.AddrPC.Offset;
+
+    char buffer[sizeof(SYMBOL_INFO) + 256];
+    PSYMBOL_INFO symbol = (PSYMBOL_INFO)buffer;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 255;
+
+    if (SymFromAddr(process, address, 0, symbol)) {
+      printf("%p: %s\n", (void*)address, symbol->Name);
+    } else {
+      printf("%p: (no symbol)\n", (void*)address);
+    }
+  }
+}
+
+diff --git a/mailnews/mime/src/mimei.cpp b/mailnews/mime/src/mimei.cpp
+--- a/mailnews/mime/src/mimei.cpp
++++ b/mailnews/mime/src/mimei.cpp
+@@ -175,4 +175,5 @@ MimeObjectClass* mime_locate_external_co
+   nsCOMPtr<nsIMimeContentTypeHandler> ctHandler =
+       do_CreateInstance(lookupID.get(), &rv);
++  printf("=== >> looked up %s with result %lx %p\n", lookupID.get(), (long)rv, (void*)ctHandler);
+   if (NS_FAILED(rv) || !ctHandler) {
+     nsCOMPtr<nsICategoryManager> catman =
+@@ -182,15 +183,16 @@ MimeObjectClass* mime_locate_external_co
+     rv = catman->GetCategoryEntry(NS_SIMPLEMIMECONVERTERS_CATEGORY, contentType,
+                                   value);
+-    if (NS_FAILED(rv) || value.IsEmpty()) return nullptr;
++    if (NS_FAILED(rv) || value.IsEmpty()) { printf("=== >> return NULL (1)\n"); return nullptr; }
+     rv = MIME_NewSimpleMimeConverterStub(contentType.get(),
+                                          getter_AddRefs(ctHandler));
+-    if (NS_FAILED(rv) || !ctHandler) return nullptr;
++    if (NS_FAILED(rv) || !ctHandler) { printf("=== >> return NULL (2)\n"); return nullptr; }
+   }
+ 
+   rv = ctHandler->CreateContentTypeHandlerClass(contentType.get(),
+                                                 ctHandlerInfo, &newObj);
+-  if (NS_FAILED(rv)) return nullptr;
++  if (NS_FAILED(rv)) { printf("=== >> return NULL (3)\n"); return nullptr; }
+ 
+   add_content_type_attribs(contentType.get(), ctHandlerInfo);
++  printf("=== >> return external\n");
+   return newObj;
+ }
+@@ -352,4 +354,5 @@ MimeObjectClass* mime_find_class(const c
+                                  const char* parent_address,
+                                  const char* parent_type) {
++  printf("=== mime_find_class %s\n", content_type);
+   MimeObjectClass* clazz = 0;
+   MimeObjectClass* tempClass = 0;
+@@ -415,6 +418,8 @@ MimeObjectClass* mime_find_class(const c
+    * to the default handler.
+    */
+-  if ((tempClass = mime_locate_external_content_handler(
+-           content_type, &ctHandlerInfo)) != nullptr) {
++  tempClass = mime_locate_external_content_handler(
++           content_type, &ctHandlerInfo);
++  printf("=== External class found %p\n", (void*)tempClass);
++  if (tempClass) {
+ #ifdef MOZ_THUNDERBIRD
+     // This is a case where we only want to add this property if we are a
+@@ -455,6 +460,8 @@ MimeObjectClass* mime_find_class(const c
+       if (!exact_match_p)
+         clazz = (MimeObjectClass*)&mimeExternalObjectClass;  // As attachment
+-    } else
++    } else {
+       clazz = (MimeObjectClass*)tempClass;
++      printf("=== mime_find_class: used external class %s\n", clazz->class_name ? clazz->class_name : "not initialised");
++    }
+   } else {
+     if (!content_type || !*content_type ||
+@@ -769,4 +776,5 @@ MimeObject* mime_create(const char* cont
+                         const char* parent_address /* = nullptr */,
+                         const char* parent_type /* = nullptr */) {
++  printf("=== mime_create %s\n", content_type);
+   /* If there is no Content-Disposition header, or if the Content-Disposition
+    is ``inline'', then we display the part inline (and let mime_find_class()
+@@ -964,4 +972,5 @@ FAIL:
+   }
+ 
++  if (clazz) printf("=== created %s\n", clazz->class_name);
+   return obj;
+ }
