@@ -1,6 +1,6 @@
 ---
-name: Issue, bug, feature request, question, anything
-about: General template used for everything
+name: Issue, bug, feature request - NO SUPPORT REQUESTS!
+about: General template used for bugs and feature requests. Do NOT file support requests or questions here!
 title: ''
 labels: ''
 assignees: ''
