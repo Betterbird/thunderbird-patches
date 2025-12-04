@@ -1,0 +1,191 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1764842058 -3600
+# Node ID c78534fe8f919302eef66bb281131bdb75f8c197
+# Parent  a3ea8d2f1ea512fa542958a9b1422ebd7fedeac2
+Bug 1992248 - Fix slow startup when have lots of folders and not using subscriptions. r=mkmelin
+
+Reporter has 16000 folders and a commenter has 6500 folders and both see
+this issue. Users with a more typical number of folders probably don't see
+this issue. The problem was caused by doing URL discoverchildren on each
+folder during folder discovery during startup as described in comment 55
+with additional information in comment 66 about change to about3Pane.js.
+
+Differential Revision: https://phabricator.services.mozilla.com/D272118
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -977,16 +977,8 @@ var folderPane = {
+           // associated with any server. Should make sure the server is
+           // assigned to an account before creating folders on the server.
+           throw new Error(`No parentRow for ${parentFolder.URI}`);
+         }
+-        // To auto-expand non-root imap folders, imap URL "discoverchildren" is
+-        // triggered -- but actually only occurs if server settings configured
+-        // to ignore subscriptions. (This also occurs in _onExpanded() for
+-        // manual folder expansion.)
+-        if (parentFolder.server.type == "imap" && !parentFolder.isServer) {
+-          parentFolder.QueryInterface(Ci.nsIMsgImapMailFolder);
+-          parentFolder.performExpand(top.msgWindow);
+-        }
+         folderTree.expandRow(parentRow);
+         const childRow = folderPane._createFolderRow(this.name, childFolder);
+         folderPane._addSubFolders(childFolder, childRow, "all");
+         parentRow.insertChildInOrder(childRow);
+@@ -2930,10 +2922,12 @@ var folderPane = {
+     // Get server type. IMAP is the only server type that does folder discovery.
+     const folder = MailServices.folderLookup.getFolderForURL(target.uri);
+     if (folder.server.type == "imap") {
+       if (folder.isServer) {
++        // Do URL discoverallboxes when server (root folder) expanded.
+         folder.server.performExpand(top.msgWindow);
+       } else {
++        // Do URL discoverchildren when mail folder expanded.
+         folder.QueryInterface(Ci.nsIMsgImapMailFolder);
+         folder.performExpand(top.msgWindow);
+       }
+     }
+diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsImapIncomingServer.cpp
+--- a/mailnews/imap/src/nsImapIncomingServer.cpp
++++ b/mailnews/imap/src/nsImapIncomingServer.cpp
+@@ -1294,8 +1294,36 @@ nsresult nsImapIncomingServer::PathFromF
+                     nsINetUtil::ESCAPE_URL_PATH, shortPath);
+   return NS_OK;
+ }
+ 
++static uint32_t gFolderCnt = 0;  // For logging info only
++/*
++ * Iterate over all folders on this imap server and close each folder database.
++ * This is based on algorithm used by ResetFoldersToUnverified() below.
++ */
++nsresult nsImapIncomingServer::CloseFoldersDB(nsIMsgFolder* parentFolder) {
++  nsresult rv = NS_OK;
++  if (!parentFolder) {
++    gFolderCnt = 0;
++    nsCOMPtr<nsIMsgFolder> rootFolder;
++    rv = GetRootFolder(getter_AddRefs(rootFolder));
++    NS_ENSURE_SUCCESS(rv, rv);
++    return CloseFoldersDB(rootFolder);
++  }
++
++  gFolderCnt++;
++  parentFolder->SetMsgDatabase(nullptr);
++  nsTArray<RefPtr<nsIMsgFolder>> subFolders;
++  rv = parentFolder->GetSubFolders(subFolders);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  for (nsIMsgFolder* child : subFolders) {
++    rv = CloseFoldersDB(child);
++    NS_ENSURE_SUCCESS(rv, rv);
++  }
++  return rv;
++}
++
+ NS_IMETHODIMP nsImapIncomingServer::DiscoveryDone() {
+   if (mDoingSubscribeDialog) return NS_OK;
+ 
+   nsCOMPtr<nsIMsgFolder> rootMsgFolder;
+@@ -1366,23 +1394,25 @@ NS_IMETHODIMP nsImapIncomingServer::Disc
+       }
+     }
+   }
+ 
+-  // Un-verify ALL subfolders when ignoring subs. Needed to ensure that new
+-  // folders are discovered at all levels, including under Inbox. Note: At
+-  // account creation, all folders are new.
+-  bool usingSubscription = true;
+-  GetUsingSubscription(&usingSubscription);
+-  if (!usingSubscription && rootMsgFolder) {
+-    ResetFoldersToUnverified(rootMsgFolder);
+-  }
+-
+-  nsCOMArray<nsIMsgImapMailFolder> unverifiedFolders;
+-  GetUnverifiedFolders(unverifiedFolders);
++  // Close all the folder DBs
++  MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
++          ("DiscoveryDone %s: start closing DBs", m_serverKey.get()));
++  CloseFoldersDB(nullptr);
++  MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
++          ("DiscoveryDone %s: Done closing DBs for %" PRIu32 " folders",
++           m_serverKey.get(), gFolderCnt));
+ 
+   // Need to do this BEFORE trash folder checks and adjustments so if trash
+   // folder is deleted it is no longer present in the trashFolders array. Array
+   // obtained below.
++  bool usingSubscription = true;
++  GetUsingSubscription(&usingSubscription);
++
++  nsCOMArray<nsIMsgImapMailFolder> unverifiedFolders;
++  GetUnverifiedFolders(unverifiedFolders);
++
+   int32_t count = unverifiedFolders.Count();
+   MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
+           ("DiscoveryDone, unverified folder count = %" PRIu32, count));
+   for (int32_t k = 0; k < count; ++k) {
+@@ -1418,15 +1448,8 @@ NS_IMETHODIMP nsImapIncomingServer::Disc
+         // do we want to refresh that folder's flags, because it won't be going
+         // away.
+         currentImapFolder->SetExplicitlyVerify(false);
+         currentImapFolder->List();  // Run listfolder url
+-        // If subscriptions are ignored, trigger a discoverchildren url so that
+-        // any new folders are discovered. PerformExpand starts the url.
+-        if (!usingSubscription) {
+-          MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
+-                  ("DiscoveryDone: run discoverchildren with PerformExpand"));
+-          currentImapFolder->PerformExpand(nullptr);
+-        }
+       }
+     } else {
+       nsCOMPtr<nsIMsgFolder> parent;
+       currentFolder->GetParent(getter_AddRefs(parent));
+diff --git a/mailnews/imap/src/nsImapIncomingServer.h b/mailnews/imap/src/nsImapIncomingServer.h
+--- a/mailnews/imap/src/nsImapIncomingServer.h
++++ b/mailnews/imap/src/nsImapIncomingServer.h
+@@ -69,8 +69,9 @@ class nsImapIncomingServer : public nsMs
+  protected:
+   virtual ~nsImapIncomingServer();
+   nsresult GetFolder(const nsACString& name, nsIMsgFolder** pFolder);
+   nsresult ResetFoldersToUnverified(nsIMsgFolder* parentFolder);
++  nsresult CloseFoldersDB(nsIMsgFolder* parentFolder);
+   void GetUnverifiedSubFolders(nsIMsgFolder* parentFolder,
+                                nsCOMArray<nsIMsgImapMailFolder>& aFoldersArray);
+   void GetUnverifiedFolders(nsCOMArray<nsIMsgImapMailFolder>& aFolderArray);
+   bool NoDescendantsAreVerified(nsIMsgFolder* parentFolder);
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -7478,11 +7478,10 @@ void nsImapProtocol::DiscoverMailboxList
+         // when connecting to servers that expose the users entire home
+         // directory (like UW-IMAP).
+         nsCString pattern;
+         pattern.Append(prefix);
++        pattern += '*';
+         if (usingSubscription) {
+-          pattern.Append('*');
+-
+           if (GetServerStateParser().GetCapabilityFlag() &
+               kHasListExtendedCapability)
+             Lsub(pattern.get(), true);  // do LIST (SUBSCRIBED)
+           else {
+@@ -7495,17 +7494,11 @@ void nsImapProtocol::DiscoverMailboxList
+             Lsub(pattern.get(), true);
+             m_standardListMailboxes.Clear();
+           }
+         } else {
+-          // Not using subscription. Need to list top level folders here so any
+-          // new folders at top level are discovered. Folders at all levels
+-          // will be set unverified and will be checked for new children in
+-          // nsImapIncomingServer::DiscoveryDone when discoverallboxes URL stop
+-          // is signaled. This must be done instead of 'list "" *' so that the
+-          // database for each individually listed folder at all levels is
+-          // is properly closed when discoverchildren URL stop is signaled.
+-          // Testing for database closing is done by test_listClosesDB.js.
+-          pattern += "%";
++          // Not using subscription. Just LIST all the folders for this
++          // namespace. Will close the DBs this leaves open in
++          // nsImapIncomingServer::DiscoveryDone().
+           List(pattern.get(), true, hasXLIST);
+         }
+       }
+     }
