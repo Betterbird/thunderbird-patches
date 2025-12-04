@@ -1,0 +1,140 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1764873769 -3600
+# Node ID c36ae706dbcd338a43154d4a97023fcbc94d19d4
+# Parent  39d26fc1faf4792495ff8fabc4c540601b56599e
+Bug 1976655 - Skip unparsable local folders in search session. r=mkmelin
+
+
+When a local search encounters a folder with a missing or outdated summary
+file, the search pauses and triggers a reparsing of that folder. If the
+reparsing succeeds, the search resumes. However, if the reparsing fails for any
+reason, the search does not handle this adequately and simply hangs. This may
+happen if the summary file is corrupt or if the mbox file itself is invalid,
+for example. This patch attempts to handle this situation gracefully by
+skipping the affected folder and logging it in the JS console.
+
+Differential Revision: https://phabricator.services.mozilla.com/D274578
+
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -4,9 +4,11 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "nsIPrefService.h"
+ #include "nsIPrefBranch.h"
++#include "nsIScriptError.h"
+ #include "nsISeekableStream.h"
++#include "nsPrintfCString.h"
+ #include "prlog.h"
+ 
+ #include "CopyMessageStreamListener.h"
+ #include "FolderCompactor.h"
+@@ -184,9 +186,21 @@ NS_IMETHODIMP nsMsgLocalMailFolder::Pars
+   };
+ 
+   // Start the parsing.
+   rv = indexer->GoIndex(this, progressFn, completionFn);
+-  NS_ENSURE_SUCCESS(rv, rv);
++  if (NS_FAILED(rv)) {
++    nsAutoCString prettyPath;
++    GetPrettyPath(prettyPath);
++    nsPrintfCString msg("Unable to build summary file for %s (error 0x%08X).",
++                        prettyPath.get(), static_cast<uint32_t>(rv));
++    NS_WARNING(msg.get());
++    msg.Append("\nRepairing the folder may fix this issue."_ns);
++    MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg), nsCString(__FILE__), __LINE__,
++                     nsIScriptError::errorFlag);
++    if (listener) listener->OnStopRunningUrl(nullptr, rv);
++    return rv;
++  }
++
+   m_parsingFolder = true;
+   mReparseListener = listener;
+ 
+   if (statusFeedback) {
+diff --git a/mailnews/search/public/nsIMsgSearchSession.idl b/mailnews/search/public/nsIMsgSearchSession.idl
+--- a/mailnews/search/public/nsIMsgSearchSession.idl
++++ b/mailnews/search/public/nsIMsgSearchSession.idl
+@@ -115,8 +115,13 @@ interface nsIMsgSearchSession :  nsISupp
+   // pause the timer while running the url. This will fail if the
+   // current adapter is not using a timer.
+   void pauseSearch();
+   void resumeSearch();
++  /**
++   * If reparsing a local folder failed, this should be called to skip the
++   * current scope. This enables resuming the search safely.
++   */
++  void skipSearch();
+ 
+   boolean MatchHdr(in nsIMsgDBHdr aMsgHdr, in nsIMsgDatabase aDatabase);
+ 
+   void addSearchHit(in nsIMsgDBHdr header, in nsIMsgFolder folder);
+diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
+--- a/mailnews/search/src/nsMsgLocalSearch.cpp
++++ b/mailnews/search/src/nsMsgLocalSearch.cpp
+@@ -700,10 +700,15 @@ NS_IMETHODIMP nsMsgSearchOfflineMail::On
+ NS_IMETHODIMP nsMsgSearchOfflineMail::OnStopRunningUrl(nsIURI* url,
+                                                        nsresult aExitCode) {
+   nsCOMPtr<nsIMsgSearchSession> searchSession;
+   if (m_scope) m_scope->GetSearchSession(getter_AddRefs(searchSession));
+-  if (searchSession) searchSession->ResumeSearch();
+-
++  if (searchSession) {
++    if (NS_FAILED(aExitCode)) {
++      nsresult rv = searchSession->SkipSearch();
++      NS_ENSURE_SUCCESS(rv, rv);
++    }
++    searchSession->ResumeSearch();
++  }
+   return NS_OK;
+ }
+ 
+ nsMsgSearchOfflineNews::nsMsgSearchOfflineNews(
+diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
+--- a/mailnews/search/src/nsMsgSearchSession.cpp
++++ b/mailnews/search/src/nsMsgSearchSession.cpp
+@@ -247,23 +247,31 @@ NS_IMETHODIMP nsMsgSearchSession::Interr
+   m_searchRunning = false;
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsMsgSearchSession::SkipSearch() {
++  if (!m_searchPaused || m_idxRunningScope >= m_scopeList.Length()) {
++    return NS_ERROR_FAILURE;
++  }
++
++  ReleaseFolderDBRef();
++  ++m_idxRunningScope;
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsMsgSearchSession::PauseSearch() {
+-  if (m_backgroundTimer) {
+-    m_backgroundTimer->Cancel();
+-    m_searchPaused = true;
+-    return NS_OK;
+-  } else
+-    return NS_ERROR_FAILURE;
++  if (!m_backgroundTimer) return NS_ERROR_FAILURE;
++
++  m_backgroundTimer->Cancel();
++  m_searchPaused = true;
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgSearchSession::ResumeSearch() {
+-  if (m_searchPaused) {
+-    m_searchPaused = false;
+-    return StartTimer();
+-  } else
+-    return NS_ERROR_FAILURE;
++  if (!m_searchPaused) return NS_ERROR_FAILURE;
++
++  m_searchPaused = false;
++  return StartTimer();
+ }
+ 
+ NS_IMETHODIMP nsMsgSearchSession::GetNumResults(int32_t* aNumResults) {
+   return NS_ERROR_NOT_IMPLEMENTED;
