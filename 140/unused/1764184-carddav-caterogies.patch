@@ -1,0 +1,322 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1765040976 -3600
+# Parent  4e6a1ca633cb846da02c8bab073ce1f72ab072af
+Bug 1764184 - Add support for vCard CATEGORIES field to address book UI.
+
+Original work by John Bieling in https://phabricator.services.mozilla.com/D158408.
+Adjusted for Betterbird 140 by Betterbird.
+
+diff --git a/mail/components/addrbook/content/aboutAddressBook.js b/mail/components/addrbook/content/aboutAddressBook.js
+--- a/mail/components/addrbook/content/aboutAddressBook.js
++++ b/mail/components/addrbook/content/aboutAddressBook.js
+@@ -3204,8 +3204,16 @@ var detailsPane = {
+       li.querySelector(".entry-value").append(this._sanitizeHref(a));
+     }
+     section.hidden = list.childElementCount == 0;
+ 
++    section = element.querySelector(".details-categories");
++    list = section.querySelector("p");
++    list.textContent = vCardProperties
++      .getAllValues("categories")
++      .flat()
++      .join(", ");
++    section.hidden = list.textContent == "";
++
+     section = element.querySelector(".details-other-info");
+     list = section.querySelector("ul.entry-list");
+     list.replaceChildren();
+ 
+diff --git a/mail/components/addrbook/content/aboutAddressBook.xhtml b/mail/components/addrbook/content/aboutAddressBook.xhtml
+--- a/mail/components/addrbook/content/aboutAddressBook.xhtml
++++ b/mail/components/addrbook/content/aboutAddressBook.xhtml
+@@ -194,8 +194,12 @@
+         <section id="phoneNumbers" class="details-phone-numbers">
+           <h2 data-l10n-id="about-addressbook-details-phone-numbers-header"></h2>
+           <ul class="entry-list"></ul>
+         </section>
++        <section class="details-categories">
++          <h2 data-l10n-id="about-addressbook-details-categories-header"></h2>
++          <p></p>
++        </section>
+         <section id="addresses" class="details-addresses">
+           <h2 data-l10n-id="about-addressbook-details-addresses-header"></h2>
+           <ul class="entry-list"></ul>
+         </section>
+diff --git a/mail/components/addrbook/content/vcard-edit/categories.mjs b/mail/components/addrbook/content/vcard-edit/categories.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/components/addrbook/content/vcard-edit/categories.mjs
+@@ -0,0 +1,111 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import { vCardIdGen } from "./id-gen.mjs";
++
++const lazy = {};
++ChromeUtils.defineESModuleGetters(lazy, {
++  VCardPropertyEntry: "resource:///modules/VCardUtils.sys.mjs",
++});
++
++/**
++ * @implements {VCardPropertyEntryView}
++ * @see RFC6350 CATEGORIES
++ */
++export class VCardCategoriesComponent extends HTMLElement {
++  /** @type {VCardPropertyEntry} */
++  vCardPropertyEntry;
++
++  /** @type {HTMLElement} */
++  categoriesEl;
++
++  static newVCardPropertyEntry() {
++    return new lazy.VCardPropertyEntry("categories", {}, "text", "");
++  }
++
++  addCategoryField(value) {
++    const template = document.getElementById("template-vcard-edit-category");
++    const clone = template.content.cloneNode(true).querySelector("div");
++
++    // Remove single child entry, or the entire element, if last child removed.
++    clone
++      .querySelector(".remove-property-button")
++      .addEventListener("click", () => {
++        clone.remove();
++        if (
++          Array.from(this.categoriesEl.querySelectorAll("input")).length == 0
++        ) {
++          document.getElementById("vcard-add-categories").hidden = false;
++          this.dispatchEvent(
++            new CustomEvent("vcard-remove-property", { bubbles: true })
++          );
++          this.remove();
++        }
++      });
++
++    const element = clone.querySelector('input[name="category"]');
++    element.addEventListener("keypress", event => {
++      if (event.keyCode === 13) {
++        event.preventDefault();
++        const newField = this.addCategoryField("");
++        newField.focus();
++      }
++    });
++    this.categoriesEl.appendChild(clone);
++
++    // Set title (used as tooltip).
++    document.l10n
++      .formatValue("vcard-category-input-title")
++      .then(t => (element.title = t));
++
++    element.value = value;
++    return element;
++  }
++
++  connectedCallback() {
++    if (this.hasConnected) {
++      return;
++    }
++    this.hasConnected = true;
++
++    const template = document.getElementById("template-vcard-edit-categories");
++    this.appendChild(template.content.cloneNode(true));
++    this.categoriesEl = this.querySelector('div[name="categories"]');
++    this.categoriesEl.id = vCardIdGen.next().value;
++
++    // Load existing categories, add an empty one if needed.
++    if (!Array.isArray(this.vCardPropertyEntry.value)) {
++      this.vCardPropertyEntry.value = this.vCardPropertyEntry.value
++        ? [this.vCardPropertyEntry.value]
++        : [""];
++    }
++
++    for (const value of this.vCardPropertyEntry.value) {
++      this.addCategoryField(value);
++    }
++
++    this.querySelector("#vcard-add-category").addEventListener("click", () => {
++      this.addCategoryField("");
++      this.categoriesEl.dispatchEvent(new CustomEvent("change"));
++    });
++
++    this.categoriesEl.dispatchEvent(new CustomEvent("change"));
++  }
++
++  fromVCardPropertyEntryToUI() {}
++
++  fromUIToVCardPropertyEntry() {
++    this.vCardPropertyEntry.value = Array.from(
++      this.categoriesEl.querySelectorAll("input")
++    )
++      .map(e => e.value)
++      .filter(v => !!v);
++  }
++
++  valueIsEmpty() {
++    return this.vCardPropertyEntry.value.length == 0;
++  }
++}
++
++customElements.define("vcard-categories", VCardCategoriesComponent);
+diff --git a/mail/components/addrbook/content/vcard-edit/edit.mjs b/mail/components/addrbook/content/vcard-edit/edit.mjs
+--- a/mail/components/addrbook/content/vcard-edit/edit.mjs
++++ b/mail/components/addrbook/content/vcard-edit/edit.mjs
+@@ -6,8 +6,9 @@ import { vCardIdGen } from "./id-gen.mjs
+ import { VCardAdrComponent } from "./adr.mjs";
+ import { VCardCustomComponent } from "./custom.mjs";
+ import { VCardEmailComponent } from "./email.mjs";
+ import { VCardIMPPComponent } from "./impp.mjs";
++import { VCardCategoriesComponent } from "./categories.mjs";
+ import { VCardNComponent } from "./n.mjs";
+ import { VCardFNComponent } from "./fn.mjs";
+ import { VCardNickNameComponent } from "./nickname.mjs";
+ import { VCardNoteComponent } from "./note.mjs";
+@@ -484,8 +485,17 @@ class VCardEdit extends HTMLElement {
+         addButton = document.getElementById("vcard-add-impp");
+         fieldset.insertBefore(impp, addButton);
+         return impp;
+       }
++      case "categories": {
++        const categories = new VCardCategoriesComponent();
++        categories.vCardPropertyEntry = entry;
++        fieldset = this.querySelector("#addr-book-edit-categories");
++        addButton = document.getElementById("vcard-add-categories");
++        fieldset.insertBefore(categories, addButton);
++        addButton.hidden = true;
++        return categories;
++      }
+       case "anniversary": {
+         const anniversary = new VCardSpecialDateComponent();
+         anniversary.vCardPropertyEntry = entry;
+         fieldset = this.querySelector("#addr-book-edit-bday-anniversary");
+@@ -594,8 +604,10 @@ class VCardEdit extends HTMLElement {
+       case "tz":
+         return VCardTZComponent.newVCardPropertyEntry();
+       case "impp":
+         return VCardIMPPComponent.newVCardPropertyEntry();
++      case "categories":
++        return VCardCategoriesComponent.newVCardPropertyEntry();
+       case "bday":
+         return VCardSpecialDateComponent.newBdayVCardPropertyEntry();
+       case "anniversary":
+         return VCardSpecialDateComponent.newAnniversaryVCardPropertyEntry();
+@@ -625,8 +637,9 @@ class VCardEdit extends HTMLElement {
+       ...this.querySelectorAll("vcard-custom"),
+       ...document.getElementById("vcard-email").children,
+       ...this.querySelectorAll("vcard-fn"),
+       ...this.querySelectorAll("vcard-impp"),
++      ...this.querySelectorAll("vcard-categories"),
+       ...this.querySelectorAll("vcard-n"),
+       ...this.querySelectorAll("vcard-nickname"),
+       ...this.querySelectorAll("vcard-note"),
+       ...this.querySelectorAll("vcard-org"),
+@@ -789,8 +802,13 @@ class VCardEdit extends HTMLElement {
+ 
+     const addIMPP = document.getElementById("vcard-add-impp");
+     this.registerAddButton(addIMPP, "impp");
+ 
++    const addCategory = document.getElementById("vcard-add-categories");
++    this.registerAddButton(addCategory, "categories", () => {
++      addCategory.hidden = true;
++    });
++
+     const addNote = document.getElementById("vcard-add-note");
+     this.registerAddButton(addNote, "note", () => {
+       addNote.hidden = true;
+     });
+diff --git a/mail/components/addrbook/content/vcard-edit/vCardTemplates.inc.xhtml b/mail/components/addrbook/content/vcard-edit/vCardTemplates.inc.xhtml
+--- a/mail/components/addrbook/content/vcard-edit/vCardTemplates.inc.xhtml
++++ b/mail/components/addrbook/content/vcard-edit/vCardTemplates.inc.xhtml
+@@ -88,8 +88,16 @@
+             data-l10n-id="vcard-impp-add"
+             class="addr-book-edit-fieldset-button add-property-button button button-flat"
+             type="button"></button>
+   </fieldset>
++  <!-- CATEGORIES -->
++  <fieldset id="addr-book-edit-categories" class="addr-book-edit-fieldset fieldset-reset">
++    <legend data-l10n-id="vcard-categories-header"/>
++    <button id="vcard-add-categories"
++            data-l10n-id="vcard-category-add"
++            class="addr-book-edit-fieldset-button add-property-button icon-button"
++            type="button"></button>
++  </fieldset>
+   <!-- Birthday and Anniversary (Special dates) -->
+   <fieldset id="addr-book-edit-bday-anniversary" class="addr-book-edit-fieldset fieldset-reset">
+     <legend data-l10n-id="vcard-bday-anniversary-header"/>
+     <button id="vcard-add-bday-anniversary"
+@@ -264,8 +272,28 @@
+           data-telemetry-id="vcard-remove-impp"
+           data-l10n-id="vcard-remove-button-title"></button>
+ </template>
+ 
++<!-- CATEGORIES -->
++<template id="template-vcard-edit-categories">
++  <div name="categories"></div>
++  <button id="vcard-add-category"
++          data-l10n-id="vcard-category-add"
++          class="addr-book-edit-fieldset-button add-property-button icon-button"
++          type="button"></button>
++</template>
++
++<!-- CATEGORY (the CATEGORIES component adds one or more CATEGORY entries) -->
++<template id="template-vcard-edit-category">
++  <div>
++    <label class="screen-reader-only" for="category" data-l10n-id="vcard-category-input-label"></label>
++    <input type="text" name="category" />
++    <button type="button"
++            class="addr-book-edit-fieldset-button remove-property-button icon-button"
++            data-l10n-id="vcard-remove-button-title"></button>
++  </div>
++</template>
++
+ <!-- Birthday and Anniversary -->
+ <template id="template-vcard-edit-bday-anniversary">
+   <label class="vcard-type-label screen-reader-only"
+          data-l10n-id="vcard-entry-type-label"></label>
+diff --git a/mail/components/addrbook/jar.mn b/mail/components/addrbook/jar.mn
+--- a/mail/components/addrbook/jar.mn
++++ b/mail/components/addrbook/jar.mn
+@@ -17,8 +17,9 @@ messenger.jar:
+ 
+     content/messenger/addressbook/AddrBookDataAdapter.mjs       (content/modules/AddrBookDataAdapter.mjs)
+ # Edit view
+     content/messenger/addressbook/edit/adr.mjs                  (content/vcard-edit/adr.mjs)
++    content/messenger/addressbook/edit/categories.mjs           (content/vcard-edit/categories.mjs)
+     content/messenger/addressbook/edit/custom.mjs               (content/vcard-edit/custom.mjs)
+     content/messenger/addressbook/edit/edit.mjs                 (content/vcard-edit/edit.mjs)
+     content/messenger/addressbook/edit/email.mjs                (content/vcard-edit/email.mjs)
+     content/messenger/addressbook/edit/fn.mjs                   (content/vcard-edit/fn.mjs)
+diff --git a/mail/locales/en-US/messenger/addressbook/aboutAddressBook.ftl b/mail/locales/en-US/messenger/addressbook/aboutAddressBook.ftl
+--- a/mail/locales/en-US/messenger/addressbook/aboutAddressBook.ftl
++++ b/mail/locales/en-US/messenger/addressbook/aboutAddressBook.ftl
+@@ -302,8 +302,9 @@ about-addressbook-save-edit-contact-butt
+ about-addressbook-add-contact-to = Add to:
+ 
+ about-addressbook-details-email-addresses-header = Email Addresses
+ about-addressbook-details-phone-numbers-header = Phone Numbers
++about-addressbook-details-categories-header = Categories
+ about-addressbook-details-addresses-header = Addresses
+ about-addressbook-details-notes-header = Notes
+ about-addressbook-details-impp-header = Instant Messaging
+ about-addressbook-details-websites-header = Websites
+diff --git a/mail/locales/en-US/messenger/addressbook/vcard.ftl b/mail/locales/en-US/messenger/addressbook/vcard.ftl
+--- a/mail/locales/en-US/messenger/addressbook/vcard.ftl
++++ b/mail/locales/en-US/messenger/addressbook/vcard.ftl
+@@ -106,8 +106,16 @@ vcard-impp-option-other = Other
+ 
+ vcard-impp-input-label = URI
+ vcard-impp-input-title = URI for instant messaging
+ 
++# CATEGORIES vCard field
++
++vcard-categories-header = Categories
++
++vcard-category-add = Add category
++vcard-category-input-label = Category
++vcard-category-input-title = Category name
++
+ # BDAY and ANNIVERSARY vCard field
+ 
+ vcard-bday-anniversary-header = Special Dates
+ 
