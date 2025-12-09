@@ -149,9 +149,9 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 %lecho% "  .accesskey = R"                 >> localization\en-GB\messenger\about3Pane.ftl
 
 :: Strings for searching all mail accounts:
-search-all-mail-accounts =
-  .label = Search all mail accounts
-  .accesskey = m
+%lecho% "search-all-mail-accounts ="          >> localization\en-GB\messenger\messenger.ftl
+%lecho% "  .label = Search all mail accounts" >> localization\en-GB\messenger\messenger.ftl
+%lecho% "  .accesskey = m"                    >> localization\en-GB\messenger\messenger.ftl
 
 :: New Gloda facets:
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Subject" >> chrome\en-GB\locale\en-GB\messenger\gloda.properties
