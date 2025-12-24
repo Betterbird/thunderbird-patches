@@ -1,0 +1,366 @@
+# HG changeset patch
+# User Masayuki Nakano <masayuki@d-toybox.com>
+# Date 1766490030 -3600
+# Parent  80b7340197ac51ead135f5c8c81fbf7afd79160d
+Bug 2005895 - Make `AutoEmptyBlockAncestorDeleter::GetNewCaretPosition()` never return point after a line break before a block boundary r=m_kato
+
+The caret should be put before the last line break in a block if there
+is no visible content between the line break and the end block boundary.
+
+Additionally,
+`WhiteSpaceVisibilityKeeper::DeleteContentNodeAndJoinTextNodesAroundIt()`
+should delete the preceding block's invisible `<br>` too.
+
+Differential Revision: https://phabricator.services.mozilla.com/D277400
+
+diff --git a/editor/libeditor/HTMLEditUtils.cpp b/editor/libeditor/HTMLEditUtils.cpp
+--- a/editor/libeditor/HTMLEditUtils.cpp
++++ b/editor/libeditor/HTMLEditUtils.cpp
+@@ -146,8 +146,33 @@ HTMLEditUtils::ComputePointToPutCaretInE
+ template Result<EditorRawDOMPoint, nsresult>
+ HTMLEditUtils::ComputePointToPutCaretInElementIfOutside(
+     const Element& aElement, const EditorRawDOMPoint& aCurrentPoint);
+ 
++template Maybe<EditorLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorDOMPoint&, const Element&);
++template Maybe<EditorRawLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorDOMPoint&, const Element&);
++template Maybe<EditorLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorRawDOMPoint&, const Element&);
++template Maybe<EditorRawLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorRawDOMPoint&, const Element&);
++template Maybe<EditorLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorDOMPointInText&, const Element&);
++template Maybe<EditorRawLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorDOMPointInText&, const Element&);
++template Maybe<EditorLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorRawDOMPointInText&, const Element&);
++template Maybe<EditorRawLineBreak>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorRawDOMPointInText&, const Element&);
++
+ template bool HTMLEditUtils::IsSameCSSColorValue(const nsAString& aColorA,
+                                                  const nsAString& aColorB);
+ template bool HTMLEditUtils::IsSameCSSColorValue(const nsACString& aColorA,
+                                                  const nsACString& aColorB);
+@@ -2873,8 +2898,35 @@ HTMLEditUtils::ComputePointToPutCaretInE
+   return EditorDOMPointType(firstEditableContent, 0u);
+ }
+ 
+ // static
++template <typename EditorLineBreakType, typename EditorDOMPointType>
++Maybe<EditorLineBreakType>
++HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++    const EditorDOMPointType& aPoint, const Element& aEditingHost) {
++  MOZ_ASSERT(aPoint.IsSet());
++  if (MOZ_UNLIKELY(!aPoint.IsInContentNode())) {
++    return Nothing{};
++  }
++  const WSScanResult previousThing =
++      WSRunScanner::ScanPreviousVisibleNodeOrBlockBoundary(
++          WSRunScanner::Scan::All, aPoint,
++          BlockInlineCheck::UseComputedDisplayStyle, &aEditingHost);
++  if (!previousThing.ReachedLineBreak()) {
++    return Nothing{};  // No preceding line break.
++  }
++  const WSScanResult nextThing =
++      WSRunScanner::ScanInclusiveNextVisibleNodeOrBlockBoundary(
++          WSRunScanner::Scan::All, aPoint,
++          BlockInlineCheck::UseComputedDisplayStyle, &aEditingHost);
++  if (!nextThing.ReachedBlockBoundary()) {
++    return Nothing{};  // The line break is not followed by a block boundary so
++                       // that it's a visible line break.
++  }
++  return Some(previousThing.CreateEditorLineBreak<EditorLineBreakType>());
++}
++
++// static
+ bool HTMLEditUtils::IsInlineStyleSetByElement(
+     const nsIContent& aContent, const EditorInlineStyle& aStyle,
+     const nsAString* aValue, nsAString* aOutValue /* = nullptr */) {
+   for (Element* element : aContent.InclusiveAncestorsOfType<Element>()) {
+diff --git a/editor/libeditor/HTMLEditUtils.h b/editor/libeditor/HTMLEditUtils.h
+--- a/editor/libeditor/HTMLEditUtils.h
++++ b/editor/libeditor/HTMLEditUtils.h
+@@ -2547,8 +2547,17 @@ class HTMLEditUtils final {
+   ComputePointToPutCaretInElementIfOutside(
+       const Element& aElement, const EditorDOMPointTypeInput& aCurrentPoint);
+ 
+   /**
++   * Return a line break if aPoint is after a line break which is immediately
++   * before a block boundary.
++   */
++  template <typename EditorLineBreakType, typename EditorDOMPointType>
++  static Maybe<EditorLineBreakType>
++  GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem(
++      const EditorDOMPointType& aPoint, const Element& aEditingHost);
++
++  /**
+    * Content-based query returns true if
+    * <mHTMLProperty mAttribute=mAttributeValue> effects aContent.  If there is
+    * such a element, but another element whose attribute value does not match
+    * with mAttributeValue is closer ancestor of aContent, then the distant
+diff --git a/editor/libeditor/HTMLEditorDeleteHandler.cpp b/editor/libeditor/HTMLEditorDeleteHandler.cpp
+--- a/editor/libeditor/HTMLEditorDeleteHandler.cpp
++++ b/editor/libeditor/HTMLEditorDeleteHandler.cpp
+@@ -1213,9 +1213,10 @@ class MOZ_STACK_CLASS HTMLEditor::AutoDe
+      * `mEmptyInclusiveAncestorBlockElement`.
+      */
+     [[nodiscard]] Result<CaretPoint, nsresult> GetNewCaretPosition(
+         const HTMLEditor& aHTMLEditor,
+-        nsIEditor::EDirection aDirectionAndAmount) const;
++        nsIEditor::EDirection aDirectionAndAmount,
++        const Element& aEditingHost) const;
+ 
+     RefPtr<Element> mEmptyInclusiveAncestorBlockElement;
+   };  // HTMLEditor::AutoDeleteRangesHandler::AutoEmptyBlockAncestorDeleter
+ 
+@@ -8374,9 +8375,10 @@ HTMLEditor::AutoDeleteRangesHandler::Aut
+ 
+ Result<CaretPoint, nsresult> HTMLEditor::AutoDeleteRangesHandler::
+     AutoEmptyBlockAncestorDeleter::GetNewCaretPosition(
+         const HTMLEditor& aHTMLEditor,
+-        nsIEditor::EDirection aDirectionAndAmount) const {
++        nsIEditor::EDirection aDirectionAndAmount,
++        const Element& aEditingHost) const {
+   MOZ_ASSERT(mEmptyInclusiveAncestorBlockElement);
+   MOZ_ASSERT(mEmptyInclusiveAncestorBlockElement->GetParentElement());
+   MOZ_ASSERT(aHTMLEditor.IsEditActionDataAvailable());
+ 
+@@ -8389,10 +8391,9 @@ Result<CaretPoint, nsresult> HTMLEditor:
+       auto afterEmptyBlock(
+           EditorDOMPoint::After(mEmptyInclusiveAncestorBlockElement));
+       MOZ_ASSERT(afterEmptyBlock.IsSet());
+       if (nsIContent* nextContentOfEmptyBlock = HTMLEditUtils::GetNextContent(
+-              afterEmptyBlock, {}, BlockInlineCheck::Unused,
+-              aHTMLEditor.ComputeEditingHost())) {
++              afterEmptyBlock, {}, BlockInlineCheck::Unused, &aEditingHost)) {
+         EditorDOMPoint pt = HTMLEditUtils::GetGoodCaretPointFor<EditorDOMPoint>(
+             *nextContentOfEmptyBlock, aDirectionAndAmount);
+         if (!pt.IsSet()) {
+           NS_WARNING("HTMLEditUtils::GetGoodCaretPointFor() failed");
+@@ -8408,22 +8409,32 @@ Result<CaretPoint, nsresult> HTMLEditor:
+     case nsIEditor::ePrevious:
+     case nsIEditor::ePreviousWord:
+     case nsIEditor::eToBeginningOfLine: {
+       // Collapse Selection to previous editable node of the empty block
+-      // if there is.  Otherwise, to after the empty block.
++      // if there is.
+       EditorRawDOMPoint atEmptyBlock(mEmptyInclusiveAncestorBlockElement);
+-      if (nsIContent* previousContentOfEmptyBlock =
++      if (nsIContent* const previousContentOfEmptyBlock =
+               HTMLEditUtils::GetPreviousContent(
+                   atEmptyBlock, {WalkTreeOption::IgnoreNonEditableNode},
+-                  BlockInlineCheck::Unused, aHTMLEditor.ComputeEditingHost())) {
+-        EditorDOMPoint pt = HTMLEditUtils::GetGoodCaretPointFor<EditorDOMPoint>(
+-            *previousContentOfEmptyBlock, aDirectionAndAmount);
+-        if (!pt.IsSet()) {
++                  BlockInlineCheck::Unused, &aEditingHost)) {
++        const EditorRawDOMPoint atEndOfPreviousContent =
++            HTMLEditUtils::GetGoodCaretPointFor<EditorRawDOMPoint>(
++                *previousContentOfEmptyBlock, aDirectionAndAmount);
++        if (!atEndOfPreviousContent.IsSet()) {
+           NS_WARNING("HTMLEditUtils::GetGoodCaretPointFor() failed");
+           return Err(NS_ERROR_FAILURE);
+         }
+-        return CaretPoint(std::move(pt));
+-      }
++        // If the previous content is between a preceding line break and the
++        // block boundary of current empty block, let's move caret to the line
++        // break if there is no visible things between them.
++        const Maybe<EditorRawLineBreak> precedingLineBreak =
++            HTMLEditUtils::GetLineBreakBeforeBlockBoundaryIfPointIsBetweenThem<
++                EditorRawLineBreak>(atEndOfPreviousContent, aEditingHost);
++        return precedingLineBreak.isSome()
++                   ? CaretPoint(precedingLineBreak->To<EditorDOMPoint>())
++                   : CaretPoint(atEndOfPreviousContent.To<EditorDOMPoint>());
++      }
++      // Otherwise, let's put caret next to the deleting block.
+       auto afterEmptyBlock =
+           EditorDOMPoint::After(*mEmptyInclusiveAncestorBlockElement);
+       if (NS_WARN_IF(!afterEmptyBlock.IsSet())) {
+         return Err(NS_ERROR_FAILURE);
+@@ -8491,9 +8502,9 @@ HTMLEditor::AutoDeleteRangesHandler::Aut
+               ? insertBRElementResult.AtLineBreak<EditorDOMPoint>()
+               : EditorDOMPoint());
+     }
+     Result<CaretPoint, nsresult> caretPointOrError =
+-        GetNewCaretPosition(aHTMLEditor, aDirectionAndAmount);
++        GetNewCaretPosition(aHTMLEditor, aDirectionAndAmount, aEditingHost);
+     NS_WARNING_ASSERTION(
+         caretPointOrError.isOk(),
+         "AutoEmptyBlockAncestorDeleter::GetNewCaretPosition() failed");
+     MOZ_ASSERT_IF(caretPointOrError.isOk(),
+@@ -8522,8 +8533,9 @@ HTMLEditor::AutoDeleteRangesHandler::Aut
+       if (NS_FAILED(rv)) {
+         NS_WARNING("EditorBase::DeleteNodeWithTransaction() failed");
+         return Err(rv);
+       }
++      trackPointToPutCaret.FlushAndStopTracking();
+     } else {
+       Result<CaretPoint, nsresult> caretPointOrError =
+           WhiteSpaceVisibilityKeeper::DeleteContentNodeAndJoinTextNodesAroundIt(
+               aHTMLEditor, MOZ_KnownLive(*mEmptyInclusiveAncestorBlockElement),
+@@ -8533,13 +8545,13 @@ HTMLEditor::AutoDeleteRangesHandler::Aut
+             "WhiteSpaceVisibilityKeeper::"
+             "DeleteContentNodeAndJoinTextNodesAroundIt() failed");
+         return caretPointOrError.propagateErr();
+       }
++      trackPointToPutCaret.FlushAndStopTracking();
+       caretPointOrError.unwrap().MoveCaretPointTo(
+           pointToPutCaret, {SuggestCaret::OnlyIfHasSuggestion});
+     }
+     trackEmptyBlockPoint.FlushAndStopTracking();
+-    trackPointToPutCaret.FlushAndStopTracking();
+     if (NS_WARN_IF(!atEmptyInclusiveAncestorBlockElement
+                         .IsInContentNodeAndValidInComposedDoc()) ||
+         NS_WARN_IF(pointToPutCaret.IsSet() &&
+                    !pointToPutCaret.IsInContentNodeAndValidInComposedDoc())) {
+diff --git a/editor/libeditor/WSRunScanner.h b/editor/libeditor/WSRunScanner.h
+--- a/editor/libeditor/WSRunScanner.h
++++ b/editor/libeditor/WSRunScanner.h
+@@ -161,8 +161,24 @@ class MOZ_STACK_CLASS WSScanResult final
+     MOZ_DIAGNOSTIC_ASSERT(mContent->IsText());
+     return mContent->AsText();
+   }
+ 
++  template <typename EditorLineBreakType>
++  MOZ_NEVER_INLINE_DEBUG EditorLineBreakType CreateEditorLineBreak() const {
++    if (ReachedBRElement()) {
++      return EditorLineBreakType(*BRElementPtr());
++    }
++    if (ReachedPreformattedLineBreak()) {
++      MOZ_ASSERT_IF(mDirection == ScanDirection::Backward, *mOffset > 0);
++      return EditorLineBreakType(*TextPtr(),
++                                 mDirection == ScanDirection::Forward
++                                     ? mOffset.valueOr(0)
++                                     : std::max(mOffset.valueOr(1), 1u) - 1);
++    }
++    MOZ_CRASH("Didn't reach a line break");
++    return EditorLineBreakType(*BRElementPtr());
++  }
++
+   /**
+    * Returns true if found or reached content is editable.
+    */
+   bool IsContentEditable() const { return mContent && mContent->IsEditable(); }
+@@ -277,8 +293,17 @@ class MOZ_STACK_CLASS WSScanResult final
+     return mReason == WSType::PreformattedLineBreak;
+   }
+ 
+   /**
++   * Return true if reached a <br> element or a preformatted line break.
++   * Return false when reached a block boundary.  Use ReachedLineBoundary() if
++   * you want it to return true in the case too.
++   */
++  [[nodiscard]] bool ReachedLineBreak() const {
++    return ReachedBRElement() || ReachedPreformattedLineBreak();
++  }
++
++  /**
+    * The scanner reached a <hr> element.
+    */
+   bool ReachedHRElement() const {
+     return mContent && mContent->IsHTMLElement(nsGkAtoms::hr);
+diff --git a/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp b/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp
+--- a/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp
++++ b/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp
+@@ -3515,10 +3515,12 @@ WhiteSpaceVisibilityKeeper::DeleteConten
+           WSScanResult nextThingOfCaretPoint =
+               WSRunScanner::ScanInclusiveNextVisibleNodeOrBlockBoundary(
+                   Scan::All, pointToPutCaret,
+                   BlockInlineCheck::UseComputedDisplayOutsideStyle);
+-          if (nextThingOfCaretPoint.ReachedBRElement() ||
+-              nextThingOfCaretPoint.ReachedPreformattedLineBreak()) {
++          Maybe<EditorLineBreak> lineBreak;
++          if (nextThingOfCaretPoint.ReachedLineBreak()) {
++            lineBreak.emplace(
++                nextThingOfCaretPoint.CreateEditorLineBreak<EditorLineBreak>());
+             nextThingOfCaretPoint =
+                 WSRunScanner::ScanInclusiveNextVisibleNodeOrBlockBoundary(
+                     Scan::All,
+                     nextThingOfCaretPoint
+@@ -3542,8 +3544,28 @@ WhiteSpaceVisibilityKeeper::DeleteConten
+             }
+             if (NS_WARN_IF(!aContentToDelete.IsInComposedDoc())) {
+               return Err(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
+             }
++            // If the previous content ends with an invisible line break, let's
++            // delete it.
++            if (lineBreak.isSome() && lineBreak->IsInComposedDoc()) {
++              const WSScanResult prevThing =
++                  WSRunScanner::ScanPreviousVisibleNodeOrBlockBoundary(
++                      WSRunScanner::Scan::All,
++                      lineBreak->To<EditorRawDOMPoint>(),
++                      BlockInlineCheck::UseComputedDisplayStyle, &aEditingHost);
++              if (!prevThing.ReachedLineBoundary()) {
++                Result<EditorDOMPoint, nsresult> pointOrError =
++                    aHTMLEditor.DeleteLineBreakWithTransaction(
++                        lineBreak.ref(), nsIEditor::eStrip, aEditingHost);
++                if (MOZ_UNLIKELY(pointOrError.isErr())) {
++                  NS_WARNING(
++                      "HTMLEditor::DeleteLineBreakWithTransaction() failed");
++                  return pointOrError.propagateErr();
++                }
++                trackPointToPutCaret->Flush(StopTracking::No);
++              }
++            }
+           }
+         }
+         // Similarly, we may put caret into the following block (this is the
+         // case when caret was in an empty block and type `Delete`, or when
+diff --git a/testing/web-platform/meta/editing/run/delete.html.ini b/testing/web-platform/meta/editing/run/delete.html.ini
+--- a/testing/web-platform/meta/editing/run/delete.html.ini
++++ b/testing/web-platform/meta/editing/run/delete.html.ini
+@@ -136,14 +136,8 @@
+ 
+   [[["delete",""\]\] "<ol><li>foo<br></ol>{}<br>" compare innerHTML]
+     expected: FAIL
+ 
+-  [[["defaultparagraphseparator","div"\],["delete",""\]\] "<ol><li>foo<br></ol><p>{}<br>" compare innerHTML]
+-    expected: FAIL
+-
+-  [[["defaultparagraphseparator","p"\],["delete",""\]\] "<ol><li>foo<br></ol><p>{}<br>" compare innerHTML]
+-    expected: FAIL
+-
+ 
+ [delete.html?2001-3000]
+   expected:
+     if (os == "android") and fission: [OK, TIMEOUT]
+diff --git a/testing/web-platform/tests/editing/data/delete.js b/testing/web-platform/tests/editing/data/delete.js
+--- a/testing/web-platform/tests/editing/data/delete.js
++++ b/testing/web-platform/tests/editing/data/delete.js
+@@ -3202,5 +3202,11 @@ var browserTests = [
+     [["delete",""]],
+     "<table><tbody><tr><th>a</th><th><br></th><th><br></th><th><br></th><th>e</th></tr></tbody></table>",
+     [true],
+     {}],
++
++["<p>abc<br> </p><p>{}<br></p>",
++    [["delete",""]],
++    "<p>abc</p>",
++    [true],
++    {}],
+ ]
+diff --git a/testing/web-platform/tests/editing/data/forwarddelete.js b/testing/web-platform/tests/editing/data/forwarddelete.js
+--- a/testing/web-platform/tests/editing/data/forwarddelete.js
++++ b/testing/web-platform/tests/editing/data/forwarddelete.js
+@@ -3064,5 +3064,11 @@ var browserTests = [
+     [["forwarddelete",""]],
+     "<table><tbody><tr><th>a</th><th><br></th><th><br></th><th><br></th><th>e</th></tr></tbody></table>",
+     [true],
+     {}],
++
++["<p>abc{}<br> </p><p><br></p>",
++    [["forwarddelete",""]],
++    "<p>abc</p>",
++    [true],
++    {}],
+ ]
