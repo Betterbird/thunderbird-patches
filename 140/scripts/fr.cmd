@@ -160,11 +160,11 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\fr\locale\fr\messenger\appstrings.p
 ::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
-%lecho% "quick-filter-bar-negate ="                                                                           >> localization\fr\messenger\about3Pane.ftl
-%lecho% "    .title = Un clic droit ou Ctrl+Entrée sur un bouton inverse le comportement."                       >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Pour le filtre de texte et d'étiquettes, tout bouton inversé crée une condition ET."        >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Quand le filtre d'étiquettes est inversé, la sélection d’un bouton d’étiquette ajoute les messages respectifs à la liste." >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Exemples:"                                                                                     >> localization\fr\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-negate ="                                                                          >> localization\fr\messenger\about3Pane.ftl
+%lecho% "    .title = Un clic droit ou Ctrl+Entrée sur un bouton inverse le résultat."                       >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Pour le filtre de texte et d’étiquettes, tout bouton inversé crée une condition ET."          >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Quand le filtre d’étiquettes est inversé, la sélection d’un bouton d’étiquette ajoute les messages respectifs à la liste." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Exemples:"                                                                                    >> localization\fr\messenger\about3Pane.ftl
 %lecho% "      • [Suivi] et [Étiqueté] inversés : Messages qui ne sont pas ‹ Suivis › ET non ‹ Étiquetés ›." >> localization\fr\messenger\about3Pane.ftl
 %lecho% "      • [Sujet] inversé et [Corps du message] sélectionné : Messages dont le ‹ Sujet › Ne Contient Pas de « mot » ET ‹ Corps du message › Contient un « mot »." >> localization\fr\messenger\about3Pane.ftl
 %lecho% "      • [Au moins une], avec [Important] inversé et [Travail] et [Personnel] sélectionnés :"        >> localization\fr\messenger\about3Pane.ftl
@@ -196,9 +196,9 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\fr\locale\fr\messenger\appstrings.p
 :: quick-filter-bar-match-addressbook =
 ::     .label = Match Address Book
 ::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
-%lecho% "quick-filter-bar-match-addressbook ="                                                                              >> localization\fr\messenger\about3Pane.ftl
-%lecho% "    .label = Critères de recherche dans le carnet d’adresses"                                                      >> localization\fr\messenger\about3Pane.ftl
-%lecho% "    .tooltiptext = Recherche sur le nom affiché (commence par) ou pseudonyme (exacte) dans les carnets d’adresses" >> localization\fr\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-match-addressbook ="                                                                                 >> localization\fr\messenger\about3Pane.ftl
+%lecho% "    .label = Recherche dans le carnet d’adresses"                                                                     >> localization\fr\messenger\about3Pane.ftl
+%lecho% "    .tooltiptext = Recherche sur le nom à afficher (commence par) ou pseudonyme (exacte) dans les carnets d’adresses" >> localization\fr\messenger\about3Pane.ftl
 
 :: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization\fr\messenger\preferences\preferences.ftl
