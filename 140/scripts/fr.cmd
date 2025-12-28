@@ -161,13 +161,13 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\fr\locale\fr\messenger\appstrings.p
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 %lecho% "quick-filter-bar-negate ="                                                                           >> localization\fr\messenger\about3Pane.ftl
-%lecho% "    .title = Un clic droit ou Ctrl+Entrée sur un bouton négative le résultat."                       >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Pour le filtre de texte et d'étiquettes, tout bouton négativé crée une condition ET."        >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      Quand le filtre d'étiquettes est négativé, la sélection d’un bouton d’étiquette ajoute les messages respectifs à la liste." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "    .title = Un clic droit ou Ctrl+Entrée sur un bouton inverse le comportement."                       >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Pour le filtre de texte et d'étiquettes, tout bouton inversé crée une condition ET."        >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      Quand un filtre d'étiquettes est inversé, la sélection d’un bouton d’étiquette ajoute les messages respectifs à la liste." >> localization\fr\messenger\about3Pane.ftl
 %lecho% "      Exemples:"                                                                                     >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      • [Suivi] et [Étiqueté] négativés : Messages qui ne sont pas ‹ Suivis › ET non ‹ Étiquetés ›." >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      • [Sujet] négativé et [Corps du message] sélectionné : Messages dont le ‹ Sujet › Ne Contient Pas de « mot » ET ‹ Corps du message › Contient un « mot »." >> localization\fr\messenger\about3Pane.ftl
-%lecho% "      • [Au moins une], avec [Important] négativé et [Travail] et [Personnel] sélectionnés :"        >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      • [Suivi] et [Étiqueté] inversés : Messages qui ne sont pas ‹ Suivis › ET non ‹ Étiquetés ›." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      • [Sujet] inversé et [Corps du message] sélectionné : Messages dont le ‹ Sujet › Ne Contient Pas de « mot » ET ‹ Corps du message › Contient un « mot »." >> localization\fr\messenger\about3Pane.ftl
+%lecho% "      • [Au moins une], avec [Important] inversé et [Travail] et [Personnel] sélectionnés :"        >> localization\fr\messenger\about3Pane.ftl
 %lecho% "      Messages étiquetés qui n’ont pas l’étiquette ‹ Important › ET qui ont l’étiquette ‹ Travail › OU l’étiquette ‹ Personnel ›." >> localization\fr\messenger\about3Pane.ftl
 
 :: New in 128:
@@ -265,4 +265,5 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Sujet"         >> chrome\fr\locale\fr\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Corps du message" >> chrome\fr\locale\fr\messenger\gloda.properties
+
 
