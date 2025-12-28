@@ -265,3 +265,7 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Sujet"         >> chrome\fr\locale\fr\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Corps du message" >> chrome\fr\locale\fr\messenger\gloda.properties
+
+:: Add some missing strings that the TB folks aren't shipping yet in 140. Pure negligence.
+%lecho% "default-message-list-sorting-legend = Tri et affichage des discussions" >> localization\fr\messenger\preferences\preferences.ftl
+%lecho% "apply-thread-sort-label = Propager les paramètres de tri et d’affichage des discussions à :" >> localization\fr\messenger\preferences\preferences.ftl
