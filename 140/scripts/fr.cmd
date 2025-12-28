@@ -265,6 +265,3 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Sujet"         >> chrome\fr\locale\fr\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Corps du message" >> chrome\fr\locale\fr\messenger\gloda.properties
-
-
-
