@@ -51,11 +51,11 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\pt-BR\locale\pt-BR\messenger\appstr
 ::     .accesskey = O
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 %lecho% "compose-send-plain-or-html-option ="       >> localization\pt-BR\messenger\preferences\preferences.ftl
-%lecho% "    .label = HTML ou Texto sem formatação" >> localization\pt-BR\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = Se nenhum estilo for usado na mensagem, envie texto sem formatação. Caso contrário, envie somente HTML." >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "    .label = Texto simples ou HTML"        >> localization\pt-BR\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-description = Se nenhuma formatação for usada na mensagem, enviar texto simples. Caso contrário, enviar somente HTML." >> localization\pt-BR\messenger\preferences\preferences.ftl
 
 %lecho% "compose-send-plain-or-html-menu-item =" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = HTML ou texto sem formato" >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
+%lecho% "    .label = Texto simples ou HTML"     >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
 %lecho% "    .accesskey = o"                     >> localization\pt-BR\messenger\messengercompose\messengercompose.ftl
 
 :: Movemail
