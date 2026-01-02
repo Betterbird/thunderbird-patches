@@ -265,3 +265,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Assunto"        >> chrome\pt-BR\locale\pt-BR\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Texto da mensagem" >> chrome\pt-BR\locale\pt-BR\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = Categorias" >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Categorias" >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = Ordenar por categorias"                        >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="             >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = Categorias"                                    >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                     >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = Categorias"                               >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                    >> localization\pt-BR\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Categorias"                     >> localization\pt-BR\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = Adicionar categoria"                 >> localization\pt-BR\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = Categoria"                   >> localization\pt-BR\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = Nome da categoria"           >> localization\pt-BR\messenger\addressbook\vcard.ftl
+%lecho% "Categories=Categorias" >> chrome\pt-BR\locale\pt-BR\messenger\search-attributes.properties

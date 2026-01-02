@@ -269,3 +269,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: Add some missing strings that the TB folks aren't shipping yet in 140. Pure negligence.
 %lecho% "default-message-list-sorting-legend = Tri et affichage des discussions" >> localization\fr\messenger\preferences\preferences.ftl
 %lecho% "apply-thread-sort-label = Propager les paramètres de tri et d’affichage des discussions à :" >> localization\fr\messenger\preferences\preferences.ftl
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = Catégories" >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Catégories" >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = Trier par catégories"                          >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="             >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = Catégories"                                    >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                     >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = Catégories"                               >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                    >> localization\fr\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Catégories"                     >> localization\fr\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = Ajouter une catégorie"               >> localization\fr\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = Catégorie"                   >> localization\fr\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = Nom de la catégorie"         >> localization\fr\messenger\addressbook\vcard.ftl
+%lecho% "Categories=Catégories" >> chrome\fr\locale\fr\messenger\search-attributes.properties

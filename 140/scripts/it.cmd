@@ -265,3 +265,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Oggetto" >> chrome\it\locale\it\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Corpo"      >> chrome\it\locale\it\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = Categorie" >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Categorie" >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = Ordina per categorie"                         >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="            >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = Categorie"                                    >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                    >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = Categorie"                               >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                   >> localization\it\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Categorie"                     >> localization\it\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = Aggiungi categoria"                 >> localization\it\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = Categoria"                  >> localization\it\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = Nome della categoria"       >> localization\it\messenger\addressbook\vcard.ftl
+%lecho% "Categories=Categorie" >> chrome\it\locale\it\messenger\search-attributes.properties

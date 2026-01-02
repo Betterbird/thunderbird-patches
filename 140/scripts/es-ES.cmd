@@ -269,3 +269,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Asunto" >> chrome\es-ES\locale\es-ES\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Cuerpo"    >> chrome\es-ES\locale\es-ES\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = Categorías" >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Categorías" >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = Ordenar por categorías"                        >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="             >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = Categorías"                                    >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                     >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = Categorías"                               >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                    >> localization\es-ES\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Categorías"                     >> localization\es-ES\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = Añadir categoría"                    >> localization\es-ES\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = Categoría"                   >> localization\es-ES\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = Nombre de la categoría"      >> localization\es-ES\messenger\addressbook\vcard.ftl
+%lecho% "Categories=Categorías" >> chrome\es-ES\locale\es-ES\messenger\search-attributes.properties

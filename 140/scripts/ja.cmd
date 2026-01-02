@@ -265,3 +265,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=件名" >> chrome\ja\locale\ja\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=本文"    >> chrome\ja\locale\ja\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = カテゴリ" >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = カテゴリ" >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = カテゴリで並べ替え"                             >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="        >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = カテゴリ"                                    >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = カテゴリ"                               >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                               >> localization\ja\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = カテゴリ"                     >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = カテゴリを追加"                     >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = カテゴリ"                  >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = カテゴリ名"                >> localization\ja\messenger\addressbook\vcard.ftl
+%lecho% "Categories=カテゴリ" >> chrome\ja\locale\ja\messenger\search-attributes.properties

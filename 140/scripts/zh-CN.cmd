@@ -265,3 +265,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=主题" >> chrome\zh-CN\locale\zh-CN\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=消息体"  >> chrome\zh-CN\locale\zh-CN\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = 分类" >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = 分类" >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = 按分类排序"                               >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="      >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = 分类"                                    >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="              >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = 分类"                               >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                             >> localization\zh-CN\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = 分类"                     >> localization\zh-CN\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = 添加分类"                       >> localization\zh-CN\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = 分类"                  >> localization\zh-CN\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = 分类名称"               >> localization\zh-CN\messenger\addressbook\vcard.ftl
+%lecho% "Categories=分类" >> chrome\zh-CN\locale\zh-CN\messenger\search-attributes.properties

@@ -265,3 +265,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Тема" >> chrome\uk\locale\uk\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Змістом" >> chrome\uk\locale\uk\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = Категорії" >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Категорії" >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = Сортувати за категоріями"                     >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="            >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = Категорії"                                    >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                    >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = Категорії"                               >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                   >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Категорії"                     >> localization\uk\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = Додати категорію"                   >> localization\uk\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = Категорія"                  >> localization\uk\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = Назва категорії"            >> localization\uk\messenger\addressbook\vcard.ftl
+%lecho% "Categories=Категорії" >> chrome\uk\locale\uk\messenger\search-attributes.properties

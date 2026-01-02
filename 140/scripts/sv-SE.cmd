@@ -265,3 +265,18 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
 %lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Ämne"    >> chrome\sv-SE\locale\sv-SE\messenger\gloda.properties
 %lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Innehållet" >> chrome\sv-SE\locale\sv-SE\messenger\gloda.properties
+
+:: Categories:
+%lecho% "about-addressbook-details-categories-header = Kategorier" >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Kategorier" >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = Sortera efter kategorier"                      >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="             >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .label = Kategorier"                                    >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                     >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .aria-label = Kategorier"                               >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                    >> localization\sv-SE\messenger\addressbook\aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Kategorier"                     >> localization\sv-SE\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-add = Lägg till kategori"                  >> localization\sv-SE\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-label = Kategori"                    >> localization\sv-SE\messenger\addressbook\vcard.ftl
+%lecho% "vcard-category-input-title = Kategorinamn"                >> localization\sv-SE\messenger\addressbook\vcard.ftl
+%lecho% "Categories=Kategorier" >> chrome\sv-SE\locale\sv-SE\messenger\search-attributes.properties
