@@ -147,7 +147,7 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\pt-PT\locale\pt-PT\messenger\appstr
 %lecho% "    .accesskey = H"                        >> localization\pt-PT\messenger\messenger.ftl
 %lecho% "msg-edit-dialog-title = Editar cabeçalhos" >> localization\pt-PT\messenger\messenger.ftl
 %lecho% "msg-edit-cancel-button = Cancelar"         >> localization\pt-PT\messenger\messenger.ftl
-%lecho% "msg-edit-restore-button = Restorar"        >> localization\pt-PT\messenger\messenger.ftl
+%lecho% "msg-edit-restore-button = Restaurar"       >> localization\pt-PT\messenger\messenger.ftl
 %lecho% "    .title = Mostrar o valor original"     >> localization\pt-PT\messenger\messenger.ftl
 %lecho% "msg-edit-update-button = Actualizar"       >> localization\pt-PT\messenger\messenger.ftl
 
@@ -163,10 +163,10 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\pt-PT\locale\pt-PT\messenger\appstr
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 %lecho% "quick-filter-bar-negate ="                                                            >> localization\pt-PT\messenger\about3Pane.ftl
 %lecho% "    .title = Clique direito ou Ctrl+Enter num botão nega o resultado."                >> localization\pt-PT\messenger\about3Pane.ftl
-%lecho% "      Para o filtro de texto e etqieutas, qualquer botão negado cria uma condição E." >> localization\pt-PT\messenger\about3Pane.ftl
-%lecho% "      Quando o filtro de etqieutas está negado, selecionar um botão de etiqueta adiciona as mensagens respectiva à lista de mensagens não etiquetadas." >> localization\pt-PT\messenger\about3Pane.ftl
+%lecho% "      Para o filtro de texto e etiquetas, qualquer botão negado cria uma condição E." >> localization\pt-PT\messenger\about3Pane.ftl
+%lecho% "      Quando o filtro de etiquetas está negado, selecionar um botão de etiqueta adiciona as mensagens respectiva à lista de mensagens não etiquetadas." >> localization\pt-PT\messenger\about3Pane.ftl
 %lecho% "      Exemplos:"                                                                      >> localization\pt-PT\messenger\about3Pane.ftl
-%lecho% "      • [Com estrela] e [Etqiuetas] negados: mostra todas as mensagens sem estrelas E sem etiquetas." >> localization\pt-PT\messenger\about3Pane.ftl
+%lecho% "      • [Com estrela] e [Etiquetas] negados: mostra todas as mensagens sem estrelas E sem etiquetas." >> localization\pt-PT\messenger\about3Pane.ftl
 %lecho% "      • [Assunto] negado e [Corpo] selecionados: mostra todas as mensagens onde “Assunto” não contém “palavra” E “Corpo” contém “palavra”." >> localization\pt-PT\messenger\about3Pane.ftl
 %lecho% "      • [Qualquer de] com [Importante] negados e [Trabalho] e [Pessoal] selecionado:" >> localization\pt-PT\messenger\about3Pane.ftl
 %lecho% "      Mostrar todas as mensagens etiquetadas que não têm a etiqueta “Importante” E têm a etiqueta “Trabalho“ OU “Pessoal”." >> localization\pt-PT\messenger\about3Pane.ftl
