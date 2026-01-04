@@ -2,7 +2,7 @@
 # User Gene Smith <gds@chartertn.net>
 # Date 1764842058 -3600
 # Node ID c78534fe8f919302eef66bb281131bdb75f8c197
-# Parent  a3ea8d2f1ea512fa542958a9b1422ebd7fedeac2
+# Parent  5cf9f696d40b57af433d4e7da0651ce0e709d0f5
 Bug 1992248 - Fix slow startup when have lots of folders and not using subscriptions. r=mkmelin
 
 Reporter has 16000 folders and a commenter has 6500 folders and both see
@@ -12,6 +12,12 @@ folder during folder discovery during startup as described in comment 55
 with additional information in comment 66 about change to about3Pane.js.
 
 Differential Revision: https://phabricator.services.mozilla.com/D272118
+* * *
+Bug 2008075 - Don't close imap folders DB after discovery and fix test_listClosesDB.js r=mkmelin
+
+so the test itself doesn't keep discovered folders DB open.
+
+Differential Revision: https://phabricator.services.mozilla.com/D277680
 
 diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 --- a/mail/base/content/about3Pane.js
@@ -49,44 +55,7 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsImapIncomingServer.cpp
 --- a/mailnews/imap/src/nsImapIncomingServer.cpp
 +++ b/mailnews/imap/src/nsImapIncomingServer.cpp
-@@ -1294,8 +1294,36 @@ nsresult nsImapIncomingServer::PathFromF
-                     nsINetUtil::ESCAPE_URL_PATH, shortPath);
-   return NS_OK;
- }
- 
-+static uint32_t gFolderCnt = 0;  // For logging info only
-+/*
-+ * Iterate over all folders on this imap server and close each folder database.
-+ * This is based on algorithm used by ResetFoldersToUnverified() below.
-+ */
-+nsresult nsImapIncomingServer::CloseFoldersDB(nsIMsgFolder* parentFolder) {
-+  nsresult rv = NS_OK;
-+  if (!parentFolder) {
-+    gFolderCnt = 0;
-+    nsCOMPtr<nsIMsgFolder> rootFolder;
-+    rv = GetRootFolder(getter_AddRefs(rootFolder));
-+    NS_ENSURE_SUCCESS(rv, rv);
-+    return CloseFoldersDB(rootFolder);
-+  }
-+
-+  gFolderCnt++;
-+  parentFolder->SetMsgDatabase(nullptr);
-+  nsTArray<RefPtr<nsIMsgFolder>> subFolders;
-+  rv = parentFolder->GetSubFolders(subFolders);
-+  NS_ENSURE_SUCCESS(rv, rv);
-+
-+  for (nsIMsgFolder* child : subFolders) {
-+    rv = CloseFoldersDB(child);
-+    NS_ENSURE_SUCCESS(rv, rv);
-+  }
-+  return rv;
-+}
-+
- NS_IMETHODIMP nsImapIncomingServer::DiscoveryDone() {
-   if (mDoingSubscribeDialog) return NS_OK;
- 
-   nsCOMPtr<nsIMsgFolder> rootMsgFolder;
-@@ -1366,23 +1394,25 @@ NS_IMETHODIMP nsImapIncomingServer::Disc
+@@ -1366,23 +1366,17 @@ NS_IMETHODIMP nsImapIncomingServer::Disc
        }
      }
    }
@@ -94,36 +63,26 @@ diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsIm
 -  // Un-verify ALL subfolders when ignoring subs. Needed to ensure that new
 -  // folders are discovered at all levels, including under Inbox. Note: At
 -  // account creation, all folders are new.
--  bool usingSubscription = true;
--  GetUsingSubscription(&usingSubscription);
++  // Need to do this BEFORE trash folder checks and adjustments so if trash
++  // folder is deleted it is no longer present in the trashFolders array. Array
++  // obtained below.
+   bool usingSubscription = true;
+   GetUsingSubscription(&usingSubscription);
 -  if (!usingSubscription && rootMsgFolder) {
 -    ResetFoldersToUnverified(rootMsgFolder);
 -  }
--
--  nsCOMArray<nsIMsgImapMailFolder> unverifiedFolders;
--  GetUnverifiedFolders(unverifiedFolders);
-+  // Close all the folder DBs
-+  MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
-+          ("DiscoveryDone %s: start closing DBs", m_serverKey.get()));
-+  CloseFoldersDB(nullptr);
-+  MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
-+          ("DiscoveryDone %s: Done closing DBs for %" PRIu32 " folders",
-+           m_serverKey.get(), gFolderCnt));
  
-   // Need to do this BEFORE trash folder checks and adjustments so if trash
-   // folder is deleted it is no longer present in the trashFolders array. Array
-   // obtained below.
-+  bool usingSubscription = true;
-+  GetUsingSubscription(&usingSubscription);
-+
-+  nsCOMArray<nsIMsgImapMailFolder> unverifiedFolders;
-+  GetUnverifiedFolders(unverifiedFolders);
-+
+   nsCOMArray<nsIMsgImapMailFolder> unverifiedFolders;
+   GetUnverifiedFolders(unverifiedFolders);
+ 
+-  // Need to do this BEFORE trash folder checks and adjustments so if trash
+-  // folder is deleted it is no longer present in the trashFolders array. Array
+-  // obtained below.
    int32_t count = unverifiedFolders.Count();
    MOZ_LOG(IMAP_DC, mozilla::LogLevel::Debug,
            ("DiscoveryDone, unverified folder count = %" PRIu32, count));
    for (int32_t k = 0; k < count; ++k) {
-@@ -1418,15 +1448,8 @@ NS_IMETHODIMP nsImapIncomingServer::Disc
+@@ -1418,15 +1412,8 @@ NS_IMETHODIMP nsImapIncomingServer::Disc
          // do we want to refresh that folder's flags, because it won't be going
          // away.
          currentImapFolder->SetExplicitlyVerify(false);
@@ -139,19 +98,6 @@ diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsIm
      } else {
        nsCOMPtr<nsIMsgFolder> parent;
        currentFolder->GetParent(getter_AddRefs(parent));
-diff --git a/mailnews/imap/src/nsImapIncomingServer.h b/mailnews/imap/src/nsImapIncomingServer.h
---- a/mailnews/imap/src/nsImapIncomingServer.h
-+++ b/mailnews/imap/src/nsImapIncomingServer.h
-@@ -69,8 +69,9 @@ class nsImapIncomingServer : public nsMs
-  protected:
-   virtual ~nsImapIncomingServer();
-   nsresult GetFolder(const nsACString& name, nsIMsgFolder** pFolder);
-   nsresult ResetFoldersToUnverified(nsIMsgFolder* parentFolder);
-+  nsresult CloseFoldersDB(nsIMsgFolder* parentFolder);
-   void GetUnverifiedSubFolders(nsIMsgFolder* parentFolder,
-                                nsCOMArray<nsIMsgImapMailFolder>& aFoldersArray);
-   void GetUnverifiedFolders(nsCOMArray<nsIMsgImapMailFolder>& aFolderArray);
-   bool NoDescendantsAreVerified(nsIMsgFolder* parentFolder);
 diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
 --- a/mailnews/imap/src/nsImapProtocol.cpp
 +++ b/mailnews/imap/src/nsImapProtocol.cpp
