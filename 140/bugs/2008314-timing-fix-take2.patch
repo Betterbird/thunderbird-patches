@@ -1,0 +1,67 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1768382781 -3600
+# Parent  5e0f25f15c4d0824910adaf8b8873b15293e5293
+Bug 2008314 - Fix timing in 'after send' filters.
+
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -230,8 +230,9 @@ nsImapMailFolder::nsImapMailFolder()
+   m_aclFlags = 0;
+   m_supportedUserFlags = 0;
+   m_namespace = nullptr;
+   m_pendingPlaybackReq = nullptr;
++  m_doingAppend = false;
+ }
+ 
+ nsImapMailFolder::~nsImapMailFolder() {
+   delete m_folderACL;
+@@ -5152,8 +5153,9 @@ nsImapMailFolder::OnStopRunningUrl(nsIUR
+         case nsIImapUrl::nsImapAppendMsgFromFile:
+         case nsIImapUrl::nsImapAppendDraftFromFile:
+           if (m_copyState) {
+             if (NS_SUCCEEDED(aExitCode)) {
++              m_doingAppend = true;
+               UpdatePendingCounts();
+ 
+               m_copyState->m_curIndex++;
+               if (m_copyState->m_curIndex >= m_copyState->m_messages.Length()) {
+@@ -5166,17 +5168,22 @@ nsImapMailFolder::OnStopRunningUrl(nsIUR
+                         m_copyState->m_undoMsgTxn;
+                     txnMgr->DoTransaction(txn);
+                   }
+                 }
+-                (void)OnCopyCompleted(m_copyState->m_srcSupport, aExitCode);
+                 UpdateFolderWithListener(msgWindow, m_urlListener);
+               }
+             } else {
+               // clear the copyState if copy has failed
+               (void)OnCopyCompleted(m_copyState->m_srcSupport, aExitCode);
+             }
+           }
+           break;
++        case nsIImapUrl::nsImapSelectFolder:
++          if (m_doingAppend && m_copyState) {
++            (void)OnCopyCompleted(m_copyState->m_srcSupport, aExitCode);
++          }
++          m_doingAppend = false;
++          break;
+         case nsIImapUrl::nsImapMoveFolderHierarchy:
+           if (m_copyState)  // delete folder gets here, but w/o an m_copyState
+           {
+             nsCOMPtr<nsIMsgCopyService> copyService = do_GetService(
+diff --git a/mailnews/imap/src/nsImapMailFolder.h b/mailnews/imap/src/nsImapMailFolder.h
+--- a/mailnews/imap/src/nsImapMailFolder.h
++++ b/mailnews/imap/src/nsImapMailFolder.h
+@@ -548,8 +548,10 @@ class nsImapMailFolder : public nsMsgDBF
+   // hash table of mapping between messageids and message keys
+   // for pseudo hdrs.
+   nsTHashMap<nsCStringHashKey, nsMsgKey> m_pseudoHdrs;
+ 
++  bool m_doingAppend;  // OnStopRunningUrl for imap APPEND in progress
++
+   nsTArray<nsMsgKey> m_keysToFetch;
+   uint32_t m_totalKeysToFetch;
+ 
+   /**
