@@ -1,0 +1,155 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1768756860 -3600
+# Node ID 5abcc41296d772a36af9e444b607b77b8f998f0f
+# Parent  c2ea67833043b0e6eae32a9b4d10a60565dd9464
+Bug 1912998 - Do not allow deleting folders with Junk special flag. r=darktrojan
+
+This patch removes the canRenameDeleteJunkMail() function entirely. This means
+that folders with the 'Junk' special flag that are not currently being used by
+Thunderbird as a spam destination cannot be deleted anymore.
+
+Consequently, users will no longer be able to delete spam folders with
+additional flags, as could occur if a trash folder was also used as a spam
+folder.
+
+Differential Revision: https://phabricator.services.mozilla.com/D276731
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -343,13 +343,11 @@ var folderPaneContextMenu = {
+     let isNNTP;
+     let isJunk;
+     let isVirtual;
+     let isInbox;
+-    let canRenameDeleteJunkMail;
+     let isSmartTagsFolder;
+     let deletable;
+     let server;
+-    let URI;
+     let flags;
+     let online;
+ 
+     const multiSelection =
+@@ -368,9 +366,8 @@ var folderPaneContextMenu = {
+       isNNTP = true;
+       isVirtual = true;
+       isCompactEnabled = true;
+       isJunk = true;
+-      canRenameDeleteJunkMail = true;
+ 
+       for (const row of folderTree.selection.values()) {
+         const folder = MailServices.folderLookup.getFolderForURL(row.uri);
+ 
+@@ -383,11 +380,8 @@ var folderPaneContextMenu = {
+         deletable &&= folder.deletable;
+         isNNTP &&= folder.server.type == "nntp";
+         isVirtual &&= folder.flags & Ci.nsMsgFolderFlags.Virtual;
+         isJunk &&= folder.flags & Ci.nsMsgFolderFlags.Junk;
+-        canRenameDeleteJunkMail &&= FolderUtils.canRenameDeleteJunkMail(
+-          folder.URI
+-        );
+         isCompactEnabled &&= folder.isCommandEnabled("cmd_compactFolder");
+ 
+         // Tiny performance failsafe in case all of the variables are already
+         // falsy we can break the loop early.
+@@ -397,9 +391,8 @@ var folderPaneContextMenu = {
+           !deletable &&
+           !isNNTP &&
+           !isVirtual &&
+           !isJunk &&
+-          !canRenameDeleteJunkMail &&
+           !isCompactEnabled
+         ) {
+           break;
+         }
+@@ -412,9 +405,8 @@ var folderPaneContextMenu = {
+         deletable,
+         flags,
+         isServer,
+         server,
+-        URI,
+       } = this.activeFolder);
+       online =
+         !Services.io.offline || !this.activeFolder.server.offlineSupportLevel;
+       isCompactEnabled =
+@@ -422,9 +414,8 @@ var folderPaneContextMenu = {
+       isNNTP = server.type == "nntp";
+       isJunk = flags & Ci.nsMsgFolderFlags.Junk;
+       isVirtual = flags & Ci.nsMsgFolderFlags.Virtual;
+       isInbox = flags & Ci.nsMsgFolderFlags.Inbox;
+-      canRenameDeleteJunkMail = FolderUtils.canRenameDeleteJunkMail(URI);
+       isSmartTagsFolder = FolderUtils.isSmartTagsFolder(this.activeFolder);
+     }
+ 
+     if (isNNTP && !isServer) {
+@@ -433,10 +424,9 @@ var folderPaneContextMenu = {
+     }
+ 
+     this._commandStates = {
+       cmd_newFolder: online && ((!isNNTP && canCreateSubfolders) || isInbox),
+-      cmd_deleteFolder:
+-        online && (isJunk ? canRenameDeleteJunkMail : deletable),
++      cmd_deleteFolder: online && deletable,
+       cmd_renameFolder: online && canRename,
+       cmd_compactFolder:
+         !isVirtual && !isNNTP && (isServer || canCompact) && isCompactEnabled,
+       cmd_emptyTrash: online && !isNNTP,
+@@ -3720,13 +3710,9 @@ var folderPane = {
+       top.MsgUnsubscribe([folder]);
+       return;
+     }
+ 
+-    const canDelete = folder.isSpecialFolder(Ci.nsMsgFolderFlags.Junk, false)
+-      ? FolderUtils.canRenameDeleteJunkMail(folder.URI)
+-      : folder.deletable;
+-
+-    if (!canDelete) {
++    if (!folder.deletable) {
+       throw new Error("Can't delete folder: " + folder.name);
+     }
+ 
+     if (folder.getFlag(Ci.nsMsgFolderFlags.Virtual)) {
+diff --git a/mailnews/base/src/FolderUtils.sys.mjs b/mailnews/base/src/FolderUtils.sys.mjs
+--- a/mailnews/base/src/FolderUtils.sys.mjs
++++ b/mailnews/base/src/FolderUtils.sys.mjs
+@@ -20,9 +20,8 @@ export var FolderUtils = {
+   getFolderIcon,
+   getFolderProperties,
+   getMostRecentFolders,
+   getSpecialFolderString,
+-  canRenameDeleteJunkMail,
+   isSmartTagsFolder,
+   isSmartVirtualFolder,
+   ONE_MONTH_IN_MILLISECONDS,
+   OUTGOING_FOLDER_FLAGS,
+@@ -313,28 +312,4 @@ function isSmartTagsFolder(folder) {
+     folder.server.hostName == "smart mailboxes" &&
+     folder.parent?.name == "tags"
+   );
+ }
+-
+-/**
+- * Checks if the configured junk mail can be renamed or deleted. In practice
+- * we no longer permit renaming folders with the Junk flag as the name is
+- * overridden by a localised name.
+- *
+- * @param {string} aFolderUri
+- */
+-function canRenameDeleteJunkMail(aFolderUri) {
+-  // Go through junk mail settings for all servers and see if the folder is set/used by anyone.
+-  for (const server of MailServices.accounts.allServers) {
+-    const settings = server.spamSettings;
+-    // If junk mail control or move junk mail to folder option is disabled then
+-    // allow the folder to be removed/renamed since the folder is not used in this case.
+-    if (!settings.level || !settings.moveOnSpam) {
+-      continue;
+-    }
+-    if (settings.spamFolderURI == aFolderUri) {
+-      return false;
+-    }
+-  }
+-
+-  return true;
+-}
