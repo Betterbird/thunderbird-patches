@@ -8,6 +8,7 @@ fi
 APPLY=""
 NOCLOBBER=""
 DELRES=""
+NOMOZ=""
 if [ "$#" -eq 2 ]; then
   if [ "$2" = "apply" ]; then
     APPLY="apply"
@@ -15,6 +16,9 @@ if [ "$#" -eq 2 ]; then
     NOCLOBBER="noclobber"
   elif [ "$2" = "delres" ]; then
     DELRES="delres"
+  elif [ "$2" = "nomoz" ]; then
+    NOMOZ="nomoz"
+    NOCLOBBER="noclobber"
   else
     echo "Usage: $0 VERSION [apply|noclobber]" >&2
     exit 1
@@ -131,13 +135,17 @@ fi
 set -e # fail on failing commands
 # this is not at start of file due to grep "mq =" causing exit
 
-echo
-echo "======================================================="
-echo "Removing old patches from $MOZILLA_DIR and updating"
-hg revert --all
-hg qpop --all
-hg pull -r $MOZILLA_REV
-hg update -r $MOZILLA_REV
+if [ "$NOMOZ" = "nomoz" ]; then
+  echo "SKIPPING update of Mozilla repo."
+else
+  echo
+  echo "======================================================="
+  echo "Removing old patches from $MOZILLA_DIR and updating"
+  hg revert --all
+  hg qpop --all
+  hg pull -r $MOZILLA_REV
+  hg update -r $MOZILLA_REV
+fi
 
 echo
 echo "======================================================="
@@ -164,13 +172,19 @@ fi
 if ! [ -d comm/.hg/patches ]; then
   mkdir comm/.hg/patches
 fi
-cp ../thunderbird-patches/$VERSION/series$MOZU           .hg/patches/series
+if [ "$NOMOZ" != "nomoz" ]; then
+  cp ../thunderbird-patches/$VERSION/series$MOZU           .hg/patches/series
+fi
 cp ../thunderbird-patches/$VERSION/series           comm/.hg/patches/series
 cp ../thunderbird-patches/$VERSION/branding/*.patch comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/bugs/*.patch     comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/features/*.patch comm/.hg/patches/
 cp ../thunderbird-patches/$VERSION/misc/*.patch     comm/.hg/patches/
-mv comm/.hg/patches/*$MOZ.patch .hg/patches/
+if [ "$NOMOZ" = "nomoz" ]; then
+  rm comm/.hg/patches/*$MOZ.patch
+else
+  mv comm/.hg/patches/*$MOZ.patch .hg/patches/
+fi
 
 if [ -d ../private-patches ]; then
   echo
@@ -179,16 +193,18 @@ if [ -d ../private-patches ]; then
   cp ../private-patches/*.patch comm/.hg/patches/
 fi
 
-echo
-echo "======================================================="
-echo "Retrieving external patches for Mozilla repo"
-echo "#!/bin/sh" > external.sh
-grep " # " .hg/patches/series | grep -v "^#" >> external.sh || true
-sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
-sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1 || true/' external.sh
-chmod 700 external.sh
-. ./external.sh
-rm external.sh
+if [ "$NOMOZ" != "nomoz" ]; then
+  echo
+  echo "======================================================="
+  echo "Retrieving external patches for Mozilla repo"
+  echo "#!/bin/sh" > external.sh
+  grep " # " .hg/patches/series | grep -v "^#" >> external.sh || true
+  sed -i -e 's/\/rev\//\/raw-rev\//' external.sh
+  sed -i -e 's/\(.*\) # \(.*\)/wget -nc \2 -O .hg\/patches\/\1 || true/' external.sh
+  chmod 700 external.sh
+  . ./external.sh
+  rm external.sh
+fi
 
 echo
 echo "======================================================="
@@ -206,8 +222,12 @@ cd ..
 echo
 echo "======================================================="
 echo "Pushing all patches"
-hg qpush -all
-hg qseries
+if [ "$NOMOZ" = "nomoz" ]; then
+  echo "SKIPPING Mozilla patches."
+else
+  hg qpush -all
+  hg qseries
+fi
 cd comm
 hg qpush -all
 hg qseries
