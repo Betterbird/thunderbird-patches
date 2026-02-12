@@ -66,7 +66,7 @@ mv %~1\omni.ja core\omni.ja
 )
 
 :: Sign
-C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "$cert = Get-ChildItem Cert:\\CurrentUser\\My\\ | Where-Object { $_.Thumbprint -eq 'f886e551d8f96c83eaa1f4d6aedc8ad9808d4e08' }; Set-AuthenticodeSignature -FilePath betterbird-%~2.%~1.win64.installer.exe -Certificate $cert  -TimestampServer http://time.certum.pl"
+C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "$cert = Get-ChildItem Cert:\\CurrentUser\\My\\ | Where-Object { $_.Thumbprint -eq 'c39501225a337c86f91e3ba7911acb06ff48acf3' }; Set-AuthenticodeSignature -FilePath betterbird-%~2.%~1.win64.installer.exe -Certificate $cert  -TimestampServer http://time.certum.pl"
 
 :: Keep omni.ja for later
 mkdir omni-win
