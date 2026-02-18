@@ -1,0 +1,149 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1771421835 -39600
+# Parent  37825040f7496c4ed9406c43acf9e4d9b90512bd
+Feature: Introduce pref 'mailnews.sendInBackground.DelayMinutes'.
+
+diff --git a/mailnews/compose/src/nsMsgSendLater.cpp b/mailnews/compose/src/nsMsgSendLater.cpp
+--- a/mailnews/compose/src/nsMsgSendLater.cpp
++++ b/mailnews/compose/src/nsMsgSendLater.cpp
+@@ -34,8 +34,13 @@
+ #include "nsIMsgWindow.h"
+ #include "nsMsgMessageFlags.h"
+ #include "mozilla/dom/Promise.h"
+ #include "mozilla/Services.h"
++#include "mozilla/Preferences.h"
++
++/* for logging to Error Console */
++#include "nsIScriptError.h"
++#include "nsPrintfCString.h"
+ 
+ // Consts for checking and sending mail in milliseconds
+ 
+ // 1 second from mail into the unsent messages folder to initially trying to
+@@ -763,8 +768,13 @@ nsresult nsMsgSendLater::InternalSendMes
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // Build mMessagesToSend array.
+   bool hasMoreElements = false;
++  int32_t sendDelay;
++  mozilla::Preferences::GetInt("mailnews.sendInBackground.DelayMinutes", &sendDelay);
++  if (sendDelay < 0) sendDelay = 0;
++  bool skippedMessage = false;
++
+   while (NS_SUCCEEDED(enumerator->HasMoreElements(&hasMoreElements)) &&
+          hasMoreElements) {
+     nsCOMPtr<nsIMsgDBHdr> messageHeader;
+     rv = enumerator->GetNext(getter_AddRefs(messageHeader));
+@@ -775,13 +785,43 @@ nsresult nsMsgSendLater::InternalSendMes
+       } else {
+         // Else just send those that are NOT marked as Queued.
+         uint32_t flags;
+         rv = messageHeader->GetFlags(&flags);
+-        if (NS_SUCCEEDED(rv) && !(flags & nsMsgMessageFlags::Queued))
+-          mMessagesToSend.AppendObject(messageHeader);
++        if (NS_SUCCEEDED(rv) && !(flags & nsMsgMessageFlags::Queued)) {
++          // Check whether we need to delay.
++          if (sendDelay == 0) {
++            mMessagesToSend.AppendObject(messageHeader);
++          } else {
++            // Get date.
++            uint32_t headerDate;
++            messageHeader->GetDateInSeconds(&headerDate);
++            uint32_t seconds;
++            PRTime2Seconds(PR_Now(), &seconds);
++            if (seconds - headerDate > (uint32_t)sendDelay * 60) {
++              nsCString subject;
++              messageHeader->GetSubject(subject);
++              nsCString msg = nsPrintfCString(
++                  "After %" PRIu32 " seconds sending message with subject \"%s\"",
++                  seconds - headerDate, subject.get());
++              MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg), nsCString(__FILE__),
++                               __LINE__, nsIScriptError::infoFlag);
++              mMessagesToSend.AppendObject(messageHeader);
++            } else {
++              skippedMessage = true;
++            }
++          }
++        }
+       }
+     }
+   }
++  // If we didn't send all messages, restart the timer.
++  // Wait for 30 seconds before looking through the unsent messages again.
++  if (skippedMessage) StartTimer(30 * 1000);
++
++  if (mMessagesToSend.Length() == 0) {
++    // Nothing ready to send so far. The next timer invocation will do it.
++    return NS_OK;
++  }
+ 
+   // We're now sending messages so its time to signal that and reset our counts.
+   mSendingMessages = true;
+   mTotalSentSuccessfully = 0;
+@@ -1324,9 +1364,9 @@ nsresult nsMsgSendLater::GetIdentityFrom
+ 
+   return rv;
+ }
+ 
+-nsresult nsMsgSendLater::StartTimer() {
++nsresult nsMsgSendLater::StartTimer(uint32_t waitBeforeStart) {
+   // No need to trigger if timer is already set
+   if (mTimerSet) return NS_OK;
+ 
+   // XXX only trigger for non-queued headers
+@@ -1338,9 +1378,9 @@ nsresult nsMsgSendLater::StartTimer() {
+     mTimer = do_CreateInstance("@mozilla.org/timer;1", &rv);
+     NS_ENSURE_SUCCESS(rv, NS_OK);
+   }
+ 
+-  rv = mTimer->Init(static_cast<nsIObserver*>(this), kInitialMessageSendTime,
++  rv = mTimer->Init(static_cast<nsIObserver*>(this), waitBeforeStart,
+                     nsITimer::TYPE_ONE_SHOT);
+   NS_ENSURE_SUCCESS(rv, NS_OK);
+ 
+   mTimerSet = true;
+@@ -1350,14 +1390,14 @@ nsresult nsMsgSendLater::StartTimer() {
+ 
+ NS_IMETHODIMP
+ nsMsgSendLater::OnFolderAdded(nsIMsgFolder* /*parent*/,
+                               nsIMsgFolder* /*child*/) {
+-  return StartTimer();
++  return StartTimer(kInitialMessageSendTime);
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgSendLater::OnMessageAdded(nsIMsgFolder* /*parent*/, nsIMsgDBHdr* /*msg*/) {
+-  return StartTimer();
++  return StartTimer(kInitialMessageSendTime);
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgSendLater::OnFolderRemoved(nsIMsgFolder* /*parent*/,
+diff --git a/mailnews/compose/src/nsMsgSendLater.h b/mailnews/compose/src/nsMsgSendLater.h
+--- a/mailnews/compose/src/nsMsgSendLater.h
++++ b/mailnews/compose/src/nsMsgSendLater.h
+@@ -100,9 +100,9 @@ class nsMsgSendLater : public nsIMsgSend
+   virtual ~nsMsgSendLater();
+   nsresult GetIdentityFromKey(const char* aKey, nsIMsgIdentity** aIdentity);
+   nsresult ReparseDBIfNeeded(nsIUrlListener* aListener);
+   nsresult InternalSendMessages(bool aUserInitiated, nsIMsgIdentity* aIdentity);
+-  nsresult StartTimer();
++  nsresult StartTimer(uint32_t waitBeforeStart);
+ 
+   nsTObserverArray<nsCOMPtr<nsIMsgSendLaterListener> > mListenerArray;
+   nsCOMPtr<nsIMsgDBHdr> mMessage;
+   nsCOMPtr<nsITimer> mTimer;
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -930,8 +930,9 @@ pref("mail.feed.play_sound.url", "");
+ pref("mail.content_disposition_type", 1);
+ 
+ // Experimental option to send message in the background - don't wait to close window.
+ pref("mailnews.sendInBackground", false);
++pref("mailnews.sendInBackground.DelayMinutes", 0);
+ // Will show a progress dialog when saving or sending a message
+ pref("mailnews.show_send_progress", true);
+ pref("mail.server.default.retainBy", 1);
+ 
