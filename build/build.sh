@@ -169,21 +169,31 @@ echo "Copying patches and series file from thunderbird-patches"
 if ! [ -d .hg/patches ]; then
   mkdir .hg/patches
 fi
+if ! [ -d .hg/patches/cherrypicks ]; then
+  mkdir .hg/patches/cherrypicks
+fi
+
 if ! [ -d comm/.hg/patches ]; then
   mkdir comm/.hg/patches
+fi
+if ! [ -d comm/.hg/patches/cherrypicks ]; then
+  mkdir comm/.hg/patches/cherrypicks
 fi
 if [ "$NOMOZ" != "nomoz" ]; then
   cp ../thunderbird-patches/$VERSION/series$MOZU           .hg/patches/series
 fi
-cp ../thunderbird-patches/$VERSION/series           comm/.hg/patches/series
-cp ../thunderbird-patches/$VERSION/branding/*.patch comm/.hg/patches/
-cp ../thunderbird-patches/$VERSION/bugs/*.patch     comm/.hg/patches/
-cp ../thunderbird-patches/$VERSION/features/*.patch comm/.hg/patches/
-cp ../thunderbird-patches/$VERSION/misc/*.patch     comm/.hg/patches/
+cp ../thunderbird-patches/$VERSION/series              comm/.hg/patches/series
+cp ../thunderbird-patches/$VERSION/branding/*.patch    comm/.hg/patches/
+cp ../thunderbird-patches/$VERSION/bugs/*.patch        comm/.hg/patches/
+cp ../thunderbird-patches/$VERSION/features/*.patch    comm/.hg/patches/
+cp ../thunderbird-patches/$VERSION/misc/*.patch        comm/.hg/patches/
+cp ../thunderbird-patches/$VERSION/cherrypicks/*.patch comm/.hg/patches/cherrypicks/
 if [ "$NOMOZ" = "nomoz" ]; then
   rm comm/.hg/patches/*$MOZ.patch
+  rm comm/.hg/patches/cherrypicks/*$MOZ.patch
 else
   mv comm/.hg/patches/*$MOZ.patch .hg/patches/
+  mv comm/.hg/patches/cherrypicks/*$MOZ.patch .hg/patches/cherrypicks/
 fi
 
 if [ -d ../private-patches ]; then

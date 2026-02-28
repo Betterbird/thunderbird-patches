@@ -1,0 +1,170 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1761819120 0
+# Node ID 66e495758c52d3a8088d178741ceb9a1e6c2a367
+# Parent  0544a79a6edbe709284f724fec8488099b1960fc
+Bug 1921406 - Import .vcf does not work if .vcf contained more than one card. r=vineet
+
+Differential Revision: https://phabricator.services.mozilla.com/D269722
+
+diff --git a/mailnews/addrbook/modules/AddrBookCard.sys.mjs b/mailnews/addrbook/modules/AddrBookCard.sys.mjs
+--- a/mailnews/addrbook/modules/AddrBookCard.sys.mjs
++++ b/mailnews/addrbook/modules/AddrBookCard.sys.mjs
+@@ -55,18 +55,18 @@ export function AddrBookCard() {
+               )
+             );
+           }
+           this.deleteProperty(key);
+         }
+         return vCardProperties;
+       }
+       return lazy.VCardProperties.fromPropertyMap(this._properties);
+-    } catch (error) {
+-      console.error("Error creating vCard properties", error);
++    } catch (e) {
++      console.error(`Creating vCard properties FAILED for vCard=${vCard}`, e);
+       // Return  an empty VCardProperties object if parsing failed
+       // catastrophically.
+       return new lazy.VCardProperties("4.0");
+     }
+   });
+ }
+ 
+ AddrBookCard.prototype = {
+diff --git a/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs b/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
+--- a/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
++++ b/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
+@@ -392,31 +392,34 @@ export class CardDAVDirectory extends SQ
+ 
+   /**
+    * Converts the card to a vCard and performs a PUT request to store it on the
+    * server. Then immediately performs a GET request ensuring the local copy
+    * matches the server copy. Stores the card in the database on success.
+    *
+    * @param {nsIAbCard} card
+    * @returns {boolean} true if the PUT request succeeded without conflict,
+-   *     false if there was a conflict.
+-   * @throws if the server responded with anything other than a success or
+-   *     conflict status code.
++   *   false if there was a conflict.
++   * @throws {Error} if the server responded with anything other than a
++   *   success or conflict status code.
+    */
+   async _sendCardToServer(card) {
+     const cardHref = this._getCardHref(card);
+     const requestDetails = {
+       method: "PUT",
+       contentType: "text/vcard",
+     };
+ 
+     const vCard = card.getProperty("_vCard", "");
+     if (this._isGoogleCardDAV) {
+       // There must be an `N` property, even if empty.
+       const vCardProperties = lazy.VCardProperties.fromVCard(vCard);
++      if (!vCardProperties) {
++        throw new Error(`Invalid vCard: ${vCard}`);
++      }
+       if (!vCardProperties.getFirstEntry("n")) {
+         vCardProperties.addValue("n", ["", "", "", "", ""]);
+       }
+       requestDetails.body = vCardProperties.toVCard();
+     } else {
+       requestDetails.body = vCard;
+     }
+ 
+diff --git a/mailnews/addrbook/modules/VCardUtils.sys.mjs b/mailnews/addrbook/modules/VCardUtils.sys.mjs
+--- a/mailnews/addrbook/modules/VCardUtils.sys.mjs
++++ b/mailnews/addrbook/modules/VCardUtils.sys.mjs
+@@ -656,20 +656,27 @@ export class VCardProperties {
+       this.addEntry(new VCardPropertyEntry("version", {}, "text", version));
+     }
+   }
+ 
+   /**
+    * Parse a vCard into a VCardProperties object.
+    *
+    * @param {string} vCard
+-   * @returns {VCardProperties}
++   * @returns {?VCardProperties}
+    */
+   static fromVCard(vCard, { isGoogleCardDAV = false } = {}) {
+-    vCard = VCardUtils.translateVCard21(vCard);
++    const vCards = vCard.match(/BEGIN:VCARD[\s\S]*?END:VCARD/gi);
++    if (!vCards) {
++      return null;
++    }
++    if (vCards.length > 1) {
++      console.warn(`Card data had more than one vCard ${vCard}`);
++    }
++    vCard = VCardUtils.translateVCard21(vCards[0]);
+ 
+     const rv = new VCardProperties();
+     const [, properties] = ICAL.parse(vCard);
+     for (const property of properties) {
+       let [name, params, type, value] = property;
+       if (property.length > 4) {
+         // The jCal format stores multiple values as the 4th...nth items.
+         // VCardPropertyEntry has only one place for a value, so store an
+diff --git a/mailnews/addrbook/test/unit/test_vCardProperties.js b/mailnews/addrbook/test/unit/test_vCardProperties.js
+--- a/mailnews/addrbook/test/unit/test_vCardProperties.js
++++ b/mailnews/addrbook/test/unit/test_vCardProperties.js
+@@ -208,16 +208,57 @@ add_task(function testFromToVCard() {
+     "multivalue entry with multiple values"
+   );
+ 
+   const outVCard = properties.toVCard();
+   Assert.equal(outVCard, inVCard, "vCard reproduction");
+ });
+ 
+ /**
++ * Tests creating a VCardProperties from a BAD vCard string,
++ * then recreating the vCard.
++ * Notice the extra begin and end. The data has two cards (second empty).
++ */
++add_task(function testFromToVCardBad() {
++  const inVCard = formatVCard`
++    BEGIN:VCARD
++    VERSION:3.0
++    EMAIL;PREF=1:mike@example.org
++    END:VCARD
++    BEGIN:VCARD
++    END:VCARD`;
++  const properties = VCardProperties.fromVCard(inVCard);
++
++  Assert.equal(properties.entries.length, 2, "entry count");
++  propertyEqual(
++    properties.getFirstEntry("version"),
++    {
++      name: "version",
++      params: {},
++      type: "text",
++      value: "3.0",
++    },
++    "version entry"
++  );
++  propertyEqual(
++    properties.getFirstEntry("email"),
++    {
++      name: "email",
++      params: { pref: 1 },
++      type: "text",
++      value: "mike@example.org",
++    },
++    "email entry"
++  );
++
++  const outVCard = properties.toVCard() + "BEGIN:VCARD\r\nEND:VCARD\r\n";
++  Assert.equal(outVCard, inVCard, "vCard reproduction should be ok");
++});
++
++/**
+  * Tests creating a VCardProperties from a Map of old-style address book
+  * properties, then recreating the Map.
+  */
+ add_task(function testFromToPropertyMap() {
+   const inProperties = [
+     ["DisplayName", "Mike Test"],
+     ["LastName", "Test"],
+     ["FirstName", "Mike"],
+

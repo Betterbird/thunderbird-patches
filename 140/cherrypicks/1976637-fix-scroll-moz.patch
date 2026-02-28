@@ -1,0 +1,116 @@
+
+# HG changeset patch
+# User Hiroyuki Ikezoe <hikezoe.birchill@mozilla.com>
+# Date 1757433121 -7200
+# Node ID f0dedf9da0fb30282c9c058e4e05e29ff8af63c5
+# Parent  ae28c9294eef08bb212acd2924009a1a7735ebff
+Bug 1976637 - Preserve the old scroll offsets only if it's not default one. r=botond
+
+The default flag is set in the case of newly created APZC, e.g. it's set
+if a new APZC is created when the corresponding document becomes
+foreground. Thus if the document has already scrolled while the document
+was background or before it becomes background, the scroll offsets
+should be used when applying the new scroll updates.
+
+Differential Revision: https://phabricator.services.mozilla.com/D257214
+
+diff --git a/gfx/layers/apz/src/AsyncPanZoomController.cpp b/gfx/layers/apz/src/AsyncPanZoomController.cpp
+--- a/gfx/layers/apz/src/AsyncPanZoomController.cpp
++++ b/gfx/layers/apz/src/AsyncPanZoomController.cpp
+@@ -5663,21 +5663,35 @@ void AsyncPanZoomController::NotifyLayer
+     // Initialize our internal state to something sane when the content
+     // that was just painted is something we knew nothing about previously
+     CancelAnimation();
+ 
+-    // Keep our existing scroll generation and existing scroll offsets, if there
+-    // are scroll updates. In this case we'll update our scroll generation and
+-    // offsets when processing the scroll update array below. If there are no
+-    // scroll updates, take the generation from the incoming metrics. Bug
+-    // 1662019 will simplify this later.
++    // Keep our existing scroll generation, if there are scroll updates. In this
++    // case we'll update our scroll generation. If there are no scroll updates,
++    // take the generation from the incoming metrics. Bug 1662019 will simplify
++    // this later.
+     ScrollGeneration oldScrollGeneration = Metrics().GetScrollGeneration();
+     CSSPoint oldLayoutScrollOffset = Metrics().GetLayoutScrollOffset();
+     CSSPoint oldVisualScrollOffset = Metrics().GetVisualScrollOffset();
+     mScrollMetadata = aScrollMetadata;
+     if (!aScrollMetadata.GetScrollUpdates().IsEmpty()) {
+       Metrics().SetScrollGeneration(oldScrollGeneration);
+-      Metrics().SetLayoutScrollOffset(oldLayoutScrollOffset);
+-      Metrics().SetVisualScrollOffset(oldVisualScrollOffset);
++      // Keep existing scroll offsets only if it's not default metrics.
++      //
++      // NOTE: The above scroll generation is used to tell whether we need to
++      // apply the scroll updates or not so that the old generation needs to be
++      // preserved. Whereas the old scroll offsets don't need to be preserved in
++      // the case of default since the new metrics have valid scroll offsets on
++      // the main-thread.
++      //
++      // Bug 1978682: In the case of default metrics, the original layout/visual
++      // scroll offsets on the main-thread (e.g the
++      // ScrollPositionUpdate::mSource in the case of relative update) need to
++      // be reflected to this new APZC because the first ScrollPositionUpdate is
++      // supposed to be applied upon the original offsets.
++      if (!isDefault) {
++        Metrics().SetLayoutScrollOffset(oldLayoutScrollOffset);
++        Metrics().SetVisualScrollOffset(oldVisualScrollOffset);
++      }
+     }
+ 
+     mExpectedGeckoMetrics.UpdateFrom(aLayerMetrics);
+ 
+diff --git a/gfx/layers/apz/test/gtest/TestBasic.cpp b/gfx/layers/apz/test/gtest/TestBasic.cpp
+--- a/gfx/layers/apz/test/gtest/TestBasic.cpp
++++ b/gfx/layers/apz/test/gtest/TestBasic.cpp
+@@ -387,8 +387,50 @@ TEST_F(APZCBasicTester, MultipleSmoothSc
+     lastOffset = offset;
+   }
+ }
+ 
++TEST_F(APZCBasicTester, NotifyLayersUpdate_WithScrollUpdates) {
++  // Set an empty metadata as if the APZC is now newly created.
++  // This replicates when a document in a background tab now becomes forground.
++  ScrollMetadata metadata;
++  apzc->SetScrollMetadata(metadata);
++  ASSERT_TRUE(apzc->GetScrollMetadata().IsDefault());
++
++  FrameMetrics& metrics = metadata.GetMetrics();
++  metrics.SetDisplayPort(CSSRect(0, 0, 10, 10));
++  metrics.SetCompositionBounds(ParentLayerRect(0, 0, 10, 10));
++  metrics.SetScrollableRect(CSSRect(0, 0, 100, 100));
++
++  // Set layout/visual scroll offsets as if the document has scrolled when the
++  // document was foregound.
++  metrics.SetVisualScrollOffset(CSSPoint(10, 10));
++  metrics.SetLayoutViewport(CSSRect(10, 10, 10, 10));
++  metrics.SetScrollId(ScrollableLayerGuid::START_SCROLL_ID);
++
++  // Add a new relative scroll update (10, 10) -> (15, 15).
++  AutoTArray<ScrollPositionUpdate, 1> scrollUpdates;
++  scrollUpdates.AppendElement(ScrollPositionUpdate::NewRelativeScroll(
++      CSSPoint::ToAppUnits(CSSPoint(10, 10)),
++      CSSPoint::ToAppUnits(CSSPoint(15, 15))));
++  metadata.SetScrollUpdates(scrollUpdates);
++  metrics.SetScrollGeneration(scrollUpdates.LastElement().GetGeneration());
++  // With the above scroll updates, now the layout/visual scroll offsets (on the
++  // main-thread) need to be updated.
++  metrics.SetVisualScrollOffset(CSSPoint(15, 15));
++  metrics.SetLayoutViewport(CSSRect(15, 15, 10, 10));
++
++  // It's not first-paint when switching tab.
++  apzc->NotifyLayersUpdated(metadata, /*isFirstPaint=*/false,
++                            /*thisLayerTreeUpdated=*/true);
++
++  // The layout/visual scroll ofsets and the relative scroll update need to be
++  // reflected.
++  ASSERT_EQ(apzc->GetFrameMetrics().GetLayoutScrollOffset(), CSSPoint(20, 20))
++      << "If the actual value is (15, 15), you fixed bug 1978682, thanks!";
++  ASSERT_EQ(apzc->GetFrameMetrics().GetVisualScrollOffset(), CSSPoint(20, 20))
++      << "If the actual value is (15, 15), you fixed bug 1978682, thanks!";
++}
++
+ class APZCSmoothScrollTester : public APZCBasicTester {
+  public:
+   // Test that a smooth scroll animation correctly handles its destination
+   // being updated by a relative scroll delta from the main thread (a "content

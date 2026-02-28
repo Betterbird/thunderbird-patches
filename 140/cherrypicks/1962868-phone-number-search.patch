@@ -1,0 +1,294 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1748642096 0
+# Node ID eb32710132eb9d03c01c6b622a1d38c20fb3ec2e
+# Parent  da3538b8531ccc9c712547740d3eb364d7ee5831
+Bug 1962868 - contact not found if dot (period) character phone using "Advanced Address Book Search". r=aleca
+
+Differential Revision: https://phabricator.services.mozilla.com/D251584
+
+diff --git a/mail/components/addrbook/test/browser/browser_search_dialog.js b/mail/components/addrbook/test/browser/browser_search_dialog.js
+--- a/mail/components/addrbook/test/browser/browser_search_dialog.js
++++ b/mail/components/addrbook/test/browser/browser_search_dialog.js
+@@ -1,15 +1,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ const { mailTestUtils } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/MailTestUtils.sys.mjs"
+ );
++const { VCardPropertyEntry } = ChromeUtils.importESModule(
++  "resource:///modules/VCardUtils.sys.mjs"
++);
+ 
+ const cards = {};
+ 
+ add_setup(async function () {
+   const account = MailServices.accounts.createAccount();
+   const identity = MailServices.accounts.createIdentity();
+   identity.email = "mochitest@localhost";
+   account.addIdentity(identity);
+@@ -18,29 +21,40 @@ add_setup(async function () {
+     "test",
+     "pop3"
+   );
+   MailServices.accounts.defaultAccount = account;
+ 
+   for (const name of ["daniel", "jonathan", "nathan"]) {
+     cards[name] = personalBook.addCard(createContact(name, "test"));
+   }
++
++  // Add "WorkPhone"
++  cards.daniel.vCardProperties.addEntry(
++    new VCardPropertyEntry("tel", { type: "work" }, "text", "+1555987654321")
++  );
++  personalBook.modifyCard(cards.daniel);
++  cards.nathan.vCardProperties.addEntry(
++    new VCardPropertyEntry("tel", { type: "work" }, "text", "555-123-456")
++  );
++  personalBook.modifyCard(cards.nathan);
++
+   for (const name of ["danielle", "katherine", "natalie", "susanah"]) {
+     cards[name] = historyBook.addCard(createContact(name, "test"));
+   }
+ 
+   registerCleanupFunction(async function () {
+     MailServices.accounts.removeAccount(account, false);
+     personalBook.deleteCards(personalBook.childCards);
+     historyBook.deleteCards(historyBook.childCards);
+   });
+ });
+ 
+ add_task(async function () {
+-  // Open the search window.
++  // Open the search addresses window.
+ 
+   const searchWindowPromise = BrowserTestUtils.domWindowOpenedAndLoaded(
+     undefined,
+     win =>
+       win.location.href ==
+       "chrome://messenger/content/addressbook/abSearchDialog.xhtml"
+   );
+   window.MsgSearchAddresses();
+@@ -69,32 +83,43 @@ add_task(async function () {
+     EventUtils.synthesizeMouseAtCenter(abMenulist, {}, searchWindow);
+     await BrowserTestUtils.waitForPopupEvent(abMenulist.menupopup, "shown");
+     abMenulist.menupopup.activateItem(
+       abMenulist.menupopup.querySelector(`menuitem[value="${bookURI}"]`)
+     );
+     await BrowserTestUtils.waitForPopupEvent(abMenulist.menupopup, "hidden");
+   }
+ 
++  async function changeSearchAttr(item, value) {
++    EventUtils.synthesizeMouseAtCenter(item, {}, searchWindow);
++    await BrowserTestUtils.waitForPopupEvent(item.menupopup, "shown");
++    item.menupopup.activateItem(
++      item.menupopup.querySelector(`menuitem[value="${value}"]`)
++    );
++    await BrowserTestUtils.waitForPopupEvent(item.menupopup, "hidden");
++  }
++
+   function checkSearchResults(expectedCards) {
+     Assert.equal(
+       resultsTree.view.rowCount,
+       expectedCards.length,
+       "expected number of cards should be displayed"
+     );
+     for (let i = 0; i < expectedCards.length; i++) {
+       Assert.equal(
+         resultsTree.view.getCellText(i, "GeneratedName"),
+         expectedCards[i].displayName
+       );
+     }
+     if (expectedCards.length) {
+       Assert.equal(
+         statusText.value,
+-        `${expectedCards.length} matches found`,
++        expectedCards.length == 1
++          ? `1 match found`
++          : `${expectedCards.length} matches found`,
+         "status text should show the number of cards"
+       );
+     } else {
+       Assert.equal(
+         statusText.value,
+         "No matches found",
+         "status text should show there are no results"
+       );
+@@ -168,20 +193,37 @@ add_task(async function () {
+   checkSearchResults([cards.daniel, cards.danielle]);
+ 
+   await changeBook(personalBook.URI);
+   input0.select();
+   EventUtils.sendString("nathan", searchWindow);
+   EventUtils.synthesizeMouseAtCenter(searchButton, {}, searchWindow);
+   checkSearchResults([cards.jonathan, cards.nathan]);
+ 
++  // Check phone number search works.
++  const searchMenuList0 = searchTerm0.querySelector(".search-menulist");
++  await changeSearchAttr(searchMenuList0, 24); // WorkPhone
++
++  input0.select();
++  EventUtils.sendString("+1 555 9876 54321", searchWindow); // +1555987654321
++
++  EventUtils.synthesizeMouseAtCenter(searchButton, {}, searchWindow);
++  checkSearchResults([cards.daniel]);
++
++  input0.select();
++  EventUtils.sendString("555.123.456", searchWindow); // 555-123-456
++  EventUtils.synthesizeMouseAtCenter(searchButton, {}, searchWindow);
++  checkSearchResults([cards.nathan]);
++
++  // Now change check both are in collecetd addresses.
++
+   await changeBook(historyBook.URI);
+-  checkSearchResults([cards.jonathan, cards.nathan]);
++  checkSearchResults([cards.nathan]); // previous result still showing
+   EventUtils.synthesizeMouseAtCenter(searchButton, {}, searchWindow);
+-  checkSearchResults([]);
++  checkSearchResults([]); // No match now.
+ 
+   // Pressing Enter from the criteria input should start a search.
+ 
+   await changeBook("moz-abdirectory://?");
+   input0.select();
+   EventUtils.synthesizeKey("KEY_Backspace", {}, searchWindow);
+   EventUtils.synthesizeKey("KEY_Enter", {}, searchWindow);
+   checkSearchResults([
+diff --git a/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs b/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs
+--- a/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs
++++ b/mailnews/addrbook/modules/AddrBookDirectory.sys.mjs
+@@ -25,16 +25,22 @@ export class AddrBookDirectory {
+   QueryInterface = ChromeUtils.generateQI(["nsIAbDirectory"]);
+ 
+   constructor() {
+     this._uid = null;
+     this._dirName = null;
+   }
+ 
+   _initialized = false;
++
++  /**
++   * Intializes a directory, pointing to a particular URI.
++   *
++   * @param {string} uri
++   */
+   init(uri) {
+     if (this._initialized) {
+       throw new Components.Exception(
+         `Directory already initialized: ${uri}`,
+         Cr.NS_ERROR_ALREADY_INITIALIZED
+       );
+     }
+ 
+@@ -288,16 +294,23 @@ export class AddrBookDirectory {
+   }
+   /** @abstract */
+   get childCardCount() {
+     throw new Components.Exception(
+       `${this.constructor.name} does not implement childCardCount getter.`,
+       Cr.NS_ERROR_NOT_IMPLEMENTED
+     );
+   }
++
++  /**
++   * Get the cards associated with the directory. This will return the cards
++   * associated with the mailing lists too.
++   *
++   * @returns {nsIAbCard[]}
++   */
+   get childCards() {
+     const results = Array.from(
+       this.lists.values(),
+       list =>
+         new lazy.AddrBookMailingList(
+           list.uid,
+           this,
+           list.name,
+@@ -307,17 +320,34 @@ export class AddrBookDirectory {
+     ).concat(Array.from(this.cards.keys(), this.getCard, this));
+ 
+     return results;
+   }
+   get supportsMailingLists() {
+     return true;
+   }
+ 
+-  search(query, string, listener) {
++  /**
++   * Searches the directory for cards matching query.
++   *
++   * @param {string} query - Query. The query takes the form:
++   *   (BOOL1(FIELD1,OP1,VALUE1)..(FIELDn,OPn,VALUEn)(BOOL2(FIELD1,OP1,VALUE1)...)...)
++   *
++   *   BOOLn   A boolean operator joining subsequent terms delimited by ().
++   *           For possible values see CreateBooleanExpression().
++   *   FIELDn  An addressbook card data field.
++   *   OPn     An operator for the search term.
++   *           For possible values see CreateBooleanConditionString().
++   *   VALUEn  The value to be matched in the FIELDn via the OPn operator.
++   *           The value must be URL encoded by the caller, if it contains any
++   *           special characters including '(' and ')'.
++   * @param {string} searchString
++   * @param {nsIAbDirSearchListener} listener
++   */
++  search(query, searchString, listener) {
+     if (!listener) {
+       return;
+     }
+     if (!query) {
+       listener.onSearchFinished(Cr.NS_ERROR_FAILURE, true, null, "");
+       return;
+     }
+     if (query[0] == "?") {
+@@ -396,29 +426,46 @@ export class AddrBookDirectory {
+             properties.set(key, value);
+           }
+         }
+       } else {
+         properties = card._properties;
+       }
+       const matches = b => {
+         if ("condition" in b) {
+-          const { name, condition, value } = b;
++          let { name, condition, value } = b;
+           if (name == "IsMailList" && condition == "=") {
+             return card.isMailList == (value == "true");
+           }
++
+           let cardValue = properties.get(name);
+           if (!cardValue) {
+             return condition == "!ex";
+           }
+           if (condition == "ex") {
+             return true;
+           }
+ 
+           cardValue = cardValue.toLowerCase();
++
++          // Normalize phone numbers so 555-123 will match 555.123 etc.
++          if (
++            [
++              "HomePhone",
++              "WorkPhone",
++              "FaxNumber",
++              "PagerNumber",
++              "CellularNumber",
++            ].includes(name)
++          ) {
++            // For phone numbers, 0-9,#* and a-z are valid; keep initial +.
++            value = value.replace(/(?!^\+)[^0-9,#*a-z]/g, "");
++            cardValue = cardValue.replace(/(?!^\+)[^0-9,#*a-z]/g, "");
++          }
++
+           switch (condition) {
+             case "=":
+               return cardValue == value;
+             case "!=":
+               return cardValue != value;
+             case "lt":
+               return cardValue < value;
+             case "gt":
+

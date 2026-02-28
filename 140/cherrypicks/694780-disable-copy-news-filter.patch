@@ -1,0 +1,176 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1757541243 0
+# Node ID feb815f624acff197856eadb9067d5cbfeb0dbef
+# Parent  69e9f4a862a2749d82759b5495566fb196f798c7
+Bug 694780 - Disable 'Copy Message to' filter action before classification in newsgroups. r=mkmelin
+
+Using the 'Copy Message to' filter action immediately when article headers are
+retrieved ('Filter before Junk Classification') is not supported. Reflect this
+limitation in the GUI and prevent saving such a filter.
+
+Additionally, improve the filter logging for newsgroups and flush the filter
+log after running filters.
+
+Differential Revision: https://phabricator.services.mozilla.com/D264135
+
+diff --git a/mailnews/news/src/NntpNewsGroup.sys.mjs b/mailnews/news/src/NntpNewsGroup.sys.mjs
+--- a/mailnews/news/src/NntpNewsGroup.sys.mjs
++++ b/mailnews/news/src/NntpNewsGroup.sys.mjs
+@@ -290,27 +290,29 @@ export class NntpNewsGroup {
+           Ci.nsMsgFilterType.NewsRule,
+           msgHdr,
+           this._folder,
+           this._db,
+           headers,
+           this,
+           this._msgWindow
+         );
++        this._folderFilterList.flushLogIfNecessary();
+       }
+       if (serverFilterCount) {
+         this._serverFilterList.applyFiltersToHdr(
+           Ci.nsMsgFilterType.NewsRule,
+           msgHdr,
+           this._folder,
+           this._db,
+           headers,
+           this,
+           this._msgWindow
+         );
++        this._serverFilterList.flushLogIfNecessary();
+       }
+       if (this._addHdrToDB && !this._db.containsKey(msgHdr.messageKey)) {
+         if (this._readKeySet.has(msgHdr.messageKey)) {
+           msgHdr.flags |= Ci.nsMsgMessageFlags.Read;
+         }
+         this._db.addNewHdrToDB(msgHdr, true);
+         MailServices.mfn.notifyMsgAdded(msgHdr);
+         this._folder.orProcessingFlags(
+@@ -326,19 +328,16 @@ export class NntpNewsGroup {
+    *
+    * @see nsIMsgFilterHitNotify
+    */
+   applyFilterHit(filter, msgWindow) {
+     const loggingEnabled = filter.filterList.loggingEnabled;
+     let applyMore = true;
+ 
+     for (const action of filter.sortedActionList) {
+-      if (loggingEnabled) {
+-        filter.logRuleHit(action, this._filteringHdr);
+-      }
+       switch (action.type) {
+         case Ci.nsMsgFilterAction.Delete:
+           this._addHdrToDB = false;
+           break;
+         case Ci.nsMsgFilterAction.MarkRead:
+           this._db.markRead(this._filteringHdr.messageKey, true, null);
+           break;
+         case Ci.nsMsgFilterAction.MarkUnread:
+@@ -376,20 +375,28 @@ export class NntpNewsGroup {
+             [this._filteringHdr],
+             action.strValue,
+             null,
+             Ci.nsMsgFilterType.NewsRule,
+             msgWindow
+           );
+           break;
+         default:
+-          throw Components.Exception(
+-            `Unexpected filter action type=${action.type}`,
+-            Cr.NS_ERROR_UNEXPECTED
+-          );
++          if (loggingEnabled) {
++            filter.logRuleHitFail(
++              action,
++              this._filteringHdr,
++              Cr.NS_ERROR_UNEXPECTED,
++              `Unexpected filter action type=${action.type}`
++            );
++          }
++          applyMore = false;
++      }
++      if (loggingEnabled && applyMore) {
++        filter.logRuleHit(action, this._filteringHdr);
+       }
+     }
+     return applyMore;
+   }
+ 
+   /**
+    * Commit changes to msg db.
+    */
+diff --git a/mailnews/search/content/searchWidgets.js b/mailnews/search/content/searchWidgets.js
+--- a/mailnews/search/content/searchWidgets.js
++++ b/mailnews/search/content/searchWidgets.js
+@@ -1296,16 +1296,39 @@
+           elements = menupopup.getElementsByAttribute(
+             "value",
+             "replytomessage"
+           );
+           if (elements.length == 1) {
+             elements[0].hidden = true;
+           }
+         }
++
++        // Disable "Copy Message to" filter action for "Getting New Mail" with
++        // "Filter before Junk Classification" in newsgroups, enable otherwise.
++        if (scope == Ci.nsMsgSearchScope.newsFilter) {
++          const filterBeforeJunkClassification =
++            gFilterType & Ci.nsMsgFilterType.NewsRule &&
++            !(gFilterType & Ci.nsMsgFilterType.PostPlugin);
++          const [actionItem] = menupopup.getElementsByAttribute(
++            "value",
++            "copymessage"
++          );
++          if (actionItem) {
++            actionItem.hidden = filterBeforeJunkClassification;
++            if (actionItem.selected) {
++              this.disabled = filterBeforeJunkClassification;
++              const [actionTargetItem] =
++                this.parentElement.getElementsByClassName("ruleactionitem");
++              if (actionTargetItem) {
++                actionTargetItem.disabled = filterBeforeJunkClassification;
++              }
++            }
++          }
++        }
+       }
+ 
+       addCustomActions() {
+         const menupopup = this.menupopup;
+         for (let i = 0; i < gCustomActions.length; i++) {
+           const customAction = gCustomActions[i];
+           const menuitem = document.createXULElement("menuitem");
+           menuitem.setAttribute("label", customAction.name);
+@@ -1649,16 +1672,28 @@
+       const actionTargetLabel =
+         actionTarget.ruleactiontargetElement &&
+         actionTarget.ruleactiontargetElement.children[0].value;
+       let errorString, customError;
+ 
+       switch (filterActionString) {
+         case "movemessage":
+         case "copymessage": {
++          // "Copy Message to" filter action for "Getting New Mail" with
++          // "Filter before Junk Classification" is not supported for
++          // newsgroups.
++          if (
++            gFilterType & Ci.nsMsgFilterType.NewsRule &&
++            !(gFilterType & Ci.nsMsgFilterType.PostPlugin)
++          ) {
++            // TODO: This should be replaced by a more concise error message
++            // when migrating to Fluent.
++            errorString = "filterFailureAction";
++            break;
++          }
+           const msgFolder = actionTargetLabel
+             ? MailUtils.getOrCreateFolder(actionTargetLabel)
+             : null;
+           if (!msgFolder || !msgFolder.canFileMessages) {
+             errorString = "mustSelectFolder";
+           }
+           break;
+         }
+

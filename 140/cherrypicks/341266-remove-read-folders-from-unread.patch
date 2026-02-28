@@ -1,0 +1,634 @@
+
+# HG changeset patch
+# User Ben Merritt <ben@haradion.net>
+# Date 1765836154 0
+# Node ID b418552d0dab174e272b450ff193ba571fa3425e
+# Parent  16bff6a00e7987a2d5bd02fdf7d8bbff094494ea
+Bug 341266 - Remove read folders from Unread Folders view. r=darktrojan
+
+Differential Revision: https://phabricator.services.mozilla.com/D248683
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -1429,25 +1429,63 @@ var folderPane = {
+         // Remove any stray rows that might be descendants of `childFolder`.
+         for (const row of [...this.containerList.querySelectorAll("li")]) {
+           if (row.uri.startsWith(childFolder.URI + "/")) {
+             row.remove();
+           }
+         }
+       },
+ 
++      /**
++       * Folders that don't pass this filter can be automatically removed from the tree.
++       *
++       * @param {nsIMsgFolder} folder
++       * @returns {boolean} True if the folder should have a row in the tree.
++       */
++      _automaticRemovalFilter(folder) {
++        if (this._unreadFilter(folder, !folderPane._isCompact)) {
++          return true;
++        }
++        // Check if this row (or one of its descendants) is currently selected.
++        // Removing a selected row is annoying since it forces focus to another folder.
++        const rowToRemove = folderPane.getRowForFolder(folder, this.name);
++        if (!rowToRemove) {
++          return false;
++        }
++        for (const selectedRow of folderTree.selection.values()) {
++          if (rowToRemove.contains(selectedRow)) {
++            return true;
++          }
++        }
++        return false;
++      },
++
+       changeUnreadCount(folder, newValue) {
+         if (newValue > 0) {
+           this._addFolder(folder);
++        } else {
++          const filter = this._automaticRemovalFilter.bind(this);
++          if (!filter(folder)) {
++            folderPane._removeFolderAndAncestors(folder, this.name, filter);
++          }
+         }
+       },
+ 
+       changeAccountOrder() {
+         folderPane._reapplyServerOrder(this.containerList);
+       },
++
++      onFolderSelected() {
++        for (const row of this.containerList.querySelectorAll("li")) {
++          const folder = MailServices.folderLookup.getFolderForURL(row.uri);
++          if (folder && !this._automaticRemovalFilter(folder)) {
++            row.remove();
++          }
++        }
++      },
+     },
+     favorite: {
+       name: "favorite",
+       active: false,
+       canBeCompact: true,
+ 
+       _favoriteFilter(folder) {
+         return folder.flags & Ci.nsMsgFolderFlags.Favorite;
+@@ -2786,16 +2824,17 @@ var folderPane = {
+ 
+       gViewWrapper?.close();
+       gFolder = gDBView = gViewWrapper = threadTree.view = null;
+       threadPaneHeader.onFolderSelected();
+       this._updateStatusQuota();
+       window.dispatchEvent(
+         new CustomEvent("folderURIChanged", { bubbles: true })
+       );
++      this._forAllActiveModes("onFolderSelected");
+       return;
+     }
+ 
+     pageTitle.removeAttribute("data-l10n-id");
+     gFolder = MailServices.folderLookup.getFolderForURL(uri);
+ 
+     // Bail out if this is synthetic view, such as a gloda search.
+     if (isSynthetic) {
+@@ -2847,16 +2886,17 @@ var folderPane = {
+       threadPaneHeader.onFolderSelected();
+     }
+ 
+     this._updateStatusQuota();
+ 
+     window.dispatchEvent(
+       new CustomEvent("folderURIChanged", { bubbles: true, detail: uri })
+     );
++    this._forAllActiveModes("onFolderSelected");
+   },
+ 
+   /**
+    * Update the quotaPanel to reflect current folder quota status.
+    */
+   _updateStatusQuota() {
+     if (top.window.document.getElementById("status-bar").hidden) {
+       return;
+diff --git a/mail/base/test/browser/browser_folderTreeQuirks.js b/mail/base/test/browser/browser_folderTreeQuirks.js
+--- a/mail/base/test/browser/browser_folderTreeQuirks.js
++++ b/mail/base/test/browser/browser_folderTreeQuirks.js
+@@ -112,73 +112,73 @@ add_task(async function testFavoriteFold
+ });
+ 
+ /**
+  * Tests the compact Favorite Folders mode.
+  */
+ add_task(async function testCompactFavoriteFolders() {
+   folderPane.activeModes = ["all", "favorite"];
+   folderPane.isCompact = true;
+-  await checkModeListItems("favorite", []);
++  await checkModeListItems("favorite", [], "compact");
+ 
+   folderA.setFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [folderA]);
++  await checkModeListItems("favorite", [folderA], "compact");
+ 
+   folderA.clearFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", []);
++  await checkModeListItems("favorite", [], "compact");
+ 
+   folderB.setFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [folderB]);
++  await checkModeListItems("favorite", [folderB], "compact");
+ 
+   folderB.clearFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", []);
++  await checkModeListItems("favorite", [], "compact");
+ 
+   folderC.setFlag(Ci.nsMsgFolderFlags.Favorite);
+   folderA.setFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [folderA, folderC]); // c, a
++  await checkModeListItems("favorite", [folderA, folderC], "compact"); // c, a
+ 
+   folderA.clearFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [folderC]);
++  await checkModeListItems("favorite", [folderC], "compact");
+ 
+   folderC.clearFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", []);
++  await checkModeListItems("favorite", [], "compact");
+ 
+   // Test with multiple accounts.
+ 
+   const foo = MailServices.accounts.createAccount();
+   foo.incomingServer = MailServices.accounts.createIncomingServer(
+     `${foo.key}user`,
+     "localhost",
+     "none"
+   );
+   const fooRootFolder = foo.incomingServer.rootFolder;
+   const fooTrashFolder = fooRootFolder.getChildNamed("Trash");
+ 
+   fooTrashFolder.setFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [fooTrashFolder]);
++  await checkModeListItems("favorite", [fooTrashFolder], "compact");
+ 
+   folderC.setFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [fooTrashFolder, folderC]);
++  await checkModeListItems("favorite", [fooTrashFolder, folderC], "compact");
+ 
+   MailServices.accounts.reorderAccounts([account.key, foo.key]);
+-  await checkModeListItems("favorite", [folderC, fooTrashFolder]);
++  await checkModeListItems("favorite", [folderC, fooTrashFolder], "compact");
+ 
+   fooTrashFolder.clearFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [folderC]);
++  await checkModeListItems("favorite", [folderC], "compact");
+ 
+   fooTrashFolder.setFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [folderC, fooTrashFolder]);
++  await checkModeListItems("favorite", [folderC, fooTrashFolder], "compact");
+ 
+   folderC.clearFlag(Ci.nsMsgFolderFlags.Favorite);
+-  await checkModeListItems("favorite", [fooTrashFolder]);
++  await checkModeListItems("favorite", [fooTrashFolder], "compact");
+ 
+   // Clean up.
+ 
+   MailServices.accounts.removeAccount(foo, false);
+-  await checkModeListItems("favorite", []);
++  await checkModeListItems("favorite", [], "compact");
+   folderPane.isCompact = false;
+ });
+ 
+ /**
+  * Tests the Unread Folders mode.
+  */
+ add_task(async function testUnreadFolders() {
+   const folderAMessages = [...folderA.messages];
+@@ -191,92 +191,228 @@ add_task(async function testUnreadFolder
+   folderAMessages[0].markRead(false);
+   await checkModeListItems("unread", [rootFolder, folderA]);
+ 
+   folderAMessages[1].markRead(false);
+   folderAMessages[2].markRead(false);
+   await checkModeListItems("unread", [rootFolder, folderA]);
+ 
+   window.MsgMarkAllRead([folderA]);
+-  await checkModeListItems("unread", [rootFolder, folderA]);
++  await checkModeListItems("unread", []);
+ 
+   folderAMessages[0].markRead(false);
+   folderBMessages[0].markRead(false);
+   await checkModeListItems("unread", [rootFolder, folderA, folderB]);
+ 
+   folderCMessages[0].markRead(false);
+   await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
+ 
+   folderBMessages[0].markRead(true);
+   await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
+ 
+   folderAMessages[0].markRead(true);
+   await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
+ 
+   folderCMessages[0].markRead(true);
+-  await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
++  await checkModeListItems("unread", []);
+ 
+   folderCMessages[0].markRead(false);
+   await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
+ 
+   folderCMessages[1].markRead(false);
+   folderCMessages[2].markRead(false);
+   await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
+ 
+   window.MsgMarkAllRead([folderC]);
+-  await checkModeListItems("unread", [rootFolder, folderA, folderB, folderC]);
++  await checkModeListItems("unread", []);
++});
++
++/**
++ * Tests the interaction between folder selection and
++ * automatic folder removal in the Unread Folders mode.
++ */
++add_task(async function testUnreadFoldersAutoRemovalWithSelection() {
++  const folderB1 = folderA
++    .createLocalSubfolder("folderTreeQuirksB1")
++    .QueryInterface(Ci.nsIMsgLocalMailFolder);
++  folderB1.addMessageBatch(
++    generator.makeMessages({}).map(message => message.toMessageString())
++  );
++  folderB1.markAllMessagesRead(null);
++
++  const folderAMessages = [...folderA.messages];
++  const folderBMessages = [...folderB.messages];
++  const folderB1Messages = [...folderB1.messages];
++  const folderCMessages = [...folderC.messages];
++
++  folderPane.activeModes = ["all", "unread"];
++  await checkModeListItems("unread", [], "with selection");
++
++  // This test uses folder.markMessagesRead instead of message.markRead
++  // because moving the selection around tends to cause folders' databases
++  // to be closed. In that situation, markMessagesRead triggers folder
++  // listeners, but markRead doesn't.
++  folderC.markMessagesRead([folderCMessages[0]], false);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB, folderC],
++    "with selection"
++  );
++
++  // Marking the selected folder read:
++  await selectFolder(folderC, "unread");
++  folderC.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB, folderC],
++    "with selection"
++  );
++
++  // Marking an ancestor of the selected folder as read:
++  folderA.markMessagesRead([folderAMessages[0]], false);
++  folderA.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB, folderC],
++    "with selection"
++  );
++
++  // Marking a descendant of the selected folder as read:
++  folderC.markMessagesRead([folderCMessages[0]], false);
++  await selectFolder(folderA, "unread");
++  folderC.markAllMessagesRead(null);
++  await checkModeListItems("unread", [rootFolder, folderA], "with selection");
++
++  // Marking a descendant of the selected folder as read, but there's an intermediate unread folder.
++  folderB.markMessagesRead([folderBMessages[0]], false);
++  folderC.markMessagesRead([folderCMessages[0]], false);
++  folderC.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB],
++    "with selection"
++  );
++  folderB.markAllMessagesRead(null);
++
++  // Marking a descendant of the selected folder as read, but there's an unread sibling.
++  folderB.markMessagesRead([folderBMessages[0]], false);
++  folderB1.markMessagesRead([folderB1Messages[0]], false);
++  folderB.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB1],
++    "with selection"
++  );
++  folderB1.markAllMessagesRead(null);
++
++  // Moving selection from a read folder to its descendant:
++  folderB.markMessagesRead([folderBMessages[0]], false); // Can't select the folder if it's not in the view.
++  await selectFolder(folderB, "unread");
++  folderB.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB],
++    "with selection"
++  );
++
++  // Moving selection from a read folder to its ancestor:
++  await selectFolder(folderA, "unread");
++  await checkModeListItems("unread", [rootFolder, folderA], "with selection");
++
++  // Moving selection from a read folder to its sibling:
++  folderB.markMessagesRead([folderBMessages[0]], false);
++  folderB1.markMessagesRead([folderB1Messages[0]], false);
++  await selectFolder(folderB1, "unread");
++  folderB1.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB, folderB1],
++    "with selection"
++  );
++  await selectFolder(folderB, "unread");
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB],
++    "with selection"
++  );
++  folderB.markAllMessagesRead(null);
++
++  // Moving selection from a read folder to its sibling, but the previously selected
++  // folder has a child with unread messages
++  folderB1.markMessagesRead([folderB1Messages[0]], false);
++  folderC.markMessagesRead([folderCMessages[0]], false);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB, folderC, folderB1],
++    "with selection"
++  );
++  await selectFolder(folderB1, "unread");
++  folderB1.markAllMessagesRead(null);
++  await checkModeListItems(
++    "unread",
++    [rootFolder, folderA, folderB, folderC, folderB1],
++    "with selection"
++  );
++  folderC.markAllMessagesRead(null);
++
++  // Clean up.
++  // Deselecting the folder should be enough to remove it from the unread list.
++  await selectFolder(folderA, null);
++  await checkModeListItems("unread", [], "with selection");
++  folderB1.deleteSelf(null);
++  rootFolder.emptyTrash(null, null);
+ });
+ 
+ /**
+  * Tests the compact Unread Folders mode.
+  */
+ add_task(async function testCompactUnreadFolders() {
+   const folderAMessages = [...folderA.messages];
+   const folderBMessages = [...folderB.messages];
+   const folderCMessages = [...folderC.messages];
+ 
+   folderPane.activeModes = ["all", "unread"];
+   folderPane.isCompact = true;
+-  await checkModeListItems("unread", []);
++  await checkModeListItems("unread", [], "compact");
+ 
+   folderAMessages[0].markRead(false);
+-  await checkModeListItems("unread", [folderA]);
++  await checkModeListItems("unread", [folderA], "compact");
+ 
+   folderAMessages[1].markRead(false);
+   folderAMessages[2].markRead(false);
+-  await checkModeListItems("unread", [folderA]);
++  await checkModeListItems("unread", [folderA], "compact");
+ 
+   window.MsgMarkAllRead([folderA]);
+-  await checkModeListItems("unread", [folderA]);
++  await checkModeListItems("unread", [], "compact");
+ 
+   folderAMessages[0].markRead(false);
+   folderBMessages[0].markRead(false);
+-  await checkModeListItems("unread", [folderA, folderB]);
++  await checkModeListItems("unread", [folderA, folderB], "compact");
+ 
+   folderCMessages[0].markRead(false);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [folderA, folderB, folderC], "compact");
+ 
+   folderBMessages[0].markRead(true);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [folderA, folderC], "compact");
+ 
+   folderAMessages[0].markRead(true);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [folderC], "compact");
+ 
+   folderCMessages[0].markRead(true);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [], "compact");
+ 
+   folderCMessages[0].markRead(false);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [folderC], "compact");
+ 
+   folderCMessages[1].markRead(false);
+   folderCMessages[2].markRead(false);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [folderC], "compact");
+ 
+   window.MsgMarkAllRead([folderC]);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [], "compact");
+ 
+   // Test with multiple accounts.
+ 
+   const foo = MailServices.accounts.createAccount();
+   foo.incomingServer = MailServices.accounts.createIncomingServer(
+     `${foo.key}user`,
+     "localhost",
+     "none"
+@@ -285,67 +421,75 @@ add_task(async function testCompactUnrea
+   const fooTrashFolder = fooRootFolder.getChildNamed("Trash");
+ 
+   fooTrashFolder
+     .QueryInterface(Ci.nsIMsgLocalMailFolder)
+     .addMessage(generator.makeMessages({}).map(m => m.toMessageString()));
+   const fooMessages = [...fooTrashFolder.messages];
+ 
+   fooMessages[0].markRead(false);
+-  await checkModeListItems("unread", [
+-    fooTrashFolder,
+-    folderA,
+-    folderB,
+-    folderC,
+-  ]);
++  await checkModeListItems("unread", [fooTrashFolder], "compact");
+ 
+   folderCMessages[0].markRead(false);
+-  await checkModeListItems("unread", [
+-    fooTrashFolder,
+-    folderA,
+-    folderB,
+-    folderC,
+-  ]);
++  await checkModeListItems("unread", [fooTrashFolder, folderC], "compact");
+ 
+   MailServices.accounts.reorderAccounts([account.key, foo.key]);
+-  await checkModeListItems("unread", [
+-    folderA,
+-    folderB,
+-    folderC,
+-    fooTrashFolder,
+-  ]);
++  await checkModeListItems("unread", [folderC, fooTrashFolder], "compact");
+ 
+   fooMessages[0].markRead(true);
+-  await checkModeListItems("unread", [
+-    folderA,
+-    folderB,
+-    folderC,
+-    fooTrashFolder,
+-  ]);
++  await checkModeListItems("unread", [folderC], "compact");
+ 
+   fooMessages[0].markRead(false);
+-  await checkModeListItems("unread", [
+-    folderA,
+-    folderB,
+-    folderC,
+-    fooTrashFolder,
+-  ]);
++  await checkModeListItems("unread", [folderC, fooTrashFolder], "compact");
+ 
+   folderCMessages[0].markRead(true);
+-  await checkModeListItems("unread", [
+-    folderA,
+-    folderB,
+-    folderC,
+-    fooTrashFolder,
+-  ]);
++  await checkModeListItems("unread", [fooTrashFolder], "compact");
+ 
+   // Clean up.
+ 
+   MailServices.accounts.removeAccount(foo, false);
+-  await checkModeListItems("unread", [folderA, folderB, folderC]);
++  await checkModeListItems("unread", [], "compact");
++  folderPane.isCompact = false;
++});
++
++/**
++ * Tests the interation between folder selection and automatic
++ * folder removal in the compact Unread Folders mode.
++ */
++add_task(async function testCompactUnreadFoldersAutoRemovalWithSelection() {
++  const folderAMessages = [...folderA.messages];
++  const folderBMessages = [...folderB.messages];
++  const folderCMessages = [...folderC.messages];
++
++  folderPane.activeModes = ["all", "unread"];
++  folderPane.isCompact = true;
++  await checkModeListItems("unread", [], "compact with selection");
++
++  folderBMessages[0].markRead(false);
++  await checkModeListItems("unread", [folderB], "compact with selection");
++
++  // Marking the selected folder read:
++  await selectFolder(folderB, "unread");
++  folderB.markAllMessagesRead(null);
++  await checkModeListItems("unread", [folderB], "compact with selection");
++
++  // Marking an ancestor of the selected folder as read:
++  folderAMessages[0].markRead(false);
++  folderA.markAllMessagesRead(null);
++  await checkModeListItems("unread", [folderB], "compact with selection");
++
++  // Marking a descendant of the selected folder as read:
++  folderCMessages[0].markRead(false);
++  folderC.markAllMessagesRead(null);
++  await checkModeListItems("unread", [folderB], "compact with selection");
++
++  // Clean up.
++  // Deselecting the folder should be enough to remove it from the unread list.
++  await selectFolder(folderA, null);
++  await checkModeListItems("unread", [], "compact with selection");
+   folderPane.isCompact = false;
+ });
+ 
+ /**
+  * Tests the Smart Folders mode.
+  */
+ add_task(async function testSmartFolders() {
+   folderPane.activeModes = ["smart"];
+@@ -1528,17 +1672,17 @@ add_task(async function testAccountOrder
+   rootFolder.emptyTrash(null);
+ 
+   await checkModeListItems("all", localFolders);
+   await checkModeListItems("smart", [
+     ...smartFolders,
+     trashFolder,
+     ...localExtraFolders,
+   ]);
+-  await checkModeListItems("unread", [rootFolder, folderA]);
++  await checkModeListItems("unread", []);
+   await checkModeListItems("favorite", []);
+ 
+   // Test hiding the Local Folders.
+ 
+   const localFoldersItem = moreContext.querySelector(
+     "#folderPaneHeaderToggleLocalFolders"
+   );
+   EventUtils.synthesizeMouseAtCenter(moreButton, {}, about3Pane);
+@@ -1664,29 +1808,49 @@ add_task(async function testMultiSelecti
+     folderB,
+     folderC,
+   ]);
+ });
+ 
+ /**
+  * @param {string} modeName
+  * @param {nsIMsgFolder[]} folders
++ * @param {string|null} context
+  */
+-async function checkModeListItems(modeName, folders) {
++async function checkModeListItems(modeName, folders, context = null) {
+   // Let things settle so that any code listening for changes
+   // can run first.
+   await new Promise(resolve => window.requestIdleCallback(resolve));
+   for (const folderTreeRow of folderPane._modes[
+     modeName
+   ].containerList.querySelectorAll("li")) {
+     folderTree.expandRow(folderTreeRow);
+     await new Promise(resolve => requestAnimationFrame(resolve));
+   }
+ 
++  const contextMsg = context == null ? "" : ` (${context})`;
+   Assert.deepEqual(
+     Array.from(
+       folderPane._modes[modeName].containerList.querySelectorAll("li"),
+       folderTreeRow => folderTreeRow.uri
+     ),
+     folders.map(folder => folder.URI),
+-    `should show correct items in ${modeName} mode`
++    `should show correct items in ${modeName} mode${contextMsg}`
+   );
+ }
++
++/**
++ * Selects the row for the given folder in the given pane mode.
++ * By default, the header in the "All Folders" view is selected.
++ *
++ * @param {nsIMsgFolder} folder
++ * @param {string|null} mode
++ */
++async function selectFolder(folder, mode = null) {
++  const row = about3Pane.folderPane.getRowForFolder(folder, mode);
++  Assert.notEqual(row, null);
++  EventUtils.synthesizeMouseAtCenter(
++    row.querySelector(".name"),
++    {},
++    about3Pane
++  );
++  await TestUtils.waitForCondition(() => folderTree.selectedRow == row);
++}
+

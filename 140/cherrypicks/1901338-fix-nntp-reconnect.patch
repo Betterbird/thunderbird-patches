@@ -1,0 +1,150 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1751496133 0
+# Node ID 38963a44b907f23b39fedaf99b69ceb92b7b35a5
+# Parent  8be05592162bd8777f46a45a858c0532f26a87d4
+Bug 1901338 - Close NNTP connections after an adjustable timeout. r=gds,mkmelin
+
+The timeout is 170 seconds by default (see also RFC 3977 section 3.1, last
+paragraph) and can be adjusted via the new `connection_timeout` server
+preference.
+
+Differential Revision: https://phabricator.services.mozilla.com/D254616
+
+diff --git a/mailnews/news/public/nsINntpIncomingServer.idl b/mailnews/news/public/nsINntpIncomingServer.idl
+--- a/mailnews/news/public/nsINntpIncomingServer.idl
++++ b/mailnews/news/public/nsINntpIncomingServer.idl
+@@ -52,16 +52,29 @@ interface nsINntpIncomingServer : nsISup
+      * This preference (internally max_cached_connections) controls how many
+      * connections we can make. A negative connection count is treated as only
+      * one connection, while 0 (the default) loads the default number of
+      * connections, presently 2.
+      */
+     attribute long maximumConnectionsNumber;
+ 
+     /**
++     * The duration of inactivity (in seconds) until a connection to the server
++     * is closed.
++     *
++     * This preference (internally connection_timeout) controls how long an
++     * inactive connection to the server is held open. The default value of 170
++     * corresponds to RFC 3977. Use -1 to disable.
++
++     * @see https://datatracker.ietf.org/doc/html/rfc3977#section-3.1 (last
++     * paragraph)
++     */
++    attribute long connectionTimeout;
++
++    /**
+      * Enqueues a URI to be run when we have a free connection.
+      *
+      * If there is one already free, it will be immediately started.
+      *
+      * @param uri      The URI to run.
+      * @param window   The standard message window object.
+      * @param consumer A listener for the response data.
+      */
+diff --git a/mailnews/news/src/NntpClient.sys.mjs b/mailnews/news/src/NntpClient.sys.mjs
+--- a/mailnews/news/src/NntpClient.sys.mjs
++++ b/mailnews/news/src/NntpClient.sys.mjs
+@@ -145,16 +145,23 @@ export class NntpClient {
+     return this.runningUri;
+   }
+ 
+   /**
+    * The open event handler.
+    */
+   _onOpen = () => {
+     this._logger.debug("Connected");
++    const timeout = this._server.connectionTimeout;
++    if (timeout > 0) {
++      this._socket.transport.setTimeout(
++        Ci.nsISocketTransport.TIMEOUT_READ_WRITE,
++        timeout
++      );
++    }
+     this._socket.ondata = this._onData;
+     this._socket.onclose = this._onClose;
+     this._inReadingMode = false;
+     this._currentGroupName = null;
+     this._nextAction = ({ status }) => {
+       if ([200, 201].includes(status)) {
+         this._nextAction = null;
+         this.onOpen();
+@@ -246,16 +253,24 @@ export class NntpClient {
+   };
+ 
+   /**
+    * The error event handler.
+    *
+    * @param {TCPSocketErrorEvent} event - The error event.
+    */
+   _onError = event => {
++    if (event.errorCode == Cr.NS_ERROR_NET_TIMEOUT && !this.runningUri) {
++      // This should be the scheduled timeout, just close the connection
++      // without indicating any error.
++      this._logger.debug("Expected timeout.");
++      this.quit();
++      return;
++    }
++
+     this._logger.error(event, event.name, event.message, event.errorCode);
+     let errorName;
+     let uri;
+     switch (event.errorCode) {
+       case Cr.NS_ERROR_UNKNOWN_HOST:
+       case Cr.NS_ERROR_UNKNOWN_PROXY_HOST:
+         errorName = "unknownHostError";
+         uri = "about:neterror?e=dnsNotFound";
+diff --git a/mailnews/news/src/NntpIncomingServer.sys.mjs b/mailnews/news/src/NntpIncomingServer.sys.mjs
+--- a/mailnews/news/src/NntpIncomingServer.sys.mjs
++++ b/mailnews/news/src/NntpIncomingServer.sys.mjs
+@@ -346,31 +346,45 @@ export class NntpIncomingServer extends 
+     return this.getStringValue("charset") || "UTF-8";
+   }
+ 
+   set charset(value) {
+     this.setStringValue("charset", value);
+   }
+ 
+   get maximumConnectionsNumber() {
+-    let maxConnections = this.getIntValue("max_cached_connections", 0);
++    let maxConnections = this.getIntValue("max_cached_connections");
+     if (maxConnections > 0) {
+       return maxConnections;
+     }
+     // The default is 2 connections, if the pref value is 0, we use the default.
+     // If it's negative, treat it as 1.
+     maxConnections = maxConnections == 0 ? 2 : 1;
+     this.maximumConnectionsNumber = maxConnections;
+     return maxConnections;
+   }
+ 
+   set maximumConnectionsNumber(value) {
+     this.setIntValue("max_cached_connections", value);
+   }
+ 
++  get connectionTimeout() {
++    let timeout = this.getIntValue("connection_timeout");
++    if (timeout > 0 || timeout == -1) {
++      return timeout;
++    }
++    timeout = 170;
++    this.connectionTimeout = timeout;
++    return timeout;
++  }
++
++  set connectionTimeout(value) {
++    this.setIntValue("connection_timeout", value);
++  }
++
+   get newsrcRootPath() {
+     let file = this.getFileValue("mail.newsrc_root-rel", "mail.newsrc_root");
+     if (!file) {
+       file = Services.dirsvc.get("NewsD", Ci.nsIFile);
+       this.setFileValue("mail.newsrc_root-rel", "mail.newsrc_root", file);
+     }
+     return file;
+   }
+

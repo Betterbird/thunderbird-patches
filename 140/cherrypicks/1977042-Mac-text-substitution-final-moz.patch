@@ -1,0 +1,155 @@
+
+# HG changeset patch
+# User Makoto Kato <m_kato@ga2.so-net.ne.jp>
+# Date 1769514222 0
+# Node ID ff902d2953c86ad2ad10014f97f04ebf0898f80d
+# Parent  e1e6eba666d42f5288935b34b97a3d44a08c3ebb
+Bug 1977042 - Text substitution isn't processed at Thunderbird compose window. r=masayuki
+
+Although I have fixed bug 1962845 for non-e10s environment, it isn't
+enough for Thunderbird. When inputting text, it forgets to dismiss
+text substitution panel.
+
+Differential Revision: https://phabricator.services.mozilla.com/D263834
+
+
+diff --git a/widget/cocoa/TextInputHandler.h b/widget/cocoa/TextInputHandler.h
+--- a/widget/cocoa/TextInputHandler.h
++++ b/widget/cocoa/TextInputHandler.h
+@@ -1067,16 +1067,17 @@ class IMEInputHandler : public TextInput
+   enum { kNotifyIMEOfFocusChangeInGecko = 1, kSyncASCIICapableOnly = 2 };
+   uint32_t mPendingMethods;
+ 
+   // Used by text substitution.
+   nsString mOriginalTextForTextSubstitution;
+   NSTextCheckingResult* mCandidatedTextSubstitutionResult;
+   bool mProcessTextSubstitution;
+   bool mBlockDismissTextSubstitutionPanel = false;
++  bool mPendingDismissTextSubstitution = false;
+ 
+   IMEInputHandler(nsCocoaWindow* aWidget, NSView<mozView>* aNativeView);
+   virtual ~IMEInputHandler();
+ 
+   void ResetTimer();
+ 
+   virtual void ExecutePendingMethods();
+ 
+diff --git a/widget/cocoa/TextInputHandler.mm b/widget/cocoa/TextInputHandler.mm
+--- a/widget/cocoa/TextInputHandler.mm
++++ b/widget/cocoa/TextInputHandler.mm
+@@ -2599,29 +2599,35 @@ void TextInputHandler::InsertText(NSStri
+   // TODO:
+   // If mCurrentKeyEvent.mKeyEvent is null, the text should be inputted as
+   // composition events.
+   nsEventStatus status = nsEventStatus_eIgnore;
+   bool keyPressDispatched = [&]() {
+     // If text content is chrome process, OnTextChange etc will be dispatched
+     // synchronously. We don't want to dismiss text substitution panel at this
+     // point.
++    mPendingDismissTextSubstitution = false;
+     AutoRestore<bool> block(mBlockDismissTextSubstitutionPanel);
+     mBlockDismissTextSubstitutionPanel = true;
+ 
+     return mDispatcher->MaybeDispatchKeypressEvents(keypressEvent, status,
+                                                     currentKeyEvent);
+   }();
+   bool keyPressHandled = (status == nsEventStatus_eConsumeNoDefault);
+ 
+-  // WebKit and text editor dismisses autocorrect panel by space, then process
+-  // autocorrect.
+-  if (keypressEvent.mKeyCode == NS_VK_SPACE && keyPressDispatched) {
+-    mProcessTextSubstitution = true;
+-    DismissTextSubstitutionPanel();
++  if (keyPressDispatched) {
++    // WebKit and text editor dismisses autocorrect panel by space, then process
++    // autocorrect.
++    const bool isSpaceKeyPress = (keypressEvent.mKeyCode == NS_VK_SPACE);
++    // If not space key, we don't process text substitution.
++    mProcessTextSubstitution = isSpaceKeyPress;
++
++    if (isSpaceKeyPress || mPendingDismissTextSubstitution) {
++      DismissTextSubstitutionPanel();
++    }
+   }
+ 
+   // Note: mWidget might have become null here. Don't count on it from here on.
+ 
+   if (currentKeyEvent) {
+     currentKeyEvent->mKeyPressHandled = keyPressHandled;
+     currentKeyEvent->mKeyPressDispatched = keyPressDispatched;
+   }
+@@ -3111,36 +3117,44 @@ bool TextInputHandler::DoCommandBySelect
+     WidgetKeyboardEvent keypressEvent(true, eKeyPress, widget);
+     currentKeyEvent->InitKeyEvent(this, keypressEvent, false);
+ 
+     nsEventStatus status = nsEventStatus_eIgnore;
+     // If text content is chrome process, OnTextChange etc will be dispatched
+     // synchronously. We don't want to dismiss text substitution panel at this
+     // point.
+     {
++      mPendingDismissTextSubstitution = false;
+       AutoRestore<bool> block(mBlockDismissTextSubstitutionPanel);
+       mBlockDismissTextSubstitutionPanel = true;
+ 
+       currentKeyEvent->mKeyPressDispatched =
+           mDispatcher->MaybeDispatchKeypressEvents(keypressEvent, status,
+                                                    currentKeyEvent);
+     }
+     currentKeyEvent->mKeyPressHandled =
+         (status == nsEventStatus_eConsumeNoDefault);
+     MOZ_LOG_KEY_OR_IME(
+         LogLevel::Info,
+         ("%p   TextInputHandler::DoCommandBySelector, keypress event "
+          "dispatched, Destroyed()=%s, keypressHandled=%s",
+          this, TrueOrFalse(Destroyed()),
+          TrueOrFalse(currentKeyEvent->mKeyPressHandled)));
+ 
+-    // WebKit and text editor dismisses autocorrect panel by enter, then process
+-    // autocorrect.
+-    mProcessTextSubstitution = (keypressEvent.mKeyCode == NS_VK_RETURN);
+-    DismissTextSubstitutionPanel();
++    if (currentKeyEvent->mKeyPressDispatched) {
++      // WebKit and text editor dismisses autocorrect panel by enter, then
++      // process autocorrect.
++      const bool isEnterKeyPress = (keypressEvent.mKeyCode == NS_VK_RETURN);
++      // If not enterkey key, we don't process text substitution.
++      mProcessTextSubstitution = isEnterKeyPress;
++
++      if (isEnterKeyPress || mPendingDismissTextSubstitution) {
++        DismissTextSubstitutionPanel();
++      }
++    }
+ 
+     // This command is now dispatched with keypress event.
+     // So, this shouldn't be handled by nobody anymore.
+     return true;
+   }
+ 
+   // If the key operation didn't cause keypress event or caused keypress event
+   // but not prevented its default, we need to honor the command.  For example,
+@@ -5073,16 +5087,24 @@ void IMEInputHandler::HandleTextSubstitu
+   }
+ 
+   NS_DispatchToCurrentThreadQueue(
+       NewRunnableMethod<uint32_t>(
+           "IMEInputHandler::OnTextSubstitution", this,
+           &IMEInputHandler::OnTextSubstitution,
+           aIMENotification.mTextChangeData.mAddedEndOffset),
+       100, EventQueuePriority::Idle);
++
++  // OnTextSubstitution might be called on non-e10s during dispatching a key
++  // events. If during it (mBlockDismissTextSubstitutionPanel is true), we have
++  // to mark that text substitution panel s going to dismiss. Then after
++  // dispatching a key event, it should be dismissed.
++  if (mBlockDismissTextSubstitutionPanel) {
++    mPendingDismissTextSubstitution = true;
++  }
+ }
+ 
+ void IMEInputHandler::OnTextSubstitution(uint32_t aStartOffset) {
+   NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
+ 
+   MOZ_LOG(gIMELog, LogLevel::Info,
+           ("%p IMEInputHandler::OnTextSubstitution, aStartOffset=%u", this,
+            aStartOffset));
+

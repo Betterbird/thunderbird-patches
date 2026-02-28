@@ -1,0 +1,201 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1756849216 21600
+# Node ID fbfa5051d8335172809ccfc19e93574f867346a4
+# Parent  7b935182dea006c6a2302efef63b9f779249bf4d
+Bug 617855 - Consider all messages of a thread when sorting by unread. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D263311
+
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -3254,17 +3254,16 @@ nsresult nsMsgDBView::GetStatusSortValue
+ nsresult nsMsgDBView::GetLongField(nsIMsgDBHdr* msgHdr,
+                                    nsMsgViewSortTypeValue sortType,
+                                    uint32_t* result,
+                                    nsIMsgCustomColumnHandler* colHandler) {
+   nsresult rv;
+   NS_ENSURE_ARG_POINTER(msgHdr);
+   NS_ENSURE_ARG_POINTER(result);
+ 
+-  bool isRead;
+   uint32_t bits;
+ 
+   switch (sortType) {
+     case nsMsgViewSortType::bySize:
+       if (mShowSizeInLines) {
+         rv = msgHdr->GetLineCount(result);
+         break;
+       }
+@@ -3292,21 +3291,41 @@ nsresult nsMsgDBView::GetLongField(nsIMs
+       rv = GetStatusSortValue(msgHdr, result);
+       break;
+     case nsMsgViewSortType::byFlagged:
+       bits = 0;
+       rv = msgHdr->GetFlags(&bits);
+       // Make flagged come out on top.
+       *result = !(bits & nsMsgMessageFlags::Marked);
+       break;
+-    case nsMsgViewSortType::byUnread:
++    case nsMsgViewSortType::byUnread: {
++      bool isRead = false;
+       rv = msgHdr->GetIsRead(&isRead);
+       if (NS_SUCCEEDED(rv)) *result = !isRead;
+-
++      if (isRead && m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay &&
++          !(m_viewFlags & nsMsgViewFlagsType::kGroupBySort) &&
++          !mSortThreadsByRoot) {
++        nsCOMPtr<nsIMsgDatabase> dbToUse = m_db;
++        if (!dbToUse || GetFolders()) {
++          // This is a search or cross-folder view. Since cross-folder threads
++          // may not be completely assembled at this point, we fall back to the
++          // message thread from the database (which is not optimal).
++          rv = GetDBForHeader(msgHdr, getter_AddRefs(dbToUse));
++          if (NS_FAILED(rv) || !dbToUse) break;
++        }
++        nsCOMPtr<nsIMsgThread> thread;
++        rv = dbToUse->GetThreadContainingMsgHdr(msgHdr, getter_AddRefs(thread));
++        if (NS_SUCCEEDED(rv)) {
++          uint32_t numUnreadChildren;
++          thread->GetNumUnreadChildren(&numUnreadChildren);
++          *result = numUnreadChildren > 0;
++        }
++      }
+       break;
++    }
+     case nsMsgViewSortType::byJunkStatus: {
+       nsCString junkScoreStr;
+       rv = msgHdr->GetStringProperty("junkscore", junkScoreStr);
+       // Unscored messages should come before messages that are scored
+       // junkScoreStr is "", and "0" - "100"; normalize to 0 - 101.
+       *result = junkScoreStr.IsEmpty() ? (0) : atoi(junkScoreStr.get()) + 1;
+       break;
+     }
+diff --git a/mailnews/base/test/unit/test_nsMsgDBView.js b/mailnews/base/test/unit/test_nsMsgDBView.js
+--- a/mailnews/base/test/unit/test_nsMsgDBView.js
++++ b/mailnews/base/test/unit/test_nsMsgDBView.js
+@@ -993,76 +993,113 @@ async function test_xfvf_threading() {
+  * sorting both by thread root and by newest message.
+  */
+ async function test_thread_sorting() {
+   const save_gTestFolder = gTestFolder;
+   gTestFolder = await messageInjection.makeEmptyFolder();
+   let messages = [];
+   // build a hierarchy like this (the UID order corresponds to the date order)
+   //  1
+-  //   4
+-  //  2
++  //   4 (read)
++  //  2 (read)
+   //   5
+   //  3
++  //  6 (read)
+   const msg1 = gMessageGenerator.makeMessage({ age: { days: 1, hours: 10 } });
+-  const msg2 = gMessageGenerator.makeMessage({ age: { days: 1, hours: 9 } });
++  const msg2 = gMessageGenerator.makeMessage({
++    age: { days: 1, hours: 9 },
++    read: true,
++  });
+   const msg3 = gMessageGenerator.makeMessage({ age: { days: 1, hours: 8 } });
+   const msg4 = gMessageGenerator.makeMessage({
+     age: { days: 1, hours: 7 },
+     inReplyTo: msg1,
++    read: true,
+   });
+   const msg5 = gMessageGenerator.makeMessage({
+     age: { days: 1, hours: 6 },
+     inReplyTo: msg2,
+   });
+-  messages = messages.concat([msg1, msg2, msg3, msg4, msg5]);
++  const msg6 = gMessageGenerator.makeMessage({
++    age: { days: 1, hours: 5 },
++    read: true,
++  });
++  messages = messages.concat([msg1, msg2, msg3, msg4, msg5, msg6]);
+ 
+   const msgSet = new SyntheticMessageSet(messages);
+ 
+   await messageInjection.addSetsToFolders([gTestFolder], [msgSet]);
+ 
+   // test the non-default pref state first, so the pref gets left with its
+   // default value at the end
+   Services.prefs.setBoolPref("mailnews.sort_threads_by_root", true);
+   gDBView.open(
+     gTestFolder,
+     Ci.nsMsgViewSortType.byDate,
+     Ci.nsMsgViewSortOrder.ascending,
+     Ci.nsMsgViewFlagsType.kThreadedDisplay,
+     {}
+   );
+ 
+-  assert_view_row_count(3);
++  assert_view_row_count(4);
+   assert_view_message_at_indices(msg1, 0);
+   assert_view_message_at_indices(msg2, 1);
+   assert_view_message_at_indices(msg3, 2);
++  assert_view_message_at_indices(msg6, 3);
+ 
+   gDBView.sort(Ci.nsMsgViewSortType.byDate, Ci.nsMsgViewSortOrder.descending);
+-  assert_view_message_at_indices(msg3, 0);
++  assert_view_message_at_indices(msg6, 0);
++  assert_view_message_at_indices(msg3, 1);
++  assert_view_message_at_indices(msg2, 2);
++  assert_view_message_at_indices(msg1, 3);
++
++  gDBView.sort(Ci.nsMsgViewSortType.byUnread, Ci.nsMsgViewSortOrder.ascending);
++  assert_view_message_at_indices(msg6, 0);
+   assert_view_message_at_indices(msg2, 1);
+-  assert_view_message_at_indices(msg1, 2);
++  assert_view_message_at_indices(msg3, 2);
++  assert_view_message_at_indices(msg1, 3);
++
++  gDBView.sort(Ci.nsMsgViewSortType.byUnread, Ci.nsMsgViewSortOrder.descending);
++  assert_view_message_at_indices(msg3, 0);
++  assert_view_message_at_indices(msg1, 1);
++  assert_view_message_at_indices(msg6, 2);
++  assert_view_message_at_indices(msg2, 3);
+ 
+   Services.prefs.clearUserPref("mailnews.sort_threads_by_root");
+   gDBView.open(
+     gTestFolder,
+     Ci.nsMsgViewSortType.byDate,
+     Ci.nsMsgViewSortOrder.ascending,
+     Ci.nsMsgViewFlagsType.kThreadedDisplay,
+     {}
+   );
+ 
+-  assert_view_row_count(3);
++  assert_view_row_count(4);
+   assert_view_message_at_indices(msg3, 0);
+   assert_view_message_at_indices(msg1, 1);
+   assert_view_message_at_indices(msg2, 2);
++  assert_view_message_at_indices(msg6, 3);
+ 
+   gDBView.sort(Ci.nsMsgViewSortType.byDate, Ci.nsMsgViewSortOrder.descending);
++  assert_view_message_at_indices(msg6, 0);
++  assert_view_message_at_indices(msg2, 1);
++  assert_view_message_at_indices(msg1, 2);
++  assert_view_message_at_indices(msg3, 3);
++
++  gDBView.sort(Ci.nsMsgViewSortType.byUnread, Ci.nsMsgViewSortOrder.ascending);
++  assert_view_message_at_indices(msg6, 0);
++  assert_view_message_at_indices(msg2, 1);
++  assert_view_message_at_indices(msg1, 2);
++  assert_view_message_at_indices(msg3, 3);
++
++  gDBView.sort(Ci.nsMsgViewSortType.byUnread, Ci.nsMsgViewSortOrder.descending);
+   assert_view_message_at_indices(msg2, 0);
+   assert_view_message_at_indices(msg1, 1);
+   assert_view_message_at_indices(msg3, 2);
++  assert_view_message_at_indices(msg6, 3);
+ 
+   gDBView.close();
+   gTestFolder = save_gTestFolder;
+ }
+ 
+ const VIEW_TYPES = [
+   ["threaded", Ci.nsMsgViewFlagsType.kThreadedDisplay],
+   ["quicksearch", Ci.nsMsgViewFlagsType.kThreadedDisplay],
+

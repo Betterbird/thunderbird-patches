@@ -1,0 +1,167 @@
+
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1752176819 0
+# Node ID 7bcca65cbad10cb59dbcdaad5fd991231a77942c
+# Parent  8dfda47ff661ffe70162a01fe940ce8eb1c21801
+Bug 1842514 - Allow folder copy within mail server accounts and Local Folders. r=edicharry
+
+Differential Revision: https://phabricator.services.mozilla.com/D256869
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -768,45 +768,36 @@ var folderPaneContextMenu = {
+ 
+     folderTree
+       .querySelector(".context-menu-target")
+       ?.classList.remove("context-menu-target");
+     this.clearOverrideFolder();
+   },
+ 
+   /**
+-   * Check if the transfer mode selected from folder context menu is "copy".
+-   * If "copy" (!isMove) is selected and the copy is within the same server,
+-   * silently change to mode "move".
+-   * Do the transfer and return true if moved, false if copied.
++   * Do the folder transfer, move or copy.
+    *
+    * @param {boolean} isMove
+    * @param {nsIMsgFolder} sourceFolder
+    * @param {nsIMsgFolder} targetFolder
+    * @param {nsIMsgCopyServiceListener} [listener]
+    */
+   transferFolder(isMove, sourceFolder, targetFolder, listener = null) {
+-    if (!isMove && sourceFolder.server == targetFolder.server) {
+-      // Don't allow folder copy within the same server; only move allowed.
+-      // Can't copy folder intra-server, change to move.
+-      isMove = true;
+-    }
+     // Do the transfer. A slight delay in calling copyFolder() helps the
+     // folder-menupopup chain of items get properly closed so the next folder
+     // context popup can occur.
+     setTimeout(() =>
+       MailServices.copy.copyFolder(
+         sourceFolder,
+         targetFolder,
+         isMove,
+         listener,
+         top.msgWindow
+       )
+     );
+-    return isMove;
+   },
+ 
+   onCommand(event) {
+     const activeFolder = this.activeFolder;
+     const selectedRows = [...folderTree.selection.values()];
+ 
+     // If the currently active folder is not part of the current selection,
+     // trigger the command only for that folder.
+@@ -905,25 +896,25 @@ var folderPaneContextMenu = {
+       case "folderPaneContext-manageTags":
+         goDoCommand("cmd_manageTags");
+         break;
+       case "folderPaneContext-resetSort":
+         folderPane.clearUserSortOrder(folder);
+         break;
+       default: {
+         // Handle folder context menu items move to, copy to.
+-        let isMove = !!event.target.closest("#folderPaneContext-moveMenu");
++        const isMove = !!event.target.closest("#folderPaneContext-moveMenu");
+         const isCopy = !!event.target.closest("#folderPaneContext-copyMenu");
+ 
+         if (!isMove && !isCopy) {
+           return;
+         }
+ 
+         const targetFolder = event.target._folder;
+-        isMove = this.transferFolder(isMove, folder, targetFolder);
++        this.transferFolder(isMove, folder, targetFolder);
+         // Save in prefs the target folder URI and if this was a move or copy.
+         // This is to fill in the next folder or message context menu item
+         // "Move|Copy to <TargetFolderName> Again".
+         Services.prefs.setStringPref(
+           "mail.last_msg_movecopy_target_uri",
+           targetFolder.URI
+         );
+         Services.prefs.setBoolPref("mail.last_msg_movecopy_was_move", isMove);
+@@ -3042,20 +3033,16 @@ var folderPane = {
+           .mozGetDataAt("text/x-moz-folder", i)
+           .QueryInterface(Ci.nsIMsgFolder);
+ 
+         // Don't allow to drop on itself.
+         if (targetFolder == sourceFolder) {
+           return;
+         }
+         const sameServer = sourceFolder.server == targetFolder.server;
+-        // Don't copy within same server.
+-        if (sameServer && systemDropEffect == "copy") {
+-          return;
+-        }
+         // Don't allow immediate child to be dropped onto its parent.
+         if (targetFolder == sourceFolder.parent) {
+           return;
+         }
+         // Don't allow dragging of virtual folders across accounts.
+         if (sourceFolder.getFlag(Ci.nsMsgFolderFlags.Virtual) && !sameServer) {
+           return;
+         }
+@@ -3290,17 +3277,17 @@ var folderPane = {
+         targetFolder,
+         isMove,
+         null,
+         top.msgWindow,
+         true
+       );
+     } else if (types.includes("text/x-moz-folder")) {
+       const rows = [];
+-      let isMove = event.dataTransfer.dropEffect == "move";
++      const isMove = event.dataTransfer.dropEffect == "move";
+       if (event.dataTransfer.mozItemCount == 1) {
+         // Only one folder was dragged and dropped.
+         // If the dropped Y-coordinate is near the center of the targetFolder,
+         // simply move it into the targetFolder. Otherwise, reorder the dropped
+         // folder above or below the targetFolder.
+ 
+         const sourceFolder = event.dataTransfer
+           .mozGetDataAt("text/x-moz-folder", 0)
+@@ -3342,17 +3329,17 @@ var folderPane = {
+ 
+         if (destinationFolder) {
+           // Move sourceFolder to a different parent.
+ 
+           // Reset the sort order of sourceFolder before moving it.
+           sourceFolder.userSortOrder = Ci.nsIMsgFolder.NO_SORT_VALUE;
+           // Start the move. This is done in an asynchronous process, so order
+           // them in the listener that will be called when the move is complete.
+-          isMove = folderPaneContextMenu.transferFolder(
++          folderPaneContextMenu.transferFolder(
+             isMove,
+             sourceFolder,
+             destinationFolder,
+             isReordering
+               ? new ReorderFolderListener(
+                   sourceFolder,
+                   targetFolder,
+                   insertAfter
+@@ -3382,17 +3369,17 @@ var folderPane = {
+           "Bug 1896531. Copy and move for multiselection is only partially supported and it might fail."
+         );
+ 
+         for (let i = 0; i < event.dataTransfer.mozItemCount; i++) {
+           const sourceFolder = event.dataTransfer
+             .mozGetDataAt("text/x-moz-folder", i)
+             .QueryInterface(Ci.nsIMsgFolder);
+ 
+-          isMove = folderPaneContextMenu.transferFolder(
++          folderPaneContextMenu.transferFolder(
+             isMove,
+             sourceFolder,
+             targetFolder
+           );
+           rows.push(this.getRowForFolder(sourceFolder.URI, row.modeName));
+         }
+         // Save in prefs the target folder URI and if this was a move or copy.
+         // This is to fill in the next folder or message context menu item
+

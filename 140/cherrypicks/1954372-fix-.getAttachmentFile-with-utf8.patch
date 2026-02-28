@@ -1,0 +1,267 @@
+
+# HG changeset patch
+# User John Bieling <john@thunderbird.net>
+# Date 1762882505 -7200
+# Node ID 0a02e98ad552ab8609e2a10f3fb0f2c346230745
+# Parent  0f00c8246bfcc970e8d9b64530313e04e8615959
+Bug 1954372 - Use "binarystring" strFormat when extracting attachment content for messages.getAttachmentFile(). r=mkmelin
+
+
+The code to create a File object expects a binary string when converting bytes
+into an array buffer. The MsgHdrProcessor instance in getAttachmentFile() however
+requested the content as "unicode" (the default option). That caused encoding
+errors.
+
+Differential Revision: https://phabricator.services.mozilla.com/D271275
+
+diff --git a/mail/components/extensions/ExtensionMessages.sys.mjs b/mail/components/extensions/ExtensionMessages.sys.mjs
+--- a/mail/components/extensions/ExtensionMessages.sys.mjs
++++ b/mail/components/extensions/ExtensionMessages.sys.mjs
+@@ -454,17 +454,17 @@ export class MsgHdrProcessor {
+    * @returns {Promise<MimeTreePart>}
+    */
+   async #decryptMessage(rawMessage) {
+     // Parse the raw message. This functions keeps all parts by default.
+     const mimeTree = this.#parseMessage(
+       rawMessage,
+       {
+         // We should not automatically decrypt nested messages, so we keep them
+-        // as an blob and do not parse them.
++        // as a blob and do not parse them.
+         decodeSubMessages: false,
+       },
+       {
+         checkForEncryption: true,
+         excludeAttachmentData: false,
+       }
+     );
+ 
+diff --git a/mail/components/extensions/parent/ext-messages.js b/mail/components/extensions/parent/ext-messages.js
+--- a/mail/components/extensions/parent/ext-messages.js
++++ b/mail/components/extensions/parent/ext-messages.js
+@@ -799,16 +799,18 @@ this.messages = class extends ExtensionA
+             });
+           };
+ 
+           // Check if the source is a MessagePart.
+           if (
+             !Number.isInteger(source) &&
+             source?.contentType == "message/rfc822"
+           ) {
++            // messagePartToRaw() uses source.rawBody to create the output, which is a binary string,
++            // the result therefore is also a binary string.
+             const raw = messagePartToRaw(source);
+             // TODO: Pipe raw through decryptor if requested.
+             if (decrypt) {
+               console.warn(
+                 "Decrypting a generated message is not yet supported"
+               );
+             }
+             if (data_format == "BinaryString") {
+@@ -921,17 +923,19 @@ this.messages = class extends ExtensionA
+           return attachments;
+         },
+         async getAttachmentFile(messageId, partName) {
+           const msgHdr = messageManager.get(messageId);
+           if (!msgHdr) {
+             throw new ExtensionError(`Message not found: ${messageId}.`);
+           }
+ 
+-          const msgHdrProcessor = new MsgHdrProcessor(msgHdr);
++          const msgHdrProcessor = new MsgHdrProcessor(msgHdr, {
++            strFormat: "binarystring",
++          });
+           let attachmentPart;
+           try {
+             attachmentPart = await msgHdrProcessor.getAttachmentPart(partName, {
+               includeRaw: true,
+             });
+           } catch (ex) {
+             switch (ex.cause) {
+               case "MessageDecryptionError":
+@@ -944,17 +948,17 @@ this.messages = class extends ExtensionA
+             }
+           }
+           if (!attachmentPart) {
+             throw new ExtensionError(
+               `Part ${partName} not found in message ${messageId}.`
+             );
+           }
+ 
+-          // Convert binary string to Uint8Array and return a File.
++          // Convert the requested binary string to Uint8Array and return a File.
+           const bytes = new Uint8Array(attachmentPart.body.length);
+           for (let i = 0; i < attachmentPart.body.length; i++) {
+             bytes[i] = attachmentPart.body.charCodeAt(i) & 0xff;
+           }
+           return new File([bytes], attachmentPart.name, {
+             type: attachmentPart.headers.contentType.type,
+           });
+         },
+diff --git a/mail/components/extensions/test/xpcshell/test_ext_messages_bug_1954372.js b/mail/components/extensions/test/xpcshell/test_ext_messages_bug_1954372.js
+new file mode 100644
+--- /dev/null
++++ b/mail/components/extensions/test/xpcshell/test_ext_messages_bug_1954372.js
+@@ -0,0 +1,98 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++var { ExtensionTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/ExtensionXPCShellUtils.sys.mjs"
++);
++var { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++add_setup(
++  {
++    skip_if: () => IS_IMAP, // no attachments support for IMAP tests
++  },
++  async function test_setup() {
++    const _account = await createAccount();
++    const _testFolder = await createSubfolder(
++      _account.incomingServer.rootFolder,
++      "test1"
++    );
++
++    await createMessageFromString(
++      _testFolder,
++      `Message-ID: <dee7b8bf-0c49-486b-b710-265a3b0be77e@mime.sample>
++MIME-Version: 1.0
++To: User@invalid
++From: User <admin@invalid>
++Subject: umlaut
++Content-Language: en-US
++Content-Type: multipart/mixed; boundary="------------PS4eoTwBacO1aHmKumdgIzBH"
++
++This message is in MIME format.  The first part should be readable text,
++while the remaining parts are likely unreadable without MIME-aware tools.
++
++--------------PS4eoTwBacO1aHmKumdgIzBH
++Content-Type: text/xml; charset=UTF-8; name="utf-8_o_umlaut.xml"
++Content-Disposition: attachment; filename="utf-8_o_umlaut.xml"
++Content-Transfer-Encoding: base64
++
++PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxhPsO2PC9hPg==
++
++--------------PS4eoTwBacO1aHmKumdgIzBH--`
++    );
++  }
++);
++
++add_task(
++  {
++    skip_if: () => IS_IMAP,
++  },
++  async function test_message_with_text_as_attachment() {
++    const extension = ExtensionTestUtils.loadExtension({
++      files: {
++        "background.js": async () => {
++          const [account] = await browser.accounts.list();
++          const testFolder = account.folders.find(f => f.name == "test1");
++          const { messages } = await browser.messages.list(testFolder.id);
++          browser.test.assertEq(1, messages.length);
++          const message = messages[0];
++
++          // Request attachments.
++          const attachments = await browser.messages.listAttachments(
++            message.id
++          );
++          browser.test.assertEq(1, attachments.length);
++          browser.test.assertEq("1.1", attachments[0].partName);
++          browser.test.assertEq("utf-8_o_umlaut.xml", attachments[0].name);
++
++          // Get the attachment and verify its encoding.
++          const att = await browser.messages.getAttachmentFile(
++            message.id,
++            "1.1"
++          );
++
++          const content = await att.text();
++          browser.test.assertEq(
++            '<?xml version="1.0" encoding="UTF-8"?>\r\n<a>ö</a>',
++            content
++          );
++
++          browser.test.notifyPass("finished");
++        },
++        "utils.js": await getUtilsJS(),
++      },
++      manifest: {
++        background: { scripts: ["utils.js", "background.js"] },
++        permissions: ["accountsRead", "messagesRead"],
++      },
++    });
++
++    await extension.startup();
++    await extension.awaitFinish("finished");
++    await extension.unload();
++  }
++);
+diff --git a/mail/components/extensions/test/xpcshell/test_ext_messages_get.js b/mail/components/extensions/test/xpcshell/test_ext_messages_get.js
+--- a/mail/components/extensions/test/xpcshell/test_ext_messages_get.js
++++ b/mail/components/extensions/test/xpcshell/test_ext_messages_get.js
+@@ -84,17 +84,17 @@ add_task(async function test_plain_mv2()
+           data_format: "BinaryString",
+         });
+         browser.test.assertEq("string", typeof strMessage_2);
+         const fileMessage_3 = await browser.messages.getRaw(message.id, {
+           data_format: "File",
+         });
+         // eslint-disable-next-line mozilla/use-isInstance
+         browser.test.assertTrue(fileMessage_3 instanceof File);
+-        // Since we do not have utf-8 chars in the test message, the returned BinaryString is
++        // Since we do not have utf-8 chars in the test message, the returned binary string is
+         // identical to the return value of File.text().
+         const strMessage_3 = await fileMessage_3.text();
+ 
+         for (let strMessage of [strMessage_1, strMessage_2, strMessage_3]) {
+           // Fold Windows line-endings \r\n to \n.
+           strMessage = strMessage.replace(/\r/g, "");
+           browser.test.assertTrue(
+             strMessage.includes("Subject: Big Meeting Today\n")
+@@ -235,17 +235,17 @@ add_task(async function test_plain_mv3()
+             message.recipients[0]
+           );
+         }
+ 
+         const fileMessage_1 = await browser.messages.getRaw(message.id);
+         // eslint-disable-next-line mozilla/use-isInstance
+         browser.test.assertTrue(fileMessage_1 instanceof File);
+         // Since we do not have utf-8 chars in the test message, the returned
+-        // BinaryString is identical to the return value of File.text().
++        // binary string is identical to the return value of File.text().
+         const strMessage_1 = await fileMessage_1.text();
+ 
+         const strMessage_2 = await browser.messages.getRaw(message.id, {
+           data_format: "BinaryString",
+         });
+         browser.test.assertEq("string", typeof strMessage_2);
+ 
+         const fileMessage_3 = await browser.messages.getRaw(message.id, {
+diff --git a/mail/components/extensions/test/xpcshell/xpcshell.toml b/mail/components/extensions/test/xpcshell/xpcshell.toml
+--- a/mail/components/extensions/test/xpcshell/xpcshell.toml
++++ b/mail/components/extensions/test/xpcshell/xpcshell.toml
+@@ -18,16 +18,18 @@ tags = ["virtualfolders"]
+ 
+ ["test_ext_messages_attachments.js"] # IMAP disabled (doesn't work with test server)
+ support-files = ["messages/**"]
+ 
+ ["test_ext_messages_bug_1737532.js"]
+ 
+ ["test_ext_messages_bug_1918925.js"]
+ 
++["test_ext_messages_bug_1954372.js"]
++
+ ["test_ext_messages_encrypted.js"]
+ 
+ ["test_ext_messages_get.js"] # PGP test disabled for NNTP
+ 
+ ["test_ext_messages_getFull_raw.js"]
+ support-files = ["messages/**"]
+ 
+ ["test_ext_messages_id.js"] # Disabled for NNTP (message move not supported)
+

@@ -1,0 +1,134 @@
+
+# HG changeset patch
+# User zeyus <dev@zeyus.com>
+# Date 1767956157 -7200
+# Node ID df1e574ed7224745799cd18a104198d28e758338
+# Parent  7d37fe0fba1371f0821a4c5c92737f22fc03b74c
+Bug 729685 - Add Windows timezone name support using ICU conversion. r=mkmelin
+
+
+This patch fixes calendar import from Exchange/Office 365 servers that use
+Windows timezone names (e.g., "Romance Standard Time") by converting them to
+IANA timezone IDs (e.g., "Europe/Paris") using ICU's built-in
+TimeZone::getIDForWindowsID() function.
+
+The conversion is attempted before timezone lookup and falls back to the
+original ID if conversion fails, making this change backward compatible.
+
+Includes corresponding test.
+
+Differential Revision: https://phabricator.services.mozilla.com/D278152
+
+diff --git a/calendar/base/src/TimezoneDatabase.cpp b/calendar/base/src/TimezoneDatabase.cpp
+--- a/calendar/base/src/TimezoneDatabase.cpp
++++ b/calendar/base/src/TimezoneDatabase.cpp
+@@ -76,16 +76,30 @@ TimezoneDatabase::GetTimezoneDefinition(
+ 
+   // It seems Windows can potentially build `convertedTzid` with wchar_t
+   // underlying, which makes the UnicodeString ctor ambiguous; be explicit here.
+   const char16_t* convertedTzidPtr = convertedTzid.get();
+ 
+   icu::UnicodeString icuTzid(convertedTzidPtr,
+                              static_cast<int>(convertedTzid.Length()));
+ 
++  // Try to convert Windows timezone IDs (like "Romance Standard Time") to
++  // IANA timezone IDs (like "Europe/Paris"). This is necessary because
++  // Exchange/Office 365 calendars often use Windows timezone names, which
++  // ICU doesn't recognize on non-Windows platforms.
++  UErrorCode err = U_ZERO_ERROR;
++  icu::UnicodeString convertedIcuTzid;
++  icu::TimeZone::getIDForWindowsID(icuTzid, nullptr, convertedIcuTzid, err);
++
++  // If the conversion succeeded and returned a non-empty result, use the
++  // converted IANA timezone ID. Otherwise, continue with the original ID.
++  if (U_SUCCESS(err) && !convertedIcuTzid.isEmpty()) {
++    icuTzid = convertedIcuTzid;
++  }
++
+   auto* icuTimezone = icu::VTimeZone::createVTimeZoneByID(icuTzid);
+   if (icuTimezone == nullptr) {
+     return NS_OK;
+   }
+ 
+   // Work around https://unicode-org.atlassian.net/browse/ICU-22175.
+   // This workaround is overly complex because there's no simple, reliable way
+   // to determine if a `VTimeZone` is "Etc/Unknown". `getID()` doesn't work
+@@ -107,17 +121,17 @@ TimezoneDatabase::GetTimezoneDefinition(
+       // has returned "Etc/Unknown", meaning the TZID was not recognized.
+       delete icuTimezone;
+       return NS_OK;
+     }
+   }
+ 
+   // Extract the VTIMEZONE definition from the timezone object as a string.
+   icu::UnicodeString vtimezoneDef;
+-  UErrorCode err = U_ZERO_ERROR;
++  err = U_ZERO_ERROR;
+   icuTimezone->write(vtimezoneDef, err);
+   delete icuTimezone;
+ 
+   if (U_FAILURE(err)) {
+     NS_WARNING(
+         nsPrintfCString("ICU error while generating VTIMEZONE definition: %s",
+                         u_errorName(err))
+             .get());
+diff --git a/calendar/test/unit/test_timezone_definition.js b/calendar/test/unit/test_timezone_definition.js
+--- a/calendar/test/unit/test_timezone_definition.js
++++ b/calendar/test/unit/test_timezone_definition.js
+@@ -25,8 +25,55 @@ add_task(async function zone_test() {
+   let foundZone = false;
+   for (const zone of cal.timezoneService.timezoneIds) {
+     foundZone = true;
+     resolveZone(zone);
+   }
+ 
+   ok(foundZone, "There is at least one timezone");
+ });
++
++// check Windows timezone ID conversion
++add_task(async function windows_timezone_test() {
++  // Test that Windows timezone names (used by Exchange/Office 365) resolve to
++  // the same timezone rules as their corresponding IANA IDs.
++  // We verify this by comparing UTC offsets at a known date.
++  const windowsToIana = [
++    ["AUS Central Standard Time", "Australia/Darwin"],
++    ["Cuba Standard Time", "America/Havana"],
++    ["Egypt Standard Time", "Africa/Cairo"],
++    ["Pacific SA Standard Time", "America/Santiago"],
++    ["Sri Lanka Standard Time", "Asia/Colombo"],
++    ["Taipei Standard Time", "Asia/Taipei"],
++    ["Tonga Standard Time", "Pacific/Tongatapu"],
++  ];
++
++  // Test date: 2024-06-15 12:00:00 UTC (mid-year to catch DST differences)
++  const testDate = cal.createDateTime("20240615T120000Z");
++
++  for (const [windowsId, ianaId] of windowsToIana) {
++    const windowsTz = cal.timezoneService.getTimezone(windowsId);
++    const ianaTz = cal.timezoneService.getTimezone(ianaId);
++
++    notEqual(windowsTz, null, `Windows timezone "${windowsId}" should resolve`);
++    notEqual(ianaTz, null, `IANA timezone "${ianaId}" should resolve`);
++
++    if (windowsTz && ianaTz) {
++      // Verify both produce valid VTIMEZONE components
++      ok(
++        windowsTz.icalComponent.serializeToICS().startsWith("BEGIN:VTIMEZONE"),
++        `Windows timezone "${windowsId}" should produce valid VTIMEZONE`
++      );
++
++      // Verify both have the same UTC offset at the test date
++      const testDateWindows = testDate.clone();
++      testDateWindows.timezone = windowsTz;
++      const testDateIana = testDate.clone();
++      testDateIana.timezone = ianaTz;
++
++      equal(
++        testDateWindows.timezoneOffset,
++        testDateIana.timezoneOffset,
++        `Windows timezone "${windowsId}" should have same offset as IANA "${ianaId}"`
++      );
++    }
++  }
++});
+

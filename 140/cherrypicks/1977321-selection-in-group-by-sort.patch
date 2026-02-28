@@ -1,0 +1,265 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1752792611 -43200
+# Node ID 26a4e96faec301d38059d0c3622ff80f409d506c
+# Parent  07658a5f5e10acefe66422f2154181cee350efa8
+Bug 1977321 - Fix row selection for Grouped By Sort views. r=tobyp
+
+
+Since bug 1924977, `nsMsgDBView::GetNumSelected` doesn't count Grouped By Sort
+header rows anymore. Therefore, `threadPane._onSelect` has to be adapted to
+prevent a header row and a message from being selected simultaneously.
+
+Differential Revision: https://phabricator.services.mozilla.com/D257387
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -5003,16 +5003,31 @@ var threadPane = {
+       this.forgetSavedSelection();
+     }
+     if (paneLayout.messagePaneVisible.isCollapsed) {
+       updateZoomCommands();
+       return;
+     }
+ 
+     const numSelected = gDBView?.numSelected || 0;
++
++    // Prevent Grouped By Sort header rows and messages from being selected
++    // simultaneously.
++    if (
++      gViewWrapper?.showGroupedBySort &&
++      numSelected > 0 &&
++      threadTree.selectedIndices.length > 1
++    ) {
++      const savedIndex = threadTree.currentIndex;
++      threadTree.selectedIndices
++        .filter(i => gViewWrapper.isExpandedGroupedByHeaderAtIndex(i))
++        .forEach(i => threadTree.toggleSelectionAtIndex(i, false, false));
++      threadTree.currentIndex = savedIndex;
++    }
++
+     switch (numSelected) {
+       case 0:
+         messagePane.displayMessage();
+         break;
+       case 1: {
+         if (
+           gDBView.getFlagsAt(threadTree.selectedIndex) & MSG_VIEW_FLAG_DUMMY
+         ) {
+@@ -5020,23 +5035,16 @@ var threadPane = {
+           break;
+         }
+ 
+         const uri = gDBView.getURIForViewIndex(threadTree.selectedIndex);
+         messagePane.displayMessage(uri);
+         break;
+       }
+       default:
+-        if (gViewWrapper.showGroupedBySort) {
+-          const savedIndex = threadTree.currentIndex;
+-          threadTree.selectedIndices
+-            .filter(i => gViewWrapper.isExpandedGroupedByHeaderAtIndex(i))
+-            .forEach(i => threadTree.toggleSelectionAtIndex(i, false, false));
+-          threadTree.currentIndex = savedIndex;
+-        }
+         messagePane.displayMessages(gDBView.getSelectedMsgHdrs());
+         break;
+     }
+ 
+     updateZoomCommands();
+   },
+ 
+   /**
+diff --git a/mail/base/content/widgets/tree-view.mjs b/mail/base/content/widgets/tree-view.mjs
+--- a/mail/base/content/widgets/tree-view.mjs
++++ b/mail/base/content/widgets/tree-view.mjs
+@@ -1610,17 +1610,17 @@ export class TreeView extends HTMLElemen
+ 
+   /**
+    * An array of the indices of all selected rows.
+    *
+    * @type {integer[]}
+    */
+   get selectedIndices() {
+     const indices = [];
+-    const rangeCount = this._selection.getRangeCount();
++    const rangeCount = this._selection?.getRangeCount();
+ 
+     for (let range = 0; range < rangeCount; range++) {
+       const min = {};
+       const max = {};
+       this._selection.getRangeAt(range, min, max);
+ 
+       if (min.value == -1) {
+         continue;
+diff --git a/mail/base/test/browser/browser_dummyRow.js b/mail/base/test/browser/browser_dummyRow.js
+--- a/mail/base/test/browser/browser_dummyRow.js
++++ b/mail/base/test/browser/browser_dummyRow.js
+@@ -31,51 +31,63 @@ add_setup(async function () {
+   rootFolder = account.incomingServer.rootFolder.QueryInterface(
+     Ci.nsIMsgLocalMailFolder
+   );
+ 
+   folderA = rootFolder
+     .createLocalSubfolder("dummyRowFolderA")
+     .QueryInterface(Ci.nsIMsgLocalMailFolder);
+ 
+-  folderB = rootFolder.createLocalSubfolder("dummyRowFolderB");
+-
+-  // Make some messages.
+-  const syntheticMessages = generator.makeMessages({
+-    count: 5,
+-    msgsPerThread: 1,
+-  });
++  folderB = rootFolder
++    .createLocalSubfolder("dummyRowFolderB")
++    .QueryInterface(Ci.nsIMsgLocalMailFolder);
+ 
+   folderA.addMessageBatch(
+-    syntheticMessages.map(message => message.toMessageString())
++    generator
++      .makeMessages({
++        count: 5,
++        msgsPerThread: 1,
++      })
++      .map(message => message.toMessageString())
+   );
+ 
++  for (let i = 1; i <= 3; i++) {
++    folderB.addMessageBatch(
++      generator
++        .makeMessages({
++          count: i,
++          msgsPerThread: i,
++        })
++        .map(message => message.toMessageString())
++    );
++  }
++
++  registerCleanupFunction(() => {
++    MailServices.accounts.removeAccount(account, false);
++  });
++});
++
++add_task(async function test_dummy_row_in_table_view() {
+   about3Pane.restoreState({
+     messagePaneVisible: true,
+     folderURI: folderA.URI,
+   });
+ 
+   about3Pane.sortController.groupBySort();
+   await BrowserTestUtils.waitForCondition(
+     () => threadTree.dataset.showGroupedBySort == "true",
+     "The tree view should be grouped by sort"
+   );
+   threadTree.scrollToIndex(0, true);
+ 
+-  registerCleanupFunction(() => {
+-    MailServices.accounts.removeAccount(account, false);
+-  });
+-});
+-
+-add_task(async function test_dummy_row_in_table_view() {
+-  const folderAMessages = [...folderA.messages];
+-
+   await ensure_table_view(document);
+   await new Promise(resolve => about3Pane.requestAnimationFrame(resolve));
+ 
++  const folderAMessages = [...folderA.messages];
++
+   Assert.equal(
+     threadTree.getRowAtIndex(0).querySelector(".subject-line span").textContent,
+     `Older (${folderAMessages.length}/${folderAMessages.length})`,
+     "The subject text with the unread and total counter should match"
+   );
+ 
+   // Mark each message as read, and check that the dummy row's content is
+   // updated accordingly. We do this for each message *except* one (the very
+@@ -97,8 +109,84 @@ add_task(async function test_dummy_row_i
+   Assert.equal(
+     threadTree.getRowAtIndex(0).querySelector(".subject-line span").textContent,
+     `Older (${folderAMessages.length})`
+   );
+ });
+ 
+ // TODO: Implement after bug 1894591.
+ // add_task(async function test_dummy_row_in_cards_view() {});
++
++add_task(async function test_dummy_row_selection() {
++  about3Pane.restoreState({
++    messagePaneVisible: true,
++    folderURI: folderB.URI,
++  });
++
++  about3Pane.sortController.sortThreadPane("subjectCol");
++  about3Pane.sortController.groupBySort();
++  await BrowserTestUtils.waitForCondition(
++    () => threadTree.dataset.showGroupedBySort == "true",
++    "The tree view should be grouped by sort"
++  );
++
++  // Test that several collapsed dummy rows can be selected at the same time.
++
++  await mouseSelect(0);
++  checkSelection([0]);
++  await mouseSelect(1, true);
++  checkSelection([0, 1]);
++  await mouseSelect(2, true);
++  checkSelection([0, 1, 2]);
++
++  await testSelectAll([0, 1, 2]);
++
++  // Test that only one expanded dummy row can be selected if any other message
++  // is selected.
++
++  goDoCommand("cmd_expandAllThreads");
++
++  await mouseSelect(0);
++  checkSelection([0]);
++  await mouseSelect(1, true);
++  checkSelection([1]);
++  await mouseSelect(2, true);
++  checkSelection([1, 2]);
++  await mouseSelect(5, true);
++  checkSelection([1, 2]);
++  await mouseSelect(4);
++  checkSelection([4]);
++  await mouseSelect(3, true);
++  checkSelection([4]);
++  await mouseSelect(2, true);
++  checkSelection([2, 4]);
++  await mouseSelect(5, true);
++  checkSelection([2, 4]);
++  await mouseSelect(6, true);
++  checkSelection([2, 4, 6]);
++
++  await testSelectAll([1, 2, 4, 6, 7, 8]);
++});
++
++async function mouseSelect(row, ctrlKeyPressed = false) {
++  const selectPromise = BrowserTestUtils.waitForEvent(threadTree, "select");
++  EventUtils.synthesizeMouseAtCenter(
++    threadTree.getRowAtIndex(row),
++    { accelKey: ctrlKeyPressed },
++    about3Pane
++  );
++  await selectPromise;
++}
++
++function checkSelection(expectedIndices) {
++  Assert.deepEqual(
++    threadTree.selectedIndices,
++    expectedIndices,
++    "The correct rows should be selected."
++  );
++}
++
++async function testSelectAll(expectedIndices) {
++  await mouseSelect(0);
++  checkSelection(0);
++  EventUtils.synthesizeKey("a", { accelKey: true }, about3Pane);
++  checkSelection(expectedIndices);
++}
+

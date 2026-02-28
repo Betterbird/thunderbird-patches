@@ -1,0 +1,99 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1771929040 0
+# Node ID b9388f8b4e95f24eed8fa420b1c0e691ae8dd0a8
+# Parent  073725232e7dd5d3429d4eef2ab52e2628fe63e6
+Bug 2018063 - Make programmatic folder expansion synchronous and fix 0-height animation bugs. r=mkmelin
+
+
+Programmatic folder selection (`displayFolder`) was failing to scroll into view
+and causing race conditions with message selection because
+`folderTree.expandRow()` runs a 200ms asynchronous animation. Additionally,
+expanding or collapsing deeply nested hidden folders triggered overlapping
+0-height animations, which actively broke parent layout calculations.
+
+Differential Revision: https://phabricator.services.mozilla.com/D284400
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -6712,16 +6712,26 @@ function restoreState({
+ function ensureFolderTreeRowIsVisible(row) {
+   let collapsedAncestor = row.parentNode.closest("#folderTree li.collapsed");
+   while (collapsedAncestor) {
+     folderTree.expandRow(collapsedAncestor);
+     collapsedAncestor = collapsedAncestor.parentNode.closest(
+       "#folderTree li.collapsed"
+     );
+   }
++
++  // Instantly fast-forward expansion animations to 100% completion.
++  for (const animation of folderTree.getAnimations({ subtree: true })) {
++    if (
++      !CSSAnimation.isInstance(animation) &&
++      !CSSTransition.isInstance(animation)
++    ) {
++      animation.finish();
++    }
++  }
+ }
+ 
+ /**
+  * Set up the given folder to be selected in the folder pane.
+  *
+  * @param {nsIMsgFolder|string} folder - The folder to display, or its URI.
+  */
+ function displayFolder(folder) {
+diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
+--- a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
++++ b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
+@@ -792,17 +792,22 @@ export const TreeListboxMixin = Base =>
+     /**
+      * Animate the collapsing of a row containing child items.
+      *
+      * @param {HTMLLIElement} row - The parent row element.
+      */
+     _animateCollapseRow(row) {
+       const childList = row.querySelector("ol, ul");
+ 
+-      if (reducedMotionMedia.matches) {
++      // Bail out if user prefers reduced motion, or if the row is inside an
++      // already collapsed ancestor.
++      if (
++        reducedMotionMedia.matches ||
++        row.parentNode.closest("li.collapsed")
++      ) {
+         if (childList) {
+           this._hideChildList(childList);
+         }
+         return;
+       }
+ 
+       const childListHeight = childList.scrollHeight;
+ 
+@@ -829,17 +834,22 @@ export const TreeListboxMixin = Base =>
+      * Animate the revealing of a row containing child items.
+      *
+      * @param {HTMLLIElement} row - The parent row element.
+      */
+     _animateExpandRow(row) {
+       const childList = row.querySelector("ol, ul");
+       childList.hidden = false;
+ 
+-      if (reducedMotionMedia.matches) {
++      // Bail out if user prefers reduced motion, or if the row is inside a
++      // still collapsed ancestor.
++      if (
++        reducedMotionMedia.matches ||
++        row.parentNode.closest("li.collapsed")
++      ) {
+         if (childList) {
+           childList.style.height = null;
+         }
+         return;
+       }
+ 
+       const childListHeight = childList.scrollHeight;
+ 
+

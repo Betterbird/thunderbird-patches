@@ -1,0 +1,152 @@
+
+# HG changeset patch
+# User Brian <brian@tno.me>
+# Date 1770275431 -7200
+# Node ID 9bb559a9fe8544fab2c780e24c7e046e46da01e9
+# Parent  1862c38e69ba79ba22818202a498faabbd4a0aab
+Bug 1921611: Handle snooze/dismiss errors r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D280753
+
+diff --git a/calendar/base/src/CalAlarmService.sys.mjs b/calendar/base/src/CalAlarmService.sys.mjs
+--- a/calendar/base/src/CalAlarmService.sys.mjs
++++ b/calendar/base/src/CalAlarmService.sys.mjs
+@@ -197,16 +197,19 @@ CalAlarmService.prototype = {
+   _logger: console.createInstance({
+     prefix: "calendar.alarms",
+     maxLogLevel: "Warn",
+     maxLogLevelPref: "calendar.alarms.loglevel",
+   }),
+ 
+   /**
+    * nsIObserver
++   *
++   * @param {nsISupports} aSubject - The subject of the observation.
++   * @param {string} aTopic - The topic of the observation.
+    */
+   observe(aSubject, aTopic) {
+     // This will also be called on app-startup, but nothing is done yet, to
+     // prevent unwanted dialogs etc. See bug 325476 and 413296
+     if (aTopic == "profile-after-change" || aTopic == "wake_notification") {
+       this.shutdown();
+       this.startup();
+     }
+@@ -250,20 +253,27 @@ CalAlarmService.prototype = {
+       // there was a snooze, but also which occurrence was snoozed.  Part
+       // of me just wants to create a local db of snoozes here...
+       propName = "X-MOZ-SNOOZE-TIME-" + aItem.recurrenceId.nativeTime;
+     }
+     newEvent.setProperty(propName, alarmTime.icalString);
+ 
+     // calling modifyItem will cause us to get the right callback
+     // and update the alarm properly
+-    const modifiedItem = await newEvent.calendar.modifyItem(newEvent, aItem.parentItem);
++    try {
++      const modifiedItem = await newEvent.calendar.modifyItem(newEvent, aItem.parentItem);
+ 
+-    if (modifiedItem.getProperty(propName) == alarmTime.icalString) {
+-      return;
++      if (modifiedItem.getProperty(propName) == alarmTime.icalString) {
++        return;
++      }
++    } catch (e) {
++      this._logger.warn(
++        `Failed to snooze alarm for item ${aItem.hashId}. This alarm will be ignored.`,
++        e
++      );
+     }
+ 
+     // The server did not persist our changes for some reason.
+     // Include the item in the ignored list so we skip displaying alarms for
+     // this item in the future.
+     IgnoredAlarmsStore.add(aItem);
+   },
+ 
+@@ -279,19 +289,26 @@ CalAlarmService.prototype = {
+       newParent.alarmLastAck = now;
+       // Make sure to clear out any snoozes that were here.
+       if (aItem.recurrenceId) {
+         newParent.deleteProperty("X-MOZ-SNOOZE-TIME-" + aItem.recurrenceId.nativeTime);
+       } else {
+         newParent.deleteProperty("X-MOZ-SNOOZE-TIME");
+       }
+ 
+-      const modifiedItem = await newParent.calendar.modifyItem(newParent, oldParent);
+-      if (modifiedItem.alarmLastAck && now.compare(modifiedItem.alarmLastAck) == 0) {
+-        return;
++      try {
++        const modifiedItem = await newParent.calendar.modifyItem(newParent, oldParent);
++        if (modifiedItem.alarmLastAck && now.compare(modifiedItem.alarmLastAck) == 0) {
++          return;
++        }
++      } catch (e) {
++        this._logger.warn(
++          `Failed to dismiss alarm for item ${aItem.hashId}. This alarm will be ignored.`,
++          e
++        );
+       }
+ 
+       // The server did not persist our changes for some reason.
+       // Include the item in the ignored list so we skip displaying alarms for
+       // this item in the future.
+       IgnoredAlarmsStore.add(aItem);
+     }
+     // if the calendar of the item is r/o, we simple remove the alarm
+@@ -596,17 +613,17 @@ CalAlarmService.prototype = {
+         this.removeFiredNotificationTimer(item);
+       },
+     };
+     const timeouts = this.calculateNotificationTimeouts(item);
+     const timers = timeouts.map(timeout =>
+       newTimerWithCallback(alarmTimerCallback, timeout, false)
+     );
+ 
+-    if (timers.length > 0) {
++    if (timers.length) {
+       this._logger.debug(
+         `addNotificationForItem hashId=${item.hashId}: adding ${timers.length} timers, timeouts=${timeouts}`
+       );
+       this.mNotificationTimerMap[item.calendar.id] =
+         this.mNotificationTimerMap[item.calendar.id] || {};
+       this.mNotificationTimerMap[item.calendar.id][item.hashId] = timers;
+     }
+   },
+@@ -626,17 +643,17 @@ CalAlarmService.prototype = {
+ 
+     for (const timer of this.mNotificationTimerMap[item.calendar.id][item.hashId]) {
+       timer.cancel();
+     }
+ 
+     delete this.mNotificationTimerMap[item.calendar.id][item.hashId];
+ 
+     // If the calendar map is empty, remove it from the timer map
+-    if (Object.keys(this.mNotificationTimerMap[item.calendar.id]).length == 0) {
++    if (!Object.keys(this.mNotificationTimerMap[item.calendar.id]).length) {
+       delete this.mNotificationTimerMap[item.calendar.id];
+     }
+   },
+ 
+   /**
+    * Remove the first notification timers for an item to release some memory.
+    *
+    * @param {calIItemBase} item - A calendar item instance.
+@@ -649,17 +666,17 @@ CalAlarmService.prototype = {
+     this._logger.debug(
+       `removeFiredNotificationTimer hashId=${item.hashId}: removed=${removed.delay}, remaining ${remainingTimersCount} timers`
+     );
+     if (remainingTimersCount == 0) {
+       delete this.mNotificationTimerMap[item.calendar.id][item.hashId];
+     }
+ 
+     // If the calendar map is empty, remove it from the timer map
+-    if (Object.keys(this.mNotificationTimerMap[item.calendar.id]).length == 0) {
++    if (!Object.keys(this.mNotificationTimerMap[item.calendar.id]).length) {
+       delete this.mNotificationTimerMap[item.calendar.id];
+     }
+   },
+ 
+   getOccurrencesInRange(aItem) {
+     // We search 1 month in each direction for alarms.  Therefore,
+     // we need occurrences between initial start date and 1 month from now
+     const until = nowUTC();
+

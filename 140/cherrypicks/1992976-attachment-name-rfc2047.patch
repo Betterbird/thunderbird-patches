@@ -1,0 +1,152 @@
+
+# HG changeset patch
+# User John Bieling <john@thunderbird.net>
+# Date 1762882533 -7200
+# Node ID 9db27c75073b5aa9535e5ef78abf85f765834cee
+# Parent  0a02e98ad552ab8609e2a10f3fb0f2c346230745
+Bug 1992976 - Fix regression in attachment name handling and return the decoded value. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D271298
+
+diff --git a/mail/components/extensions/ExtensionMessages.sys.mjs b/mail/components/extensions/ExtensionMessages.sys.mjs
+--- a/mail/components/extensions/ExtensionMessages.sys.mjs
++++ b/mail/components/extensions/ExtensionMessages.sys.mjs
+@@ -304,18 +304,21 @@ class WebExtMimeTreeEmitter extends Mime
+       return null;
+     }
+ 
+     let name;
+     const contentDisposition = mimeTreePart.headers.get("content-disposition");
+     if (contentDisposition) {
+       name = lazy.MimeParser.getParameter(contentDisposition[0], "filename");
+     }
++    if (!name && mimeTreePart.fullContentType) {
++      name = lazy.MimeParser.getParameter(mimeTreePart.fullContentType, "name");
++    }
+     if (!name) {
+-      name = mimeTreePart.headers.contentType.get("name") || "";
++      name = "";
+     }
+ 
+     // Handle forwarded messages.
+     if (type == "message/rfc822") {
+       return name || "ForwardedMessage.eml";
+     }
+ 
+     // Handle deleted attachments.
+diff --git a/mail/components/extensions/test/xpcshell/test_ext_messages_attachments.js b/mail/components/extensions/test/xpcshell/test_ext_messages_attachments.js
+--- a/mail/components/extensions/test/xpcshell/test_ext_messages_attachments.js
++++ b/mail/components/extensions/test/xpcshell/test_ext_messages_attachments.js
+@@ -20,16 +20,20 @@ add_setup(
+     const _testFolder1 = await createSubfolder(
+       _account.incomingServer.rootFolder,
+       "test1"
+     );
+     const _testFolder2 = await createSubfolder(
+       _account.incomingServer.rootFolder,
+       "test2"
+     );
++    const _testFolder3 = await createSubfolder(
++      _account.incomingServer.rootFolder,
++      "test3"
++    );
+ 
+     const textAttachment = {
+       body: "textAttachment",
+       filename: "test.txt",
+       contentType: "text/plain",
+     };
+     const binaryAttachment = {
+       body: btoa("binaryAttachment"),
+@@ -79,16 +83,40 @@ add_setup(
+       do_get_file("messages/nestedMessageNoContentDispositionHeader.eml").path
+     );
+ 
+     // A binary attachment marked as inline.
+     await createMessageFromFile(
+       _testFolder2,
+       do_get_file("messages/inlineBinaryAttachment.eml").path
+     );
++
++    await createMessageFromString(
++      _testFolder3,
++      `Message-ID: <dee7b8bf-0c49-486b-b710-265a3b0be77e@mime.sample>
++MIME-Version: 1.0
++To: User@invalid
++From: User <admin@invalid>
++Subject: umlaut
++Content-Language: en-US
++Content-Type: multipart/mixed; boundary="------------PS4eoTwBacO1aHmKumdgIzBH"
++
++This message is in MIME format.  The first part should be readable text,
++while the remaining parts are likely unreadable without MIME-aware tools.
++
++--------------PS4eoTwBacO1aHmKumdgIzBH
++Content-Type: application/octet-stream;
++ name="=?UTF-8?B?UmVjaG51bmcgMjAy?==?UTF-8?B?NS0xMDU2MTE5LnBk?==?UTF-8?B?Zg==?="
++Content-Transfer-Encoding: base64
++Content-Disposition: attachment
++
++PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxhPsO2PC9hPg==
++
++--------------PS4eoTwBacO1aHmKumdgIzBH--`
++    );
+   }
+ );
+ 
+ add_task(
+   {
+     skip_if: () => IS_IMAP,
+   },
+   async function test_attachments() {
+@@ -1103,8 +1131,49 @@ add_task(
+       },
+     });
+ 
+     await extension.startup();
+     await extension.awaitFinish("finished");
+     await extension.unload();
+   }
+ );
++
++add_task(
++  {
++    skip_if: () => IS_IMAP,
++  },
++  async function test_message_with_text_as_attachment() {
++    const extension = ExtensionTestUtils.loadExtension({
++      files: {
++        "background.js": async () => {
++          const [account] = await browser.accounts.list();
++          const testFolder = account.folders.find(f => f.name == "test3");
++          const { messages } = await browser.messages.list(testFolder.id);
++          browser.test.assertEq(1, messages.length);
++          const message = messages[0];
++
++          // Request attachments.
++          const attachments = await browser.messages.listAttachments(
++            message.id
++          );
++          browser.test.assertEq(1, attachments.length);
++          browser.test.assertEq("1.1", attachments[0].partName);
++          browser.test.assertEq(
++            "Rechnung 2025-1056119.pdf",
++            attachments[0].name
++          );
++
++          browser.test.notifyPass("finished");
++        },
++        "utils.js": await getUtilsJS(),
++      },
++      manifest: {
++        background: { scripts: ["utils.js", "background.js"] },
++        permissions: ["accountsRead", "messagesRead"],
++      },
++    });
++
++    await extension.startup();
++    await extension.awaitFinish("finished");
++    await extension.unload();
++  }
++);
+

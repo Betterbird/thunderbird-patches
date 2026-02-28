@@ -1,0 +1,121 @@
+
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1756198986 -43200
+# Node ID 6478f8b14ab858eb0c321d1ae7680e562469d6ae
+# Parent  d19d83e818f4dd1a4a18f22d3b93b245f1161a91
+Bug 1984376 - Try to use an existing login, ahead of OAuth2, for CalDAV/CardDAV. r=mkmelin
+This restores the behaviour that existed for Fastmail users with an app password until the OAuth code was changed.
+Nothing else should be affected as only Fastmail has multiple authentication options.
+
+It does not enable app passwords to be chosen instead of OAuth2 when setting up CalDAV or CardDAV.
+
+Differential Revision: https://phabricator.services.mozilla.com/D262551
+
+diff --git a/calendar/providers/caldav/modules/CalDavSession.sys.mjs b/calendar/providers/caldav/modules/CalDavSession.sys.mjs
+--- a/calendar/providers/caldav/modules/CalDavSession.sys.mjs
++++ b/calendar/providers/caldav/modules/CalDavSession.sys.mjs
+@@ -49,16 +49,28 @@ export class CalDavSession {
+ 
+   /**
+    * Prepare the channel for a request, e.g. setting custom authentication headers
+    *
+    * @param {nsIChannel} aChannel - The channel to prepare
+    * @returns {Promise} A promise resolved when the preparations are complete
+    */
+   async prepareRequest(aChannel) {
++    if (!("_oAuth" in this)) {
++      for (const login of await Services.logins.searchLoginsAsync({
++        origin: aChannel.URI.prePath,
++      })) {
++        // If we have a saved login, it might be a Fastmail user with an app password,
++        // in which case we want to use it for authentication instead of OAuth2.
++        if (login.username == this.username) {
++          this._oAuth = null; // Use this saved login instead of OAuth.
++          break;
++        }
++      }
++    }
+     // Set up oAuth. We could do this in the constructor but we need to have a hostname,
+     // which is fine in the normal case but difficult when detecting calendars.
+     if (!("_oAuth" in this)) {
+       const oAuth = new lazy.OAuth2Module();
+       if (oAuth.initFromHostname(aChannel.URI.host, this.username, "caldav")) {
+         this._oAuth = oAuth;
+       } else {
+         this._oAuth = null; // Prevents this block from running again.
+diff --git a/calendar/test/unit/test_detection.js b/calendar/test/unit/test_detection.js
+--- a/calendar/test/unit/test_detection.js
++++ b/calendar/test/unit/test_detection.js
+@@ -9,16 +9,18 @@ var { ICSServer } = ChromeUtils.importES
+   "resource://testing-common/calendar/ICSServer.sys.mjs"
+ );
+ 
+ var { detection } = ChromeUtils.importESModule(
+   "resource:///modules/calendar/utils/calProviderDetectionUtils.sys.mjs"
+ );
+ 
+ add_setup(async () => {
++  do_get_profile();
++
+   ICSServer.open();
+   ICSServer.putICSInternal(
+     CalendarTestUtils.dedent`
+       BEGIN:VCALENDAR
+       BEGIN:VEVENT
+       UID:6714b781-920f-46f8-80ec-3d3995e2e9ce
+       SUMMARY:some event
+       DTSTART:20210401T120000Z
+diff --git a/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs b/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
+--- a/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
++++ b/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
+@@ -192,34 +192,42 @@ export class CardDAVDirectory extends SQ
+    *
+    * @param {string} path - A path relative to the server URL.
+    * @param {object} details - See CardDAVUtils.makeRequest.
+    * @returns {Promise<object>} - See CardDAVUtils.makeRequest.
+    */
+   async _makeRequest(path, details = {}) {
+     const serverURI = Services.io.newURI(this._serverURL);
+     const uri = serverURI.resolve(path);
++    const username = this.getStringValue("carddav.username", "");
+ 
+     if (!("_oAuth" in this)) {
++      for (const login of await Services.logins.searchLoginsAsync({
++        origin: serverURI.prePath,
++      })) {
++        // If we have a saved login, it might be a Fastmail user with an app password,
++        // in which case we want to use it for authentication instead of OAuth2.
++        if (login.username == username) {
++          this._oAuth = null; // Use this saved login instead of OAuth.
++          break;
++        }
++      }
++    }
++    if (!("_oAuth" in this)) {
+       const oAuth = new lazy.OAuth2Module();
+       if (
+-        oAuth.initFromHostname(
+-          serverURI.host,
+-          this.getStringValue("carddav.username", "") || this.UID,
+-          "carddav"
+-        )
++        oAuth.initFromHostname(serverURI.host, username || this.UID, "carddav")
+       ) {
+         this._oAuth = oAuth;
+       } else {
+         this._oAuth = null; // Prevents this block from running again.
+       }
+     }
+     details.oAuth = this._oAuth;
+ 
+-    const username = this.getStringValue("carddav.username", "");
+     const callbacks = new lazy.NotificationCallbacks(username);
+     details.callbacks = callbacks;
+ 
+     details.userContextId =
+       this._userContextId ?? lazy.CardDAVUtils.contextForUsername(username);
+ 
+     let response;
+     try {
+
