@@ -231,7 +231,7 @@ if [ -d ../private-patches ]; then
   echo
   echo "======================="
   echo "Copying private patches"
-  cp ../private-patches/*.patch comm/.hg/patches/
+  cp ../private-patches/*.patch comm/.hg/patches/features/
 fi
 
 if [ "$NOMOZ" != "nomoz" ]; then
