@@ -39,6 +39,10 @@ mv localization\en-US\devtools\startup\ localization\%~1\devtools\startup\
 rm -rf chrome\en-US
 rm -rf localization\en-US
 
+:: Delete inbuilt en-US dictionary.
+rm -rf dictionaries
+truncate -s 0 chrome\browser\content\built_in_addons.json
+
 :: lessecho uses LR instead of CRLF
 lessecho %~1> default.locale
 lessecho %~1> res\multilocale.txt
