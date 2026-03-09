@@ -3,82 +3,82 @@ set lecho="C:\Program Files\Git\usr\bin\lessecho.exe"
 :: Script will only work if Windows system locale is set to UTF-8 !!
 
 :: Fix strings in appstrings.properties.
-sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.properties
+sed -i -e 's/Thunderbird/Betterbird/' chrome/uk/locale/uk/messenger/appstrings.properties
 
 :: Original strings:
 :: groupButtonTooltipText=Add a new group
-%lecho% "groupButtonTooltipText=Додати нову групу" >> chrome\uk\locale\uk\messenger\search.properties
+%lecho% "groupButtonTooltipText=Додати нову групу" >> chrome/uk/locale/uk/messenger/search.properties
 
 :: Original string:
 :: <!ENTITY folderContextStartupFolder.label "Startup Folder">
-%lecho% "<!ENTITY folderContextStartupFolder.label \"Тека автозапуску\">" >> chrome\uk\locale\uk\messenger\messenger.dtd
+%lecho% "<!ENTITY folderContextStartupFolder.label \"Тека автозапуску\">" >> chrome/uk/locale/uk/messenger/messenger.dtd
 
 :: Original strings:
 :: quick-filter-bar-untagged-button =
 ::     .tooltiptext = Show messages with no tags
 :: quick-filter-bar-tagged-button =
 ::     .tooltiptext = Show messages with one or more tags. Right-click to clear individual tag selection.
-%lecho% "quick-filter-bar-untagged-button ="                           >> localization\uk\messenger\about3Pane.ftl
-%lecho% "    .tooltiptext = Показувати повідомлення без ключових слів" >> localization\uk\messenger\about3Pane.ftl
-%lecho% "quick-filter-bar-tagged-button ="                             >> localization\uk\messenger\about3Pane.ftl
-%lecho% "    .tooltiptext = Відображати повідомлення з одним або кількома ключовими словами. Клацніть правою кнопкою миші, щоб видалити вибір ключових слів." >> localization\uk\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-untagged-button ="                           >> localization/uk/messenger/about3Pane.ftl
+%lecho% "    .tooltiptext = Показувати повідомлення без ключових слів" >> localization/uk/messenger/about3Pane.ftl
+%lecho% "quick-filter-bar-tagged-button ="                             >> localization/uk/messenger/about3Pane.ftl
+%lecho% "    .tooltiptext = Відображати повідомлення з одним або кількома ключовими словами. Клацніть правою кнопкою миші, щоб видалити вибір ключових слів." >> localization/uk/messenger/about3Pane.ftl
 
 :: Original strings:
 :: enable-gloda-search-encrypted-label =
 ::     .label = Enable search in encrypted messages (stores decrypted copy locally)
-%lecho% "enable-gloda-search-encrypted-label =" >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Зробити зашифровані повідомлення доступними для пошуку (зберігає розшифровану копію локально)" >> localization\uk\messenger\preferences\preferences.ftl
+%lecho% "enable-gloda-search-encrypted-label =" >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Зробити зашифровані повідомлення доступними для пошуку (зберігає розшифровану копію локально)" >> localization/uk/messenger/preferences/preferences.ftl
 
 :: Original strings:
 :: menuitem-recent-files =
 ::     .label = Recent File(s)…
 :: context-menuitem-recent-files =
 ::     .label = Attach Recent File(s)…
-%lecho% "menuitem-recent-files ="                    >> localization\uk\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Останній відкритий файл(и)..." >> localization\uk\messenger\messengercompose\messengercompose.ftl
-%lecho% "context-menuitem-recent-files ="            >> localization\uk\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Прикріпити останні файл(и)..." >> localization\uk\messenger\messengercompose\messengercompose.ftl
+%lecho% "menuitem-recent-files ="                    >> localization/uk/messenger/messengercompose/messengercompose.ftl
+%lecho% "    .label = Останній відкритий файл(и)..." >> localization/uk/messenger/messengercompose/messengercompose.ftl
+%lecho% "context-menuitem-recent-files ="            >> localization/uk/messenger/messengercompose/messengercompose.ftl
+%lecho% "    .label = Прикріпити останні файл(и)..." >> localization/uk/messenger/messengercompose/messengercompose.ftl
 
 :: Original strings:
 :: menu-multi-line-all-folders =
 ::     .label = Multi-line View On All Folders
-%lecho% "menu-multi-line-all-folders ="                   >> localization\uk\messenger\menubar.ftl
-%lecho% "    .label = Багаторядковий перегляд усіх папок" >> localization\uk\messenger\menubar.ftl
+%lecho% "menu-multi-line-all-folders ="                   >> localization/uk/messenger/menubar.ftl
+%lecho% "    .label = Багаторядковий перегляд усіх папок" >> localization/uk/messenger/menubar.ftl
 
 :: Original strings:
 :: compose-send-plain-or-html-option =
 ::     .label = Plain Text or HTML
 ::     .accesskey = O
 :: compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
-%lecho% "compose-send-plain-or-html-option ="    >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Звичайний текст або HTML"  >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "compose-send-plain-or-html-description = Якщо у повідомленні не використовується стиль, надіслати звичайний текст. В іншому випадку надіслати HTML із резервним варіантом у вигляді звичайного тексту." >> localization\uk\messenger\preferences\preferences.ftl
+%lecho% "compose-send-plain-or-html-option ="    >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Звичайний текст або HTML"  >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "compose-send-plain-or-html-description = Якщо у повідомленні не використовується стиль, надіслати звичайний текст. В іншому випадку надіслати HTML із резервним варіантом у вигляді звичайного тексту." >> localization/uk/messenger/preferences/preferences.ftl
 
-%lecho% "compose-send-plain-or-html-menu-item =" >> localization\uk\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .label = Звичайний текст або HTML"  >> localization\uk\messenger\messengercompose\messengercompose.ftl
-%lecho% "    .accesskey = O"                     >> localization\uk\messenger\messengercompose\messengercompose.ftl
+%lecho% "compose-send-plain-or-html-menu-item =" >> localization/uk/messenger/messengercompose/messengercompose.ftl
+%lecho% "    .label = Звичайний текст або HTML"  >> localization/uk/messenger/messengercompose/messengercompose.ftl
+%lecho% "    .accesskey = O"                     >> localization/uk/messenger/messengercompose/messengercompose.ftl
 
 :: Movemail
 :: Strings from https://hg.mozilla.org/l10n-central/uk/file/86e0abeb9aaa97dfe5ab5199249171b957b725dd/mail/chrome/messenger/localMsgs.properties
-%lecho% "movemailCantOpenSpoolFile=Неможливо відкрити файл поштового буфера %%S."     >> chrome\uk\locale\uk\messenger\localMsgs.properties
-%lecho% "movemailCantCreateLock=Неможливо створити блокуючий файл %%S. Для роботи Movemail необхідне створення таких файлів в каталозі поштового буфера. Для більшості систем досить встановити цьому каталогу має права 01777." >> chrome\uk\locale\uk\messenger\localMsgs.properties
-%lecho% "movemailCantDeleteLock=Неможливо стерти блокуючий файл %%S."                 >> chrome\uk\locale\uk\messenger\localMsgs.properties
-%lecho% "movemailCantTruncateSpoolFile=Неможливо зменшити файл буфера %%S." >> chrome\uk\locale\uk\messenger\localMsgs.properties
-%lecho% "movemailSpoolFileNotFound=Неможливо знайти локальний файл поштового буфера." >> chrome\uk\locale\uk\messenger\localMsgs.properties
-%lecho% "movemailCantParseSpool=Не вдалося розібрати файл буфера %%S. Файл може бути пошкоджений або недійсний." >> chrome\uk\locale\uk\messenger\localMsgs.properties
-%lecho% "serverType-movemail=Unix Movemail"                                           >> chrome\uk\locale\uk\messenger\messenger.properties
+%lecho% "movemailCantOpenSpoolFile=Неможливо відкрити файл поштового буфера %%S."     >> chrome/uk/locale/uk/messenger/localMsgs.properties
+%lecho% "movemailCantCreateLock=Неможливо створити блокуючий файл %%S. Для роботи Movemail необхідне створення таких файлів в каталозі поштового буфера. Для більшості систем досить встановити цьому каталогу має права 01777." >> chrome/uk/locale/uk/messenger/localMsgs.properties
+%lecho% "movemailCantDeleteLock=Неможливо стерти блокуючий файл %%S."                 >> chrome/uk/locale/uk/messenger/localMsgs.properties
+%lecho% "movemailCantTruncateSpoolFile=Неможливо зменшити файл буфера %%S." >> chrome/uk/locale/uk/messenger/localMsgs.properties
+%lecho% "movemailSpoolFileNotFound=Неможливо знайти локальний файл поштового буфера." >> chrome/uk/locale/uk/messenger/localMsgs.properties
+%lecho% "movemailCantParseSpool=Не вдалося розібрати файл буфера %%S. Файл може бути пошкоджений або недійсний." >> chrome/uk/locale/uk/messenger/localMsgs.properties
+%lecho% "serverType-movemail=Unix Movemail"                                           >> chrome/uk/locale/uk/messenger/messenger.properties
 
-%lecho% "account-action-add-movemail-account ="         >> localization\uk\messenger\accountManager.ftl
-%lecho% "    .label = Додати обліковий запис Movemail…" >> localization\uk\messenger\accountManager.ftl
-%lecho% "    .accesskey = M"                            >> localization\uk\messenger\accountManager.ftl
-%lecho% "file-new-movemail-account ="                   >> localization\uk\messenger\menubar.ftl
-%lecho% "    .label = Movemail-Обліковий запис..."      >> localization\uk\messenger\menubar.ftl
-%lecho% "    .accesskey = M"                            >> localization\uk\messenger\menubar.ftl
+%lecho% "account-action-add-movemail-account ="         >> localization/uk/messenger/accountManager.ftl
+%lecho% "    .label = Додати обліковий запис Movemail…" >> localization/uk/messenger/accountManager.ftl
+%lecho% "    .accesskey = M"                            >> localization/uk/messenger/accountManager.ftl
+%lecho% "file-new-movemail-account ="                   >> localization/uk/messenger/menubar.ftl
+%lecho% "    .label = Movemail-Обліковий запис..."      >> localization/uk/messenger/menubar.ftl
+%lecho% "    .accesskey = M"                            >> localization/uk/messenger/menubar.ftl
 
 :: Unread/seleted status
-%lecho% "unreadMsgStatus=Непрочитано: %%S" >> chrome\uk\locale\uk\messenger\messenger.properties
-%lecho% "selectedMsgStatus=Обрано: %%S"    >> chrome\uk\locale\uk\messenger\messenger.properties
-%lecho% "totalMsgStatus=Усього: %%S"       >> chrome\uk\locale\uk\messenger\messenger.properties
+%lecho% "unreadMsgStatus=Непрочитано: %%S" >> chrome/uk/locale/uk/messenger/messenger.properties
+%lecho% "selectedMsgStatus=Обрано: %%S"    >> chrome/uk/locale/uk/messenger/messenger.properties
+%lecho% "totalMsgStatus=Усього: %%S"       >> chrome/uk/locale/uk/messenger/messenger.properties
 
 :: Original strings:
 :: vertical-tabs-label =
@@ -87,12 +87,12 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.p
 :: attachments-display-top-label =
 ::     .label = Display attachment list above message
 ::     .accesskey = p
-%lecho% "vertical-tabs-label ="                                      >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Увімкнути вертикальні вкладки"                 >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = v"                                         >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "attachments-display-top-label ="                            >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Відобразити список вкладень над повідомленням" >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = o"                                         >> localization\uk\messenger\preferences\preferences.ftl
+%lecho% "vertical-tabs-label ="                                      >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Увімкнути вертикальні вкладки"                 >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .accesskey = v"                                         >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "attachments-display-top-label ="                            >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Відобразити список вкладень над повідомленням" >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .accesskey = o"                                         >> localization/uk/messenger/preferences/preferences.ftl
 
 :: Original strings:
 :: restore-tabs-session-label =
@@ -106,17 +106,17 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.p
 :: restore-no-tabs =
 ::     .label = None
 ::     .accesskey = n
-%lecho% "restore-tabs-session-label ="                              >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .value = Відновлення вкладок під час запуску системи:" >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "restore-all-tabs ="                                        >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Всі вкладки"                                  >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = A"                                        >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "restore-system-tabs ="                                     >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Системні вкладки"                             >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = S"                                        >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "restore-no-tabs ="                                         >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .label = Ні"                                           >> localization\uk\messenger\preferences\preferences.ftl
-%lecho% "    .accesskey = K"                                        >> localization\uk\messenger\preferences\preferences.ftl
+%lecho% "restore-tabs-session-label ="                              >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .value = Відновлення вкладок під час запуску системи:" >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "restore-all-tabs ="                                        >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Всі вкладки"                                  >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .accesskey = A"                                        >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "restore-system-tabs ="                                     >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Системні вкладки"                             >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .accesskey = S"                                        >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "restore-no-tabs ="                                         >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .label = Ні"                                           >> localization/uk/messenger/preferences/preferences.ftl
+%lecho% "    .accesskey = K"                                        >> localization/uk/messenger/preferences/preferences.ftl
 
 :: Original strings:
 :: menu-view-layout-widethread =
@@ -125,12 +125,12 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.p
 :: menu-view-layout-stacked =
 ::     .label = Stacked View
 ::     .accesskey = S
-%lecho% "menu-view-layout-widethread ="   >> localization\uk\messenger\menubar.ftl
-%lecho% "    .label = Широкий перегляд"   >> localization\uk\messenger\menubar.ftl
-%lecho% "    .accesskey = B"              >> localization\uk\messenger\menubar.ftl
-%lecho% "menu-view-layout-stacked ="      >> localization\uk\messenger\menubar.ftl
-%lecho% "    .label = Складений перегляд" >> localization\uk\messenger\menubar.ftl
-%lecho% "    .accesskey = S"              >> localization\uk\messenger\menubar.ftl
+%lecho% "menu-view-layout-widethread ="   >> localization/uk/messenger/menubar.ftl
+%lecho% "    .label = Широкий перегляд"   >> localization/uk/messenger/menubar.ftl
+%lecho% "    .accesskey = B"              >> localization/uk/messenger/menubar.ftl
+%lecho% "menu-view-layout-stacked ="      >> localization/uk/messenger/menubar.ftl
+%lecho% "    .label = Складений перегляд" >> localization/uk/messenger/menubar.ftl
+%lecho% "    .accesskey = S"              >> localization/uk/messenger/menubar.ftl
 
 :: Original strings:
 :: other-action-msg-edit-headers =
@@ -141,14 +141,14 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.p
 :: msg-edit-restore-button = Restore
 ::     .title = Show the original value
 :: msg-edit-update-button = Update
-%lecho% "other-action-msg-edit-headers ="                >> localization\uk\messenger\messenger.ftl
-%lecho% "    .label = Редагувати заголовки..."           >> localization\uk\messenger\messenger.ftl
-%lecho% "    .accesskey = K"                             >> localization\uk\messenger\messenger.ftl
-%lecho% "msg-edit-dialog-title = Редагування заголовків" >> localization\uk\messenger\messenger.ftl
-%lecho% "msg-edit-cancel-button = Скасувати"             >> localization\uk\messenger\messenger.ftl
-%lecho% "msg-edit-restore-button = Відновити"            >> localization\uk\messenger\messenger.ftl
-%lecho% "    .title = Показати оригінальне значення"     >> localization\uk\messenger\messenger.ftl
-%lecho% "msg-edit-update-button = Оновити"               >> localization\uk\messenger\messenger.ftl
+%lecho% "other-action-msg-edit-headers ="                >> localization/uk/messenger/messenger.ftl
+%lecho% "    .label = Редагувати заголовки..."           >> localization/uk/messenger/messenger.ftl
+%lecho% "    .accesskey = K"                             >> localization/uk/messenger/messenger.ftl
+%lecho% "msg-edit-dialog-title = Редагування заголовків" >> localization/uk/messenger/messenger.ftl
+%lecho% "msg-edit-cancel-button = Скасувати"             >> localization/uk/messenger/messenger.ftl
+%lecho% "msg-edit-restore-button = Відновити"            >> localization/uk/messenger/messenger.ftl
+%lecho% "    .title = Показати оригінальне значення"     >> localization/uk/messenger/messenger.ftl
+%lecho% "msg-edit-update-button = Оновити"               >> localization/uk/messenger/messenger.ftl
 
 :: Original strings:
 :: quick-filter-bar-negate =
@@ -160,15 +160,15 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.p
 ::       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 ::       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 ::       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
-%lecho% "quick-filter-bar-negate ="                                                                                                               >> localization\uk\messenger\about3Pane.ftl
-%lecho% "    .title = Натискання правої кнопки миші або одночасне натискання клавіш Ctrl та Enter на кнопці призводить до скасування дії."        >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      Для фільтра тексту та тегів будь-яка відхилена кнопка створює умову 'І'."                                                          >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      Коли фільтр за тегами інвертований (відкинутий), вибір кнопки тега додає відповідні повідомлення до списку повідомлень без тегів." >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      Приклади:"                                                                                                                         >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      • [Зірка] та [Теги] відхилені: Показати всі повідомлення, які не відмічені зірочкою і не мають тегів."                             >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      • [Тема] відкинута, а [тіло] вибрано: Показати всі повідомлення, в яких 'тема' не містить 'слово', а 'тіло' містить 'слово'."      >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      • [Будь-який з] з вимкненою опцією [Важливі] та вибраними опціями [Робота] і [Особисте]."                                          >> localization\uk\messenger\about3Pane.ftl
-%lecho% "      Показати всі теговані повідомлення, які НЕ мають тегу 'Важливі' І які мають тег 'Робота' або 'Особисті'."                          >> localization\uk\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-negate ="                                                                                                               >> localization/uk/messenger/about3Pane.ftl
+%lecho% "    .title = Натискання правої кнопки миші або одночасне натискання клавіш Ctrl та Enter на кнопці призводить до скасування дії."        >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      Для фільтра тексту та тегів будь-яка відхилена кнопка створює умову 'І'."                                                          >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      Коли фільтр за тегами інвертований (відкинутий), вибір кнопки тега додає відповідні повідомлення до списку повідомлень без тегів." >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      Приклади:"                                                                                                                         >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      • [Зірка] та [Теги] відхилені: Показати всі повідомлення, які не відмічені зірочкою і не мають тегів."                             >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      • [Тема] відкинута, а [тіло] вибрано: Показати всі повідомлення, в яких 'тема' не містить 'слово', а 'тіло' містить 'слово'."      >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      • [Будь-який з] з вимкненою опцією [Важливі] та вибраними опціями [Робота] і [Особисте]."                                          >> localization/uk/messenger/about3Pane.ftl
+%lecho% "      Показати всі теговані повідомлення, які НЕ мають тегу 'Важливі' І які мають тег 'Робота' або 'Особисті'."                          >> localization/uk/messenger/about3Pane.ftl
 
 :: New in 128:
 
@@ -179,32 +179,32 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome\uk\locale\uk\messenger\appstrings.p
 :: mail-context-reset-message-threading =
 ::     .label = Restore Original Threading
 ::     .accesskey = R
-%lecho% "mail-context-unthread-message ="                >> localization\uk\messenger\messenger.ftl
-%lecho% "    .label = Видалити з ланцюжка"               >> localization\uk\messenger\messenger.ftl
-%lecho% "    .accesskey = U"                             >> localization\uk\messenger\messenger.ftl
-%lecho% "mail-context-reset-message-threading ="         >> localization\uk\messenger\messenger.ftl
-%lecho% "    .label = Повернути до початкового ланцюжка" >> localization\uk\messenger\messenger.ftl
-%lecho% "    .accesskey = R"                             >> localization\uk\messenger\messenger.ftl
+%lecho% "mail-context-unthread-message ="                >> localization/uk/messenger/messenger.ftl
+%lecho% "    .label = Видалити з ланцюжка"               >> localization/uk/messenger/messenger.ftl
+%lecho% "    .accesskey = U"                             >> localization/uk/messenger/messenger.ftl
+%lecho% "mail-context-reset-message-threading ="         >> localization/uk/messenger/messenger.ftl
+%lecho% "    .label = Повернути до початкового ланцюжка" >> localization/uk/messenger/messenger.ftl
+%lecho% "    .accesskey = R"                             >> localization/uk/messenger/messenger.ftl
 
 :: Disable account:
 :: account-disabled =
 ::   .label = Account disabled
-%lecho% "account-disabled ="                    >> localization\uk\messenger\accountSettings.ftl
-%lecho% "  .label = Обліковий запис відключено" >> localization\uk\messenger\accountSettings.ftl
+%lecho% "account-disabled ="                    >> localization/uk/messenger/accountSettings.ftl
+%lecho% "  .label = Обліковий запис відключено" >> localization/uk/messenger/accountSettings.ftl
 
 :: Search AB via display name and nickname.
 :: quick-filter-bar-match-addressbook =
 ::     .label = Match Address Book
 ::     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
-%lecho% "quick-filter-bar-match-addressbook =" >> localization\uk\messenger\about3Pane.ftl
-%lecho% "    .label = Порівняти з контактами"  >> localization\uk\messenger\about3Pane.ftl
-%lecho% "    .tooltiptext = Зіставлення за ім'ям для відображення (починається з) або псевдонімом (точним) з ваших контактів" >> localization\uk\messenger\about3Pane.ftl
+%lecho% "quick-filter-bar-match-addressbook =" >> localization/uk/messenger/about3Pane.ftl
+%lecho% "    .label = Порівняти з контактами"  >> localization/uk/messenger/about3Pane.ftl
+%lecho% "    .tooltiptext = Зіставлення за ім'ям для відображення (починається з) або псевдонімом (точним) з ваших контактів" >> localization/uk/messenger/about3Pane.ftl
 
 :: Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
-sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization\uk\messenger\preferences\preferences.ftl
-sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get-app\1Thunderbird\2/' localization\uk\messenger\preferences\preferences.ftl
+sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization/uk/messenger/preferences/preferences.ftl
+sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get-app\1Thunderbird\2/' localization/uk/messenger/preferences/preferences.ftl
 
-%lecho% "Expires=Expires" >> chrome\uk\locale\uk\messenger\search-attributes.properties
+%lecho% "Expires=Expires" >> chrome/uk/locale/uk/messenger/search-attributes.properties
 
 :: New in 140:
 
@@ -212,9 +212,9 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: menu-view-layout-horizontal =
 ::    .label = Horizontal View
 ::    .accesskey = z
-%lecho% "menu-view-layout-horizontal ="      >> localization\uk\messenger\menubar.ftl
-%lecho% "    .label = Горизонтальний вигляд" >> localization\uk\messenger\menubar.ftl
-%lecho% "    .accesskey = z"                 >> localization\uk\messenger\menubar.ftl
+%lecho% "menu-view-layout-horizontal ="      >> localization/uk/messenger/menubar.ftl
+%lecho% "    .label = Горизонтальний вигляд" >> localization/uk/messenger/menubar.ftl
+%lecho% "    .accesskey = z"                 >> localization/uk/messenger/menubar.ftl
 
 :: Original strings:
 :: <!ENTITY storeOnUpdated.label     "Store updated articles">
@@ -222,61 +222,61 @@ sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get
 :: <!ENTITY storeOnUpdatedInfo.label "For Atom or JSON feeds with the &lt;updated&gt; tag. If the publisher changes the value, store the article instead of treating it as a duplicate.">
 :: <!ENTITY storeWebPageArchive.label "Store an archive of the web page with the article">
 :: <!ENTITY storeWebPageArchive.accesskey "w">
-%lecho% "<!ENTITY storeOnUpdated.label \"Зберігати оновлені статті\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                     >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Для стрічок Atom або JSON з тегом "'&lt;updated&gt;'". Якщо видавець змінює значення, стаття зберігається, а не вважається дублікатом.\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.label \"Зберігати архів вебсторінки разом зі статтею\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
-%lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome\uk\locale\uk\messenger-newsblog\feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.label \"Зберігати оновлені статті\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdated.accesskey \"u\">"                     >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
+%lecho% "<!ENTITY storeOnUpdatedInfo.label \"Для стрічок Atom або JSON з тегом "'&lt;updated&gt;'". Якщо видавець змінює значення, стаття зберігається, а не вважається дублікатом.\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.label \"Зберігати архів вебсторінки разом зі статтею\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
+%lecho% "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
 
 :: Original strings:
 :: run-filters-on-incoming-msgs =
 ::   .label = Run filters on incoming messages
-%lecho% "run-filters-on-incoming-msgs ="                       >> localization\uk\messenger\folderprops.ftl
-%lecho% "  .label = Запускати фільтри для вхідних повідомлень" >> localization\uk\messenger\folderprops.ftl
+%lecho% "run-filters-on-incoming-msgs ="                       >> localization/uk/messenger/folderprops.ftl
+%lecho% "  .label = Запускати фільтри для вхідних повідомлень" >> localization/uk/messenger/folderprops.ftl
 
 :: Original strings:
 :: carddav-directory-sync-warning =
 ::    CardDAV: Some data was dropped by the server, please check the Error Console for details
 ::carddav-directory-sync-failed =
 ::    CardDAV: Synchronisation with the server failed, please check the Error Console for details
-%lecho% "carddav-directory-sync-warning =" >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
-%lecho% "    CardDAV: Деякі дані були видалені сервером. Перевірте консоль помилок для отримання подробиць." >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
-%lecho% "carddav-directory-sync-failed =" >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
-%lecho% "    CardDAV: Не вдалося виконати синхронізацію з сервером. Перевірте консоль помилок для отримання подробиць." >> localization\uk\messenger\addressbook\abCardDAVProperties.ftl
+%lecho% "carddav-directory-sync-warning =" >> localization/uk/messenger/addressbook/abCardDAVProperties.ftl
+%lecho% "    CardDAV: Деякі дані були видалені сервером. Перевірте консоль помилок для отримання подробиць." >> localization/uk/messenger/addressbook/abCardDAVProperties.ftl
+%lecho% "carddav-directory-sync-failed =" >> localization/uk/messenger/addressbook/abCardDAVProperties.ftl
+%lecho% "    CardDAV: Не вдалося виконати синхронізацію з сервером. Перевірте консоль помилок для отримання подробиць." >> localization/uk/messenger/addressbook/abCardDAVProperties.ftl
 
 :: Strings for bug 1972710:
 :: folder-pane-context-reset-sort =
 ::   .label = Reset Folder Order
 ::   .accesskey = R
-%lecho% "folder-pane-context-reset-sort =" >> localization\uk\messenger\about3Pane.ftl
-%lecho% "  .label = Скинути порядок папок" >> localization\uk\messenger\about3Pane.ftl
-%lecho% "  .accesskey = К"                 >> localization\uk\messenger\about3Pane.ftl
+%lecho% "folder-pane-context-reset-sort =" >> localization/uk/messenger/about3Pane.ftl
+%lecho% "  .label = Скинути порядок папок" >> localization/uk/messenger/about3Pane.ftl
+%lecho% "  .accesskey = К"                 >> localization/uk/messenger/about3Pane.ftl
 
 :: Strings for searching all mail accounts:
 :: search-all-mail-accounts =
 ::   .label = Search all mail accounts
 ::   .accesskey = m
-%lecho% "search-all-mail-accounts ="                         >> localization\uk\messenger\messenger.ftl
-%lecho% "  .label = Пошук у всіх поштових облікових записах" >> localization\uk\messenger\messenger.ftl
-%lecho% "  .accesskey = п"                                   >> localization\uk\messenger\messenger.ftl
+%lecho% "search-all-mail-accounts ="                         >> localization/uk/messenger/messenger.ftl
+%lecho% "  .label = Пошук у всіх поштових облікових записах" >> localization/uk/messenger/messenger.ftl
+%lecho% "  .accesskey = п"                                   >> localization/uk/messenger/messenger.ftl
 
 :: New Gloda facets:
 :: gloda.message.attr._subjectMatches.facetNameLabel=Subject
 :: gloda.message.attr._bodyMatches.facetNameLabel=Body
-%lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Тема" >> chrome\uk\locale\uk\messenger\gloda.properties
-%lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Змістом" >> chrome\uk\locale\uk\messenger\gloda.properties
+%lecho% "gloda.message.attr._subjectMatches.facetNameLabel=Тема" >> chrome/uk/locale/uk/messenger/gloda.properties
+%lecho% "gloda.message.attr._bodyMatches.facetNameLabel=Змістом" >> chrome/uk/locale/uk/messenger/gloda.properties
 
 :: Categories:
-%lecho% "about-addressbook-details-categories-header = Категорії" >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "about-addressbook-column-header-categories2 = Категорії" >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "  .title = Сортувати за категоріями"                     >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "about-addressbook-column-label-categories2 ="            >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "  .label = Категорії"                                    >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "about-addressbook-cell-categories2 ="                    >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "  .aria-label = Категорії"                               >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "  .title = { $title }"                                   >> localization\uk\messenger\addressbook\aboutAddressBook.ftl
-%lecho% "vcard-categories-header = Категорії"                     >> localization\uk\messenger\addressbook\vcard.ftl
-%lecho% "vcard-category-add = Додати категорію"                   >> localization\uk\messenger\addressbook\vcard.ftl
-%lecho% "vcard-category-input-label = Категорія"                  >> localization\uk\messenger\addressbook\vcard.ftl
-%lecho% "vcard-category-input-title = Назва категорії"            >> localization\uk\messenger\addressbook\vcard.ftl
-%lecho% "Categories=Категорії" >> chrome\uk\locale\uk\messenger\search-attributes.properties
+%lecho% "about-addressbook-details-categories-header = Категорії" >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "about-addressbook-column-header-categories2 = Категорії" >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "  .title = Сортувати за категоріями"                     >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "about-addressbook-column-label-categories2 ="            >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "  .label = Категорії"                                    >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "about-addressbook-cell-categories2 ="                    >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "  .aria-label = Категорії"                               >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "  .title = { $title }"                                   >> localization/uk/messenger/addressbook/aboutAddressBook.ftl
+%lecho% "vcard-categories-header = Категорії"                     >> localization/uk/messenger/addressbook/vcard.ftl
+%lecho% "vcard-category-add = Додати категорію"                   >> localization/uk/messenger/addressbook/vcard.ftl
+%lecho% "vcard-category-input-label = Категорія"                  >> localization/uk/messenger/addressbook/vcard.ftl
+%lecho% "vcard-category-input-title = Назва категорії"            >> localization/uk/messenger/addressbook/vcard.ftl
+%lecho% "Categories=Категорії" >> chrome/uk/locale/uk/messenger/search-attributes.properties
