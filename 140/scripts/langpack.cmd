@@ -35,7 +35,7 @@ rmdir /s /q localization\en-US
 call ..\%~1.cmd
 
 :: Pack the whole thing again
-7z a -r -tzip %~1-%~2.xpi manifest.json chrome localization
+7z a -tzip %~1-%~2.xpi manifest.json chrome localization
 
 rmdir /s /q chrome
 rmdir /s /q localization
