@@ -154,3 +154,18 @@ lessecho "  .accesskey = m"                    >> localization/en-GB/messenger/m
 # New Gloda facets:
 lessecho "gloda.message.attr._subjectMatches.facetNameLabel=Subject" >> chrome/en-GB/locale/en-GB/messenger/gloda.properties
 lessecho "gloda.message.attr._bodyMatches.facetNameLabel=Body"       >> chrome/en-GB/locale/en-GB/messenger/gloda.properties
+
+# Categories:
+lessecho "about-addressbook-details-categories-header = Categories" >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "about-addressbook-column-header-categories2 = Categories" >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "  .title = Sort by categories"                            >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "about-addressbook-column-label-categories2 ="             >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "  .label = Categories"                                    >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "about-addressbook-cell-categories2 ="                     >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "  .aria-label = Categories"                               >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "  .title = { \$title }"                                   >> localization/en-GB/messenger/addressbook/aboutAddressBook.ftl
+lessecho "vcard-categories-header = Categories"                     >> localization/en-GB/messenger/addressbook/vcard.ftl
+lessecho "vcard-category-add = Add category"                        >> localization/en-GB/messenger/addressbook/vcard.ftl
+lessecho "vcard-category-input-label = Category"                    >> localization/en-GB/messenger/addressbook/vcard.ftl
+lessecho "vcard-category-input-title = Category name"               >> localization/en-GB/messenger/addressbook/vcard.ftl
+lessecho "Categories=Categories" >> chrome/en-GB/locale/en-GB/messenger/search-attributes.properties
