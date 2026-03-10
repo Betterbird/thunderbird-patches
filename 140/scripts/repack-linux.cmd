@@ -53,7 +53,7 @@ sed -i -e 's/en-US en-US\/locale\/en-US/%~1 %~1\/locale\/%~1/' chrome\chrome.man
 sed -i -e 's/en-US en-US\/locale\/pdfviewer/%~1 %~1\/locale\/pdfviewer/' chrome\chrome.manifest
 
 :: Call script that provides extra strings
-call ..\%~1.cmd
+bash ..\%~1.sh
 
 :: Pack the whole thing again
 7z a -tzip -m0=Copy omni.ja *
