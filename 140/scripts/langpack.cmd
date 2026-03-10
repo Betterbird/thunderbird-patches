@@ -32,7 +32,7 @@ rmdir /s /q chrome\en-US
 rmdir /s /q localization\en-US
 
 :: Call script that provides extra strings
-call ..\%~1.cmd
+bash ..\%~1.sh
 
 :: Pack the whole thing again
 7z a -tzip %~1-%~2.xpi manifest.json chrome localization
