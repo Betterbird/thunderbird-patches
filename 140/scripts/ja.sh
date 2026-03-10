@@ -222,7 +222,7 @@ lessecho "    .accesskey = z"            >> localization/ja/messenger/menubar.ft
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"更新された記事を保存する\">" >> chrome/ja/locale/ja/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"u\">"                >> chrome/ja/locale/ja/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \""'&lt;updated&gt;'" タグを含む Atom または JSON フィードに対応します。発信元が値を変更した場合は、重複ではなく新しい記事として保存します。\">" >> chrome/ja/locale/ja/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"&lt;updated&gt; タグを含む Atom または JSON フィードに対応します。発信元が値を変更した場合は、重複ではなく新しい記事として保存します。\">" >> chrome/ja/locale/ja/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"記事と一緒にウェブページのアーカイブを保存する\">" >> chrome/ja/locale/ja/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/ja/locale/ja/messenger-newsblog/feed-subscriptions.dtd
 

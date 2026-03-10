@@ -225,7 +225,7 @@ lessecho "    .accesskey = z"               >> localization/cs/messenger/menubar
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"Uložit aktualizované články\">" >> chrome/cs/locale/cs/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"u\">"                       >> chrome/cs/locale/cs/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \"Pro kanály Atom nebo JSON s tagem "'&lt;updated&gt;'". Pokud vydavatel změní hodnotu, článek se uloží, aby nebyl považován za duplicitní.\">" >> chrome/cs/locale/cs/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"Pro kanály Atom nebo JSON s tagem &lt;updated&gt;. Pokud vydavatel změní hodnotu, článek se uloží, aby nebyl považován za duplicitní.\">" >> chrome/cs/locale/cs/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"Uložit archiv webové stránky spolu s článkem\">" >> chrome/cs/locale/cs/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/cs/locale/cs/messenger-newsblog/feed-subscriptions.dtd
 

@@ -222,7 +222,7 @@ lessecho "    .accesskey = z"                 >> localization/uk/messenger/menub
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"Зберігати оновлені статті\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"u\">"                     >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \"Для стрічок Atom або JSON з тегом "'&lt;updated&gt;'". Якщо видавець змінює значення, стаття зберігається, а не вважається дублікатом.\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"Для стрічок Atom або JSON з тегом &lt;updated&gt;. Якщо видавець змінює значення, стаття зберігається, а не вважається дублікатом.\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"Зберігати архів вебсторінки разом зі статтею\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/uk/locale/uk/messenger-newsblog/feed-subscriptions.dtd
 

@@ -219,7 +219,7 @@ lessecho "    .accesskey = y"            >> localization/tr/messenger/menubar.ft
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"Güncellenen makaleleri kaydet\">" >> chrome/tr/locale/tr/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"y\">"                         >> chrome/tr/locale/tr/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \""'&lt;updated&gt;'" etiketi bulunan Atom veya JSON beslemeleri için. Yayıncı bu değeri değiştirirse, makale yinelenmiş olarak sayılmak yerine kaydedilir.\">" >> chrome/tr/locale/tr/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"&lt;updated&gt; etiketi bulunan Atom veya JSON beslemeleri için. Yayıncı bu değeri değiştirirse, makale yinelenmiş olarak sayılmak yerine kaydedilir.\">" >> chrome/tr/locale/tr/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"Makaleyle birlikte web sayfasının bir arşivini kaydet\">" >> chrome/tr/locale/tr/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/tr/locale/tr/messenger-newsblog/feed-subscriptions.dtd
 

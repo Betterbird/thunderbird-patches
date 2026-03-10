@@ -222,7 +222,7 @@ lessecho "    .accesskey = z"                       >> localization/it/messenger
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"Salva articoli aggiornati\">" >> chrome/it/locale/it/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"o\">"                     >> chrome/it/locale/it/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \"Per feed Atom o JSON con il tag "'&lt;updated&gt;'". Se il publisher cambia il valore, salva l’articolo invece di considerarlo un duplicato.\">" >> chrome/it/locale/it/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"Per feed Atom o JSON con il tag &lt;updated&gt;. Se il publisher cambia il valore, salva l’articolo invece di considerarlo un duplicato.\">" >> chrome/it/locale/it/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"Salva un archivio della pagina web insieme all’articolo\">" >> chrome/it/locale/it/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/it/locale/it/messenger-newsblog/feed-subscriptions.dtd
 

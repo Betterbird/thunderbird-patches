@@ -222,7 +222,7 @@ lessecho "    .accesskey = z"            >> localization/zh-CN/messenger/menubar
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"保存已更新的文章\">" >> chrome/zh-CN/locale/zh-CN/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"u\">"           >> chrome/zh-CN/locale/zh-CN/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \"对于包含 "'&lt;updated&gt;'" 标签的 Atom 或 JSON 订阅源，如果发布者更改了该值，则保存文章，而非将其视作重复项。\">" >> chrome/zh-CN/locale/zh-CN/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"对于包含 &lt;updated&gt; 标签的 Atom 或 JSON 订阅源，如果发布者更改了该值，则保存文章，而非将其视作重复项。\">" >> chrome/zh-CN/locale/zh-CN/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"将网页的存档与文章一起保存\">" >> chrome/zh-CN/locale/zh-CN/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/zh-CN/locale/zh-CN/messenger-newsblog/feed-subscriptions.dtd
 

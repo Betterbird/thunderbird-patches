@@ -222,7 +222,7 @@ lessecho "    .accesskey = s"            >> localization/sv-SE/messenger/menubar
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"Spara uppdaterade artiklar\">" >> chrome/sv-SE/locale/sv-SE/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"u\">"                      >> chrome/sv-SE/locale/sv-SE/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \"För Atom- eller JSON-flöden med taggen "'&lt;updated&gt;'". Om utgivaren ändrar värdet sparas artikeln istället för att behandlas som en dubblett.\">" >> chrome/sv-SE/locale/sv-SE/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"För Atom- eller JSON-flöden med taggen &lt;updated&gt;. Om utgivaren ändrar värdet sparas artikeln istället för att behandlas som en dubblett.\">" >> chrome/sv-SE/locale/sv-SE/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"Spara ett arkiv av webbsidan tillsammans med artikeln\">" >> chrome/sv-SE/locale/sv-SE/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/sv-SE/locale/sv-SE/messenger-newsblog/feed-subscriptions.dtd
 

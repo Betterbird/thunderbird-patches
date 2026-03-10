@@ -225,7 +225,7 @@ lessecho "    .accesskey = z"               >> localization/de/messenger/menubar
 # <!ENTITY storeWebPageArchive.accesskey "w">
 lessecho "<!ENTITY storeOnUpdated.label \"Aktualisierte Artikel speichern\">" >> chrome/de/locale/de/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeOnUpdated.accesskey \"u\">"                           >> chrome/de/locale/de/messenger-newsblog/feed-subscriptions.dtd
-lessecho "<!ENTITY storeOnUpdatedInfo.label \"Für Atom- oder JSON-Feeds mit dem "'&lt;updated&gt;'"-Tag. Wenn der Herausgeber den Wert ändert, wird der Artikel gespeichert, anstatt ihn als Duplikat zu behandeln.\">" >> chrome/de/locale/de/messenger-newsblog/feed-subscriptions.dtd
+lessecho "<!ENTITY storeOnUpdatedInfo.label \"Für Atom- oder JSON-Feeds mit dem &lt;updated&gt;-Tag. Wenn der Herausgeber den Wert ändert, wird der Artikel gespeichert, anstatt ihn als Duplikat zu behandeln.\">" >> chrome/de/locale/de/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.label \"Archiv der Webseite zusammen mit dem Artikel speichern\">" >> chrome/de/locale/de/messenger-newsblog/feed-subscriptions.dtd
 lessecho "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/de/locale/de/messenger-newsblog/feed-subscriptions.dtd
 
