@@ -1,0 +1,160 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1773228130 -39600
+# Parent  6e9ec949e5c8ec14695d5ef055ed771c35438f52
+Feature: Add "Open in Folder" button next to link when the link points to an associated message (mid: link).
+
+diff --git a/calendar/base/content/dialogs/calendar-dialog-utils.js b/calendar/base/content/dialogs/calendar-dialog-utils.js
+--- a/calendar/base/content/dialogs/calendar-dialog-utils.js
++++ b/calendar/base/content/dialogs/calendar-dialog-utils.js
+@@ -14,8 +14,9 @@
+ 
+ var { cal } = ChromeUtils.importESModule("resource:///modules/calendar/calUtils.sys.mjs");
+ var { openLinkExternally } = ChromeUtils.importESModule("resource:///modules/LinkHelper.sys.mjs");
+ var { XPCOMUtils } = ChromeUtils.importESModule("resource://gre/modules/XPCOMUtils.sys.mjs");
++var { MailUtils } = ChromeUtils.importESModule("resource:///modules/MailUtils.sys.mjs");
+ 
+ ChromeUtils.defineESModuleGetters(this, {
+   CalAlarm: "resource:///modules/CalAlarm.sys.mjs",
+ });
+@@ -617,4 +618,29 @@ function openAttachmentFromItemSummary(a
+   if (attachments.length && attachments[0].uri && attachments[0].uri.spec != "about:blank") {
+     openLinkExternally(attachments[0].uri, { addToHistory: false });
+   }
+ }
++
++function openMidLinkInFolder(url) {
++  if (!url.startsWith("mid:")) {
++    return;
++  }
++  const msgId = url.slice(4);
++  window?.setCursor("wait");
++  const msgHdr = MailUtils.getMsgHdrForMsgId(msgId);
++  window?.setCursor("auto");
++  if (msgHdr) {
++    MailUtils.displayMessageInFolderTab(msgHdr);
++    return;
++  }
++
++  const bundle = Services.strings.createBundle(
++    "chrome://messenger/locale/messenger.properties"
++  );
++  Services.prompt.alert(
++    window,
++    bundle.GetStringFromName("errorOpenMessageForMessageIdTitle"),
++    bundle.formatStringFromName("errorOpenMessageForMessageIdMessage", [
++      `<${msgId}>`,
++    ])
++  );
++}
+diff --git a/calendar/base/content/dialogs/calendar-summary-dialog.js b/calendar/base/content/dialogs/calendar-summary-dialog.js
+--- a/calendar/base/content/dialogs/calendar-summary-dialog.js
++++ b/calendar/base/content/dialogs/calendar-summary-dialog.js
+@@ -102,8 +102,14 @@ async function onLoad() {
+   window.focus();
+   // This class is removed so the dialog can resize correctly.
+   dialog.classList.remove("resize");
+   opener.setCursor("auto");
++
++  // URL link
++  const url = window.calendarItem.getProperty("URL")?.trim();
++  if (!url || !url.startsWith("mid:")) {
++    document.getElementById("openInFolderButton").disabled = true;
++  }
+ }
+ 
+ function onUnload() {
+   if (typeof window.ToolbarIconColor !== "undefined") {
+diff --git a/calendar/base/content/item-editing/calendar-item-iframe.js b/calendar/base/content/item-editing/calendar-item-iframe.js
+--- a/calendar/base/content/item-editing/calendar-item-iframe.js
++++ b/calendar/base/content/item-editing/calendar-item-iframe.js
+@@ -622,9 +622,13 @@ function loadDialog(aItem) {
+     updateAttachment();
+   }
+ 
+   // URL link
+-  updateItemURL(window.calendarItem.getProperty("URL")?.trim());
++  const url = window.calendarItem.getProperty("URL")?.trim();
++  if (!url || !url.startsWith("mid:")) {
++    document.getElementById("openInFolderButton").disabled = true;
++  }
++  updateItemURL(url);
+ 
+   // Description
+   const editorElement = document.getElementById("item-description");
+   const editor = editorElement.getHTMLEditor(editorElement.contentWindow);
+diff --git a/calendar/base/content/item-editing/calendar-item-iframe.xhtml b/calendar/base/content/item-editing/calendar-item-iframe.xhtml
+--- a/calendar/base/content/item-editing/calendar-item-iframe.xhtml
++++ b/calendar/base/content/item-editing/calendar-item-iframe.xhtml
+@@ -8,9 +8,10 @@
+ <!ENTITY % calendarDTD SYSTEM "chrome://calendar/locale/calendar.dtd">
+ <!ENTITY % eventDialogDTD SYSTEM "chrome://calendar/locale/calendar-event-dialog.dtd">
+ <!ENTITY % messengercomposeDTD SYSTEM "chrome://messenger/locale/messengercompose/messengercompose.dtd" >
+ <!ENTITY % editorOverlayDTD SYSTEM "chrome://messenger/locale/messengercompose/editorOverlay.dtd">
+-%brandDTD; %globalDTD; %calendarDTD; %eventDialogDTD; %messengercomposeDTD; %editorOverlayDTD; ]>
++<!ENTITY % SearchDialogDTD SYSTEM "chrome://messenger/locale/SearchDialog.dtd">
++%brandDTD; %globalDTD; %calendarDTD; %eventDialogDTD; %messengercomposeDTD; %editorOverlayDTD; %SearchDialogDTD; ]>
+ <html
+   id="calendar-event-dialog-inner"
+   xmlns="http://www.w3.org/1999/xhtml"
+   lightweightthemes="true"
+@@ -782,15 +783,18 @@
+         <html:th>
+           <label value="&event.url.label;" control="url-link" />
+         </html:th>
+         <html:td>
++          <hbox>
+           <label
+             id="url-link"
+-            class="text-link"
++            class="text-link push-down-8px"
+             onclick="launchBrowser(this.getAttribute('href'), event)"
+             oncommand="launchBrowser(this.getAttribute('href'), event)"
+             crop="end"
+           />
++          <button label="&openInFolder.label;" id="openInFolderButton" oncommand="openMidLinkInFolder(this.previousSibling.getAttribute('href'))" />
++          </hbox>
+         </html:td>
+       </html:tr>
+ 
+       <html:tr class="separator">
+diff --git a/calendar/base/content/widgets/calendar-item-summary.js b/calendar/base/content/widgets/calendar-item-summary.js
+--- a/calendar/base/content/widgets/calendar-item-summary.js
++++ b/calendar/base/content/widgets/calendar-item-summary.js
+@@ -175,10 +175,13 @@
+             <label value="&read.only.link.label;"
+                    class="header"/>
+             <separator class="groove" flex="1"/>
+           </hbox>
+-          <label class="url-link text-link default-indent"
++          <hbox>
++          <label class="url-link text-link push-down-8px default-indent"
+                  crop="end"/>
++          <button label="&openInFolder.label;" id="openInFolderButton" oncommand="openMidLinkInFolder(this.previousSibling.getAttribute('href'))" />
++          </hbox>
+         </box>
+       </vbox>`;
+     }
+ 
+@@ -187,8 +190,9 @@
+         "chrome://calendar/locale/global.dtd",
+         "chrome://calendar/locale/calendar.dtd",
+         "chrome://calendar/locale/calendar-event-dialog.dtd",
+         "chrome://branding/locale/brand.dtd",
++        "chrome://messenger/locale/SearchDialog.dtd",
+       ];
+     }
+ 
+     static get alarmMenulistFragment() {
+diff --git a/calendar/base/themes/common/dialogs/calendar-event-dialog.css b/calendar/base/themes/common/dialogs/calendar-event-dialog.css
+--- a/calendar/base/themes/common/dialogs/calendar-event-dialog.css
++++ b/calendar/base/themes/common/dialogs/calendar-event-dialog.css
+@@ -681,4 +681,8 @@ label.label {
+ .cloud-file-attach-image {
+   -moz-context-properties: fill;
+   fill: var(--selected-item-color);
+ }
++
++.push-down-8px {
++  margin-top: 8px;
++}
