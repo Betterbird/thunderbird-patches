@@ -1,0 +1,177 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1773222878 -39600
+# Node ID c28557d1ce8b52c40c47940a5c272326032bf59c
+# Parent  81cffc68836de0873554cc17c13753f43628237b
+Bug 2021848 - Show calendar event URL in dialog regardless of protocol handler. r=mkmelin
+
+Bug 1706158 removed the user toggle for the related link and updated the
+summary pane to always show the URL if present. However, it left behind
+strict protocol validation logic (showOrHideItemURL) in the event edit dialog.
+
+This caused a UI inconsistency where links with unregistered protocols
+(e.g., custom or app-specific schemes) were visible in the read-only summary
+pane but completely hidden when editing the event. This gave the false
+impression of data loss and prevented users from copying the link.
+
+This patch removes the OS protocol handler checks from calendar-dialog-utils.js
+and calendar-item-iframe.js. The URL field will now consistently display
+based solely on the presence of the string, matching the summary pane's behavior.
+
+Inspired by https://github.com/Betterbird/thunderbird-patches/blob/main/140/bugs/NNN33-always-show-calendar-item-links.patch
+
+Differential Revision: https://phabricator.services.mozilla.com/D286637
+
+diff --git a/calendar/base/content/dialogs/calendar-dialog-utils.js b/calendar/base/content/dialogs/calendar-dialog-utils.js
+--- a/calendar/base/content/dialogs/calendar-dialog-utils.js
++++ b/calendar/base/content/dialogs/calendar-dialog-utils.js
+@@ -3,9 +3,9 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ /* exported gInTab, gMainWindow, gTabmail, intializeTabOrWindowVariables,
+  *          dispose, setDialogId, loadReminders, saveReminder,
+- *          commonUpdateReminder, updateLink,
++ *          commonUpdateReminder,
+  *          adaptScheduleAgent, sendMailToOrganizer,
+  *          openAttachmentFromItemSummary,
+  */
+ 
+@@ -527,53 +527,8 @@ function commonUpdateReminder(
+   return reminderList.selectedIndex;
+ }
+ 
+ /**
+- * Updates the related link on the dialog. Currently only used by the
+- * read-only summary dialog.
+- *
+- * @param {string} itemUrlString - The calendar item URL as a string.
+- * @param {Element} linkRow - The row containing the link.
+- * @param {Element} urlLink - The link element itself.
+- */
+-function updateLink(itemUrlString, linkRow, urlLink) {
+-  const linkCommand = document.getElementById("cmd_toggle_link");
+-
+-  if (linkCommand) {
+-    // Disable if there is no url.
+-    linkCommand.disabled = !itemUrlString;
+-  }
+-
+-  if ((linkCommand && linkCommand.getAttribute("checked") != "true") || !itemUrlString.length) {
+-    // Hide if there is no url, or the menuitem was chosen so that the url
+-    // should be hidden
+-    linkRow.hidden = true;
+-  } else {
+-    let handler, uri;
+-    try {
+-      uri = Services.io.newURI(itemUrlString);
+-      handler = Services.io.getProtocolHandler(uri.scheme);
+-    } catch (e) {
+-      // No protocol handler for the given protocol, or invalid uri
+-      linkRow.hidden = true;
+-      return;
+-    }
+-
+-    // Only show if its either an internal protocol handler, or its external
+-    // and there is an external app for the scheme
+-    handler = cal.wrapInstance(handler, Ci.nsIExternalProtocolHandler);
+-    const show = !handler || handler.externalAppExistsForScheme(uri.scheme);
+-    linkRow.hidden = !show;
+-
+-    setTimeout(() => {
+-      // HACK the url link doesn't crop when setting the value in onLoad
+-      urlLink.setAttribute("value", itemUrlString);
+-      urlLink.setAttribute("href", itemUrlString);
+-    }, 0);
+-  }
+-}
+-
+-/**
+  * Adapts the scheduling responsibility for CalDAV servers according to RFC 6638
+  * based on forceEmailScheduling preference for the respective calendar.
+  *
+  * @param {calIEvent|calIToDo} aItem - Item to apply the change on
+diff --git a/calendar/base/content/item-editing/calendar-item-iframe.js b/calendar/base/content/item-editing/calendar-item-iframe.js
+--- a/calendar/base/content/item-editing/calendar-item-iframe.js
++++ b/calendar/base/content/item-editing/calendar-item-iframe.js
+@@ -622,11 +622,9 @@ function loadDialog(aItem) {
+     updateAttachment();
+   }
+ 
+   // URL link
+-  const itemUrl = window.calendarItem.getProperty("URL")?.trim() || "";
+-  const showLink = showOrHideItemURL(itemUrl);
+-  updateItemURL(showLink, itemUrl);
++  updateItemURL(window.calendarItem.getProperty("URL")?.trim());
+ 
+   // Description
+   const editorElement = document.getElementById("item-description");
+   const editor = editorElement.getHTMLEditor(editorElement.contentWindow);
+@@ -3664,54 +3662,28 @@ function updateAttachment() {
+   });
+ }
+ 
+ /**
+- * Returns whether to show or hide the related link on the dialog
+- * (rfc2445 URL property).
+- *
+- * @param {string} url - The url in question.
+- * @returns {boolean} true for show and false for hide
+- */
+-function showOrHideItemURL(url) {
+-  if (!url) {
+-    return false;
+-  }
+-  let handler;
+-  let uri;
+-  try {
+-    uri = Services.io.newURI(url);
+-    handler = Services.io.getProtocolHandler(uri.scheme);
+-  } catch (e) {
+-    // No protocol handler for the given protocol, or invalid uri
+-    // hideOrShow(false);
+-    return false;
+-  }
+-  // Only show if its either an internal protocol handler, or its external
+-  // and there is an external app for the scheme
+-  handler = cal.wrapInstance(handler, Ci.nsIExternalProtocolHandler);
+-  return !handler || handler.externalAppExistsForScheme(uri.scheme);
+-}
+-
+-/**
+  * Updates the related link on the dialog (rfc2445 URL property).
+  *
+- * @param {boolean} aShow - Show the link (true) or not (false).
+- * @param {string} aUrl - The url.
++ * @param {?string} url - The url.
+  */
+-function updateItemURL(aShow, aUrl) {
++function updateItemURL(url) {
+   // Hide or show the link
+-  document.getElementById("event-grid-link-separator").toggleAttribute("hidden", !aShow);
+-  document.getElementById("event-grid-link-row").toggleAttribute("hidden", !aShow);
++  document.getElementById("event-grid-link-separator").toggleAttribute("hidden", !url);
++  document.getElementById("event-grid-link-row").toggleAttribute("hidden", !url);
++
++  if (!url) {
++    return;
++  }
+ 
+   // Set the url for the link
+-  if (aShow && aUrl.length) {
+-    setTimeout(() => {
+-      // HACK the url-link doesn't crop when setting the value in onLoad
+-      const label = document.getElementById("url-link");
+-      label.setAttribute("value", aUrl);
+-      label.setAttribute("href", aUrl);
+-    }, 0);
+-  }
++  setTimeout(() => {
++    // HACK the url-link doesn't crop when setting the value in onLoad
++    const label = document.getElementById("url-link");
++    label.setAttribute("value", url);
++    label.setAttribute("href", url);
++  }, 0);
+ }
+ 
+ /**
+  * This function updates dialog controls related to attendees.
