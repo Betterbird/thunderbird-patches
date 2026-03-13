@@ -238,3 +238,40 @@ echo "carddav-directory-sync-warning =" >> localization/tr/messenger/addressbook
 echo "    CardDAV: Bazı veriler sunucu tarafından silindi, ayrıntılar için Hata Konsolunu kontrol edin" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
 echo "carddav-directory-sync-failed =" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: Sunucuyla eşzamanlama başarısız oldu, ayrıntılar için Hata Konsolunu kontrol edin" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
+
+# Strings for bug 1972710:
+# folder-pane-context-reset-sort =
+#   .label = Reset Folder Order
+#   .accesskey = R
+echo "folder-pane-context-reset-sort =" >> localization/tr/messenger/about3Pane.ftl
+echo "  .label = Reset Folder Order"    >> localization/tr/messenger/about3Pane.ftl
+echo "  .accesskey = R"                 >> localization/tr/messenger/about3Pane.ftl
+
+# Strings for searching all mail accounts:
+# search-all-mail-accounts =
+#   .label = Search all mail accounts
+#   .accesskey = m
+echo "search-all-mail-accounts ="          >> localization/tr/messenger/messenger.ftl
+echo "  .label = Search all mail accounts" >> localization/tr/messenger/messenger.ftl
+echo "  .accesskey = m"                    >> localization/tr/messenger/messenger.ftl
+
+# New Gloda facets:
+# gloda.message.attr._subjectMatches.facetNameLabel=Subject
+# gloda.message.attr._bodyMatches.facetNameLabel=Body
+echo "gloda.message.attr._subjectMatches.facetNameLabel=Subject" >> chrome/tr/locale/tr/messenger/gloda.properties
+echo "gloda.message.attr._bodyMatches.facetNameLabel=Body"       >> chrome/tr/locale/tr/messenger/gloda.properties
+
+# Categories:
+echo "about-addressbook-details-categories-header = Categories" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-categories2 = Categories" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = Sort by categories"                            >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-label-categories2 ="             >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .label = Categories"                                    >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-cell-categories2 ="                     >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .aria-label = Categories"                               >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = { \$title }"                                   >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "vcard-categories-header = Categories"                     >> localization/tr/messenger/addressbook/vcard.ftl
+echo "vcard-category-add = Add category"                        >> localization/tr/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-label = Category"                    >> localization/tr/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-title = Category name"               >> localization/tr/messenger/addressbook/vcard.ftl
+echo "Categories=Categories" >> chrome/tr/locale/tr/messenger/search-attributes.properties
