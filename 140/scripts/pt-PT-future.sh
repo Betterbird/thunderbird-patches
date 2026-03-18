@@ -19,7 +19,7 @@ echo "<!ENTITY folderContextStartupFolder.label \"Pasta de arranque\">" >> chrom
 echo "quick-filter-bar-untagged-button ="                 >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Mostrar mensagens sem etiquetas" >> localization/pt-PT/messenger/about3Pane.ftl
 echo "quick-filter-bar-tagged-button ="                   >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Faça clique direito para limpar a selecção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Clica com o botão direito para limpar a seleção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
 
 # Original strings:
 # enable-gloda-search-encrypted-label =
@@ -58,13 +58,13 @@ echo "    .accesskey = O"                     >> localization/pt-PT/messenger/me
 
 # Movemail
 # Strings from https://hg.mozilla.org/l10n-central/pt-PT/file/d540c584ace3454ca4bfe6183953afb00e4f7486/mail/chrome/messenger/localMsgs.properties
-echo "movemailCantOpenSpoolFile=Não foi possível abrir o ficheiro de spool %S."       >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantCreateLock=Não foi possível criar o ficheiro de bloqueio %S. Para mover o correio, tem que criar os ficheiros no diretório de spool. Em muitos sistemas, a melhor forma de o fazer é aplicar o modo 01777 no diretório." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantDeleteLock=Não foi possível apagar o ficheiro de bloqueio %S."      >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantOpenSpoolFile=Não foi possível abrir o ficheiro de spool %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantCreateLock=Não foi possível criar o ficheiro de bloqueio %S. Para mover o correio, tens de criar os ficheiros no diretório de spool. Em muitos sistemas, a melhor forma de o fazer é aplicar o modo 01777 no diretório." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantDeleteLock=Não foi possível eliminar o ficheiro de bloqueio %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
 echo "movemailCantTruncateSpoolFile=Não foi possível truncar o ficheiro de spool %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailSpoolFileNotFound=Não foi possível localizar o ficheiro de spool."       >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailSpoolFileNotFound=Não foi possível localizar o ficheiro de spool." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
 echo "movemailCantParseSpool=Não foi possível processar o ficheiro de spool %S. O ficheiro pode estar danificado ou inválido." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "serverType-movemail=Unix Movemail"                                               >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
+echo "serverType-movemail=Unix Movemail" >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
 
 echo "account-action-add-movemail-account ="  >> localization/pt-PT/messenger/accountManager.ftl
 echo "    .label = Adicionar conta Movemail…" >> localization/pt-PT/messenger/accountManager.ftl
@@ -125,10 +125,10 @@ echo "    .accesskey = n"                            >> localization/pt-PT/messe
 #     .label = Stacked View
 #     .accesskey = S
 echo "menu-view-layout-widethread ="    >> localization/pt-PT/messenger/menubar.ftl
-echo "    .label = Largo nas mensagens" >> localization/pt-PT/messenger/menubar.ftl
+echo "    .label = Vista em thread largo" >> localization/pt-PT/messenger/menubar.ftl
 echo "    .accesskey = T"               >> localization/pt-PT/messenger/menubar.ftl
 echo "menu-view-layout-stacked ="       >> localization/pt-PT/messenger/menubar.ftl
-echo "    .label = Empilhado"           >> localization/pt-PT/messenger/menubar.ftl
+echo "    .label = Vista empilhada"     >> localization/pt-PT/messenger/menubar.ftl
 echo "    .accesskey = S"               >> localization/pt-PT/messenger/menubar.ftl
 
 # Original strings:
@@ -160,14 +160,14 @@ echo "msg-edit-update-button = Actualizar"       >> localization/pt-PT/messenger
 #       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 #       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 echo "quick-filter-bar-negate ="                                                            >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .title = Clique direito ou Ctrl+Enter num botão nega o resultado."                >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      Para o filtro de texto e etiquetas, qualquer botão negado cria uma condição E." >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      Quando o filtro de etiquetas está negado, selecionar um botão de etiqueta adiciona as mensagens respectiva à lista de mensagens não etiquetadas." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .title = Clica com o botão direito ou Ctrl+Enter num botão para negar o resultado." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      Para o filtro de texto e de etiquetas, qualquer botão negado cria uma condição E." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      Quando o filtro de etiquetas está negado, selecionar um botão de etiqueta adiciona as mensagens respetivas à lista de mensagens sem etiqueta." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      Exemplos:"                                                                      >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      • [Com estrela] e [Etiquetas] negados: mostra todas as mensagens sem estrelas E sem etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      • [Assunto] negado e [Corpo] selecionados: mostra todas as mensagens onde “Assunto” não contém “palavra” E “Corpo” contém “palavra”." >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      • [Qualquer de] com [Importante] negados e [Trabalho] e [Pessoal] selecionado:" >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      Mostrar todas as mensagens etiquetadas que não têm a etiqueta “Importante” E têm a etiqueta “Trabalho“ OU “Pessoal”." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      • [Com estrela] e [Etiquetas] negados: mostra todas as mensagens que não têm estrela e não têm etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      • [Assunto] negado e [Corpo] seleccionado: mostra todas as mensagens onde o “Assunto” não contém “palavra” e o “Corpo” contém “palavra”." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      • [Qualquer de] com [Importante] negado e [Trabalho] e [Pessoal] seleccionados:" >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      Mostra todas as mensagens etiquetadas que não têm a etiqueta “Importante” e que têm a etiqueta “Trabalho” ou “Pessoal”." >> localization/pt-PT/messenger/about3Pane.ftl
 
 # New in 128:
 
@@ -197,7 +197,7 @@ echo "  .label = Conta desactivada" >> localization/pt-PT/messenger/accountSetti
 #     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
 echo "quick-filter-bar-match-addressbook ="                                                                         >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .label = Comparar com o livro de endereços"                                                               >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .tooltiptext = Comparar com o nome exibido (começa com) ou alcunha (exacta) nos seus livros de endereços" >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .tooltiptext = Comparar com o nome exibido (começa com) ou alcunha (exacta) nos teus livros de endereços" >> localization/pt-PT/messenger/about3Pane.ftl
 
 # Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization/pt-PT/messenger/preferences/preferences.ftl
@@ -239,9 +239,9 @@ echo "  .label = Executar filtros em mensagens chegadas" >> localization/pt-PT/m
 #carddav-directory-sync-failed =
 #    CardDAV: Synchronisation with the server failed, please check the Error Console for details
 echo "carddav-directory-sync-warning =" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
-echo "    CardDAV: alguns dados foram descartados pelo servidor, por favor, veja a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
+echo "    CardDAV: alguns dados foram descartados pelo servidor, por favor consulta a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 echo "carddav-directory-sync-failed =" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
-echo "    CardDAV: falha ao sincronizar com o servidor, por favor, veja a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
+echo "    CardDAV: falha ao sincronizar com o servidor, por favor consulta a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 
 # Strings for bug 1972710:
 # folder-pane-context-reset-sort =
@@ -265,17 +265,18 @@ echo "  .accesskey = m"                                  >> localization/pt-PT/m
 echo "gloda.message.attr._subjectMatches.facetNameLabel=Assunto" >> chrome/pt-PT/locale/pt-PT/messenger/gloda.properties
 echo "gloda.message.attr._bodyMatches.facetNameLabel=Corpo"      >> chrome/pt-PT/locale/pt-PT/messenger/gloda.properties
 
-# Categories:
-echo "about-addressbook-details-categories-header = Categories" >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
-echo "about-addressbook-column-header-categories2 = Categories" >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
-echo "  .title = Sort by categories"                            >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+# Categories
+echo "about-addressbook-details-categories-header = Categorias" >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-categories2 = Categorias" >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = Ordenar por categorias"                        >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-label-categories2 ="             >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
-echo "  .label = Categories"                                    >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .label = Categorias"                                    >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-cell-categories2 ="                     >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
-echo "  .aria-label = Categories"                               >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .aria-label = Categorias"                               >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
 echo "  .title = { \$title }"                                   >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
-echo "vcard-categories-header = Categories"                     >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "vcard-category-add = Add category"                        >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "vcard-category-input-label = Category"                    >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "vcard-category-input-title = Category name"               >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "Categories=Categories" >> chrome/pt-PT/locale/pt-PT/messenger/search-attributes.properties
+echo "vcard-categories-header = Categorias"                     >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-add = Adicionar categoria"                 >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-label = Categoria"                   >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-title = Nome da categoria"           >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "Categories=Categorias" >> chrome/pt-PT/locale/pt-PT/messenger/search-attributes.properties
+
