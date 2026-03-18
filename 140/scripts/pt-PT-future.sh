@@ -19,7 +19,7 @@ echo "<!ENTITY folderContextStartupFolder.label \"Pasta de arranque\">" >> chrom
 echo "quick-filter-bar-untagged-button ="                  >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Mostrar mensagens sem etiquetas" >> localization/pt-PT/messenger/about3Pane.ftl
 echo "quick-filter-bar-tagged-button ="                    >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Clica com o botão direito para limpar a seleção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Clique com o botão direito para limpar a seleção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
 
 # Original strings:
 # enable-gloda-search-encrypted-label =
@@ -59,7 +59,7 @@ echo "    .accesskey = O"                     >> localization/pt-PT/messenger/me
 # Movemail
 # Strings from https://hg.mozilla.org/l10n-central/pt-PT/file/d540c584ace3454ca4bfe6183953afb00e4f7486/mail/chrome/messenger/localMsgs.properties
 echo "movemailCantOpenSpoolFile=Não foi possível abrir o ficheiro de depósito %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantCreateLock=Não foi possível criar o ficheiro de bloqueio %S. Para mover o correio, tens de criar os ficheiros no diretório de depósito. Em muitos sistemas, a melhor forma de o fazer é aplicar o modo 01777 no diretório." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantCreateLock=Não foi possível criar o ficheiro de bloqueio %S. Para mover o correio, tem de criar os ficheiros no diretório de depósito. Em muitos sistemas, a melhor forma de o fazer é aplicar o modo 01777 no diretório." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
 echo "movemailCantDeleteLock=Não foi possível eliminar o ficheiro de bloqueio %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
 echo "movemailCantTruncateSpoolFile=Não foi possível truncar o ficheiro de depósito %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
 echo "movemailSpoolFileNotFound=Não foi possível localizar o ficheiro de depósito." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
@@ -160,14 +160,14 @@ echo "msg-edit-update-button = Atualizar"        >> localization/pt-PT/messenger
 #       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 #       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
 echo "quick-filter-bar-negate ="                                                            >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .title = Clica com o botão direito ou Ctrl+Enter num botão para negar o resultado." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .title = Clique com o botão direito ou Ctrl+Enter num botão para negar o resultado." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      Para o filtro de texto e de etiquetas, qualquer botão negado cria uma condição E." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      Quando o filtro de etiquetas está negado, selecionar um botão de etiqueta adiciona as mensagens respetivas à lista de mensagens sem etiqueta." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      Exemplos:"                                                                      >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      • [Com estrela] e [Etiquetas] negados: mostra todas as mensagens que não têm estrela e não têm etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      • [Assunto] negado e [Corpo] selecionado: mostra todas as mensagens onde o “Assunto” não contém “palavra” e o “Corpo” contém “palavra”." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      • [Qualquer de] com [Importante] negado e [Trabalho] e [Pessoal] selecionados:" >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      Mostra todas as mensagens etiquetadas que não têm a etiqueta “Importante” e que têm a etiqueta “Trabalho” ou “Pessoal”." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      Mostrar todas as mensagens etiquetadas que não têm a etiqueta “Importante” e que têm a etiqueta “Trabalho” ou “Pessoal”." >> localization/pt-PT/messenger/about3Pane.ftl
 
 # New in 128:
 
@@ -182,7 +182,7 @@ echo "mail-context-unthread-message ="         >> localization/pt-PT/messenger/m
 echo "    .label = Remover da sequência"        >> localization/pt-PT/messenger/messenger.ftl
 echo "    .accesskey = U"                       >> localization/pt-PT/messenger/messenger.ftl
 echo "mail-context-reset-message-threading =" >> localization/pt-PT/messenger/messenger.ftl
-echo "    .label = Restaurar encadeamento original"  >> localization/pt-PT/messenger/messenger.ftl
+echo "    .label = Restaurar sequência original"  >> localization/pt-PT/messenger/messenger.ftl
 echo "    .accesskey = R"                       >> localization/pt-PT/messenger/messenger.ftl
 
 # Disable account:
@@ -197,7 +197,7 @@ echo "  .label = Conta desativada"  >> localization/pt-PT/messenger/accountSetti
 #      .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
 echo "quick-filter-bar-match-addressbook ="                                                                   >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .label = Comparar com o livro de endereços"                                                              >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .tooltiptext = Comparar com o nome exibido (começa com) ou alcunha (exata) nos teus livros de endereços" >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .tooltiptext = Comparar com o nome exibido (começa com) ou alcunha (exata) nos seus livros de endereços" >> localization/pt-PT/messenger/about3Pane.ftl
 
 # Fix "qr-export-pane-header = Export accounts to { -brand-product-name } Mobile"
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization/pt-PT/messenger/preferences/preferences.ftl
@@ -239,7 +239,7 @@ echo "  .label = Executar filtros em mensagens chegadas" >> localization/pt-PT/m
 #carddav-directory-sync-failed =
 #    CardDAV: Synchronisation with the server failed, please check the Error Console for details
 echo "carddav-directory-sync-warning =" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
-echo "    CardDAV: alguns dados foram descartados pelo servidor, por favor consulta a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
+echo "    CardDAV: alguns dados foram descartados pelo servidor, por favor consulte a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 echo "carddav-directory-sync-failed =" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: falha ao sincronizar com o servidor, por favor consulta a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 
