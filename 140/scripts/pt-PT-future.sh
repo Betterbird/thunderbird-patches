@@ -19,7 +19,7 @@ echo "<!ENTITY folderContextStartupFolder.label \"Pasta de arranque\">" >> chrom
 echo "quick-filter-bar-untagged-button ="                 >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Mostrar mensagens sem etiquetas" >> localization/pt-PT/messenger/about3Pane.ftl
 echo "quick-filter-bar-tagged-button ="                   >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Clica com o botão direito para limpar a seleção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Clica com o botão direito para limpar a selecção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
 
 # Original strings:
 # enable-gloda-search-encrypted-label =
