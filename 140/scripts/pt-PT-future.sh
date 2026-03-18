@@ -264,3 +264,18 @@ echo "  .accesskey = m"                                  >> localization/pt-PT/m
 # gloda.message.attr._bodyMatches.facetNameLabel=Body
 echo "gloda.message.attr._subjectMatches.facetNameLabel=Assunto" >> chrome/pt-PT/locale/pt-PT/messenger/gloda.properties
 echo "gloda.message.attr._bodyMatches.facetNameLabel=Corpo"      >> chrome/pt-PT/locale/pt-PT/messenger/gloda.properties
+
+# Categories:
+echo "about-addressbook-details-categories-header = Categories" >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-categories2 = Categories" >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = Sort by categories"                            >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-label-categories2 ="             >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .label = Categories"                                    >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-cell-categories2 ="                     >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .aria-label = Categories"                               >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = { \$title }"                                   >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
+echo "vcard-categories-header = Categories"                     >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-add = Add category"                        >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-label = Category"                    >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-title = Category name"               >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "Categories=Categories" >> chrome/pt-PT/locale/pt-PT/messenger/search-attributes.properties
