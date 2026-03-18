@@ -241,7 +241,7 @@ echo "  .label = Executar filtros em mensagens chegadas" >> localization/pt-PT/m
 echo "carddav-directory-sync-warning =" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: alguns dados foram descartados pelo servidor, por favor consulte a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 echo "carddav-directory-sync-failed =" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
-echo "    CardDAV: falha ao sincronizar com o servidor, por favor consulta a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
+echo "    CardDAV: falha ao sincronizar com o servidor, por favor consulte a consola de erros para mais detalhes" >> localization/pt-PT/messenger/addressbook/abCardDAVProperties.ftl
 
 # Strings for bug 1972710:
 # folder-pane-context-reset-sort =
