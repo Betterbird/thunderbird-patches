@@ -40,7 +40,7 @@ echo "    .label = Anexar ficheiros recentes…" >> localization/pt-PT/messenger
 # Original strings:
 # menu-multi-line-all-folders =
 #     .label = Multi-line View On All Folders
-echo "menu-multi-line-all-folders ="                     >> localization/pt-PT/messenger/menubar.ftl
+echo "menu-multi-line-all-folders ="                    >> localization/pt-PT/messenger/menubar.ftl
 echo "    .label = Múltiplas linhas em todas as pastas" >> localization/pt-PT/messenger/menubar.ftl
 
 # Original strings:
@@ -133,8 +133,8 @@ echo "    .accesskey = E"               >> localization/pt-PT/messenger/menubar.
 
 # Original strings:
 # other-action-msg-edit-headers =
-#      .label = Edit Headers…
-#      .accesskey = H
+#     .label = Edit Headers…
+#     .accesskey = H
 # msg-edit-dialog-title = Edit Headers
 # msg-edit-cancel-button = Cancel
 # msg-edit-restore-button = Restore
@@ -151,7 +151,7 @@ echo "msg-edit-update-button = Atualizar"        >> localization/pt-PT/messenger
 
 # Original strings:
 # quick-filter-bar-negate =
-#      .title = Right-click or Ctrl+Enter on a button negates the result.
+#     .title = Right-click or Ctrl+Enter on a button negates the result.
 #       For the text and tag filter, any negated button creates an AND condition.
 #       When the tag filter is negated, selecting a tag button adds respective messages to the list of untagged messages.
 #       Examples:
@@ -213,7 +213,7 @@ echo "Expires=Expira" >> chrome/pt-PT/locale/pt-PT/messenger/search-attributes.p
 #    .accesskey = z
 echo "menu-view-layout-horizontal =" >> localization/pt-PT/messenger/menubar.ftl
 echo "    .label = Horizontal"       >> localization/pt-PT/messenger/menubar.ftl
-echo "    .accesskey = z"            >> localization/pt-PT/menubar.ftl
+echo "    .accesskey = z"            >> localization/pt-PT/messenger/menubar.ftl
 
 # Original strings:
 # <!ENTITY storeOnUpdated.label     "Store updated articles">
@@ -230,7 +230,7 @@ echo "<!ENTITY storeWebPageArchive.accesskey \"w\">" >> chrome/pt-PT/locale/pt-P
 # Original strings:
 # run-filters-on-incoming-msgs =
 #   .label = Run filters on incoming messages
-echo "run-filters-on-incoming-msgs ="                     >> localization/pt-PT/messenger/folderprops.ftl
+echo "run-filters-on-incoming-msgs ="                    >> localization/pt-PT/messenger/folderprops.ftl
 echo "  .label = Executar filtros em mensagens chegadas" >> localization/pt-PT/messenger/folderprops.ftl
 
 # Original strings:
