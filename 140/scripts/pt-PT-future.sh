@@ -41,7 +41,7 @@ echo "    .label = Anexar ficheiros recentes…" >> localization/pt-PT/messenger
 # menu-multi-line-all-folders =
 #     .label = Multi-line View On All Folders
 echo "menu-multi-line-all-folders ="                    >> localization/pt-PT/messenger/menubar.ftl
-echo "    .label = Múltiplas linhas em todas as pastas" >> localization/pt-PT/messenger/menubar.ftl
+echo "    .label = Vista multilinha em todas as pastas" >> localization/pt-PT/messenger/menubar.ftl
 
 # Original strings:
 # compose-send-plain-or-html-option =
@@ -50,7 +50,7 @@ echo "    .label = Múltiplas linhas em todas as pastas" >> localization/pt-PT/m
 # compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 echo "compose-send-plain-or-html-option =" >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "    .label = Texto simples ou HTML"  >> localization/pt-PT/messenger/preferences/preferences.ftl
-echo "compose-send-plain-or-html-description = Se não for usado estilo na mensagem, é enviada em texto simples. Caso contrário, é enviada apenas em HTML." >> localization/pt-PT/messenger/preferences/preferences.ftl
+echo "compose-send-plain-or-html-description = Se a mensagem não tiver qualquer formatação, envia em texto simples. Caso contrário, envia apenas em HTML." >> localization/pt-PT/messenger/preferences/preferences.ftl
 
 echo "compose-send-plain-or-html-menu-item =" >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
 echo "    .label = Texto simples ou HTML"     >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
