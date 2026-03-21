@@ -257,7 +257,7 @@ echo "  .accesskey = R"                    >> localization/pt-PT/messenger/about
 #   .accesskey = m
 echo "search-all-mail-accounts ="                        >> localization/pt-PT/messenger/messenger.ftl
 echo "  .label = Procurar em todas as contas de correio" >> localization/pt-PT/messenger/messenger.ftl
-echo "  .accesskey = m"                                  >> localization/pt-PT/messenger/messenger.ftl
+echo "  .accesskey = c"                                  >> localization/pt-PT/messenger/messenger.ftl
 
 # New Gloda facets:
 # gloda.message.attr._subjectMatches.facetNameLabel=Subject
