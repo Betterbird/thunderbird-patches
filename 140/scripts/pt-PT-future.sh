@@ -159,9 +159,9 @@ echo "msg-edit-update-button = Atualizar"        >> localization/pt-PT/messenger
 #       • [Subject] negated and [Body] selected: Show all messages where ‘Subject’ Does Not Contain “word” AND ‘Body’ Contains “word”.
 #       • [Any of] with [Important] negated and [Work] and [Personal] selected:
 #       Show all tagged messages which Do Not have the ‘Important’ tag AND which have the ‘Work’ OR the ‘Personal’ tag.
-echo "quick-filter-bar-negate ="                                                            >> localization/pt-PT/messenger/about3Pane.ftl
-echo "    .title = Clique com o botão direito ou Ctrl+Enter num botão para negar o resultado." >> localization/pt-PT/messenger/about3Pane.ftl
-echo "      Para o filtro de texto e de etiquetas, qualquer botão negado cria uma condição E." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "quick-filter-bar-negate ="                                                                    >> localization/pt-PT/messenger/about3Pane.ftl
+echo "    .title = Clique com o botão direito ou prima Ctrl+Enter no botão para negar o resultado." >> localization/pt-PT/messenger/about3Pane.ftl
+echo "      Para o filtro de texto e de etiquetas, qualquer botão negado cria uma condição E."      >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      Quando o filtro de etiquetas está negado, selecionar um botão de etiqueta adiciona as mensagens respetivas à lista de mensagens sem etiqueta." >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      Exemplos:"                                                                      >> localization/pt-PT/messenger/about3Pane.ftl
 echo "      • [Com estrela] e [Etiquetas] negados: mostra todas as mensagens que não têm estrela e não têm etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
