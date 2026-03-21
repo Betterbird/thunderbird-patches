@@ -16,25 +16,25 @@ echo "<!ENTITY folderContextStartupFolder.label \"Pasta de arranque\">" >> chrom
 #      .tooltiptext = Show messages with no tags
 # quick-filter-bar-tagged-button =
 #      .tooltiptext = Show messages with one or more tags. Right-click to clear individual tag selection.
-echo "quick-filter-bar-untagged-button ="                  >> localization/pt-PT/messenger/about3Pane.ftl
+echo "quick-filter-bar-untagged-button ="                 >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Mostrar mensagens sem etiquetas" >> localization/pt-PT/messenger/about3Pane.ftl
-echo "quick-filter-bar-tagged-button ="                    >> localization/pt-PT/messenger/about3Pane.ftl
+echo "quick-filter-bar-tagged-button ="                   >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Mostrar mensagens com uma ou mais etiquetas. Clique com o botão direito para limpar a seleção individual de etiquetas." >> localization/pt-PT/messenger/about3Pane.ftl
 
 # Original strings:
 # enable-gloda-search-encrypted-label =
-#      .label = Enable search in encrypted messages (stores decrypted copy locally)
+#     .label = Enable search in encrypted messages (stores decrypted copy locally)
 echo "enable-gloda-search-encrypted-label =" >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "    .label = Ativar procura em mensagens encriptadas (armazena cópia desencriptada localmente)" >> localization/pt-PT/messenger/preferences/preferences.ftl
 
 # Original strings:
 # menuitem-recent-files =
-#      .label = Recent File(s)…
+#     .label = Recent File(s)…
 # context-menuitem-recent-files =
-#      .label = Attach Recent File(s)…
+#     .label = Attach Recent File(s)…
 echo "menuitem-recent-files ="                 >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
-echo "    .label = Ficheiros recentes…"         >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
-echo "context-menuitem-recent-files ="          >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
+echo "    .label = Ficheiros recentes…"        >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
+echo "context-menuitem-recent-files ="         >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
 echo "    .label = Anexar ficheiros recentes…" >> localization/pt-PT/messenger/messengercompose/messengercompose.ftl
 
 # Original strings:
@@ -45,8 +45,8 @@ echo "    .label = Múltiplas linhas em todas as pastas" >> localization/pt-PT/m
 
 # Original strings:
 # compose-send-plain-or-html-option =
-#      .label = Plain Text or HTML
-#      .accesskey = O
+#     .label = Plain Text or HTML
+#     .accesskey = O
 # compose-send-plain-or-html-description = If no styling is used in the message, send Plain Text. Otherwise, send HTML only.
 echo "compose-send-plain-or-html-option =" >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "    .label = Texto simples ou HTML"  >> localization/pt-PT/messenger/preferences/preferences.ftl
@@ -58,31 +58,31 @@ echo "    .accesskey = O"                     >> localization/pt-PT/messenger/me
 
 # Movemail
 # Strings from https://hg.mozilla.org/l10n-central/pt-PT/file/d540c584ace3454ca4bfe6183953afb00e4f7486/mail/chrome/messenger/localMsgs.properties
-echo "movemailCantOpenSpoolFile=Não foi possível abrir o ficheiro de depósito %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantCreateLock=Não foi possível criar o ficheiro de bloqueio %S. Para mover o correio, tem de criar os ficheiros no diretório de depósito. Em muitos sistemas, a melhor forma de o fazer é aplicar o modo 01777 no diretório." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantDeleteLock=Não foi possível eliminar o ficheiro de bloqueio %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantTruncateSpoolFile=Não foi possível truncar o ficheiro de depósito %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailSpoolFileNotFound=Não foi possível localizar o ficheiro de depósito." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "movemailCantParseSpool=Não foi possível processar o ficheiro de depósito %S. O ficheiro pode estar danificado ou ser inválido." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
-echo "serverType-movemail=Unix Movemail" >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
+echo "movemailCantOpenSpoolFile=Não foi possível abrir o ficheiro de spool %S."       >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantCreateLock=Não foi possível criar o ficheiro de bloqueio %S. Para mover o correio, tem de criar os ficheiros no diretório de spool. Em muitos sistemas, a melhor forma de o fazer é aplicar o modo 01777 no diretório." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantDeleteLock=Não foi possível eliminar o ficheiro de bloqueio %S."    >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantTruncateSpoolFile=Não foi possível truncar o ficheiro de spool %S." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailSpoolFileNotFound=Não foi possível localizar o ficheiro de spool."      >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "movemailCantParseSpool=Não foi possível processar o ficheiro de spool %S. O ficheiro pode estar danificado ou ser inválido." >> chrome/pt-PT/locale/pt-PT/messenger/localMsgs.properties
+echo "serverType-movemail=Unix Movemail"                                              >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
 
 echo "account-action-add-movemail-account ="  >> localization/pt-PT/messenger/accountManager.ftl
 echo "    .label = Adicionar conta Movemail…" >> localization/pt-PT/messenger/accountManager.ftl
 echo "    .accesskey = M"                     >> localization/pt-PT/messenger/accountManager.ftl
 echo "file-new-movemail-account ="            >> localization/pt-PT/messenger/menubar.ftl
-echo "    .label = Conta Movemail…"            >> localization/pt-PT/messenger/menubar.ftl
+echo "    .label = Conta Movemail…"           >> localization/pt-PT/messenger/menubar.ftl
 echo "    .accesskey = M"                     >> localization/pt-PT/messenger/menubar.ftl
 
 # Unread/seleted status
 # https://hg.mozilla.org/l10n-central/pt-PT/file/d540c584ace3454ca4bfe6183953afb00e4f7486/mail/chrome/messenger/messenger.properties#l169
 echo "unreadMsgStatus=Não lidas: %S"      >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
 echo "selectedMsgStatus=Selecionadas: %S" >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
-echo "totalMsgStatus=Total: %S"            >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
+echo "totalMsgStatus=Total: %S"           >> chrome/pt-PT/locale/pt-PT/messenger/messenger.properties
 
 # Original strings:
 # vertical-tabs-label =
-#      .label = Enable vertical tabs
-#      .accesskey = v
+#     .label = Enable vertical tabs
+#     .accesskey = v
 # attachments-display-top-label =
 #      .label = Display attachment list above message
 #      .accesskey = p
@@ -95,16 +95,16 @@ echo "    .accesskey = p"                                      >> localization/p
 
 # Original strings:
 # restore-tabs-session-label =
-#      .value = Restore tabs on startup:
+#     .value = Restore tabs on startup:
 # restore-all-tabs =
-#      .label = All tabs
-#      .accesskey = t
+#     .label = All tabs
+#     .accesskey = t
 # restore-system-tabs =
-#      .label = System tabs
-#      .accesskey = s
+#     .label = System tabs
+#     .accesskey = s
 # restore-no-tabs =
-#      .label = None
-#      .accesskey = n
+#     .label = None
+#     .accesskey = n
 echo "restore-tabs-session-label ="                  >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "    .value = Restaurar separadores no início:" >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "restore-all-tabs ="                            >> localization/pt-PT/messenger/preferences/preferences.ftl
@@ -119,17 +119,17 @@ echo "    .accesskey = n"                            >> localization/pt-PT/messe
 
 # Original strings:
 # menu-view-layout-widethread =
-#      .label = Wide Thread View
-#      .accesskey = T
+#     .label = Wide Thread View
+#     .accesskey = T
 # menu-view-layout-stacked =
-#      .label = Stacked View
-#      .accesskey = S
+#     .label = Stacked View
+#     .accesskey = S
 echo "menu-view-layout-widethread ="    >> localization/pt-PT/messenger/menubar.ftl
 echo "    .label = Largo nas mensagens" >> localization/pt-PT/messenger/menubar.ftl
-echo "    .accesskey = T"                >> localization/pt-PT/messenger/menubar.ftl
+echo "    .accesskey = a"               >> localization/pt-PT/messenger/menubar.ftl
 echo "menu-view-layout-stacked ="       >> localization/pt-PT/messenger/menubar.ftl
 echo "    .label = Empilhado"           >> localization/pt-PT/messenger/menubar.ftl
-echo "    .accesskey = S"                >> localization/pt-PT/messenger/menubar.ftl
+echo "    .accesskey = E"               >> localization/pt-PT/messenger/menubar.ftl
 
 # Original strings:
 # other-action-msg-edit-headers =
@@ -140,12 +140,12 @@ echo "    .accesskey = S"                >> localization/pt-PT/messenger/menubar
 # msg-edit-restore-button = Restore
 #      .title = Show the original value
 # msg-edit-update-button = Update
-echo "other-action-msg-edit-headers ="            >> localization/pt-PT/messenger/messenger.ftl
-echo "    .label = Editar cabeçalhos…"            >> localization/pt-PT/messenger/messenger.ftl
-echo "    .accesskey = H"                         >> localization/pt-PT/messenger/messenger.ftl
+echo "other-action-msg-edit-headers ="           >> localization/pt-PT/messenger/messenger.ftl
+echo "    .label = Editar cabeçalhos…"           >> localization/pt-PT/messenger/messenger.ftl
+echo "    .accesskey = C"                        >> localization/pt-PT/messenger/messenger.ftl
 echo "msg-edit-dialog-title = Editar cabeçalhos" >> localization/pt-PT/messenger/messenger.ftl
-echo "msg-edit-cancel-button = Cancelar"          >> localization/pt-PT/messenger/messenger.ftl
-echo "msg-edit-restore-button = Restaurar"        >> localization/pt-PT/messenger/messenger.ftl
+echo "msg-edit-cancel-button = Cancelar"         >> localization/pt-PT/messenger/messenger.ftl
+echo "msg-edit-restore-button = Restaurar"       >> localization/pt-PT/messenger/messenger.ftl
 echo "    .title = Mostrar o valor original"     >> localization/pt-PT/messenger/messenger.ftl
 echo "msg-edit-update-button = Atualizar"        >> localization/pt-PT/messenger/messenger.ftl
 
@@ -178,12 +178,12 @@ echo "      Mostrar todas as mensagens etiquetadas que não têm a etiqueta “I
 # mail-context-reset-message-threading =
 #      .label = Restore Original Threading
 #      .accesskey = R
-echo "mail-context-unthread-message ="         >> localization/pt-PT/messenger/messenger.ftl
-echo "    .label = Remover da sequência"        >> localization/pt-PT/messenger/messenger.ftl
-echo "    .accesskey = U"                       >> localization/pt-PT/messenger/messenger.ftl
+echo "mail-context-unthread-message ="        >> localization/pt-PT/messenger/messenger.ftl
+echo "    .label = Desagrupar do tópico"      >> localization/pt-PT/messenger/messenger.ftl
+echo "    .accesskey = D"                     >> localization/pt-PT/messenger/messenger.ftl
 echo "mail-context-reset-message-threading =" >> localization/pt-PT/messenger/messenger.ftl
-echo "    .label = Restaurar sequência original"  >> localization/pt-PT/messenger/messenger.ftl
-echo "    .accesskey = R"                       >> localization/pt-PT/messenger/messenger.ftl
+echo "    .label = Restaurar tópico original" >> localization/pt-PT/messenger/messenger.ftl
+echo "    .accesskey = R"                     >> localization/pt-PT/messenger/messenger.ftl
 
 # Disable account:
 # account-disabled =
@@ -212,8 +212,8 @@ echo "Expires=Expira" >> chrome/pt-PT/locale/pt-PT/messenger/search-attributes.p
 #    .label = Horizontal View
 #    .accesskey = z
 echo "menu-view-layout-horizontal =" >> localization/pt-PT/messenger/menubar.ftl
-echo "    .label = Horizontal"        >> localization/pt-PT/messenger/menubar.ftl
-echo "    .accesskey = z"             >> localization/pt-PT/menubar.ftl
+echo "    .label = Horizontal"       >> localization/pt-PT/messenger/menubar.ftl
+echo "    .accesskey = z"            >> localization/pt-PT/menubar.ftl
 
 # Original strings:
 # <!ENTITY storeOnUpdated.label     "Store updated articles">
@@ -247,7 +247,7 @@ echo "    CardDAV: falha ao sincronizar com o servidor, por favor consulte a con
 # folder-pane-context-reset-sort =
 #   .label = Reset Folder Order
 #   .accesskey = R
-echo "folder-pane-context-reset-sort ="     >> localization/pt-PT/messenger/about3Pane.ftl
+echo "folder-pane-context-reset-sort ="    >> localization/pt-PT/messenger/about3Pane.ftl
 echo "  .label = Repor a ordem das pastas" >> localization/pt-PT/messenger/about3Pane.ftl
 echo "  .accesskey = R"                    >> localization/pt-PT/messenger/about3Pane.ftl
 
@@ -255,9 +255,9 @@ echo "  .accesskey = R"                    >> localization/pt-PT/messenger/about
 # search-all-mail-accounts =
 #   .label = Search all mail accounts
 #   .accesskey = m
-echo "search-all-mail-accounts ="                         >> localization/pt-PT/messenger/messenger.ftl
+echo "search-all-mail-accounts ="                        >> localization/pt-PT/messenger/messenger.ftl
 echo "  .label = Procurar em todas as contas de correio" >> localization/pt-PT/messenger/messenger.ftl
-echo "  .accesskey = m"                                   >> localization/pt-PT/messenger/messenger.ftl
+echo "  .accesskey = m"                                  >> localization/pt-PT/messenger/messenger.ftl
 
 # New Gloda facets:
 # gloda.message.attr._subjectMatches.facetNameLabel=Subject
@@ -275,7 +275,7 @@ echo "about-addressbook-cell-categories2 ="                     >> localization/
 echo "  .aria-label = Categorias"                               >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
 echo "  .title = { \$title }"                                   >> localization/pt-PT/messenger/addressbook/aboutAddressBook.ftl
 echo "vcard-categories-header = Categorias"                     >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "vcard-category-add = Adicionar categoria"                  >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "vcard-category-input-label = Categoria"                    >> localization/pt-PT/messenger/addressbook/vcard.ftl
-echo "vcard-category-input-title = Nome da categoria"            >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-add = Adicionar categoria"                 >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-label = Categoria"                   >> localization/pt-PT/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-title = Nome da categoria"           >> localization/pt-PT/messenger/addressbook/vcard.ftl
 echo "Categories=Categorias" >> chrome/pt-PT/locale/pt-PT/messenger/search-attributes.properties
