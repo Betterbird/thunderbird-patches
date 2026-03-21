@@ -13,9 +13,9 @@ echo "<!ENTITY folderContextStartupFolder.label \"Pasta de arranque\">" >> chrom
 
 # Original strings:
 # quick-filter-bar-untagged-button =
-#      .tooltiptext = Show messages with no tags
+#     .tooltiptext = Show messages with no tags
 # quick-filter-bar-tagged-button =
-#      .tooltiptext = Show messages with one or more tags. Right-click to clear individual tag selection.
+#     .tooltiptext = Show messages with one or more tags. Right-click to clear individual tag selection.
 echo "quick-filter-bar-untagged-button ="                 >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Mostrar mensagens sem etiquetas" >> localization/pt-PT/messenger/about3Pane.ftl
 echo "quick-filter-bar-tagged-button ="                   >> localization/pt-PT/messenger/about3Pane.ftl
@@ -39,7 +39,7 @@ echo "    .label = Anexar ficheiros recentes…" >> localization/pt-PT/messenger
 
 # Original strings:
 # menu-multi-line-all-folders =
-#      .label = Multi-line View On All Folders
+#     .label = Multi-line View On All Folders
 echo "menu-multi-line-all-folders ="                     >> localization/pt-PT/messenger/menubar.ftl
 echo "    .label = Múltiplas linhas em todas as pastas" >> localization/pt-PT/messenger/menubar.ftl
 
@@ -84,8 +84,8 @@ echo "totalMsgStatus=Total: %S"           >> chrome/pt-PT/locale/pt-PT/messenger
 #     .label = Enable vertical tabs
 #     .accesskey = v
 # attachments-display-top-label =
-#      .label = Display attachment list above message
-#      .accesskey = p
+#     .label = Display attachment list above message
+#     .accesskey = p
 echo "vertical-tabs-label ="                                    >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "    .label = Mostrar barra de separadores verticalmente" >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "    .accesskey = v"                                      >> localization/pt-PT/messenger/preferences/preferences.ftl
@@ -173,11 +173,11 @@ echo "      Mostrar todas as mensagens etiquetadas que não têm a etiqueta “I
 
 # Threading on menu:
 # mail-context-unthread-message =
-#      .label = Unthread Message
-#      .accesskey = U
+#     .label = Unthread Message
+#     .accesskey = U
 # mail-context-reset-message-threading =
-#      .label = Restore Original Threading
-#      .accesskey = R
+#     .label = Restore Original Threading
+#     .accesskey = R
 echo "mail-context-unthread-message ="        >> localization/pt-PT/messenger/messenger.ftl
 echo "    .label = Desagrupar do tópico"      >> localization/pt-PT/messenger/messenger.ftl
 echo "    .accesskey = D"                     >> localization/pt-PT/messenger/messenger.ftl
@@ -193,9 +193,9 @@ echo "  .label = Conta desativada"  >> localization/pt-PT/messenger/accountSetti
 
 # Search AB via display name and nickname.
 # quick-filter-bar-match-addressbook =
-#      .label = Match Address Book
-#      .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
-echo "quick-filter-bar-match-addressbook ="                                                                   >> localization/pt-PT/messenger/about3Pane.ftl
+#     .label = Match Address Book
+#     .tooltiptext = Match on Display Name (begins with) or Nickname (exact) from your address books
+echo "quick-filter-bar-match-addressbook ="                                                                        >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .label = Comparar com o livro de endereços"                                                              >> localization/pt-PT/messenger/about3Pane.ftl
 echo "    .tooltiptext = Comparar com o nome exibido (começa com) ou alcunha (exata) nos seus livros de endereços" >> localization/pt-PT/messenger/about3Pane.ftl
 
