@@ -1,0 +1,59 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1774082718 -3600
+# Node ID b4859cea2c92e0089da6e6c62edfd8b3b3f8302b
+# Parent  7a1742e9a48597d04f79b57bcbecc71601c6b411
+Bug 2020627 - Fix POP3 state deadlock and false-success on unexpected connection drops. r=mkmelin
+
+If a POP3 connection dropped unexpectedly during a multi-line response (like
+UIDL), `_onClose` defaulted to `_actionDone(Cr.NS_OK)`. This caused Thunderbird
+to silently accept the failed sync as successful. Furthermore, the `LineReader`
+and NOOP states were not cleared, blinding the JS state machine to all future
+server responses, deadlocking the account until TB was restarted.
+
+Differential Revision: https://phabricator.services.mozilla.com/D286057
+
+diff --git a/mailnews/local/src/Pop3Client.sys.mjs b/mailnews/local/src/Pop3Client.sys.mjs
+--- a/mailnews/local/src/Pop3Client.sys.mjs
++++ b/mailnews/local/src/Pop3Client.sys.mjs
+@@ -64,9 +64,8 @@ export class Pop3Client {
+   constructor(server) {
+     this._server = server.QueryInterface(Ci.nsIMsgIncomingServer);
+     this._server.wrappedJSObject.runningClient = this;
+     this._authenticator = new Pop3Authenticator(server);
+-    this._lineReader = new LineReader();
+     this._noopRespPending = false;
+ 
+     // Somehow, Services.io.newURI("pop3://localhost") doesn't work, what we
+     // need is just a valid nsIMsgMailNewsUrl to propagate OnStopRunningUrl and
+@@ -142,8 +141,14 @@ export class Pop3Client {
+     this.runningUri
+       .QueryInterface(Ci.nsIMsgMailNewsUrl)
+       .SetUrlState(true, Cr.NS_OK);
+     this._server.serverBusy = true;
++
++    // Instantiate a fresh LineReader and reset NOOP state to guarantee no
++    // pollution from previous dropped connections.
++    this._lineReader = new LineReader();
++    this._noopRespPending = false;
++
+     this._secureTransport = this._server.socketType == Ci.nsMsgSocketType.SSL;
+     this._socket = new TCPSocket(hostname, this._server.port, {
+       binaryType: "arraybuffer",
+       useSecureTransport: this._secureTransport,
+@@ -438,9 +443,15 @@ export class Pop3Client {
+     this._destroyed = true;
+     if (this._authenticating) {
+       // In some cases, socket is closed for invalid username/password.
+       this._actionAuthResponse({ success: false });
++    } else if (!this._done) {
++      this._logger.warn(
++        "The connection closed unexpectedly while a command was active."
++      );
++      this._actionDone(Cr.NS_ERROR_NET_INTERRUPT);
+     } else {
++      // Connection closed cleanly after QUIT.
+       this._actionDone();
+     }
+   };
+ 
