@@ -1,0 +1,155 @@
+# HG changeset patch
+# User Manuel <phash@users.noreply.github.com>
+# Date 1742644800 -3600
+# Parent  0000000000000000000000000000000000000000
+Bug 1121151 - Allow creating accounts when incoming server already exists.
+
+Instead of blocking account creation when an incoming server with the same
+hostname/port/username already exists, reuse the existing server — mirroring
+the behavior already in place for outgoing (SMTP) servers.
+
+This also cleans up orphaned server entries (from cancelled account setups)
+that previously blocked all subsequent account creation attempts for the
+same mail server.
+
+diff --git a/mail/components/accountcreation/modules/CreateInBackend.sys.mjs b/mail/components/accountcreation/modules/CreateInBackend.sys.mjs
+--- a/mail/components/accountcreation/modules/CreateInBackend.sys.mjs
++++ b/mail/components/accountcreation/modules/CreateInBackend.sys.mjs
+@@ -20,10 +20,16 @@ import { MailServices } from "resource:/
+  * @returns {nsIMsgAccount} - The newly created account.
+  */
+ async function createAccountInBackend(config) {
+   // incoming server
+-  const inServer = MailServices.accounts.createIncomingServer(
+-    config.incoming.username,
+-    config.incoming.hostname,
+-    config.incoming.type
+-  );
++  let inServer;
++  if (config.incoming.existingServerKey) {
++    inServer = MailServices.accounts.getIncomingServer(
++      config.incoming.existingServerKey
++    );
++  } else {
++    inServer = MailServices.accounts.createIncomingServer(
++      config.incoming.username,
++      config.incoming.hostname,
++      config.incoming.type
++    );
++  }
+   inServer.port = config.incoming.port;
+   inServer.authMethod = config.incoming.auth;
+   inServer.password = config.incoming.password;
+@@ -335,8 +341,9 @@ function checkAccountNameAlreadyExists(n
+  * Check whether the user's setup already has an incoming server
+  * which matches (hostname, port, username) the primary one
+  * in the config.
+  * (We also check the email address as username.)
++ * Also cleans up orphaned server entries from cancelled account setups.
+  *
+  * @param {AccountConfig} config - AccountConfig filled in (no placeholders)
+  * @returns {?nsIMsgIncomingServer} If it already exists, the server object is
+  *   returned. If it's a new server, |null| is returned.
+@@ -355,6 +362,22 @@ function checkIncomingServerAlreadyExist
+       incoming.port
+     );
+   }
++
++  // If we found an existing server, check if it's actually used by an
++  // active account. Orphaned server entries (left behind by cancelled
++  // account setups, see bug 1788086) should be cleaned up rather than
++  // blocking account creation.
++  if (existing) {
++    const isUsedByAccount = MailServices.accounts.accounts.some(
++      account => account.incomingServer?.key === existing.key
++    );
++    if (!isUsedByAccount) {
++      lazy.AccountCreationUtils.gAccountSetupLogger.info(
++        "Removing orphaned incoming server: " + existing.key
++      );
++      MailServices.accounts.removeIncomingServer(existing, false);
++      return null;
++    }
++  }
++
+   return existing;
+ }
+
+diff --git a/mail/components/accountcreation/content/accountSetup.js b/mail/components/accountcreation/content/accountSetup.js
+--- a/mail/components/accountcreation/content/accountSetup.js
++++ b/mail/components/accountcreation/content/accountSetup.js
+@@ -2003,13 +2003,12 @@ var gAccountSetup = {
+     assert(this._currentConfig instanceof AccountConfig);
+     const configFilledIn = this.getConcreteConfig();
+
+-    if (CreateInBackend.checkIncomingServerAlreadyExists(configFilledIn)) {
+-      const [title, description] = await document.l10n.formatValues([
+-        "account-setup-creation-error-title",
+-        "account-setup-error-server-exists",
+-      ]);
+-      Services.prompt.alert(null, title, description);
+-      return;
++    const existingInServer =
++      CreateInBackend.checkIncomingServerAlreadyExists(configFilledIn);
++    if (existingInServer) {
++      configFilledIn.incoming.existingServerKey = existingInServer.key;
+     }
+
+     const [title, description] = await document.l10n.formatValues([
+@@ -2247,13 +2246,12 @@ var gAccountSetup = {
+       configFilledIn.incoming.type = configFilledIn.incoming.addonAccountType;
+     }
+
+-    if (CreateInBackend.checkIncomingServerAlreadyExists(configFilledIn)) {
+-      const [title, description] = await document.l10n.formatValues([
+-        "account-setup-creation-error-title",
+-        "account-setup-error-server-exists",
+-      ]);
+-      Services.prompt.alert(null, title, description);
+-      return;
++    const existingInServer =
++      CreateInBackend.checkIncomingServerAlreadyExists(configFilledIn);
++    if (existingInServer) {
++      configFilledIn.incoming.existingServerKey = existingInServer.key;
+     }
+
+     if (configFilledIn.outgoing.addThisServer) {
+diff --git a/mail/components/accountcreation/views/email.mjs b/mail/components/accountcreation/views/email.mjs
+--- a/mail/components/accountcreation/views/email.mjs
++++ b/mail/components/accountcreation/views/email.mjs
+@@ -1353,12 +1353,11 @@ class AccountHubEmail extends HTMLElemen
+    * @param {AccountConfig} accountConfig - Account Config object.
+    */
+   async #advancedSetup(accountConfig) {
+-    if (lazy.CreateInBackend.checkIncomingServerAlreadyExists(accountConfig)) {
+-      throw new Error("Account already exists.", {
+-        cause: {
+-          fluentTitleId: "account-setup-creation-error-title",
+-          fluentDescriptionId: "account-setup-error-server-exists",
+-        },
+-      });
++    const existingInServer =
++      lazy.CreateInBackend.checkIncomingServerAlreadyExists(accountConfig);
++    if (existingInServer) {
++      accountConfig.incoming.existingServerKey = existingInServer.key;
+     }
+
+     const [title, description] = await lazy.l10n.formatValues([
+@@ -1583,12 +1582,11 @@ class AccountHubEmail extends HTMLElemen
+       completeConfig.incoming.type = completeConfig.incoming.addonAccountType;
+     }
+
+-    if (lazy.CreateInBackend.checkIncomingServerAlreadyExists(completeConfig)) {
+-      throw new Error("Account already exists.", {
+-        cause: {
+-          fluentTitleId: "account-setup-creation-error-title",
+-          fluentDescriptionId: "account-setup-error-server-exists",
+-        },
+-      });
++    const existingInServer =
++      lazy.CreateInBackend.checkIncomingServerAlreadyExists(completeConfig);
++    if (existingInServer) {
++      completeConfig.incoming.existingServerKey = existingInServer.key;
+     }
+
+     if (completeConfig.outgoing.addThisServer) {
