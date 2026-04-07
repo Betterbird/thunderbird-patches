@@ -1,0 +1,65 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1775593817 -7200
+# Node ID 44713325a305c61c179969fefc219c50510165a8
+# Parent  caf5756ad0e80e52cb9c62cf47ddcc38ad5f725b
+Bug 2029007 - Preserve <pre> formatting when quoting a selection from an HTML message. r=mkmelin
+
+Previously, replying with a partial selection from an email only preserved <pre> formatting
+if the original message was a plain-text email wrapped by Thunderbird (using the
+moz-text-plain class). This caused native HTML emails with <pre> tags to lose their
+formatting, collapsing newlines into spaces when partially quoted.
+
+This patch updates nsMsgComposeService::OpenComposeWindow to traverse the DOM tree upwards
+from the selection's focus node, checking if the selection resides inside any <pre> block.
+It ensures the quoted text is wrapped in <pre class="moz-quote-pre"> for both plain-text
+emails and native HTML preformatted blocks.
+
+Also adds a new Mochitest (test_html_pre) to browser_replySelection.js to prevent future
+regressions.
+
+Differential Revision: https://phabricator.services.mozilla.com/D292233
+
+diff --git a/mailnews/compose/src/nsMsgComposeService.cpp b/mailnews/compose/src/nsMsgComposeService.cpp
+--- a/mailnews/compose/src/nsMsgComposeService.cpp
++++ b/mailnews/compose/src/nsMsgComposeService.cpp
+@@ -366,18 +366,31 @@ nsMsgComposeService::OpenComposeWindow(
+            type == nsIMsgCompType::ReplyToList)) {
+         nsCOMPtr<nsINode> node = selection->GetFocusNode();
+         nsAutoCString selHTML;
+         if (node && NS_SUCCEEDED(GetOrigWindowSelection(selection, selHTML))) {
++          // Traverse the DOM tree upwards to check if the selection is
++          // inside a <pre> tag.
++          bool isInsidePre = false;
++          for (nsCOMPtr<nsINode> parentNode = node; parentNode;
++               parentNode = parentNode->GetParentNode()) {
++            if (parentNode->LocalName().EqualsLiteral("pre")) {
++              isInsidePre = true;
++              break;
++            }
++          }
++          // Wrap in <pre> if it's an actual HTML <pre> block or a plain-text
++          // email.
+           IgnoredErrorResult er;
+-          if ((node->LocalName().IsEmpty() ||
+-               node->LocalName().EqualsLiteral("pre")) &&
+-              node->OwnerDoc()->QuerySelector(
+-                  "body > div:first-of-type.moz-text-plain"_ns, er)) {
+-            // Treat the quote as <pre> for selections in moz-text-plain bodies.
+-            // If focusNode.localName isn't empty, we had e.g. body selected
+-            // and should not add <pre>.
++          if (isInsidePre ||
++              ((node->LocalName().IsEmpty() ||
++                node->LocalName().EqualsLiteral("pre")) &&
++               node->OwnerDoc()->QuerySelector(
++                   "body > div:first-of-type.moz-text-plain"_ns, er))) {
++            // Treat the quote as <pre> for selections in actual <pre> tags or
++            // moz-text-plain bodies. If focusNode.localName isn't empty, we
++            // had e.g. body selected and should not add <pre>.
+             pMsgComposeParams->SetHtmlToQuote(
+-                "<pre class=\"moz-quote-pre\" wrap=\"\">"_ns + selHTML +
++                R"(<pre class="moz-quote-pre" wrap="">)"_ns + selHTML +
+                 "</pre>"_ns);
+           } else {
+             pMsgComposeParams->SetHtmlToQuote(selHTML);
+           }
