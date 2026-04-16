@@ -1,0 +1,142 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1776381378 -7200
+# Parent  2d47a9b798a19b4b7a5537e8b42738666375d2ea
+Bug 1866822 - When decrypting, remove unneeded multipart/mixed layer before writing the message to file if there is multipart/signed in the body.
+
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+@@ -614,48 +614,25 @@ MimeDecryptHandler.prototype = {
+ 
+     this.extractEncryptedHeaders();
+     this.extractAutocryptGossip();
+ 
+-    let mightNeedWrapper = true;
+-
+-    // It's unclear which scenario this check is supposed to fix.
+-    // Based on a comment in mimeVerify (which seems code seems to be
+-    // derived from), it might be intended to fix forwarding of empty
+-    // messages. Not sure this is still necessary. We should check if
+-    // this code can be removed.
+-    const i = this.decryptedData.search(/\n\r?\n/);
+-    // It's unknown why this test checks for > instead of >=
+-    if (i > 0) {
+-      var hdr = this.decryptedData.substr(0, i).split(/\r?\n/);
+-      for (let j = 0; j < hdr.length; j++) {
+-        if (hdr[j].search(/^\s*content-type:\s+text\/(plain|html)/i) >= 0) {
+-          lazy.log.debug(`Adding multipart/mixed around ${hdr[j]}`);
+-          this.addWrapperToDecryptedResult();
+-          mightNeedWrapper = false;
+-          break;
+-        }
+-      }
+-    }
+-
+     // If there is no Content-Type header prior to the first double
+     // newline sequence (which is interpreted as the separator between
+     // a header section and the body), then assume the first section is
+     // actually NOT an email header, but rather part of the message body.
+     // To ensure all data is shown to the user, to ensure the initial
+     // paragraph isn't hidden, we wrap a text/plain content-type header
+     // around the result data.
+-    if (mightNeedWrapper) {
+-      const headerBoundaryPosition = this.decryptedData.search(/\n\r?\n/);
+-      if (
+-        headerBoundaryPosition >= 0 &&
+-        !/^Content-Type:/im.test(
+-          this.decryptedData.substr(0, headerBoundaryPosition)
+-        )
+-      ) {
+-        this.decryptedData =
+-          "Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+-          this.decryptedData;
+-      }
++    const headerBoundaryPosition = this.decryptedData.search(/\n\r?\n/);
++    if (
++      headerBoundaryPosition >= 0 &&
++      !/^Content-Type:/im.test(
++        this.decryptedData.substr(0, headerBoundaryPosition)
++      )
++    ) {
++      this.decryptedData =
++        "Content-Type: text/plain; charset=utf-8\r\n\r\n" +
++        this.decryptedData;
+     }
+ 
+     this.exitCode = exitCode;
+   },
+diff --git a/mail/extensions/openpgp/content/modules/persistentCrypto.sys.mjs b/mail/extensions/openpgp/content/modules/persistentCrypto.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/persistentCrypto.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/persistentCrypto.sys.mjs
+@@ -254,8 +254,9 @@ class CryptMessageIntoFolder extends Mim
+       }
+       this.cryptoChanged = true;
+     } else {
+       msg = mimeTreeToString(mimeTree, true);
++      msg = this.removeTopMultipartMixedLayer(msg);
+     }
+ 
+     if (this.decryptFailure) {
+       throw new Error("Failure to decrypt message");
+@@ -268,8 +269,60 @@ class CryptMessageIntoFolder extends Mim
+       this.cryptoChanged ? "decrypted-" + new Date().valueOf() : null
+     );
+   }
+ 
++  removeTopMultipartMixedLayer(mimeText) {
++    // Split into top-level headers and rest of message.
++    const headerBoundaryPosition = mimeText.search(/\n\r?\n/);
++    let bodyText = mimeText.slice(headerBoundaryPosition);
++    if (bodyText.search(/^content-type:\s*multipart\/signed/im) < 0) {
++      // Nothing to do.
++      return mimeText;
++    }
++
++    const headerText = mimeText.slice(0, headerBoundaryPosition);
++
++    // Find top-level Content-Type: multipart/mixed header and boundary.
++    // The regex matched the content-type header and all folded continuation lines.
++    // ?: is a non-capturing group.
++    const ctRegex =
++      /^content-type:\s*multipart\/mixed\s*;\s*boundary="([^"]+)"[^\n\r]*(?:\r?\n[ \t].*)*\r?\n/im;
++
++    const match = headerText.match(ctRegex);
++    if (!match) {
++      // Nothing to do.
++      return mimeText;
++    }
++
++    const boundary = match[1];
++
++    // Remove the Content-Type header from top-level headers.
++    const newHeaderText = headerText.replace(ctRegex, "");
++
++    // Boundary markers.
++    const firstBoundaryRegex = new RegExp(
++      "\\r?\\n--" + this.escapeRegex(boundary) + "[ \\t]*\\r?\\n(?:\\r?\\n)*",
++      "m"
++    );
++
++    const closingBoundaryRegex = new RegExp(
++      "\\r?\\n--" + this.escapeRegex(boundary) + "--[ \\t]*(?:\\r?\\n)*$",
++      "m"
++    );
++
++    // Remove first opening boundary + following empty lines.
++    bodyText = bodyText.replace(firstBoundaryRegex, "");
++
++    // Remove final closing boundary.
++    bodyText = bodyText.replace(closingBoundaryRegex, "");
++
++    return newHeaderText + bodyText;
++  }
++
++  escapeRegex(str) {
++    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  }
++
+   encryptToKey(mimeTree) {
+     const exitCodeObj = {};
+     const statusFlagsObj = {};
+     const errorMsgObj = {};
