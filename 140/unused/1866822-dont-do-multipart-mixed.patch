@@ -1,0 +1,153 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1776289299 -7200
+# Parent  2d47a9b798a19b4b7a5537e8b42738666375d2ea
+Bug 1866822 - Reshuffle MIME tree for PGP/MIME to avoid multipart/mixed layer.
+
+This works in principle but parsing the tree from the decrypted data and
+re-assembling it leads to small differences which make the signature invalid.
+
+So the processing in MimeTree.sys.mjs needs to be left untouched and the multipart/mixed layer
+needs to removed in mimeDecrypt.sys.mjs.
+
+diff --git a/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs b/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs
+@@ -579,8 +579,28 @@ export class MimeTreeDecrypter {
+     );
+     m.initialize(data.substr(0, bodyIndex));
+     let ct = m.extractHeader("content-type", false) || "";
+     const part = mimeTreePart.partNum;
++    const innerMsg = getMimeTree(data, true);
++
++    // Replace the entire tree with the inner part.
++    // Note that this is PGP/MIME, two message parts with the
++    // PGP blob being the second. We can safely replace the
++    // entire message. We need to maintain the overall headers.
++    console.log(mimeTreePart.partNum);
++    console.log(part);
++    console.log(innerMsg);
++    console.log(mimeTreePart);
++    for (const i in innerMsg) {
++      console.log("=== i", i);
++      if (i == "headers") continue;
++      mimeTreePart[i] = innerMsg[i];
++    }
++    // Carefully carry over the content type from the inner message.
++    // mimeTreePart.headers.contentType = innerMsg.headers.contentType;
++    mimeTreePart.headers._rawHeaders.set("content-type",
++      innerMsg.headers._rawHeaders.get("content-type"));
++    console.log(mimeTreePart);
+ 
+     if (part.length > 0 && part.search(/[^01.]/) < 0) {
+       if (ct.search(/protected-headers/i) >= 0) {
+         if (m.hasHeader("subject")) {
+@@ -598,9 +618,8 @@ export class MimeTreeDecrypter {
+         !(statusFlagsObj.value & lazy.EnigmailConstants.GOOD_SIGNATURE) &&
+         /^multipart\/signed/i.test(ct)
+       ) {
+         // RFC 3156, Section 6.1 message
+-        const innerMsg = getMimeTree(data, false);
+         if (innerMsg.subParts.length > 0) {
+           ct = innerMsg.subParts[0].fullContentType;
+           const hdrMap = innerMsg.subParts[0].headers._rawHeaders;
+           if (ct.search(/protected-headers/i) >= 0 && hdrMap.has("subject")) {
+@@ -613,36 +632,8 @@ export class MimeTreeDecrypter {
+         }
+       }
+     }
+ 
+-    let boundary = getBoundary(mimeTreePart);
+-    if (!boundary) {
+-      boundary = lazy.EnigmailMime.createBoundary();
+-    }
+-
+-    // append relevant headers
+-    mimeTreePart.headers.get("content-type").type = "multipart/mixed";
+-    mimeTreePart.headers._rawHeaders.set("content-type", [
+-      'multipart/mixed; boundary="' + boundary + '"',
+-    ]);
+-    mimeTreePart.subParts = [
+-      {
+-        body: data,
+-        decryptedPgpMime: true,
+-        partNum: mimeTreePart.partNum + ".1",
+-        headers: {
+-          _rawHeaders: new Map(),
+-          get() {
+-            return null;
+-          },
+-          has() {
+-            return false;
+-          },
+-        },
+-        subParts: [],
+-      },
+-    ];
+-
+     this.cryptoChanged = true;
+   }
+ 
+   /**
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+@@ -614,48 +614,25 @@ MimeDecryptHandler.prototype = {
+ 
+     this.extractEncryptedHeaders();
+     this.extractAutocryptGossip();
+ 
+-    let mightNeedWrapper = true;
+-
+-    // It's unclear which scenario this check is supposed to fix.
+-    // Based on a comment in mimeVerify (which seems code seems to be
+-    // derived from), it might be intended to fix forwarding of empty
+-    // messages. Not sure this is still necessary. We should check if
+-    // this code can be removed.
+-    const i = this.decryptedData.search(/\n\r?\n/);
+-    // It's unknown why this test checks for > instead of >=
+-    if (i > 0) {
+-      var hdr = this.decryptedData.substr(0, i).split(/\r?\n/);
+-      for (let j = 0; j < hdr.length; j++) {
+-        if (hdr[j].search(/^\s*content-type:\s+text\/(plain|html)/i) >= 0) {
+-          lazy.log.debug(`Adding multipart/mixed around ${hdr[j]}`);
+-          this.addWrapperToDecryptedResult();
+-          mightNeedWrapper = false;
+-          break;
+-        }
+-      }
+-    }
+-
+     // If there is no Content-Type header prior to the first double
+     // newline sequence (which is interpreted as the separator between
+     // a header section and the body), then assume the first section is
+     // actually NOT an email header, but rather part of the message body.
+     // To ensure all data is shown to the user, to ensure the initial
+     // paragraph isn't hidden, we wrap a text/plain content-type header
+     // around the result data.
+-    if (mightNeedWrapper) {
+-      const headerBoundaryPosition = this.decryptedData.search(/\n\r?\n/);
+-      if (
+-        headerBoundaryPosition >= 0 &&
+-        !/^Content-Type:/im.test(
+-          this.decryptedData.substr(0, headerBoundaryPosition)
+-        )
+-      ) {
+-        this.decryptedData =
+-          "Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+-          this.decryptedData;
+-      }
++    const headerBoundaryPosition = this.decryptedData.search(/\n\r?\n/);
++    if (
++      headerBoundaryPosition >= 0 &&
++      !/^Content-Type:/im.test(
++        this.decryptedData.substr(0, headerBoundaryPosition)
++      )
++    ) {
++      this.decryptedData =
++        "Content-Type: text/plain; charset=utf-8\r\n\r\n" +
++        this.decryptedData;
+     }
+ 
+     this.exitCode = exitCode;
+   },
