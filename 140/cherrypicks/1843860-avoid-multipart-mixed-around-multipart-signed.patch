@@ -1,0 +1,106 @@
+# HG changeset patch
+# User kaie@kuix.de
+# Date 1777023776 -7200
+# Node ID b9388f8b4e95f24eed8fa420b1c0e691ae8dd0a8
+# Parent  a5e276fe44faa31187d095d729a6816b133ab846
+Bug 1843860 - When creating decrypted copy, avoid adding multipart/mixed layer when payload is multipart/signed. r=mkmelin
+
+diff --git a/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs b/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/MimeTree.sys.mjs
+@@ -578,8 +578,9 @@ export class MimeTreeDecrypter {
+       Ci.nsIMimeHeaders
+     );
+     m.initialize(data.substr(0, bodyIndex));
+     let ct = m.extractHeader("content-type", false) || "";
++    const outerCt = ct;
+     const part = mimeTreePart.partNum;
+ 
+     if (part.length > 0 && part.search(/[^01.]/) < 0) {
+       if (ct.search(/protected-headers/i) >= 0) {
+@@ -613,35 +614,45 @@ export class MimeTreeDecrypter {
+         }
+       }
+     }
+ 
+-    let boundary = getBoundary(mimeTreePart);
+-    if (!boundary) {
+-      boundary = lazy.EnigmailMime.createBoundary();
+-    }
++    if (/^multipart\/signed/i.test(outerCt)) {
++      mimeTreePart.headers.get("content-type").type = "multipart/signed";
++      mimeTreePart.headers._rawHeaders.set("content-type", [outerCt]);
++
++      // Use the raw body from data directly, preserving exact bytes
++      // for signature verification.
++      mimeTreePart.body = data.substring(bodyIndex);
++      mimeTreePart.subParts = [];
++    } else {
++      let boundary = getBoundary(mimeTreePart);
++      if (!boundary) {
++        boundary = lazy.EnigmailMime.createBoundary();
++      }
+ 
+-    // append relevant headers
+-    mimeTreePart.headers.get("content-type").type = "multipart/mixed";
+-    mimeTreePart.headers._rawHeaders.set("content-type", [
+-      'multipart/mixed; boundary="' + boundary + '"',
+-    ]);
+-    mimeTreePart.subParts = [
+-      {
+-        body: data,
+-        decryptedPgpMime: true,
+-        partNum: mimeTreePart.partNum + ".1",
+-        headers: {
+-          _rawHeaders: new Map(),
+-          get() {
+-            return null;
++      // append relevant headers
++      mimeTreePart.headers.get("content-type").type = "multipart/mixed";
++      mimeTreePart.headers._rawHeaders.set("content-type", [
++        'multipart/mixed; boundary="' + boundary + '"',
++      ]);
++      mimeTreePart.subParts = [
++        {
++          body: data,
++          decryptedPgpMime: true,
++          partNum: mimeTreePart.partNum + ".1",
++          headers: {
++            _rawHeaders: new Map(),
++            get() {
++              return null;
++            },
++            has() {
++              return false;
++            },
+           },
+-          has() {
+-            return false;
+-          },
++          subParts: [],
+         },
+-        subParts: [],
+-      },
+-    ];
++      ];
++    }
+ 
+     this.cryptoChanged = true;
+   }
+ 
+diff --git a/mail/test/browser/openpgp/browser_perm_decrypt.js b/mail/test/browser/openpgp/browser_perm_decrypt.js
+--- a/mail/test/browser/openpgp/browser_perm_decrypt.js
++++ b/mail/test/browser/openpgp/browser_perm_decrypt.js
+@@ -143,8 +143,12 @@ add_task(async function testPermanentDec
+   Assert.ok(
+     !OpenPGPTestUtils.hasEncryptedIconState(aboutMessage.document, "ok"),
+     "encrypted icon NOT displayed"
+   );
++  Assert.ok(
++    OpenPGPTestUtils.hasSignedIconState(aboutMessage.document, "verified"),
++    "signed icon should be shown"
++  );
+ });
+ 
+ registerCleanupFunction(function () {
+   // Reset the OpenPGP key and delete the account.
