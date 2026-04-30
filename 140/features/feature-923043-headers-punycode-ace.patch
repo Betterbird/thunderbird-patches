@@ -1,0 +1,96 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1777579964 -7200
+# Parent  517d5cc27de9731b547b5fb77c79374600bf36b8
+Bug 923043 - Introduce pref mail.strictly_ace and force headers to ACE/Punycode when set.
+
+diff --git a/mailnews/compose/src/MimeMessage.sys.mjs b/mailnews/compose/src/MimeMessage.sys.mjs
+--- a/mailnews/compose/src/MimeMessage.sys.mjs
++++ b/mailnews/compose/src/MimeMessage.sys.mjs
+@@ -141,8 +141,31 @@ export class MimeMessage {
+    * Collect top level headers like From/To/Subject into a Map.
+    *
+    * @returns {Map<string,*>} headers to value mapping.
+    */
++  _headerACE(value) {
++    const atPos = value.lastIndexOf("@");
++    if (atPos < 0) {
++      return value;
++    }
++    const domain = value.slice(atPos + 1);
++    let needsReplacement = false;
++    for (let i = 0; i < domain.length; i++) {
++      const ch = domain[i];
++      if (ch < " " || ch > "~") {
++        needsReplacement = true;
++        break;
++      }
++    }
++    if (!needsReplacement) {
++      return value;
++    }
++    const idnService = Cc["@mozilla.org/network/idn-service;1"].getService(
++      Ci.nsIIDNService
++    );
++    return value.slice(0, atPos + 1) + idnService.convertUTF8toACE(domain);
++  }
++
+   _gatherMimeHeaders() {
+     let messageId = this._compFields.messageId;
+     if (
+       !messageId &&
+@@ -213,11 +236,22 @@ export class MimeMessage {
+         );
+       }
+     }
+ 
++    const isRealSend =
++      this._deliverMode != Ci.nsIMsgSend.nsMsgSaveAsDraft &&
++      this._deliverMode != Ci.nsIMsgSend.nsMsgSaveAsTemplate;
++
+     for (const headerName of [...this._compFields.headerNames]) {
+-      const headerContent = this._compFields.getRawHeader(headerName);
++      let headerContent = this._compFields.getRawHeader(headerName);
+       if (headerContent) {
++        if (
++          isRealSend &&
++          Services.prefs.getBoolPref("mail.strictly_ace") &&
++          ["to", "from", "cc", "bcc", "reply-to"].includes(headerName)
++        ) {
++          headerContent = this._headerACE(headerContent);
++        }
+         headers.set(headerName, headerContent);
+       }
+     }
+     const isDraft = [
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -210,9 +210,12 @@ export class SmtpClient {
+     this._envelope.from = [].concat(
+       this._envelope.from || "anonymous@" + this._getHelloArgument()
+     )[0];
+ 
+-    if (!this._capabilities.includes("SMTPUTF8")) {
++    if (
++      !this._capabilities.includes("SMTPUTF8") ||
++      Services.prefs.getBoolPref("mail.strictly_ace")
++    ) {
+       // If server doesn't support SMTPUTF8, check if addresses contain invalid
+       // characters.
+ 
+       const recipients = this._envelope.to;
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -215,8 +215,10 @@ pref("mail.quoted_graphical", true);
+ // use HTML-style quoting for quoting plain text
+ pref("mail.quoteasblock", true);
+ // Use CTE quoted-printable for mail bodies.
+ pref("mail.strictly_mime", false);
++// Force addressing headers to Punycode/ACE.
++pref("mail.strictly_ace", false);
+ // The maximum number of entries in the "Recent" menu of the folder picker.
+ pref("mail.folder_widget.max_recent", 25);
+ // 0/1 (name param is encoded in a legacy way), 2(RFC 2231 only)
+ // 0 the name param is never separated to multiple lines.
