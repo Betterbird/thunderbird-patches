@@ -66,10 +66,10 @@ echo "======================================================="
 echo "Copying patches and series file from thunderbird-patches"
 # cp -u doesn't work on Mac :-(
 rsync -u -i ../thunderbird-patches/$VERSION/series$MOZU .hg/patches/series
-rsync -u -i ../thunderbird-patches/$VERSION/branding/*$MOZ.patch .hg/patches/
-rsync -u -i ../thunderbird-patches/$VERSION/bugs/*$MOZ.patch     .hg/patches/
-rsync -u -i ../thunderbird-patches/$VERSION/features/*$MOZ.patch .hg/patches/
-rsync -u -i ../thunderbird-patches/$VERSION/misc/*$MOZ.patch     .hg/patches/
+rsync -u -i ../thunderbird-patches/$VERSION/branding/*$MOZ.patch .hg/patches/branding/
+rsync -u -i ../thunderbird-patches/$VERSION/bugs/*$MOZ.patch     .hg/patches/bugs/
+rsync -u -i ../thunderbird-patches/$VERSION/features/*$MOZ.patch .hg/patches/features/
+rsync -u -i ../thunderbird-patches/$VERSION/misc/*$MOZ.patch     .hg/patches/misc/
 
 echo
 echo "======================================================="
