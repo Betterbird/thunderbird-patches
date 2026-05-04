@@ -88,7 +88,7 @@ if [ -d ../../private-patches ]; then
   echo
   echo "======================================================="
   echo "Copying private patches"
-  cp ../../private-patches/*.patch .hg/patches/
+  cp ../../private-patches/*.patch .hg/patches/features/
 fi
 
 echo
