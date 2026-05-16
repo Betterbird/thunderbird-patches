@@ -1,0 +1,117 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1778964788 -7200
+# Parent  bcf43e18aed55110deceea6abd34d9068c0fb00f
+Bug 532712 - disable some code that replaces NBSP with ASCII space (Blink variant).
+
+These changes are needed when pref editor.white_space_normalization.blink_compatible is true.
+
+diff --git a/editor/libeditor/HTMLEditSubActionHandler.cpp b/editor/libeditor/HTMLEditSubActionHandler.cpp
+--- a/editor/libeditor/HTMLEditSubActionHandler.cpp
++++ b/editor/libeditor/HTMLEditSubActionHandler.cpp
+@@ -1724,8 +1724,12 @@ void HTMLEditor::GenerateWhiteSpaceSeque
+   HTMLEditor::ReplaceStringWithNormalizedWhiteSpaceSequence(
+       aResult, 0u, aLength, aPreviousCharPointData, aNextCharPointData);
+ }
+ 
++// These are also accessed in WSRunScanner.cpp.
++bool priorInsertWasNBSP2 = false;
++bool currentInsertIsNBSP2 = false;
++
+ // static
+ void HTMLEditor::ReplaceStringWithNormalizedWhiteSpaceSequence(
+     nsString& aResult, uint32_t aOffset, uint32_t aLength,
+     const CharPointData& aPreviousCharPointData,
+@@ -1750,8 +1754,9 @@ void HTMLEditor::ReplaceStringWithNormal
+     // XXX This means that this does not allow to put an NBSP in HTML editor
+     //     without preformatted style.  However, Chrome has same issue too.
+     if (aPreviousCharPointData.Type() == CharPointType::VisibleChar &&
+         aNextCharPointData.Type() == CharPointType::VisibleChar) {
++      if (priorInsertWasNBSP2) return;
+       aResult.SetCharAt(HTMLEditUtils::kSpace, aOffset);
+       return;
+     }
+     // If it's start or end of text, put an NBSP.
+@@ -1815,8 +1820,13 @@ HTMLEditor::NormalizeWhiteSpacesToInsert
+           *aPointToInsert.ContainerAs<nsIContent>())) {
+     return NormalizedStringToInsertText(aStringToInsert, aPointToInsert);
+   }
+ 
++  // Ugly hack to make inserting a NBSP not trigger its removal when
++  // the next character is typed.
++  priorInsertWasNBSP2 = currentInsertIsNBSP2;
++  currentInsertIsNBSP2 = aStringToInsert.EqualsLiteral(u"\x00A0");
++
+   Text* const textNode = aPointToInsert.GetContainerAs<Text>();
+   const CharacterDataBuffer* const characterDataBuffer =
+       textNode ? &textNode->DataBuffer() : nullptr;
+   const bool isNewLineCollapsible = !EditorUtils::IsNewLinePreformatted(
+@@ -1886,9 +1896,9 @@ HTMLEditor::NormalizeWhiteSpacesToInsert
+     str.SetCapacity(aStringToInsert.Length() + newPrecedingWhiteSpaceLength +
+                     newFollowingWhiteSpaceLength);
+     for ([[maybe_unused]] auto unused :
+          IntegerRange(newPrecedingWhiteSpaceLength)) {
+-      str.Append(' ');
++      str.Append(priorInsertWasNBSP2 ? 0xA0 : ' ');  // NBSP in UTF-16.
+     }
+     str.Append(aStringToInsert);
+     for ([[maybe_unused]] auto unused :
+          IntegerRange(newFollowingWhiteSpaceLength)) {
+diff --git a/editor/libeditor/WSRunScanner.cpp b/editor/libeditor/WSRunScanner.cpp
+--- a/editor/libeditor/WSRunScanner.cpp
++++ b/editor/libeditor/WSRunScanner.cpp
+@@ -22,8 +22,11 @@
+ namespace mozilla {
+ 
+ using namespace dom;
+ 
++extern bool priorInsertWasNBSP2;
++extern bool currentInsertIsNBSP2;
++
+ /******************************************************************************
+  * mozilla::WSScanResult
+  ******************************************************************************/
+ 
+@@ -547,8 +550,13 @@ Result<EditorDOMRangeInTexts, nsresult>
+ WSRunScanner::GetRangeInTextNodesToBackspaceFrom(
+     Options aOptions,  // NOLINT(performance-unnecessary-value-param)
+     const EditorDOMPoint& aPoint,
+     const Element* aAncestorLimiter /* = nullptr */) {
++
++  // Backspace deletion calls this, so undo insertion hack.
++  priorInsertWasNBSP2 = false;
++  currentInsertIsNBSP2 = false;
++
+   // Corresponding to computing delete range part of
+   // `WhiteSpaceVisibilityKeeper::DeletePreviousWhiteSpace()`
+   MOZ_ASSERT(aPoint.IsSetAndValid());
+   MOZ_ASSERT(!aOptions.contains(Option::ReferHTMLDefaultStyle));
+@@ -649,8 +657,14 @@ Result<EditorDOMRangeInTexts, nsresult>
+ WSRunScanner::GetRangeInTextNodesToForwardDeleteFrom(
+     Options aOptions,  // NOLINT(performance-unnecessary-value-param)
+     const EditorDOMPoint& aPoint,
+     const Element* aAncestorLimiter /* = nullptr */) {
++
++  // Forward deletion does NOT appear to call this, but undoing the
++  // insertion hack won't hurt, just in case.
++  priorInsertWasNBSP2 = false;
++  currentInsertIsNBSP2 = false;
++
+   // Corresponding to computing delete range part of
+   // `WhiteSpaceVisibilityKeeper::DeleteInclusiveNextWhiteSpace()`
+   MOZ_ASSERT(aPoint.IsSetAndValid());
+   MOZ_ASSERT(!aOptions.contains(Option::ReferHTMLDefaultStyle));
+@@ -917,8 +931,13 @@ EditorDOMRange
+ WSRunScanner::GetRangeContainingInvisibleWhiteSpacesAtRangeBoundaries(
+     Options aOptions,  // NOLINT(performance-unnecessary-value-param)
+     const EditorDOMRange& aRange,
+     const Element* aAncestorLimiter /* = nullptr */) {
++
++  // Forward deletion calls this, so undo insertion hack.
++  priorInsertWasNBSP2 = false;
++  currentInsertIsNBSP2 = false;
++
+   MOZ_ASSERT(aRange.IsPositionedAndValid());
+   MOZ_ASSERT(aRange.EndRef().IsSetAndValid());
+   MOZ_ASSERT(aRange.StartRef().IsSetAndValid());
+   MOZ_ASSERT(!aOptions.contains(Option::ReferHTMLDefaultStyle));
