@@ -1,0 +1,157 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1711566501 -3600
+# Parent  a6c4ca1f8e1406a9f83cd7fe878fd91a285ed68b
+Feature: Linux systray: Adding activation via left-click, https://github.com/AyatanaIndicators/libayatana-appindicator/pull/71:
+
+https://github.com/AyatanaIndicators/libayatana-appindicator/pull/71/commits/20591e6cf5068dde1f5371a60e7fc76700da9291
+
+Work by Alexey Sokolov (DarthGandalf)
+
+Betterbird added a few lines in the test program betterbird-systray-icon.c.
+
+diff --git a/third_party/appindicator/app-indicator.c b/third_party/appindicator/app-indicator.c
+--- a/third_party/appindicator/app-indicator.c
++++ b/third_party/appindicator/app-indicator.c
+@@ -125,8 +125,9 @@ enum {
+     NEW_TOOLTIP,
+     CONNECTION_CHANGED,
+     NEW_ICON_THEME_PATH,
+     SCROLL_EVENT,
++    ACTIVATE_EVENT,
+     LAST_SIGNAL
+ };
+ 
+ static guint signals[LAST_SIGNAL] = { 0 };
+@@ -707,8 +708,24 @@ app_indicator_class_init (AppIndicatorCl
+                                       NULL, NULL,
+                                       _application_service_marshal_VOID__INT_UINT,
+                                       G_TYPE_NONE, 2, G_TYPE_INT, GDK_TYPE_SCROLL_DIRECTION);
+ 
++    /**
++     * AppIndicator::activate-event:
++     * @arg0: The #AppIndicator object
++     * @arg1: X
++     * @arg2: Y
++     *
++     * Signaled when the #AppIndicator receives a scroll event.
++     */
++    signals[ACTIVATE_EVENT] = g_signal_new (APP_INDICATOR_SIGNAL_ACTIVATE_EVENT,
++                                      G_TYPE_FROM_CLASS(klass),
++                                      G_SIGNAL_RUN_LAST,
++                                      G_STRUCT_OFFSET (AppIndicatorClass, activate_event),
++                                      NULL, NULL,
++                                      _application_service_marshal_VOID__INT_UINT,
++                                      G_TYPE_NONE, 2, G_TYPE_INT, G_TYPE_INT);
++
+     /* DBus interfaces */
+     if (item_node_info == NULL) {
+         GError * error = NULL;
+ 
+@@ -1349,9 +1366,12 @@ bus_method_call (GDBusConnection * conne
+         }
+ 
+         delta = ABS(delta);
+         g_signal_emit(app, signals[SCROLL_EVENT], 0, delta, direction);
+-
++    } else if (g_strcmp0(method, "Activate") == 0) {
++        gint x, y;
++        g_variant_get(params, "(ii)", &x, &y);
++        g_signal_emit(app, signals[ACTIVATE_EVENT], 0, x, y);
+     } else if (g_strcmp0(method, "SecondaryActivate") == 0 ||
+                g_strcmp0(method, "XAyatanaSecondaryActivate") == 0) {
+         GtkWidget *menuitem = priv->sec_activate_target;
+ 
+diff --git a/third_party/appindicator/app-indicator.h b/third_party/appindicator/app-indicator.h
+--- a/third_party/appindicator/app-indicator.h
++++ b/third_party/appindicator/app-indicator.h
+@@ -116,16 +116,22 @@ G_BEGIN_DECLS
+  * APP_INDICATOR_SIGNAL_SCROLL_EVENT:
+  *
+  * String identifier for the #AppIndicator::scroll-event signal.
+  */
++/**
++ * APP_INDICATOR_SIGNAL_ACTIVATE_EVENT:
++ *
++ * String identifier for the #AppIndicator::activate-event signal.
++ */
+ #define APP_INDICATOR_SIGNAL_NEW_ICON            "new-icon"
+ #define APP_INDICATOR_SIGNAL_NEW_ATTENTION_ICON  "new-attention-icon"
+ #define APP_INDICATOR_SIGNAL_NEW_STATUS          "new-status"
+ #define APP_INDICATOR_SIGNAL_NEW_LABEL           "new-label"
+ #define APP_INDICATOR_SIGNAL_NEW_TOOLTIP         "new-tooltip"
+ #define APP_INDICATOR_SIGNAL_CONNECTION_CHANGED  "connection-changed"
+ #define APP_INDICATOR_SIGNAL_NEW_ICON_THEME_PATH "new-icon-theme-path"
+ #define APP_INDICATOR_SIGNAL_SCROLL_EVENT        "scroll-event"
++#define APP_INDICATOR_SIGNAL_ACTIVATE_EVENT      "activate-event"
+ 
+ /**
+  * AppIndicatorCategory:
+  * @APP_INDICATOR_CATEGORY_APPLICATION_STATUS: The indicator is used to display the status of the application.
+@@ -221,8 +227,13 @@ struct _AppIndicatorClass {
+                                      gint                  delta,
+                                      GdkScrollDirection direction,
+                                      gpointer          user_data);
+ 
++    void (* activate_event)         (AppIndicator * indicator,
++                                     gint                  x,
++                                     gint                  y,
++                                     gpointer          user_data);
++
+     void (*app_indicator_reserved_ats)(void);
+ 
+     /* Overridable Functions */
+     GtkStatusIcon * (*fallback)     (AppIndicator * indicator);
+@@ -233,9 +244,8 @@ struct _AppIndicatorClass {
+     void (*app_indicator_reserved_1)(void);
+     void (*app_indicator_reserved_2)(void);
+     void (*app_indicator_reserved_3)(void);
+     void (*app_indicator_reserved_4)(void);
+-    void (*app_indicator_reserved_5)(void);
+ };
+ 
+ /**
+  * AppIndicator:
+diff --git a/third_party/appindicator/betterbird-systray-icon.c b/third_party/appindicator/betterbird-systray-icon.c
+--- a/third_party/appindicator/betterbird-systray-icon.c
++++ b/third_party/appindicator/betterbird-systray-icon.c
+@@ -12,8 +12,12 @@ static char icon_path0[PATH_MAX + 100];
+ static char icon_pathN[PATH_MAX + 100];
+ 
+ static int icon;
+ 
++static void activated (AppIndicator * self, gint x, gint y, gpointer data) {
++  fprintf(stderr, "*** Activated!!\n");
++}
++
+ static gboolean change_icon0(AppIndicator *ci) {
+   if (icon == 0) {
+     fprintf(stderr, "Setting icon to %s and title to '%s 1'\n", icon_path0, TEXT_ICON_TITLE);
+     app_indicator_set_icon_full(ci, icon_path0, NULL);
+@@ -60,8 +64,10 @@ int main(int argc, char ** argv) {
+ 
+   g_assert(APP_IS_INDICATOR(ci));
+   g_assert(G_IS_OBJECT(ci));
+ 
++  g_signal_connect(ci, APP_INDICATOR_SIGNAL_ACTIVATE_EVENT, G_CALLBACK(activated), NULL);
++
+   icon = 0;
+   change_icon0(ci);
+   g_timeout_add_seconds(5, change_icon, ci);
+ 
+diff --git a/third_party/appindicator/gen-notification-item.xml.c b/third_party/appindicator/gen-notification-item.xml.c
+--- a/third_party/appindicator/gen-notification-item.xml.c
++++ b/third_party/appindicator/gen-notification-item.xml.c
+@@ -25,8 +25,12 @@ const char * _notification_item =
+ "		<method name=\"Scroll\">\n"
+ "			<arg type=\"i\" name=\"delta\" direction=\"in\" />\n"
+ "			<arg type=\"s\" name=\"orientation\" direction=\"in\" />\n"
+ "		</method>\n"
++"		<method name=\"Activate\">\n"
++"			<arg type=\"i\" name=\"x\" direction=\"in\" />\n"
++"			<arg type=\"i\" name=\"y\" direction=\"in\" />\n"
++"		</method>\n"
+ "		<method name=\"SecondaryActivate\">\n"
+ "			<arg type=\"i\" name=\"x\" direction=\"in\" />\n"
+ "			<arg type=\"i\" name=\"y\" direction=\"in\" />\n"
+ "		</method>\n"
