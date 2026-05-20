@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1778443891 -7200
-# Parent  32055be6777d6d697194c557b7c3dbafbbd9ac0d
+# Parent  b9e0275725b55db7a5e2a2570c8713ae789518cc
 Feature: Reversed threading (bug 305741).
 
 diff --git a/mail/base/content/widgets/treeview/thread-card.mjs b/mail/base/content/widgets/treeview/thread-card.mjs
@@ -614,20 +614,23 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  nsresult nsMsgDBView::OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
-@@ -4874,8 +4988,12 @@ nsMsgViewIndex nsMsgDBView::GetIndexForT
+@@ -4874,8 +4988,15 @@ nsMsgViewIndex nsMsgDBView::GetIndexForT
        while (lowIndex < GetSize() && m_levels[lowIndex]) lowIndex++;
      }
    }
  
 +  if (ReversedThreading()) {
 +    // If the row at `highIndex` is expanded, reduce to its topmost child.
++    // This is correct in this function where we want to return the insertion
++    // point and not the root, like in GetThreadRootIndex(), which has almost
++    // identical code but a very different purpose.
 +    while (highIndex > 0 && m_levels[highIndex - 1]) highIndex--;
 +  }
    return highIndex;
  }
  
  nsMsgViewIndex nsMsgDBView::GetInsertIndexHelper(
-@@ -5060,11 +5178,16 @@ bool nsMsgDBView::WantsThisThread(nsIMsg
+@@ -5060,11 +5181,16 @@ bool nsMsgDBView::WantsThisThread(nsIMsg
  
  nsMsgViewIndex nsMsgDBView::FindParentInThread(
      nsMsgKey parentKey, nsMsgViewIndex startOfThreadViewIndex) {
@@ -646,7 +649,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  
      if (NS_FAILED(m_db->GetMsgHdrForKey(parentKey, getter_AddRefs(msgHdr))))
        break;
-@@ -5078,8 +5201,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
+@@ -5078,8 +5204,9 @@ nsMsgViewIndex nsMsgDBView::FindParentIn
  nsresult nsMsgDBView::ListIdsInThreadOrder(nsIMsgThread* threadHdr,
                                             nsMsgKey parentKey, uint32_t level,
                                             nsMsgViewIndex* viewIndex,
@@ -656,7 +659,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
    nsresult rv =
        threadHdr->EnumerateMessages(parentKey, getter_AddRefs(msgEnumerator));
    NS_ENSURE_SUCCESS(rv, rv);
-@@ -5131,8 +5255,28 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
+@@ -5131,8 +5258,28 @@ nsresult nsMsgDBView::ListIdsInThreadOrd
      rv = ListIdsInThreadOrder(threadHdr, msgKey, level + 1, viewIndex,
                                pNumListed);
      NS_ENSURE_SUCCESS(rv, rv);
@@ -685,21 +688,39 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  void nsMsgDBView::InsertEmptyRows(nsMsgViewIndex viewIndex, int32_t numRows) {
-@@ -5391,8 +5535,13 @@ nsMsgViewIndex nsMsgDBView::GetThreadRoo
+@@ -5339,9 +5486,13 @@ nsMsgViewIndex nsMsgDBView::GetThreadRoo
+ 
+   while (highIndex > lowIndex) {
+     nsMsgViewIndex tryIndex = (lowIndex + highIndex) / 2;
+     // Need to adjust tryIndex if it's not a thread.
+-    while (m_levels[tryIndex] && tryIndex) tryIndex--;
++    if (ReversedThreading()) {
++      while (tryIndex < m_keys.Length() && m_levels[tryIndex]) tryIndex++;
++    } else {
++      while (m_levels[tryIndex] && tryIndex) tryIndex--;
++    }
+ 
+     if (tryIndex < lowIndex) {
+       NS_ERROR("try index shouldn't be less than low index");
+       break;
+@@ -5385,9 +5536,16 @@ nsMsgViewIndex nsMsgDBView::GetThreadRoo
+ 
+     if (retStatus < 0) {
+       highIndex = tryIndex;
+       // We already made sure tryIndex was at a thread at the top of the loop.
++      if (ReversedThreading()) {
++        while (highIndex > 0 && m_levels[highIndex - 1]) highIndex--;
++      }
+     } else {
++      // Move `lowIndex` down to the next root. Fine for normal and reversed
++      // threading:
++      // Normal threading: Skip children of root at tryIndex and position to next root.
++      // Reversed threading: Skip children of root below tryIndex and position to that root.
+       lowIndex = tryIndex + 1;
        while (lowIndex < GetSize() && m_levels[lowIndex]) lowIndex++;
      }
    }
- 
-+  if (ReversedThreading()) {
-+    // If the row at `highIndex` is expanded, reduce to its topmost child.
-+    while (highIndex > 0 && m_levels[highIndex - 1]) highIndex--;
-+  }
-+
-   nsCOMPtr<nsIMsgDBHdr> resultHdr;
-   GetMsgHdrForViewIndex(highIndex, getter_AddRefs(resultHdr));
- 
-   if (resultHdr != msgHdr) {
-@@ -5445,8 +5594,22 @@ nsresult nsMsgDBView::ListUnreadIdsInThr
+@@ -5445,8 +5603,22 @@ nsresult nsMsgDBView::ListUnreadIdsInThr
        }
      }
    }
@@ -722,7 +743,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
  }
  
  NS_IMETHODIMP
-@@ -6567,11 +6730,20 @@ nsMsgDBView::OnDeleteCompleted(bool aSuc
+@@ -6567,11 +6739,20 @@ nsMsgDBView::OnDeleteCompleted(bool aSuc
          if (mTree) mTree->BeginUpdateBatch();
          if (mJSTree) mJSTree->BeginUpdateBatch();
        }
@@ -746,7 +767,7 @@ diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.c
        if (numIndices > 1) {
          if (mTree) mTree->EndUpdateBatch();
          if (mJSTree) mJSTree->EndUpdateBatch();
-@@ -6761,8 +6933,9 @@ nsresult nsMsgDBView::CopyDBView(nsMsgDB
+@@ -6761,8 +6942,9 @@ nsresult nsMsgDBView::CopyDBView(nsMsgDB
    aNewMsgDBView->m_folder = m_folder;
    aNewMsgDBView->m_viewFlags = m_viewFlags;
    aNewMsgDBView->m_sortOrder = m_sortOrder;
@@ -856,7 +877,31 @@ diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/ns
 diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
 --- a/mailnews/base/src/nsMsgSearchDBView.cpp
 +++ b/mailnews/base/src/nsMsgSearchDBView.cpp
-@@ -477,39 +477,71 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+@@ -434,9 +434,11 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+     // getting the root header before we add the new header, and finding that.
+     if (newThread || !viewThread->MsgCount()) {
+       viewThread->AddHdr(msgHdr, false, posInThread, getter_AddRefs(parent));
+       nsMsgViewIndex insertIndex = GetIndexForThread(msgHdr);
+-      NS_ASSERTION(insertIndex == m_levels.Length() ||
++      // For reversed threading the assertion doesn't hold since we will be
++      // inserting where there is a child above an expanded root.
++      NS_ASSERTION(insertIndex == m_levels.Length() || ReversedThreading() ||
+                        (IsValidIndex(insertIndex) && !m_levels[insertIndex]),
+                    "inserting into middle of thread");
+       if (insertIndex == nsMsgViewIndex_None)
+         return NS_MSG_INVALID_DBVIEW_INDEX;
+@@ -457,9 +459,9 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+         // Not really OK, but not failure exactly.
+         return NS_OK;
+       }
+ 
+-      NS_ASSERTION(!m_levels[threadIndex],
++      NS_ASSERTION(ReversedThreading() || !m_levels[threadIndex],
+                    "threadRoot incorrect, or level incorrect");
+ 
+       bool moveThread = false;
+       if ((m_sortType == nsMsgViewSortType::byDate ||
+@@ -478,39 +480,71 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
            // Since we know posInThread, we just want to insert the new hdr
            // at threadIndex + posInThread, and then rebuild the view until we
            // get to a sibling of the new hdr.
@@ -949,7 +994,7 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
        } else if (!parent) {
          // New parent came into collapsed thread.
          nsCOMPtr<nsIMsgFolder> msgFolder;
-@@ -579,18 +611,32 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
+@@ -580,24 +614,40 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
      threadKeys.SetCapacity(childCount);
      threadFlags.SetCapacity(childCount);
      threadLevels.SetCapacity(childCount);
@@ -988,7 +1033,16 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
  
    nsMsgDBView::RemoveByIndex(threadIndex);
    m_folders.RemoveObjectAt(threadIndex);
-@@ -606,24 +652,45 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
+   nsMsgViewIndex newIndex = GetIndexForThread(threadHdr);
+-  NS_ASSERTION(newIndex == m_levels.Length() ||
++  // For reversed threading the assertion doesn't hold since we will be
++  // inserting where there is a child above an expanded root.
++  NS_ASSERTION(newIndex == m_levels.Length() || ReversedThreading() ||
+                    (IsValidIndex(newIndex) && !m_levels[newIndex]),
+                "inserting into middle of thread");
+   if (newIndex == nsMsgViewIndex_None) newIndex = 0;
+ 
+@@ -607,24 +657,45 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
    threadHdr->GetFlags(&msgFlags);
    InsertMsgHdrAt(newIndex, threadHdr, msgKey, msgFlags, 0);
  
@@ -1041,7 +1095,7 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
  
  nsresult nsMsgSearchDBView::GetMessageEnumerator(
      nsIMsgEnumerator** enumerator) {
-@@ -830,10 +897,15 @@ nsresult nsMsgSearchDBView::RemoveByInde
+@@ -831,10 +902,15 @@ nsresult nsMsgSearchDBView::RemoveByInde
            static_cast<nsMsgXFViewThread*>(thread.get());
        if (viewThread->MsgCount() == 2) {
          // If we removed the next to last message in the thread,
@@ -1059,7 +1113,7 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
                         ~(MSG_VIEW_FLAG_ISTHREAD | nsMsgMessageFlags::Elided |
                           MSG_VIEW_FLAG_HASCHILDREN));
            m_levels[threadIndex] = 0;
-@@ -842,18 +914,32 @@ nsresult nsMsgSearchDBView::RemoveByInde
+@@ -843,18 +919,32 @@ nsresult nsMsgSearchDBView::RemoveByInde
        }
  
        // Bump up the level of all the descendants of the message
@@ -1102,7 +1156,7 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
      }
    }
  
-@@ -1162,20 +1248,40 @@ nsMsgSearchDBView::OpenWithHdrs(nsIMsgEn
+@@ -1163,20 +1253,40 @@ nsMsgSearchDBView::OpenWithHdrs(nsIMsgEn
  
  nsMsgViewIndex nsMsgSearchDBView::FindHdr(nsIMsgDBHdr* msgHdr,
                                            nsMsgViewIndex startIndex,
@@ -1153,7 +1207,7 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
  
  // This method looks for the XF thread that corresponds to this message hdr,
  // first by looking up the message id, then references, and finally, if subject
-@@ -1360,8 +1466,21 @@ nsresult nsMsgSearchDBView::ListIdsInThr
+@@ -1361,8 +1471,21 @@ nsresult nsMsgSearchDBView::ListIdsInThr
                        !(m_viewFlags & nsMsgViewFlagsType::kGroupBySort);
    nsMsgXFViewThread* viewThread;
    if (threadedView) viewThread = static_cast<nsMsgXFViewThread*>(threadHdr);
@@ -1175,7 +1229,7 @@ diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSe
      nsCOMPtr<nsIMsgDBHdr> msgHdr;
      threadHdr->GetChildHdrAt(i, getter_AddRefs(msgHdr));
  
-@@ -1372,9 +1491,13 @@ nsresult nsMsgSearchDBView::ListIdsInThr
+@@ -1373,9 +1496,13 @@ nsresult nsMsgSearchDBView::ListIdsInThr
        msgHdr->GetFlags(&msgFlags);
        uint8_t level = (threadedView) ? viewThread->ChildLevelAt(i) : 1;
        SetMsgHdrAt(msgHdr, viewIndex, msgKey, msgFlags & ~MSG_VIEW_FLAGS, level);
@@ -1229,7 +1283,7 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
                 !(flags & MSG_VIEW_FLAG_HASCHILDREN)) {
        nsCOMPtr<nsIMsgDBHdr> msgHdr;
        nsCOMPtr<nsIMsgThread> pThread;
-@@ -597,8 +602,26 @@ nsresult nsMsgThreadedDBView::OnNewHeade
+@@ -600,8 +605,26 @@ nsresult nsMsgThreadedDBView::OnNewHeade
    if (isExpanded) {
      CollapseByIndex(threadIndex, nullptr);
    }
@@ -1256,7 +1310,7 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
  
    // Handle root changes or chronological shifts directly
    nsMsgViewIndex newIndex = nsMsgViewIndex_None;
-@@ -721,10 +744,20 @@ nsresult nsMsgThreadedDBView::RemoveByIn
+@@ -724,10 +747,20 @@ nsresult nsMsgThreadedDBView::RemoveByIn
      });
  
      // Scrub stale children natively.
@@ -1279,7 +1333,7 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
      // Add newly promoted root and let Mork natively calculate the layout and
      // indentation.
      nsCOMPtr<nsIMsgDBHdr> newRootHdr;
-@@ -773,16 +806,30 @@ nsresult nsMsgThreadedDBView::RemoveByIn
+@@ -776,16 +809,30 @@ nsresult nsMsgThreadedDBView::RemoveByIn
      NS_ENSURE_SUCCESS(rv, rv);
  
      // If the deleted child had children of its own, the DB reparents them to
