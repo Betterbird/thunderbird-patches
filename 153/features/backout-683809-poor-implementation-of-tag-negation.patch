@@ -1,0 +1,230 @@
+# HG changeset patch
+# Date 1779464539 -7200
+# Parent  fc847a515e2b8c24bf7c983775eca1e413aaa1d0
+Backout poor implementation of tag negation. Bug 683809 and follow-up bug 2008278.
+
+diff --git a/mail/base/content/quickFilterBar.inc.xhtml b/mail/base/content/quickFilterBar.inc.xhtml
+--- a/mail/base/content/quickFilterBar.inc.xhtml
++++ b/mail/base/content/quickFilterBar.inc.xhtml
+@@ -75,20 +75,17 @@
+                     data-l10n-id="quick-filter-bar-text-filter-body"></button>
+           </div>
+         </div>
+         <div id="quickFilterBarTagsContainer" hidden="hidden">
+-          <xul:menulist id="qfb-tag-filter-mode" value="OR">
+-            <xul:menupopup class="no-icon-menupopup">
+-              <xul:menuitem id="qfb-tag-filter-mode-or"
++          <xul:menulist id="qfb-boolean-mode" value="OR">
++            <xul:menupopup>
++              <xul:menuitem id="qfb-boolean-mode-or"
+                             value="OR"
+                             data-l10n-id="quick-filter-bar-boolean-mode-any"
+                             default="default"/>
+-              <xul:menuitem id="qfb-tag-filter-mode-and"
++              <xul:menuitem id="qfb-boolean-mode-and"
+                             value="AND"
+                             data-l10n-id="quick-filter-bar-boolean-mode-all"/>
+-              <xul:menuitem id="qfb-tag-filter-mode-none"
+-                            value="NONE"
+-                            data-l10n-id="quick-filter-bar-tag-mode-none"/>
+             </xul:menupopup>
+           </xul:menulist>
+         </div>
+       </div>
+diff --git a/mail/components/extensions/parent/ext-mailTabs.js b/mail/components/extensions/parent/ext-mailTabs.js
+--- a/mail/components/extensions/parent/ext-mailTabs.js
++++ b/mail/components/extensions/parent/ext-mailTabs.js
+@@ -765,20 +765,10 @@ this.mailTabs = class extends ExtensionA
+             for (const tag of MailServices.tags.getAllTags()) {
+               filterer.filterValues.tags[tag.key] = null;
+             }
+             if (typeof state.tags == "object") {
+-              switch (state.tags.mode) {
+-                case "all":
+-                  filterer.filterValues.tags.mode = "AND";
+-                  break;
+-                case "none":
+-                  filterer.filterValues.tags.mode = "NONE";
+-                  break;
+-                case "any":
+-                default:
+-                  filterer.filterValues.tags.mode = "OR";
+-                  break;
+-              }
++              filterer.filterValues.tags.mode =
++                state.tags.mode == "any" ? "OR" : "AND";
+               for (const [key, value] of Object.entries(state.tags.tags)) {
+                 filterer.filterValues.tags.tags[key] = value;
+               }
+             }
+diff --git a/mail/components/extensions/schemas/messages.json b/mail/components/extensions/schemas/messages.json
+--- a/mail/components/extensions/schemas/messages.json
++++ b/mail/components/extensions/schemas/messages.json
+@@ -1555,10 +1555,10 @@
+             }
+           },
+           "mode": {
+             "type": "string",
+-            "description": "Whether <var>all</var> of the tag filters must apply, <var>any</var> of them, or <var>none</var>. The <var>none</var> mode ignores the provided filters and selects only messages without any tags.",
+-            "enum": ["all", "any", "none"]
++            "description": "Whether all of the tag filters must apply, or any of them.",
++            "enum": ["all", "any"]
+           }
+         }
+       }
+     ],
+diff --git a/mail/components/extensions/test/browser/browser_ext_quickFilter.js b/mail/components/extensions/test/browser/browser_ext_quickFilter.js
+--- a/mail/components/extensions/test/browser/browser_ext_quickFilter.js
++++ b/mail/components/extensions/test/browser/browser_ext_quickFilter.js
+@@ -72,13 +72,8 @@ add_task(async () => {
+     });
+     await window.sendMessage("checkVisible", 9, 6, 3, 0);
+ 
+     await browser.mailTabs.setQuickFilter({
+-      tags: { mode: "none", tags: {} },
+-    });
+-    await window.sendMessage("checkVisible", 7, 5);
+-
+-    await browser.mailTabs.setQuickFilter({
+       tags: { mode: "any", tags: { $label2: true } },
+     });
+     await window.sendMessage("checkVisible", 8, 6, 4, 2, 0);
+ 
+diff --git a/mail/locales/en-US/messenger/about3Pane.ftl b/mail/locales/en-US/messenger/about3Pane.ftl
+--- a/mail/locales/en-US/messenger/about3Pane.ftl
++++ b/mail/locales/en-US/messenger/about3Pane.ftl
+@@ -156,12 +156,8 @@ quick-filter-bar-boolean-mode-any =
+ # The All-of tagging mode.
+ quick-filter-bar-boolean-mode-all =
+     .label = All of
+     .title = All of the selected tag criteria must match
+-# The None tagging mode.
+-quick-filter-bar-tag-mode-none =
+-    .label = Untagged only
+-    .title = Only messages without tags
+ 
+ # This label explains what the sender/recipients/subject/body buttons do.
+ # This string should ideally be kept short because the label and the text
+ # filter buttons share their bar (that appears when there is text in the text
+diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
+--- a/mail/modules/QuickFilterManager.sys.mjs
++++ b/mail/modules/QuickFilterManager.sys.mjs
+@@ -704,22 +704,8 @@ var TagFacetingFilter = {
+       return null;
+     }
+ 
+     let term, value;
+-    const mode = aFilterValue.mode;
+-
+-    // Show only messages that have no tags assigned.
+-    if (mode === "NONE") {
+-      term = aTermCreator.createTerm();
+-      term.attrib = Ci.nsMsgSearchAttrib.Keywords;
+-      value = term.value;
+-      value.str = "";
+-      term.value = value;
+-      term.op = Ci.nsMsgSearchOp.IsEmpty;
+-      term.booleanAnd = true;
+-      aTerms.push(term);
+-      return null;
+-    }
+ 
+     // Just the true/false case.
+     if (this.isSimple(aFilterValue)) {
+       term = aTermCreator.createTerm();
+@@ -744,8 +730,9 @@ var TagFacetingFilter = {
+       term = null;
+ 
+       const excludeTerms = [];
+ 
++      const mode = aFilterValue.mode;
+       for (const key in aFilterValue.tags) {
+         const shouldFilter = aFilterValue.tags[key];
+         if (shouldFilter !== null) {
+           term = aTermCreator.createTerm();
+@@ -872,27 +859,18 @@ var TagFacetingFilter = {
+     return [checked, true];
+   },
+ 
+   domBindExtra(aDocument, aMuxer) {
+-    // Tag filtering mode menu: All of/Any of/None.
++    // Tag filtering mode menu (All of/Any of)
+     function commandHandler(aEvent) {
+       const filterValue = aMuxer.getFilterValueForMutation(
+         TagFacetingFilter.name
+       );
+-      // The search was triggered when the filter was being cleared, no need
+-      // to do anything.
+-      if (!filterValue) {
+-        return;
+-      }
+-
+       filterValue.mode = aEvent.target.value;
+-      aDocument
+-        .getElementById("quickFilterBarTagsContainer")
+-        .classList.toggle("none-mode-selected", filterValue.mode === "NONE");
+       aMuxer.updateSearch();
+     }
+     aDocument
+-      .getElementById("qfb-tag-filter-mode")
++      .getElementById("qfb-boolean-mode")
+       .addEventListener("ValueChange", commandHandler);
+   },
+ 
+   reflectInDOM(aNode, aFilterValue, aDocument, aMuxer, aCallId) {
+@@ -905,15 +883,9 @@ var TagFacetingFilter = {
+     }
+     if (aFilterValue != null && typeof aFilterValue == "object") {
+       this._populateTagBar(aFilterValue, aDocument, aMuxer);
+     } else {
+-      // Properly reset the tags container to its initial state since
+-      // re-enabling the tags filtering won't account for any previously
+-      // modified values.
+-      const container = aDocument.getElementById("quickFilterBarTagsContainer");
+-      container.hidden = true;
+-      container.classList.remove("none-mode-selected");
+-      aDocument.getElementById("qfb-tag-filter-mode").selectedIndex = 0;
++      aDocument.getElementById("quickFilterBarTagsContainer").hidden = true;
+     }
+   },
+ 
+   _populateTagBar(aState, aDocument, aMuxer) {
+@@ -922,9 +894,9 @@ var TagFacetingFilter = {
+ 
+     // If we have a mode stored use that. If we don't have a mode, then update
+     // our state to agree with what the UI is currently displaying;
+     // this will happen for fresh profiles.
+-    const qbm = aDocument.getElementById("qfb-tag-filter-mode");
++    const qbm = aDocument.getElementById("qfb-boolean-mode");
+     if (aState.mode) {
+       qbm.value = aState.mode;
+     } else {
+       aState.mode = qbm.value;
+diff --git a/mail/themes/shared/mail/quickFilterBar.css b/mail/themes/shared/mail/quickFilterBar.css
+--- a/mail/themes/shared/mail/quickFilterBar.css
++++ b/mail/themes/shared/mail/quickFilterBar.css
+@@ -91,22 +91,18 @@
+   display: flex;
+   align-items: center;
+   margin-inline-start: -3px;
+   flex-wrap: wrap;
+-
+-  &.none-mode-selected button.qfb-tag-button {
+-    display: none;
+-  }
+ }
+ 
+-#qfb-tag-filter-mode {
++#qfb-boolean-mode {
+   line-height: unset;
+   min-block-size: 0;
+   margin: 3px;
+   padding-block: 3px;
+ }
+ 
+-button.qfb-tag-button {
++.qfb-tag-button {
+   --tag-color: currentColor;
+   --tag-contrast-color: currentColor;
+   --button-padding: 3px;
+   --button-margin: 3px;
