@@ -1,0 +1,295 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Parent  d6648563fc9d083dd19e9ce6c90fe1c30a9320dd
+Backout bug 1903063 which removed mail.compose.show_attachment_pane.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -663,8 +663,10 @@ pref("mail.allowed_unc_hosts", "");
+ // Comma separated list of allowed hostnames detached attachments can
+ // be located at.
+ pref("mail.allowed_attachment_hostnames", "");
+ 
++// Start compositions with (empty) attachment pane showing
++pref("mail.compose.show_attachment_pane", false);
+ // Check for missing attachments?
+ pref("mail.compose.attachment_reminder", true);
+ // Words that should trigger a missing attachments warning.
+ pref("mail.compose.attachment_reminder_keywords", "chrome://messenger/locale/messengercompose/composeMsgs.properties");
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -5273,8 +5273,12 @@ async function ComposeStartup() {
+     // information. Fall back to no-draft-restore-support.
+     attachmentItem.attachment.sendViaCloud = false;
+   }
+ 
++  if (Services.prefs.getBoolPref("mail.compose.show_attachment_pane")) {
++    toggleAttachmentPane("show");
++  }
++
+   // Fill custom headers.
+   const otherHeaders = Services.prefs
+     .getCharPref("mail.compose.other.header", "")
+     .split(",")
+@@ -8697,8 +8701,20 @@ async function RemoveAllAttachments() {
+   await RemoveAttachments(gAttachmentBucket.itemChildren);
+ }
+ 
+ /**
++ * Show or hide the attachment pane after updating its header bar information
++ * (number and total file size of attachments) and tooltip.
++ *
++ * @param {boolean} aShowBucket - Show bucket or not:
++ *   - true: show the attachment pane
++ *   - false (or omitted): hide the attachment pane
++ */
++function UpdateAttachmentBucket(aShowBucket) {
++  updateAttachmentPane(aShowBucket ? "show" : "hide");
++}
++
++/**
+  * Update the header bar information (number and total file size of attachments)
+  * and tooltip of attachment pane, then (optionally) show or hide the pane.
+  *
+  * @param {"show"|"hide"} [aShowPane] Command:
+@@ -8725,9 +8741,9 @@ function updateAttachmentPane(aShowPane)
+       : item.attachment.size;
+   }
+ 
+   document.getElementById("attachmentBucketSize").textContent =
+-    gMessenger.formatFileSize(attachmentsSize);
++    count > 0 ? gMessenger.formatFileSize(attachmentsSize) : "";
+ 
+   document
+     .getElementById("composeContentBox")
+     .classList.toggle("attachment-area-hidden", !count);
+@@ -9309,8 +9325,26 @@ function reorderAttachmentsPanelOnPopupS
+   // in attachment bucket right now, which is required for updating them.
+   updateReorderAttachmentsItems();
+ }
+ 
++function attachmentHeaderContextOnPopupShowing() {
++  const initiallyShowItem = document.getElementById(
++    "attachmentHeaderContext_initiallyShowItem"
++  );
++
++  initiallyShowItem.setAttribute(
++    "checked",
++    Services.prefs.getBoolPref("mail.compose.show_attachment_pane")
++  );
++}
++
++function toggleInitiallyShowAttachmentPane(aMenuItem) {
++  Services.prefs.setBoolPref(
++    "mail.compose.show_attachment_pane",
++    aMenuItem.getAttribute("checked")
++  );
++}
++
+ /**
+  * Handle blur event on attachment pane and control visibility of
+  * reorderAttachmentsPanel.
+  */
+diff --git a/mail/components/compose/content/MsgComposeCommands.js.globals b/mail/components/compose/content/MsgComposeCommands.js.globals
+--- a/mail/components/compose/content/MsgComposeCommands.js.globals
++++ b/mail/components/compose/content/MsgComposeCommands.js.globals
+@@ -18,8 +18,9 @@
+   "attachmentBucketOnClick",
+   "attachmentBucketOnKeyPress",
+   "attachmentBucketOnSelect",
+   "attachmentBucketUpdateTooltips",
++  "attachmentHeaderContextOnPopupShowing",
+   "AttachmentInfo",
+   "attachmentNotificationSupressed",
+   "Attachments2CompFields",
+   "AttachmentsChanged",
+@@ -298,8 +299,9 @@
+   "ToggleDSN",
+   "toggleEncryptedSubject",
+   "toggleEncryptMessage",
+   "toggleGlobalSignMessage",
++  "toggleInitiallyShowAttachmentPane",
+   "ToggleReturnReceipt",
+   "toggleSpellCheckingEnabled",
+   "ToggleWindowLock",
+   "UIDensity",
+@@ -308,8 +310,9 @@
+   "updateAllItems",
+   "updateAriaLabelsAndTooltipsOfAllAddressRows",
+   "updateAriaLabelsOfAddressRow",
+   "UpdateAttachment",
++  "UpdateAttachmentBucket",
+   "updateAttachmentItemProperties",
+   "updateAttachmentItems",
+   "updateAttachmentPane",
+   "updateAttachMyPubKey",
+diff --git a/mail/components/compose/content/messengercompose.xhtml b/mail/components/compose/content/messengercompose.xhtml
+--- a/mail/components/compose/content/messengercompose.xhtml
++++ b/mail/components/compose/content/messengercompose.xhtml
+@@ -762,8 +762,17 @@
+             accesskey="&removeAllAttachments.accesskey;"
+             command="cmd_removeAllAttachments"/>
+ </menupopup>
+ 
++<menupopup id="attachmentHeaderContext"
++           onpopupshowing="attachmentHeaderContextOnPopupShowing();">
++  <menuitem id="attachmentHeaderContext_initiallyShowItem"
++            type="checkbox"
++            label="&initiallyShowAttachmentPane.label;"
++            accesskey="&initiallyShowAttachmentPane.accesskey;"
++            oncommand="toggleInitiallyShowAttachmentPane(this);"/>
++</menupopup>
++
+ <menupopup id="format-toolbar-context-menu"
+            onpopupshowing="ToolbarContextMenu.updateExtension(this);">
+   <menuitem oncommand="ToolbarContextMenu.openAboutAddonsForContextAction(this.parentElement)"
+             data-l10n-id="toolbar-context-menu-manage-extension"
+diff --git a/mail/components/extensions/test/browser/browser_ext_compose_attachments.js b/mail/components/extensions/test/browser/browser_ext_compose_attachments.js
+--- a/mail/components/extensions/test/browser/browser_ext_compose_attachments.js
++++ b/mail/components/extensions/test/browser/browser_ext_compose_attachments.js
+@@ -486,13 +486,17 @@ add_task(async function test_file_attach
+       );
+     }
+ 
+     const bucketTotal = composeDocument.getElementById("attachmentBucketSize");
+-    Assert.equal(
+-      bucketTotal.textContent,
+-      messenger.formatFileSize(totalSize),
+-      "Total size should match."
+-    );
++    if (totalSize == 0) {
++      Assert.equal(bucketTotal.textContent, "");
++    } else {
++      Assert.equal(
++        bucketTotal.textContent,
++        messenger.formatFileSize(totalSize),
++        "Total size should match."
++      );
++    }
+ 
+     extension.sendMessage();
+   });
+ 
+@@ -1171,9 +1175,16 @@ add_task(async function test_compose_att
+       );
+     }
+ 
+     const bucketTotal = composeDocument.getElementById("attachmentBucketSize");
+-    Assert.equal(bucketTotal.textContent, messenger.formatFileSize(totalSize));
++    if (totalSize == 0) {
++      Assert.equal(bucketTotal.textContent, "");
++    } else {
++      Assert.equal(
++        bucketTotal.textContent,
++        messenger.formatFileSize(totalSize)
++      );
++    }
+ 
+     extension.sendMessage();
+   });
+ 
+@@ -1593,9 +1604,16 @@ add_task(async function test_compose_att
+       );
+     }
+ 
+     const bucketTotal = composeDocument.getElementById("attachmentBucketSize");
+-    Assert.equal(bucketTotal.textContent, messenger.formatFileSize(totalSize));
++    if (totalSize == 0) {
++      Assert.equal(bucketTotal.textContent, "");
++    } else {
++      Assert.equal(
++        bucketTotal.textContent,
++        messenger.formatFileSize(totalSize)
++      );
++    }
+ 
+     extension.sendMessage();
+   });
+ 
+@@ -2011,9 +2029,16 @@ add_task(async function test_compose_att
+       );
+     }
+ 
+     const bucketTotal = composeDocument.getElementById("attachmentBucketSize");
+-    Assert.equal(bucketTotal.textContent, messenger.formatFileSize(totalSize));
++    if (totalSize == 0) {
++      Assert.equal(bucketTotal.textContent, "");
++    } else {
++      Assert.equal(
++        bucketTotal.textContent,
++        messenger.formatFileSize(totalSize)
++      );
++    }
+ 
+     extension.sendMessage();
+   });
+ 
+diff --git a/mail/extensions/openpgp/content/ui/enigmailMsgComposeOverlay.js b/mail/extensions/openpgp/content/ui/enigmailMsgComposeOverlay.js
+--- a/mail/extensions/openpgp/content/ui/enigmailMsgComposeOverlay.js
++++ b/mail/extensions/openpgp/content/ui/enigmailMsgComposeOverlay.js
+@@ -318,25 +318,29 @@ Enigmail.msg = {
+         gSelectedTechnologyIsPGP = false;
+       }
+     }
+ 
+-    // Check for attached signature files and remove them.
++    // check for attached signature files and remove them
+     var bucketList = document.getElementById("attachmentBucket");
+     if (bucketList.hasChildNodes()) {
+       var node = bucketList.firstChild;
+       while (node) {
+         if (node.attachment.contentType == "application/pgp-signature") {
+           if (!this.findRelatedAttachment(bucketList, node)) {
+-            // Let's release the attachment object held by the node else it
+-            // won't go away until the window is destroyed
++            // Let's release the attachment object held by the node else it won't go away until the window is destroyed
+             node.attachment = null;
+             node = bucketList.removeChild(node);
+           }
+         }
+         node = node.nextSibling;
+       }
+     }
+-    updateAttachmentPane(bucketList.hasChildNodes() ? "show" : "hide");
++
++    // If we removed all the children and the bucket wasn't meant
++    // to stay open, close it.
++    if (!Services.prefs.getBoolPref("mail.compose.show_attachment_pane")) {
++      UpdateAttachmentBucket(bucketList.hasChildNodes());
++    }
+ 
+     if (selectedElement) {
+       selectedElement.focus();
+     }
+@@ -474,9 +478,9 @@ Enigmail.msg = {
+         }
+       }
+ 
+       // Update the visibility of the attachment pane.
+-      updateAttachmentPane(bucketList.itemCount ? "show" : "hide");
++      UpdateAttachmentBucket(bucketList.itemCount);
+     }
+   },
+ 
+   // Used on send failure, to reset the pre-send modifications
+diff --git a/mail/locales/en-US/chrome/messenger/messengercompose/messengercompose.dtd b/mail/locales/en-US/chrome/messenger/messengercompose/messengercompose.dtd
+--- a/mail/locales/en-US/chrome/messenger/messengercompose/messengercompose.dtd
++++ b/mail/locales/en-US/chrome/messenger/messengercompose/messengercompose.dtd
+@@ -279,8 +279,15 @@
+ <!ENTITY convertRegularAttachment.accesskey "A">
+ <!ENTITY attachPage.label "Attach Web Page…">
+ <!ENTITY attachPage.accesskey "W">
+ 
++<!-- Attachment Pane Header Bar Context Menu -->
++<!-- LOCALIZATION NOTE (initiallyShowAttachmentPane.label):
++     Should use the same wording as startExpandedCmd.label
++     in msgHdrViewOverlay.dtd. -->
++<!ENTITY initiallyShowAttachmentPane.label "Initially Show Attachment Pane">
++<!ENTITY initiallyShowAttachmentPane.accesskey "S">
++
+ <!-- Spell checker context menu items -->
+ <!ENTITY spellAddDictionaries.label "Add Dictionaries…">
+ <!ENTITY spellAddDictionaries.accesskey "A">
+ 
