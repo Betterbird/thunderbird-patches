@@ -1,0 +1,346 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1779909697 -7200
+# Parent  3a15d45cf25480481fa73d4d509c6d9125ffc294
+Feature: Add Wide Thread and Stacked layout views to 3pane.
+
+Wide thread layout: thread tree across the top, and folder tree and message browser on the bottom.
+Stacked layout: folder tree and thread tree on the left, and message browser on the right.
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+* * *
+Feature: Add Horizontal layout view to 3pane.
+- Bug 1964119
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -2913,12 +2913,17 @@ var folderPane = {
+           gFolder.URI
+         )}`
+       );
+       document.body.classList.add("account-central");
++      paneLayout.folderPaneSplitter.resizeDirection = "horizontal";
+       accountCentralBrowser.hidden = false;
+     } else {
+       document.title = `${gFolder.localizedName} - ${gFolder.server.prettyName}`;
+       document.body.classList.remove("account-central");
++      const layoutConfig =
++        paneLayout.CONFIG_MAP[paneLayout.LAYOUTS[paneLayout.layoutPreference]];
++      paneLayout.folderPaneSplitter.resizeDirection =
++        layoutConfig.folderPaneSplitterDir;
+       accountCentralBrowser.hidden = true;
+ 
+       await quickFilterBar.onFolderSelected();
+       threadPane.restoreColumns();
+@@ -7105,8 +7110,17 @@ commandController.registerCallback("cmd_
+ );
+ commandController.registerCallback("cmd_viewVerticalMailLayout", () =>
+   Services.prefs.setIntPref("mail.pane_config.dynamic", 2)
+ );
++commandController.registerCallback("cmd_viewWideThreadMailLayout", () =>
++  Services.prefs.setIntPref("mail.pane_config.dynamic", 3)
++);
++commandController.registerCallback("cmd_viewStackedMailLayout", () =>
++  Services.prefs.setIntPref("mail.pane_config.dynamic", 4)
++);
++commandController.registerCallback("cmd_viewHorizontalMailLayout", () =>
++  Services.prefs.setIntPref("mail.pane_config.dynamic", 5)
++);
+ commandController.registerCallback(
+   "cmd_toggleThreadPaneHeader",
+   () => threadPaneHeader.toggleThreadPaneHeader(),
+   () => gFolder && !gFolder.isServer
+diff --git a/mail/base/content/mainCommandSet.inc.xhtml b/mail/base/content/mainCommandSet.inc.xhtml
+--- a/mail/base/content/mainCommandSet.inc.xhtml
++++ b/mail/base/content/mainCommandSet.inc.xhtml
+@@ -47,8 +47,11 @@
+      <command id="cmd_collapseAllThreads" oncommand="goDoCommand('cmd_collapseAllThreads')" disabled=""/>
+      <command id="cmd_viewClassicMailLayout" oncommand="goDoCommand('cmd_viewClassicMailLayout')" disabled=""/>
+      <command id="cmd_viewWideMailLayout" oncommand="goDoCommand('cmd_viewWideMailLayout')" disabled=""/>
+      <command id="cmd_viewVerticalMailLayout" oncommand="goDoCommand('cmd_viewVerticalMailLayout')" disabled=""/>
++     <command id="cmd_viewWideThreadMailLayout" oncommand="goDoCommand('cmd_viewWideThreadMailLayout')" disabled=""/>
++     <command id="cmd_viewStackedMailLayout" oncommand="goDoCommand('cmd_viewStackedMailLayout')" disabled=""/>
++     <command id="cmd_viewHorizontalMailLayout" oncommand="goDoCommand('cmd_viewHorizontalMailLayout')" disabled=""/>
+      <command id="cmd_toggleFolderPane" oncommand="goDoCommand('cmd_toggleFolderPane')" disabled=""/>
+      <command id="cmd_toggleThreadPaneHeader" oncommand="goDoCommand('cmd_toggleThreadPaneHeader')" disabled=""/>
+      <command id="cmd_toggleMessagePane" oncommand="goDoCommand('cmd_toggleMessagePane')" disabled=""/>
+      <command id="cmd_viewAllMsgs" oncommand="goDoCommand('cmd_viewAllMsgs')" disabled=""/>
+diff --git a/mail/base/content/messenger-menubar.inc.xhtml b/mail/base/content/messenger-menubar.inc.xhtml
+--- a/mail/base/content/messenger-menubar.inc.xhtml
++++ b/mail/base/content/messenger-menubar.inc.xhtml
+@@ -382,8 +382,23 @@
+         <menuitem id="messagePaneWide" type="radio" label="&messagePaneWide.label;" name="viewlayoutgroup"
+                   accesskey="&messagePaneWide.accesskey;" command="cmd_viewWideMailLayout"/>
+         <menuitem id="messagePaneVertical" type="radio" label="&messagePaneVertical.label;" name="viewlayoutgroup"
+                   accesskey="&messagePaneVertical.accesskey;" command="cmd_viewVerticalMailLayout"/>
++        <menuitem id="messagePaneWideThread"
++                  type="radio"
++                  data-l10n-id="menu-view-layout-widethread"
++                  name="viewlayoutgroup"
++                  command="cmd_viewWideThreadMailLayout"/>
++        <menuitem id="messagePaneStacked"
++                  type="radio"
++                  data-l10n-id="menu-view-layout-stacked"
++                  name="viewlayoutgroup"
++                  command="cmd_viewStackedMailLayout"/>
++        <menuitem id="messagePaneHorizontal"
++                  type="radio"
++                  data-l10n-id="menu-view-layout-horizontal"
++                  name="viewlayoutgroup"
++                  command="cmd_viewHorizontalMailLayout"/>
+         <menuseparator id="viewMenuAfterPaneVerticalSeparator"/>
+         <menuitem id="menu_showFolderPane" type="checkbox" label="&showFolderPaneCmd.label;"
+                   accesskey="&showFolderPaneCmd.accesskey;" command="cmd_toggleFolderPane"/>
+         <menuitem id="menu_toggleThreadPaneHeader"
+diff --git a/mail/base/content/widgets/pane-layout.mjs b/mail/base/content/widgets/pane-layout.mjs
+--- a/mail/base/content/widgets/pane-layout.mjs
++++ b/mail/base/content/widgets/pane-layout.mjs
+@@ -36,8 +36,53 @@ class PaneLayout extends HTMLBodyElement
+     ["messagePaneSplitter", "messagepaneboxwrapper"],
+   ]);
+ 
+   /**
++   * Maps the preference integer into a layout name array.
++   *
++   * @type {Array}
++   */
++  LAYOUTS = ["standard", "wide", "vertical", "widethread", "stacked", "horizontal"];
++
++  /**
++   * Maps the layout name properties for dom node attributes.
++   *
++   * @type {object}
++   */
++  CONFIG_MAP = {
++    standard: {
++      className: "layout-classic",
++      folderPaneSplitterDir: "horizontal",
++      messagePaneSplitterDir: "vertical",
++    },
++    wide: {
++      className: "layout-wide",
++      folderPaneSplitterDir: "horizontal",
++      messagePaneSplitterDir: "vertical",
++    },
++    vertical: {
++      className: "layout-vertical",
++      folderPaneSplitterDir: "horizontal",
++      messagePaneSplitterDir: "horizontal",
++    },
++    widethread: {
++      className: "layout-widethread",
++      folderPaneSplitterDir: "horizontal",
++      messagePaneSplitterDir: "vertical",
++    },
++    stacked: {
++      className: "layout-stacked",
++      folderPaneSplitterDir: "vertical",
++      messagePaneSplitterDir: "horizontal",
++    },
++    horizontal: {
++      className: "layout-horizontal",
++      folderPaneSplitterDir: "vertical",
++      messagePaneSplitterDir: "vertical",
++    },
++  };
++
++  /**
+    * If the account central browser is currently visible.
+    *
+    * @returns {boolean}
+    */
+@@ -138,9 +183,9 @@ class PaneLayout extends HTMLBodyElement
+ 
+   #initialize() {
+     this.folderPaneSplitter = this.querySelector("#folderPaneSplitter");
+     this.folderPaneSplitter.addEventListener("splitter-resized", this);
+-    this.#setValues(this.folderPaneSplitter, ["width"]);
++    this.#setValues(this.folderPaneSplitter, ["height", "width"]);
+ 
+     this.messagePaneSplitter = this.querySelector("#messagePaneSplitter");
+     this.messagePaneSplitter.addEventListener("splitter-collapsed", this);
+     this.messagePaneSplitter.addEventListener("splitter-expanded", this);
+@@ -175,22 +220,17 @@ class PaneLayout extends HTMLBodyElement
+    *
+    * @param {integer} preference - The currently stored preference integer.
+    */
+   #setLayout(preference) {
+-    this.classList.remove("layout-classic", "layout-vertical", "layout-wide");
+-    switch (preference) {
+-      case 1:
+-        this.classList.add("layout-wide");
+-        this.messagePaneSplitter.resizeDirection = "vertical";
+-        break;
+-      case 2:
+-        this.classList.add("layout-vertical");
+-        this.messagePaneSplitter.resizeDirection = "horizontal";
+-        break;
+-      default:
+-        this.classList.add("layout-classic");
+-        this.messagePaneSplitter.resizeDirection = "vertical";
+-        break;
+-    }
++    this.LAYOUTS.forEach(layout => {
++      this.classList.remove(this.CONFIG_MAP[layout].className);
++    });
++
++    const layoutConfig = this.CONFIG_MAP[this.LAYOUTS[preference]];
++    this.classList.add(layoutConfig.className);
++    this.folderPaneSplitter.resizeDirection =
++      layoutConfig.folderPaneSplitterDir;
++    this.messagePaneSplitter.resizeDirection =
++      layoutConfig.messagePaneSplitterDir;
+   }
+ }
+ customElements.define("pane-layout", PaneLayout, { extends: "body" });
+diff --git a/mail/components/customizableui/content/panelUI.inc.xhtml b/mail/components/customizableui/content/panelUI.inc.xhtml
+--- a/mail/components/customizableui/content/panelUI.inc.xhtml
++++ b/mail/components/customizableui/content/panelUI.inc.xhtml
+@@ -358,8 +358,26 @@
+                        type="radio"
+                        label="&messagePaneVertical.label;"
+                        name="viewlayoutgroup"
+                        command="cmd_viewVerticalMailLayout"/>
++        <toolbarbutton id="appmenu_messagePaneWideThread"
++                       class="subviewbutton subviewbutton-iconic"
++                       type="radio"
++                       data-l10n-id="menu-view-layout-widethread"
++                       name="viewlayoutgroup"
++                       command="cmd_viewWideThreadMailLayout"/>
++        <toolbarbutton id="appmenu_messagePaneStacked"
++                       class="subviewbutton subviewbutton-iconic"
++                       type="radio"
++                       data-l10n-id="menu-view-layout-stacked"
++                       name="viewlayoutgroup"
++                       command="cmd_viewStackedMailLayout"/>
++        <toolbarbutton id="appmenu_messagePaneHorizontal"
++                       class="subviewbutton subviewbutton-iconic"
++                       type="radio"
++                       data-l10n-id="menu-view-layout-horizontal"
++                       name="viewlayoutgroup"
++                       command="cmd_viewHorizontalMailLayout"/>
+         <toolbarseparator id="appmenu_viewMenuAfterPaneVerticalSeparator"/>
+         <toolbarbutton id="appmenu_showFolderPane"
+                        class="subviewbutton subviewbutton-iconic"
+                        type="checkbox"
+diff --git a/mail/components/extensions/parent/ext-mailTabs.js b/mail/components/extensions/parent/ext-mailTabs.js
+--- a/mail/components/extensions/parent/ext-mailTabs.js
++++ b/mail/components/extensions/parent/ext-mailTabs.js
+@@ -32,9 +32,17 @@ XPCOMUtils.defineLazyPreferenceGetter(
+   "mail.pane_config.dynamic",
+   0
+ );
+ 
+-const LAYOUTS = ["standard", "wide", "vertical"];
++const LAYOUTS = [
++  "standard",
++  "wide",
++  "vertical",
++  "widethread",
++  "stacked",
++  "horizontal",
++];
++
+ // From nsIMsgDBView.idl
+ const SORT_TYPE_MAP = new Map(
+   Object.keys(Ci.nsMsgViewSortType).map(key => {
+     // Change "byFoo" to "foo".
+diff --git a/mail/components/extensions/schemas/mailTabs.json b/mail/components/extensions/schemas/mailTabs.json
+--- a/mail/components/extensions/schemas/mailTabs.json
++++ b/mail/components/extensions/schemas/mailTabs.json
+@@ -76,9 +76,9 @@
+           },
+           "layout": {
+             "type": "string",
+             "description": "The arrangement of the folder pane, message list pane, and message display pane.",
+-            "enum": ["standard", "wide", "vertical"]
++            "enum": ["standard", "wide", "vertical", "widethread", "stacked", "horizontal"]
+           },
+           "folderMode": {
+             "description": "The folder mode of the currently displayed folder.",
+             "$ref": "mailTabs.FolderMode",
+@@ -164,9 +164,9 @@
+           "layout": {
+             "type": "string",
+             "description": "Sets the arrangement of the folder pane, message list pane, and message display pane. Setting a layout will be applied to all mail tabs.",
+             "optional": true,
+-            "enum": ["standard", "wide", "vertical"]
++            "enum": ["standard", "wide", "vertical", "widethread", "stacked", "horizontal"]
+           },
+           "folderPaneVisible": {
+             "type": "boolean",
+             "description": "Shows or hides the folder pane.",
+diff --git a/mail/locales/en-US/messenger/menubar.ftl b/mail/locales/en-US/messenger/menubar.ftl
+--- a/mail/locales/en-US/messenger/menubar.ftl
++++ b/mail/locales/en-US/messenger/menubar.ftl
+@@ -124,8 +124,20 @@ menu-view-folders-toggle-header =
+     .accesskey = P
+ 
+ ## View / Layout
+ 
++menu-view-layout-widethread =
++    .label = Wide Thread View
++    .accesskey = T
++
++menu-view-layout-stacked =
++    .label = Stacked View
++    .accesskey = S
++
++menu-view-layout-horizontal =
++    .label = Horizontal View
++    .accesskey = z
++
+ menu-view-toggle-thread-pane-header =
+     .label = Message List Header
+     .accesskey = H
+ 
+diff --git a/mail/themes/shared/mail/about3Pane.css b/mail/themes/shared/mail/about3Pane.css
+--- a/mail/themes/shared/mail/about3Pane.css
++++ b/mail/themes/shared/mail/about3Pane.css
+@@ -69,8 +69,9 @@ body {
+   text-shadow: none;
+ 
+   display: grid;
+   --folderPaneSplitter-width: 18em;
++  --folderPaneSplitter-height: 18em;
+   --messagePaneSplitter-width: 54em;
+   --messagePaneSplitter-height: 36em;
+ 
+   /* Classic layout: folder tree on the left, thread tree and message browser on the right. */
+@@ -97,8 +98,33 @@ body {
+       "message message message" minmax(auto, var(--messagePaneSplitter-height))
+       / minmax(auto, var(--folderPaneSplitter-width)) min-content minmax(auto, 1fr);
+   }
+ 
++  /* Wide thread layout: thread tree across the top, and folder tree and message browser on the bottom. */
++  &.layout-widethread {
++    grid-template: "threads threads threads" minmax(auto, 1fr)
++                   "messagePaneSplitter messagePaneSplitter messagePaneSplitter" min-content
++                   "folders folderPaneSplitter message" minmax(auto, var(--messagePaneSplitter-height))
++                   / minmax(auto, var(--folderPaneSplitter-width)) min-content minmax(auto, 1fr);
++  }
++
++  /* Stacked layout: folder tree and thread tree on the left, and message browser on the right. */
++  &.layout-stacked {
++    grid-template: "folders messagePaneSplitter message" minmax(auto, var(--folderPaneSplitter-height))
++                   "folderPaneSplitter messagePaneSplitter message" min-content
++                   "threads messagePaneSplitter message" minmax(auto, 1fr)
++                   / minmax(auto, 1fr) min-content minmax( var(--messagePaneSplitter-width), 1fr);
++  }
++
++  /* Horizontal layout: folder tree and thread tree and message browser one after the other. */
++  &.layout-horizontal {
++    grid-template: "folders" var(--folderPaneSplitter-height)
++    "folderPaneSplitter" min-content
++    "threads" auto
++    "messagePaneSplitter" min-content
++    "message" var(--messagePaneSplitter-height);
++  }
++
+   /* If Account Central is shown, it overrides the layout setting. */
+   &.account-central {
+     grid-template:
+       "folders folderPaneSplitter account-central" auto
