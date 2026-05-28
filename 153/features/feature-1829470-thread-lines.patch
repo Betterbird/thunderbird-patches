@@ -1,0 +1,148 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1736158144 -3600
+# Parent  75683861f4f0bcda3480213ac6cd65ed65721ece
+Bug 1829470 - Add thread connecting lines for the rightmost level.
+
+diff --git a/mail/base/content/widgets/treeview/thread-card.mjs b/mail/base/content/widgets/treeview/thread-card.mjs
+--- a/mail/base/content/widgets/treeview/thread-card.mjs
++++ b/mail/base/content/widgets/treeview/thread-card.mjs
+@@ -55,14 +55,19 @@ class ThreadCard extends TreeViewTableRo
+     // XPCOM calls here must be keep to a minimum. Collect all of the
+     // required data in one go.
+     const properties = {};
+     const threadLevel = {};
++    const numChildren = {};
++    const hasNextSibling = {};
+ 
+     const cellTexts = this.view.cellDataForColumns(
+       this._index,
+       window.threadPane.cardColumns,
+       properties,
+-      threadLevel
++      threadLevel,
++      false,
++      numChildren,
++      hasNextSibling
+     );
+ 
+     // Collect the various strings and fluent IDs to build the full string for
+     // the message row aria-label.
+diff --git a/mail/base/content/widgets/treeview/thread-row.mjs b/mail/base/content/widgets/treeview/thread-row.mjs
+--- a/mail/base/content/widgets/treeview/thread-row.mjs
++++ b/mail/base/content/widgets/treeview/thread-row.mjs
+@@ -45,16 +45,25 @@ class ThreadRow extends TreeViewTableRow
+     }
+ 
+     // XPCOM calls here must be keep to a minimum. Collect all of the
+     // required data in one go.
++    const threadedDisplay =
++      window.gViewWrapper._viewFlags & Ci.nsMsgViewFlagsType.kThreadedDisplay;
+     const properties = {};
+     const threadLevel = {};
++    const numChildren = {};
++    const hasNextSibling = {};
+     const cellTexts = this.view.cellDataForColumns(
+       this._index,
+       textColumns,
+       properties,
+-      threadLevel
++      threadLevel,
++      threadedDisplay, // no need to get the following two for a non-threaded display
++      numChildren,
++      hasNextSibling
+     );
++    this.classList.toggle("singleton", numChildren.value <= 1);
++    this.classList.toggle("lastchild", !hasNextSibling.value);
+ 
+     // Collect the various strings and fluent IDs to build the full string for
+     // the message row aria-label.
+     const ariaLabelPromises = [];
+diff --git a/mail/themes/shared/mail/threadPane.css b/mail/themes/shared/mail/threadPane.css
+--- a/mail/themes/shared/mail/threadPane.css
++++ b/mail/themes/shared/mail/threadPane.css
+@@ -405,8 +405,22 @@ tr[data-properties~="unread"].selected .
+       margin-block-start: -2px;
+       margin-inline-end: 3px;
+     }
+   }
++
++  &:not(.children):not(.singleton) .subject-line {
++    background-position-x: 10px;
++    background-image: url("chrome://messenger/skin/icons/search-row-more.svg");
++    background-position-y: center;
++    background-repeat: no-repeat;
++    -moz-context-properties: fill, fill-opacity;
++    fill: var(--tree-view-color);
++    fill-opacity: 0.3;
++  }
++
++  &:not(.children):not(.singleton).lastchild .subject-line {
++    background-image: url("chrome://messenger/skin/icons/search-row-end.svg");
++  }
+ }
+ 
+ [is="tree-view-table-body"][role="treegrid"] .table-layout:not(.children) .subject-line {
+   padding-inline-start: 22px;
+diff --git a/mailnews/base/public/nsIMsgDBView.idl b/mailnews/base/public/nsIMsgDBView.idl
+--- a/mailnews/base/public/nsIMsgDBView.idl
++++ b/mailnews/base/public/nsIMsgDBView.idl
+@@ -496,15 +496,21 @@ interface nsIMsgDBView : nsISupports
+    * @param aRow - Index of the row we want data for.
+    * @param aColumnNames - The column names we want cell text for.
+    * @param aProperties - The properties of the row.
+    * @param aThreadLevel - The thread level of the row.
++   * @param aGetChildrenInfo - if false, return dummy values for aNumChildren and aHasNextSibling.
++   * @param aNumChildren - The number of children of the row.
++   * @param aHasNextSibling - Whether the row has a next sibling.
+    *
+    * @returns The cell text for the columns in `aColumnNames`.
+    */
+   Array<AString> cellDataForColumns(in long aRow,
+                                     in Array<AString> aColumnNames,
+                                     out AString aProperties,
+-                                    out long aThreadLevel);
++                                    out long aThreadLevel,
++                                    in boolean getChildrenInfo,
++                                    out unsigned long aNumChildren,
++                                    out boolean aHasNextSibling);
+ };
+ 
+ /* this interface is rapidly morphing from a command updater interface into a more generic
+    FE updater interface to handle changes in the view
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -2051,8 +2051,10 @@ nsMsgDBView::CellTextForColumn(int32_t a
+ NS_IMETHODIMP
+ nsMsgDBView::CellDataForColumns(int32_t aRow,
+                                 const nsTArray<nsString>& aColumnNames,
+                                 nsAString& aProperties, int32_t* aThreadLevel,
++                                bool aGetChildrenInfo, uint32_t* aNumChildren,
++                                bool* aHasNextSibling,
+                                 nsTArray<nsString>& _retval) {
+   nsresult rv;
+   _retval.Clear();
+ 
+@@ -2088,8 +2090,21 @@ nsMsgDBView::CellDataForColumns(int32_t 
+     }
+     _retval.AppendElement(text);
+   }
+ 
++  *aHasNextSibling = false;
++  *aNumChildren = 0;
++  if (aGetChildrenInfo) {
++    // The following call (so far) doesn't fail.
++    HasNextSibling(aRow, aRow, aHasNextSibling);
++
++    nsCOMPtr<nsIMsgThread> thread;
++    rv = GetThreadContainingIndex(aRow, getter_AddRefs(thread));
++    if (NS_SUCCEEDED(rv) && thread) {
++      thread->GetNumChildren(aNumChildren);
++    }
++  }
++
+   rv = GetLevel(aRow, aThreadLevel);
+   if (NS_FAILED(rv)) {
+     _retval.Clear();
+     aProperties.Truncate();
