@@ -1,0 +1,66 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1780088212 -7200
+# Parent  7c437a18c6ef78048883c93d6d0ee2d929c4266e
+Bug 1554188 - Allow for 6144 open files with Windows system call.
+
+Here's the very sad story. This patch has had many variations. The bottom line is:
+Despite our best efforts to implement a simple LRU cache for open databases,
+IFF the database isn't force closed in nsMsgSearchSession::ReleaseFolderDBRef(), previously with
+folder->CloseDBIfFolderNotOpen(true), the search doesn't work.
+
+This was later changed to
+
+  // Calling this with `true` will call `nsMsgDatabase::ForceClosed()`
+  // and that loses the listeners and panels don't update any more
+  // resulting in phantom rows.
+  folder->CloseDBIfFolderNotOpen(false);
+
+So the dilemma is:
+Calling this with `true` (or calling `nsMsgDatabase::ForceClosed()`), makes the search
+succeed, but the search panel will show a phantom row if a message is deleted in a contributing folder.
+Calling this with `false` is not strong enough. So the only change in the entire patch that saves the day
+is allowing more open files on Windows.
+
+Therefore, with a bleeding heart about all the work that went into it, we're cutting the patch down to a
+one-liner :-(
+
+diff --git a/mail/app/nsMailApp.cpp b/mail/app/nsMailApp.cpp
+--- a/mail/app/nsMailApp.cpp
++++ b/mail/app/nsMailApp.cpp
+@@ -215,22 +215,24 @@ static int do_main(int argc, char* argv[
+   const char* acceptableParams[] = {"compose", "mail"};
+   EnsureCommandlineSafe(argc, argv, acceptableParams);
+ 
+ #ifdef XP_WIN
+-  //  Allow the user to raise the number of files that may be open
+-  //  simultaneously by setting an environment variable.
++  // Allow for 75% of the max number of 8192, see:
++  // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setmaxstdio?view=msvc-170
++  int limit = 6144;
++
++  // Allow the user to raise the number of files that may be open
++  // simultaneously by setting an environment variable.
+   const char* mozMaxstdio = getenv("MOZ_MAXSTDIO");
+   if (mozMaxstdio) {
+-    int limit = atoi(mozMaxstdio);
+-    int newLimit = -1;
+-    if (limit >= 3 && limit <= 8192) {
+-      newLimit = _setmaxstdio(limit);
++    int envLimit = atoi(mozMaxstdio);
++    if (limit < envLimit && envLimit <= 8192) {
++      limit = envLimit;
+     }
+-    if (newLimit != limit) {
+-      Output(
+-          "The open file limit could not be set from the MOZ_MAXSTDIO "
+-          "environment variable.\n");
+-    }
++  }
++  int newLimit = _setmaxstdio(limit);
++  if (newLimit != limit) {
++    Output("The open file limit could not be set.\n");
+   }
+ #endif
+ 
+   return gBootstrap->XRE_main(argc, argv, config);
