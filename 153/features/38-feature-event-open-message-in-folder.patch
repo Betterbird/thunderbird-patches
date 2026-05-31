@@ -1,0 +1,163 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1780255054 -7200
+# Parent  85264b64efd6a5750682e851e0774aaa33f52c04
+Feature: Add "Open in Folder" button next to link in calendar event/task dialogue if the link points to an associated message (mid: link).
+
+diff --git a/calendar/base/content/dialogs/calendar-dialog-utils.js b/calendar/base/content/dialogs/calendar-dialog-utils.js
+--- a/calendar/base/content/dialogs/calendar-dialog-utils.js
++++ b/calendar/base/content/dialogs/calendar-dialog-utils.js
+@@ -14,8 +14,9 @@
+ 
+ var { cal } = ChromeUtils.importESModule("resource:///modules/calendar/calUtils.sys.mjs");
+ var { openLinkExternally } = ChromeUtils.importESModule("resource:///modules/LinkHelper.sys.mjs");
+ var { XPCOMUtils } = ChromeUtils.importESModule("resource://gre/modules/XPCOMUtils.sys.mjs");
++var { MailUtils } = ChromeUtils.importESModule("resource:///modules/MailUtils.sys.mjs");
+ 
+ ChromeUtils.defineESModuleGetters(this, {
+   CalAlarm: "resource:///modules/CalAlarm.sys.mjs",
+ });
+@@ -616,4 +617,29 @@ function openAttachmentFromItemSummary(a
+   if (attachments.length && attachments[0].uri && attachments[0].uri.spec != "about:blank") {
+     openLinkExternally(attachments[0].uri, { addToHistory: false });
+   }
+ }
++
++function openMidLinkInFolder(url) {
++  if (!url.startsWith("mid:")) {
++    return;
++  }
++  const msgId = url.slice(4);
++  window?.setCursor("wait");
++  const msgHdr = MailUtils.getMsgHdrForMsgId(msgId);
++  window?.setCursor("auto");
++  if (msgHdr) {
++    MailUtils.displayMessageInFolderTab(msgHdr);
++    return;
++  }
++
++  const bundle = Services.strings.createBundle(
++    "chrome://messenger/locale/messenger.properties"
++  );
++  Services.prompt.alert(
++    window,
++    bundle.GetStringFromName("errorOpenMessageForMessageIdTitle"),
++    bundle.formatStringFromName("errorOpenMessageForMessageIdMessage", [
++      `<${msgId}>`,
++    ])
++  );
++}
+diff --git a/calendar/base/content/dialogs/calendar-summary-dialog.js b/calendar/base/content/dialogs/calendar-summary-dialog.js
+--- a/calendar/base/content/dialogs/calendar-summary-dialog.js
++++ b/calendar/base/content/dialogs/calendar-summary-dialog.js
+@@ -102,8 +102,14 @@ async function onLoad() {
+   window.focus();
+   // This class is removed so the dialog can resize correctly.
+   dialog.classList.remove("resize");
+   opener.setCursor("auto");
++
++  // URL link
++  const url = window.calendarItem.getProperty("URL")?.trim();
++  if (!url || !url.startsWith("mid:")) {
++    document.getElementById("openInFolderButton").disabled = true;
++  }
+ }
+ 
+ function onUnload() {
+   if (typeof window.ToolbarIconColor !== "undefined") {
+diff --git a/calendar/base/content/dialogs/calendar-summary-dialog.xhtml b/calendar/base/content/dialogs/calendar-summary-dialog.xhtml
+--- a/calendar/base/content/dialogs/calendar-summary-dialog.xhtml
++++ b/calendar/base/content/dialogs/calendar-summary-dialog.xhtml
+@@ -43,8 +43,9 @@
+     <link rel="localization" href="toolkit/global/textActions.ftl" />
+     <link rel="localization" href="calendar/calendar.ftl" />
+     <link rel="localization" href="calendar/calendar-summary-dialog.ftl" />
+     <link rel="localization" href="calendar/calendar-editable-item.ftl" />
++    <link rel="localization" href="messenger/searchDialog.ftl" />
+     <script defer="defer" src="chrome://messenger/content/globalOverlay.js"></script>
+     <script defer="defer" src="chrome://global/content/editMenuOverlay.js"></script>
+     <script defer="defer" src="chrome://calendar/content/calendar-dialog-utils.js"></script>
+     <script defer="defer" src="chrome://calendar/content/calendar-ui-utils.js"></script>
+diff --git a/calendar/base/content/item-editing/calendar-item-iframe.js b/calendar/base/content/item-editing/calendar-item-iframe.js
+--- a/calendar/base/content/item-editing/calendar-item-iframe.js
++++ b/calendar/base/content/item-editing/calendar-item-iframe.js
+@@ -622,9 +622,13 @@ function loadDialog(aItem) {
+     updateAttachment();
+   }
+ 
+   // URL link
+-  updateItemURL(window.calendarItem.getProperty("URL")?.trim());
++  const url = window.calendarItem.getProperty("URL")?.trim();
++  if (!url || !url.startsWith("mid:")) {
++    document.getElementById("openInFolderButton").disabled = true;
++  }
++  updateItemURL(url);
+ 
+   // Description
+   const editorElement = document.getElementById("item-description");
+   const editor = editorElement.getHTMLEditor(editorElement.contentWindow);
+diff --git a/calendar/base/content/item-editing/calendar-item-iframe.xhtml b/calendar/base/content/item-editing/calendar-item-iframe.xhtml
+--- a/calendar/base/content/item-editing/calendar-item-iframe.xhtml
++++ b/calendar/base/content/item-editing/calendar-item-iframe.xhtml
+@@ -38,8 +38,9 @@
+     <link rel="localization" href="toolkit/global/textActions.ftl" />
+     <link rel="localization" href="calendar/calendar.ftl" />
+     <link rel="localization" href="calendar/calendar-editable-item.ftl" />
+     <link rel="localization" href="calendar/calendar-widgets.ftl" />
++    <link rel="localization" href="messenger/searchDialog.ftl" />
+     <script defer="defer" src="chrome://messenger/content/globalOverlay.js"></script>
+     <script defer="defer" src="chrome://global/content/editMenuOverlay.js"></script>
+     <script defer="defer" src="chrome://calendar/content/calendar-dialog-utils.js"></script>
+     <script defer="defer" src="chrome://calendar/content/calendar-ui-utils.js"></script>
+@@ -792,15 +793,20 @@
+         <html:th>
+           <label value="&event.url.label;" control="url-link" />
+         </html:th>
+         <html:td>
++          <hbox>
+           <label
+             id="url-link"
+-            class="text-link"
++            class="text-link push-down-8px"
+             onclick="launchBrowser(this.getAttribute('href'), event)"
+             oncommand="launchBrowser(this.getAttribute('href'), event)"
+             crop="end"
+           />
++          <button data-l10n-id="open-in-folder"
++                  id="openInFolderButton"
++                  oncommand="openMidLinkInFolder(this.previousSibling.getAttribute('href'))" />
++          </hbox>
+         </html:td>
+       </html:tr>
+ 
+       <html:tr class="separator">
+diff --git a/calendar/base/content/widgets/calendar-item-summary.js b/calendar/base/content/widgets/calendar-item-summary.js
+--- a/calendar/base/content/widgets/calendar-item-summary.js
++++ b/calendar/base/content/widgets/calendar-item-summary.js
+@@ -175,10 +175,13 @@
+             <label value="&read.only.link.label;"
+                    class="header"/>
+             <separator class="groove" flex="1"/>
+           </hbox>
+-          <label class="url-link text-link default-indent"
++          <hbox>
++          <label class="url-link text-link push-down-8px default-indent"
+                  crop="end"/>
++          <button data-l10n-id="open-in-folder" id="openInFolderButton" oncommand="openMidLinkInFolder(this.previousSibling.getAttribute('href'))" />
++          </hbox>
+         </box>
+       </vbox>`;
+     }
+ 
+diff --git a/calendar/base/themes/common/dialogs/calendar-event-dialog.css b/calendar/base/themes/common/dialogs/calendar-event-dialog.css
+--- a/calendar/base/themes/common/dialogs/calendar-event-dialog.css
++++ b/calendar/base/themes/common/dialogs/calendar-event-dialog.css
+@@ -693,4 +693,8 @@ label.label {
+ .cloud-file-attach-image {
+   -moz-context-properties: fill;
+   fill: var(--selected-item-color);
+ }
++
++.push-down-8px {
++  margin-top: 8px;
++}
