@@ -1,0 +1,350 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1780342161 -7200
+# Parent  436970e683afd9b85d36d9d0825980c55d811774
+Feature: Introduce pref mailnews.collapse_thread_to_most_recent and show most recent child in collapsed thread root. (Bug 604033)
+
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -2104,8 +2104,10 @@ nsMsgDBView::Open(nsIMsgFolder* folder, 
+                   nsMsgViewFlagsTypeValue viewFlags) {
+   AUTO_PROFILER_LABEL("nsMsgDBView::Open", MAILNEWS);
+   mReversedThreading =
+       mozilla::Preferences::GetBool("mailnews.reversed_threading", false);
++  mCollapseToMostRecent = mozilla::Preferences::GetBool(
++      "mailnews.collapse_thread_to_most_recent", false);
+   m_viewFlags = viewFlags;
+   m_sortOrder = sortOrder;
+   m_sortType = sortType;
+   m_folderFlags = 0;
+@@ -2644,8 +2646,16 @@ nsresult nsMsgDBView::GetHeadersFromSele
+       hdrs.AppendElement(msgHdr);
+       if (includeCollapsedMsgs && viewIndexFlags & nsMsgMessageFlags::Elided &&
+           viewIndexFlags & MSG_VIEW_FLAG_HASCHILDREN &&
+           m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) {
++        if (CollapseToMostRecent()) {
++          hdrs.RemoveElementAt(hdrs.Length() - 1);
++          nsCOMPtr<nsIMsgThread> pThread;
++          nsresult rv = GetThreadContainingIndex(viewIndex, getter_AddRefs(pThread));
++          NS_ENSURE_SUCCESS(rv, rv);
++          pThread->GetChildHdrAt(0, getter_AddRefs(msgHdr));
++          hdrs.AppendElement(msgHdr);
++        }
+         rv = ListCollapsedChildren(viewIndex, hdrs);
+       }
+     }
+   }
+@@ -4421,9 +4431,9 @@ nsMsgDBView::GetThreadContainingMsgHdr(n
+   return m_db->GetThreadContainingMsgHdr(msgHdr, pThread);
+ }
+ 
+ nsresult nsMsgDBView::ExpandByIndex(nsMsgViewIndex index,
+-                                    uint32_t* pNumExpanded) {
++                                    uint32_t* pNumExpanded, bool fixRoot) {
+   if ((uint32_t)index >= m_keys.Length()) return NS_MSG_MESSAGE_NOT_FOUND;
+ 
+   uint32_t flags = m_flags[index];
+   uint32_t numExpanded = 0;
+@@ -4435,8 +4445,20 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
+   nsCOMPtr<nsIMsgDBHdr> msgHdr;
+   nsCOMPtr<nsIMsgThread> pThread;
+   nsresult rv = GetThreadContainingIndex(index, getter_AddRefs(pThread));
+   NS_ENSURE_SUCCESS(rv, rv);
++  if (fixRoot && CollapseToMostRecent()) {
++    // Restore damaged thead root.
++    pThread->GetChildKeyAt(0, &m_keys[index]);
++    pThread->GetChildHdrAt(0, getter_AddRefs(msgHdr));
++    uint32_t orgFlags;
++    msgHdr->GetFlags(&orgFlags);
++    flags = orgFlags |
++            (flags & (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
++    m_flags[index] = flags;
++    m_levels[index] = 0;
++    SetFolder(index, msgHdr);
++  }
+   if (m_viewFlags & nsMsgViewFlagsType::kUnreadOnly) {
+     rv = ListUnreadIdsInThread(pThread, index, &numExpanded);
+   } else {
+     rv = ListIdsInThread(pThread, index, &numExpanded);
+@@ -4490,9 +4512,9 @@ nsresult nsMsgDBView::CollapseAll() {
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgDBView::CollapseByIndex(nsMsgViewIndex index,
+-                                      uint32_t* pNumCollapsed) {
++                                      uint32_t* pNumCollapsed, bool fixRoot) {
+   nsresult rv;
+   int32_t flags = m_flags[index];
+   int32_t rowDelta = 0;
+ 
+@@ -4511,8 +4533,60 @@ nsresult nsMsgDBView::CollapseByIndex(ns
+ 
+   m_flags[index] = flags;
+   int32_t numRemoved = -rowDelta;
+ 
++  if (fixRoot && CollapseToMostRecent()) {
++    // Make the root display the most recent child.
++    nsCOMPtr<nsIMsgThread> pThread;
++    nsresult rv = GetThreadContainingIndex(index, getter_AddRefs(pThread));
++    NS_ENSURE_SUCCESS(rv, rv);
++    uint32_t newestDate = 0;
++    uint32_t numChildren;
++    nsMsgKey newestKey = nsMsgKey_None;
++
++    pThread->GetNumChildren(&numChildren);
++    for (uint32_t childIndex = 0; childIndex < numChildren; childIndex++) {
++      nsCOMPtr<nsIMsgDBHdr> child;
++      rv = pThread->GetChildHdrAt(childIndex, getter_AddRefs(child));
++      if (NS_SUCCEEDED(rv)) {
++        uint32_t msgDate;
++        child->GetDateInSeconds(&msgDate);
++        if (msgDate > newestDate) {
++          newestDate = msgDate;
++          child->GetMessageKey(&newestKey);
++        }
++      }
++    }
++
++    if (newestKey != nsMsgKey_None) {
++      // Find index.
++      uint32_t newestIndex;
++      if (ReversedThreading()) {
++        // Start looking at the last child of the thread which is at the
++        // top in reversed threading. Likely it's already the one we want.
++        newestIndex = index - numRemoved;
++        newestIndex = m_keys.IndexOf(newestKey, newestIndex);
++      } else {
++        // Start looking at the last child of the thread which is at the
++        // bottom in reversed threading. Likely it's already the one we want.
++        newestIndex = index + numRemoved;
++        newestIndex = m_keys.LastIndexOf(newestKey, newestIndex);
++      }
++      // Don't crash if something went wrong.
++      if (!IsValidIndex(newestIndex)) {
++        return NS_ERROR_UNEXPECTED;
++      }
++      m_keys[index] = m_keys[newestIndex];
++      m_flags[index] = m_flags[newestIndex];
++      TransferFolder(newestIndex, index);
++
++      // Carry over the relevant flags from the root.
++      m_flags[index] |= nsMsgMessageFlags::Elided;
++      m_flags[index] |=
++          (flags & (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
++    }
++  }
++
+   if (ReversedThreading()) {
+     // Remove rows above `index`.
+     if (index < (nsMsgViewIndex)numRemoved) {
+       NS_ERROR("trying to remove too many rows");
+@@ -6641,8 +6715,9 @@ nsresult nsMsgDBView::CopyDBView(nsMsgDB
+   aNewMsgDBView->m_viewFlags = m_viewFlags;
+   aNewMsgDBView->m_sortOrder = m_sortOrder;
+   aNewMsgDBView->m_sortType = m_sortType;
+   aNewMsgDBView->mReversedThreading = mReversedThreading;
++  aNewMsgDBView->mCollapseToMostRecent = mCollapseToMostRecent;
+   aNewMsgDBView->m_curCustomColumn = m_curCustomColumn;
+   aNewMsgDBView->m_secondarySort = m_secondarySort;
+   aNewMsgDBView->m_secondarySortOrder = m_secondarySortOrder;
+   aNewMsgDBView->m_secondaryCustomColumn = m_secondaryCustomColumn;
+diff --git a/mailnews/base/src/nsMsgDBView.h b/mailnews/base/src/nsMsgDBView.h
+--- a/mailnews/base/src/nsMsgDBView.h
++++ b/mailnews/base/src/nsMsgDBView.h
+@@ -226,10 +226,12 @@ class nsMsgDBView : public nsIMsgDBView,
+                            nsMsgKey msgKey, uint32_t flags, uint32_t level);
+   virtual void InsertEmptyRows(nsMsgViewIndex viewIndex, int32_t numRows);
+   virtual void RemoveRows(nsMsgViewIndex viewIndex, int32_t numRows);
+   nsresult ToggleExpansion(nsMsgViewIndex index, uint32_t* numChanged);
+-  nsresult ExpandByIndex(nsMsgViewIndex index, uint32_t* pNumExpanded);
+-  nsresult CollapseByIndex(nsMsgViewIndex index, uint32_t* pNumCollapsed);
++  nsresult ExpandByIndex(nsMsgViewIndex index, uint32_t* pNumExpanded,
++                         bool fixRoot = true);
++  nsresult CollapseByIndex(nsMsgViewIndex index, uint32_t* pNumCollapsed,
++                           bool fixRoot = true);
+   nsresult ExpandAll();
+   nsresult CollapseAll();
+   nsresult ExpandAndSelectThread();
+ 
+@@ -333,8 +335,10 @@ class nsMsgDBView : public nsIMsgDBView,
+   virtual nsresult RemoveByIndex(nsMsgViewIndex index);
+   virtual void OnExtraFlagChanged(nsMsgViewIndex /*index*/,
+                                   uint32_t /*extraFlag*/) {}
+   virtual void OnHeaderAddedOrDeleted() {}
++  virtual void TransferFolder(uint32_t from, uint32_t to) {}
++  virtual void SetFolder(uint32_t at, nsIMsgDBHdr* folder) {}
+   nsresult ToggleWatched(nsTArray<nsMsgViewIndex> const& selection);
+   nsresult SetThreadWatched(nsIMsgThread* thread, nsMsgViewIndex index,
+                             bool watched);
+   nsresult SetThreadIgnored(nsIMsgThread* thread, nsMsgViewIndex threadIndex,
+@@ -520,8 +524,15 @@ class nsMsgDBView : public nsIMsgDBView,
+            !(m_viewFlags & nsMsgViewFlagsType::kGroupBySort) &&
+            m_sortType == nsMsgViewSortType::byDate &&
+            m_sortOrder == nsMsgViewSortOrder::descending;
+   }
++  bool mCollapseToMostRecent;
++  inline bool CollapseToMostRecent() {
++    return mCollapseToMostRecent &&
++           m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay &&
++           !(m_viewFlags & nsMsgViewFlagsType::kGroupBySort) &&
++           m_sortType == nsMsgViewSortType::byDate;
++  }
+ 
+  protected:
+   static void InitDisplayFormats();
+ 
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -632,9 +632,9 @@ void nsMsgSearchDBView::MoveThreadAt(nsM
+       }
+     }
+ 
+     uint32_t collapseCount;
+-    CollapseByIndex(threadIndex, &collapseCount);
++    CollapseByIndex(threadIndex, &collapseCount, false);
+     if (ReversedThreading()) {
+       // Thread parent has moved down due to child removal.
+       threadIndex -= childCount;
+     }
+diff --git a/mailnews/base/src/nsMsgSearchDBView.h b/mailnews/base/src/nsMsgSearchDBView.h
+--- a/mailnews/base/src/nsMsgSearchDBView.h
++++ b/mailnews/base/src/nsMsgSearchDBView.h
+@@ -140,8 +140,17 @@ class nsMsgSearchDBView : public nsMsgGr
+   // Augments the existing arrays in nsMsgDBView (m_keys, m_flags and m_levels),
+   // and is kept in sync with them.
+   nsCOMArray<nsIMsgFolder> m_folders;
+ 
++  virtual void TransferFolder(uint32_t from, uint32_t to) override {
++    m_folders.ReplaceObjectAt(m_folders[from], to);
++  }
++  virtual void SetFolder(uint32_t at, nsIMsgDBHdr* msgHdr) override {
++    nsCOMPtr<nsIMsgFolder> folder;
++    msgHdr->GetFolder(getter_AddRefs(folder));
++    m_folders.ReplaceObjectAt(folder, at);
++  }
++
+   // Used for copy, move, and delete operations.
+   nsTArray<nsTArray<RefPtr<nsIMsgDBHdr>>> m_hdrsForEachFolder;
+   nsCOMArray<nsIMsgFolder> m_uniqueFoldersSelected;
+   uint32_t mCurIndex;
+diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
+--- a/mailnews/base/src/nsMsgThreadedDBView.cpp
++++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
+@@ -180,8 +180,38 @@ nsresult nsMsgThreadedDBView::InitThread
+     if ((!(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) ||
+          m_viewFlags & nsMsgViewFlagsType::kExpandAll) &&
+         msgFlags & nsMsgMessageFlags::Elided) {
+       ExpandByIndex(m_keys.Length() - 1, nullptr);
++    } else if (CollapseToMostRecent()) {
++      // We need to replace the unexpanded root with the most recent child.
++      // Mostly copied from nsMsgDBView::CollapseByIndex().
++      uint32_t newestDate = 0;
++      nsMsgKey newestKey = nsMsgKey_None;
++      nsCOMPtr<nsIMsgDBHdr> newestChild;
++
++      for (uint32_t childIndex = 0; childIndex < numChildren; childIndex++) {
++        nsCOMPtr<nsIMsgDBHdr> child;
++        rv = threadHdr->GetChildHdrAt(childIndex, getter_AddRefs(child));
++        if (NS_SUCCEEDED(rv)) {
++          uint32_t msgDate;
++          child->GetDateInSeconds(&msgDate);
++          if (msgDate > newestDate) {
++            newestDate = msgDate;
++            child->GetMessageKey(&newestKey);
++            newestChild = child;
++          }
++        }
++      }
++      if (newestKey != nsMsgKey_None) {
++        uint32_t lastIndex = m_keys.Length() - 1;
++        m_keys[lastIndex] = newestKey;
++        newestChild->GetFlags(&m_flags[lastIndex]);
++
++        // Carry over the relevant flags from the root.
++        m_flags[lastIndex] |= nsMsgMessageFlags::Elided;
++        m_flags[lastIndex] |=
++            (msgFlags & (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
++      }
+     }
+ 
+     count++;
+   }
+@@ -605,9 +635,9 @@ nsresult nsMsgThreadedDBView::OnNewHeade
+   });
+ 
+   // Scrub existing children from the view
+   if (isExpanded) {
+-    CollapseByIndex(threadIndex, nullptr);
++    CollapseByIndex(threadIndex, nullptr, false);
+   }
+ 
+   if (ReversedThreading()) {
+     // Correct `threadIndex`, since all the children above
+@@ -657,9 +687,9 @@ nsresult nsMsgThreadedDBView::OnNewHeade
+ 
+   // Rebuild the thread children natively from the DB.
+   if (isExpanded) {
+     m_flags[targetIndex] |= nsMsgMessageFlags::Elided;
+-    ExpandByIndex(targetIndex, nullptr);
++    ExpandByIndex(targetIndex, nullptr, false);
+   }
+ 
+   return NS_OK;
+ }
+@@ -749,9 +779,9 @@ nsresult nsMsgThreadedDBView::RemoveByIn
+       }
+     });
+ 
+     // Scrub stale children natively.
+-    CollapseByIndex(index, nullptr);
++    CollapseByIndex(index, nullptr, false);
+     if (ReversedThreading()) {
+       // When not subtract `numThreadChildren - 1` here, since collapsing a
+       // thread of N children (incl. the root) removes only N-1 rows from the
+       // view? Apparently the DB deletion has already taken place, so
+@@ -777,9 +807,9 @@ nsresult nsMsgThreadedDBView::RemoveByIn
+       m_flags[newIndex] |= MSG_VIEW_FLAG_ISTHREAD;
+       if (numThreadChildren > 1) {
+         m_flags[newIndex] |=
+             MSG_VIEW_FLAG_HASCHILDREN | nsMsgMessageFlags::Elided;
+-        ExpandByIndex(newIndex, nullptr);
++        ExpandByIndex(newIndex, nullptr, false);
+       }
+     }
+     return NS_OK;
+   }
+diff --git a/mailnews/base/src/nsMsgXFViewThread.cpp b/mailnews/base/src/nsMsgXFViewThread.cpp
+--- a/mailnews/base/src/nsMsgXFViewThread.cpp
++++ b/mailnews/base/src/nsMsgXFViewThread.cpp
+@@ -327,10 +327,12 @@ nsMsgXFViewThread::GetRootHdr(nsIMsgDBHd
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFViewThread::GetChildKeyAt(uint32_t aIndex, nsMsgKey* aResult) {
+-  NS_ASSERTION(false, "shouldn't call this");
+-  return NS_ERROR_NOT_IMPLEMENTED;
++  NS_ENSURE_ARG_POINTER(aResult);
++  if (aIndex >= m_keys.Length()) return NS_ERROR_INVALID_ARG;
++  *aResult = m_keys[aIndex];
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgXFViewThread::GetChild(nsMsgKey msgKey, nsIMsgDBHdr** aResult) {
+diff --git a/mailnews/mailnews.js b/mailnews/mailnews.js
+--- a/mailnews/mailnews.js
++++ b/mailnews/mailnews.js
+@@ -105,8 +105,11 @@ pref("mailnews.sort_threads_by_root", fa
+ 
+ // Reversed threading when ordered by date descending.
+ pref("mailnews.reversed_threading", false);
+ 
++// Show most recent child in collapsed thread root.
++pref("mailnews.collapse_thread_to_most_recent", false);
++
+ // Virtual folder verbosity.
+ pref("mailnews.virtual_folders.verbose", false);
+ 
+ // default view flags for new folders

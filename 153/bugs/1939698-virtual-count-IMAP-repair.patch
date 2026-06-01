@@ -1,0 +1,190 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1780340314 -7200
+# Parent  12d4402e3869b320be2338b36b33f64cfa91d17d
+Bug 1939698 - Fix virtual count double-up on IMAP folder repair.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -4013,8 +4013,9 @@ var folderPane = {
+     // this folder to rebuild their views.
+     MailServices.mfn.notifyFolderReindexTriggered(folder);
+ 
+     folder.msgDatabase.summaryValid = false;
++    const isIMAP = folder.server.type == "imap";
+     try {
+       let transferInfo = null;
+       switch (folder.server.type) {
+         case "imap":
+@@ -4047,8 +4048,13 @@ var folderPane = {
+     // However, folder discovery relies on the existence of the offline store,
+     // so to avoid an intermediate state that could cause folder discovery to
+     // fail for this folder, we create the local store.
+     folder.msgStore.ensureLocalStore(folder);
++    if (isIMAP) {
++      // This will be reset in nsImapMailFolder::UpdateFolder().
++      folder.QueryInterface(Ci.nsIMsgImapMailFolder).suppressNotification =
++        true;
++    }
+     folder.updateFolder(top.msgWindow);
+   },
+ 
+   /**
+diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsgAccountManager.cpp
+--- a/mailnews/base/src/nsMsgAccountManager.cpp
++++ b/mailnews/base/src/nsMsgAccountManager.cpp
+@@ -25,8 +25,9 @@
+ #include "nsIMsgFolderCache.h"
+ #include "nsMsgFolderCache.h"
+ #include "nsMsgUtils.h"
+ #include "nsMsgDBFolder.h"
++#include "nsIMsgImapMailFolder.h"
+ #include "nsIFile.h"
+ #include "nsIURL.h"
+ #include "nsNetCID.h"
+ #include "nsIPrefService.h"
+@@ -2479,8 +2480,16 @@ VirtualFolderChangeListener::OnHdrProper
+   const uint32_t kNew = 0x4;
+   NS_ENSURE_ARG_POINTER(aHdrChanged);
+   NS_ENSURE_ARG_POINTER(aStatus);
+ 
++  nsCOMPtr<nsIMsgImapMailFolder> imapFolder =
++      do_QueryInterface(m_folderWatching);
++  if (imapFolder) {
++    bool suppress;
++    imapFolder->GetSuppressNotification(&suppress);
++    if (suppress) return NS_OK;
++  }
++
+   uint32_t flags;
+   bool match;
+   nsCOMPtr<nsIMsgDatabase> msgDB;
+   nsresult rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
+@@ -2568,8 +2577,16 @@ NS_IMETHODIMP VirtualFolderChangeListene
+     nsIMsgDBHdr* aHdrChanged, uint32_t aOldFlags, uint32_t aNewFlags,
+     nsIDBChangeListener* aInstigator) {
+   nsCOMPtr<nsIMsgDatabase> msgDB;
+ 
++  nsCOMPtr<nsIMsgImapMailFolder> imapFolder =
++      do_QueryInterface(m_folderWatching);
++  if (imapFolder) {
++    bool suppress;
++    imapFolder->GetSuppressNotification(&suppress);
++    if (suppress) return NS_OK;
++  }
++
+   nsresult rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
+   bool oldMatch = false, newMatch = false;
+   // we don't want any early returns from this function, until we've
+   // called ClearScopes 0n the search session.
+@@ -2645,8 +2662,16 @@ NS_IMETHODIMP VirtualFolderChangeListene
+     nsIMsgDBHdr* aHdrDeleted, nsMsgKey aParentKey, int32_t aFlags,
+     nsIDBChangeListener* aInstigator) {
+   nsCOMPtr<nsIMsgDatabase> msgDB;
+ 
++  nsCOMPtr<nsIMsgImapMailFolder> imapFolder =
++      do_QueryInterface(m_folderWatching);
++  if (imapFolder) {
++    bool suppress;
++    imapFolder->GetSuppressNotification(&suppress);
++    if (suppress) return NS_OK;
++  }
++
+   nsresult rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
+   NS_ENSURE_SUCCESS(rv, rv);
+   bool match = false;
+   m_searchSession->AddScopeTerm(nsMsgSearchScope::offlineMail,
+@@ -2694,8 +2719,16 @@ NS_IMETHODIMP VirtualFolderChangeListene
+     nsIMsgDBHdr* aNewHdr, nsMsgKey aParentKey, int32_t aFlags,
+     nsIDBChangeListener* aInstigator) {
+   nsCOMPtr<nsIMsgDatabase> msgDB;
+ 
++  nsCOMPtr<nsIMsgImapMailFolder> imapFolder =
++      do_QueryInterface(m_folderWatching);
++  if (imapFolder) {
++    bool suppress;
++    imapFolder->GetSuppressNotification(&suppress);
++    if (suppress) return NS_OK;
++  }
++
+   nsresult rv = m_folderWatching->GetMsgDatabase(getter_AddRefs(msgDB));
+   NS_ENSURE_SUCCESS(rv, rv);
+   bool match = false;
+   if (!m_searchSession) return NS_ERROR_NULL_POINTER;
+diff --git a/mailnews/imap/public/nsIMsgImapMailFolder.idl b/mailnews/imap/public/nsIMsgImapMailFolder.idl
+--- a/mailnews/imap/public/nsIMsgImapMailFolder.idl
++++ b/mailnews/imap/public/nsIMsgImapMailFolder.idl
+@@ -258,5 +258,7 @@ interface nsIMsgImapMailFolder : nsISupp
+    *
+    * @param aDelta amount to change the unread count by.
+    */
+   void changePendingUnread(in long aDelta);
++
++  attribute boolean suppressNotification;
+ };
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -592,9 +592,11 @@ nsresult nsImapMailFolder::GetDatabase()
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsImapMailFolder::UpdateFolder(nsIMsgWindow* inMsgWindow) {
+-  return UpdateFolderWithListener(inMsgWindow, nullptr);
++  nsresult rv = UpdateFolderWithListener(inMsgWindow, nullptr);
++  SetSuppressNotification(false);
++  return rv;
+ }
+ 
+ NS_IMETHODIMP nsImapMailFolder::UpdateFolderWithListener(
+     nsIMsgWindow* aMsgWindow, nsIUrlListener* aUrlListener) {
+@@ -755,13 +757,15 @@ NS_IMETHODIMP nsImapMailFolder::UpdateFo
+     if (aMsgWindow) AutoCompact(aMsgWindow);
+ 
+     if (rv == NS_MSG_ERROR_OFFLINE || rv == NS_BINDING_ABORTED) {
+       rv = NS_OK;
++      SetSuppressNotification(false);
+       NotifyFolderEvent(kFolderLoaded);
+     }
+   } else {
+     // Tell the front end that the folder is loaded if we're not going to
+     // actually run a url.
++    SetSuppressNotification(false);
+     if (!m_updatingFolder)  // if we're already running an update url, we'll let
+                             // that one send the folder loaded
+       NotifyFolderEvent(kFolderLoaded);
+   }
+@@ -8758,8 +8762,19 @@ NS_IMETHODIMP nsImapMailFolder::GetAutoS
+   NS_IF_ADDREF(*autoSyncStateObj = m_autoSyncStateObj);
+   return NS_OK;
+ }
+ 
++NS_IMETHODIMP nsImapMailFolder::GetSuppressNotification(bool* value) {
++  NS_ENSURE_ARG_POINTER(value);
++  *value = m_suppressNotification;
++  return NS_OK;
++}
++
++NS_IMETHODIMP nsImapMailFolder::SetSuppressNotification(bool value) {
++  m_suppressNotification = value;
++  return NS_OK;
++}
++
+ NS_IMETHODIMP nsImapMailFolder::InitiateAutoSync(nsIUrlListener* aUrlListener) {
+   MOZ_LOG(gAutoSyncLog, mozilla::LogLevel::Debug,
+           ("%s: Updating folder: %s", __func__, mURI.get()));
+ 
+diff --git a/mailnews/imap/src/nsImapMailFolder.h b/mailnews/imap/src/nsImapMailFolder.h
+--- a/mailnews/imap/src/nsImapMailFolder.h
++++ b/mailnews/imap/src/nsImapMailFolder.h
+@@ -530,8 +530,9 @@ class nsImapMailFolder : public nsMsgDBF
+                                 // inbox
+   nsMsgIMAPFolderACL* m_folderACL;
+   uint32_t m_aclFlags;
+   uint32_t m_supportedUserFlags;
++  bool m_suppressNotification{false};
+ 
+   // determines if we are on GMail server
+   bool m_isGmailServer;
+   // offline imap support

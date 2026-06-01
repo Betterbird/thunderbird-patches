@@ -1,0 +1,270 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1780341604 -7200
+# Parent  c1c0edd80723185b2ef4023b81f5ca7f60a3d9a8
+Bug 1980005 - Log differences in round-tripped vCard data.
+
+Also add additional logging for bug 1980024 and statusbar message.
+
+diff --git a/mail/locales/en-US/messenger/addressbook/abCardDAVProperties.ftl b/mail/locales/en-US/messenger/addressbook/abCardDAVProperties.ftl
+--- a/mail/locales/en-US/messenger/addressbook/abCardDAVProperties.ftl
++++ b/mail/locales/en-US/messenger/addressbook/abCardDAVProperties.ftl
+@@ -28,4 +28,10 @@ carddav-refreshinterval-hours-value =
+ 
+ carddav-readonly-label =
+     .label = Read-only
+     .accesskey = R
++
++carddav-directory-sync-warning =
++    CardDAV: Some data was dropped by the server, please check the Error Console for details
++
++carddav-directory-sync-failed =
++    CardDAV: Synchronization with the server failed, please check the Error Console for details
+diff --git a/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs b/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
+--- a/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
++++ b/mailnews/addrbook/modules/CardDAVDirectory.sys.mjs
+@@ -3,8 +3,12 @@
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import { SQLiteDirectory } from "resource:///modules/SQLiteDirectory.sys.mjs";
+ 
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   BANISHED_PROPERTIES: "resource:///modules/VCardUtils.sys.mjs",
+   CardDAVUtils: "resource:///modules/CardDAVUtils.sys.mjs",
+@@ -16,8 +20,15 @@ ChromeUtils.defineESModuleGetters(lazy, 
+   setInterval: "resource://gre/modules/Timer.sys.mjs",
+   setTimeout: "resource://gre/modules/Timer.sys.mjs",
+ });
+ 
++ChromeUtils.defineLazyGetter(lazy, "l10n", () => {
++  return new Localization(
++    ["messenger/addressbook/abCardDAVProperties.ftl"],
++    true
++  );
++});
++
+ const PREFIX_BINDINGS = {
+   card: "urn:ietf:params:xml:ns:carddav",
+   cs: "http://calendarserver.org/ns/",
+   d: "DAV:",
+@@ -82,8 +93,11 @@ export class CardDAVDirectory extends SQ
+       log.debug(`Retrieved list of cards to remove: ${hrefsToRemove}`);
+     } else {
+       this._hrefsToRemove = new Set();
+     }
++
++    Services.obs.addObserver(this, "addrbook-directory-sync-failed");
++    Services.obs.addObserver(this, "addrbook-directory-sync-warning");
+   }
+   async cleanUp() {
+     await super.cleanUp();
+ 
+@@ -101,8 +115,28 @@ export class CardDAVDirectory extends SQ
+       const hrefsToRemove = [...this._hrefsToRemove].join(" ");
+       this.setStringValue("carddav.hrefsToRemove", hrefsToRemove);
+       log.debug(`Stored list of cards to remove: ${hrefsToRemove}`);
+     }
++
++    Services.obs.removeObserver(this, "addrbook-directory-sync-failed");
++    Services.obs.removeObserver(this, "addrbook-directory-sync-warning");
++  }
++
++  observe(aSubject, aTopic, _aState) {
++    if (
++      aTopic == "addrbook-directory-sync-failed" ||
++      aTopic == "addrbook-directory-sync-warning"
++    ) {
++      if (aTopic == "addrbook-directory-sync-warning") {
++        MailServices.feedback.reportStatus(
++          lazy.l10n.formatValueSync("carddav-directory-sync-warning")
++        );
++      } else {
++        MailServices.feedback.reportStatus(
++          lazy.l10n.formatValueSync("carddav-directory-sync-failed")
++        );
++      }
++    }
+   }
+ 
+   get propertiesChromeURI() {
+     return "chrome://messenger/content/addressbook/abCardDAVProperties.xhtml";
+@@ -114,15 +148,17 @@ export class CardDAVDirectory extends SQ
+     return false;
+   }
+ 
+   addCard(card, withNewUID) {
++    MailServices.feedback.reportStatus("");
+     // Ideally, we'd not add the card until it was on the server, but we have
+     // to return newCard synchronously.
+     const newCard = super.addCard(card, withNewUID);
+     this._sendCardToServer(newCard).catch(console.error);
+     return newCard;
+   }
+   modifyCard(card) {
++    MailServices.feedback.reportStatus("");
+     // Well this is awkward. Because it's defined in nsIAbDirectory,
+     // modifyCard must not be async, but we need to do async operations.
+     const oldProperties = this.loadCardProperties(card.UID);
+     const newCard = super.modifyCard(card);
+@@ -138,8 +174,9 @@ export class CardDAVDirectory extends SQ
+       console.error(ex);
+     }
+   }
+   deleteCards(cards) {
++    MailServices.feedback.reportStatus("");
+     super.deleteCards(cards);
+     this._deleteCards(cards);
+   }
+   async _deleteCards(cards) {
+@@ -254,9 +291,9 @@ export class CardDAVDirectory extends SQ
+       details.expectedStatuses &&
+       !details.expectedStatuses.includes(response.status)
+     ) {
+       throw Components.Exception(
+-        `Incorrect response from server: ${response.status} ${response.statusText}`,
++        `Incorrect response from server: (${response.status}) ${response.statusText}`,
+         Cr.NS_ERROR_FAILURE
+       );
+     }
+ 
+@@ -394,8 +431,87 @@ export class CardDAVDirectory extends SQ
+       yield response;
+     }
+   };
+ 
++  // Code written by ChatGPT.
++  compareVCards(original, received) {
++    const normalize = vcard =>
++      vcard
++        .trim()
++        .split(/\r?\n/)
++        .map(line => line.trim())
++        .filter(line => line.length)
++        .sort();
++
++    const origLines = normalize(original);
++    const recvLines = normalize(received);
++
++    const onlyInOriginal = [];
++    const onlyInReceived = [];
++    const differences = [];
++
++    let i = 0;
++    let j = 0;
++
++    while (i < origLines.length && j < recvLines.length) {
++      const oLine = origLines[i];
++      const rLine = recvLines[j];
++
++      if (oLine === rLine) {
++        i++;
++        j++;
++      } else if (oLine < rLine) {
++        onlyInOriginal.push(oLine);
++        i++;
++      } else {
++        onlyInReceived.push(rLine);
++        j++;
++      }
++    }
++
++    // Collect leftovers.
++    while (i < origLines.length) {
++      onlyInOriginal.push(origLines[i++]);
++    }
++    while (j < recvLines.length) {
++      onlyInReceived.push(recvLines[j++]);
++    }
++
++    // Look for similar lines (same field prefix) among remaining lines.
++    for (i = onlyInOriginal.length - 1; i >= 0; i--) {
++      const oLine = onlyInOriginal[i];
++      const oKey = oLine.split(":")[0].split(";")[0];
++
++      for (j = onlyInReceived.length - 1; j >= 0; j--) {
++        const rLine = onlyInReceived[j];
++        const rKey = rLine.split(":")[0].split(";")[0];
++
++        if (oKey === rKey) {
++          differences.push({ key: oKey, original: oLine, received: rLine });
++          onlyInOriginal.splice(i, 1);
++          onlyInReceived.splice(j, 1);
++          break;
++        }
++      }
++    }
++
++    // Output results
++    differences.forEach(diff =>
++      console.warn(
++        `CardDAV: Different information for ${diff.key}:\n  original: ${diff.original}\n  received: ${diff.received}`
++      )
++    );
++
++    onlyInOriginal.forEach(line => {
++      console.warn("CardDAV: Missing in received vCard:", line);
++      Services.obs.notifyObservers(this, "addrbook-directory-sync-warning");
++    });
++
++    onlyInReceived.forEach(line =>
++      console.warn("CardDAV: Unexpected in received vCard:", line)
++    );
++  }
++
+   /**
+    * Converts the card to a vCard and performs a PUT request to store it on the
+    * server. Then immediately performs a GET request ensuring the local copy
+    * matches the server copy. Stores the card in the database on success.
+@@ -432,16 +548,25 @@ export class CardDAVDirectory extends SQ
+     try {
+       log.debug(`Sending ${cardHref} to server.`);
+       response = await this._makeRequest(cardHref, requestDetails);
+     } catch (ex) {
++      console.error(
++        "Sending card to server failed:",
++        requestDetails.body.replace(/\r?\n/g, "|")
++      );
+       Services.obs.notifyObservers(this, "addrbook-directory-sync-failed");
+       this._uidsToSync.add(card.UID);
+       throw ex;
+     }
+ 
+     if (response.status >= 400) {
++      console.error(
++        "Sending card to server failed:",
++        requestDetails.body.replace(/\r?\n/g, "|")
++      );
++      Services.obs.notifyObservers(this, "addrbook-directory-sync-failed");
+       throw Components.Exception(
+-        `Sending card to the server failed, response was ${response.status} ${response.statusText}`,
++        `Sending card to the server failed, response was: (${response.status}) ${response.statusText}`,
+         Cr.NS_ERROR_FAILURE
+       );
+     }
+ 
+@@ -461,8 +586,9 @@ export class CardDAVDirectory extends SQ
+       const responseCard = normalizeLineEndings(
+         properties.querySelector("address-data")?.textContent
+       );
+ 
++      this.compareVCards(requestDetails.body, responseCard);
+       const abCard = lazy.VCardUtils.vCardToAbCard(responseCard);
+       abCard.setProperty("_etag", etag);
+       abCard.setProperty("_href", href);
+ 
+@@ -863,9 +989,9 @@ export class CardDAVDirectory extends SQ
+     });
+ 
+     if (response.status == 400) {
+       log.warn(
+-        `Server ${this._serverURL} responded with: ${response.status} ${response.statusText}`
++        `Server ${this._serverURL} responded with: (${response.status}) ${response.statusText}`
+       );
+       await this.fetchAllFromServer();
+       return;
+     }
