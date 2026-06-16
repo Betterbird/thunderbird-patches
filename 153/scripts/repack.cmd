@@ -1,0 +1,80 @@
+@if not exist betterbird-%~2.en-US.win64.installer-unsigned.exe (
+  @echo Error: betterbird-%~2.en-US.win64.installer-unsigned.exe does not exist. Exiting.
+  @exit /b 1
+)
+
+mkdir %~1
+cd %~1
+
+:: Unpack original
+7z e ..\betterbird-%~2.en-US.win64.installer-unsigned.exe core/omni.ja
+move omni.ja ..\omni.ja
+7z x ..\omni.ja
+del ..\omni.ja
+
+:: Get language pack
+wget http://ftp.mozilla.org/pub/thunderbird/candidates/153.0b1-candidates/build1/linux-x86_64/xpi/%~1.xpi
+
+:: Remove stuff we don't want from the language pack
+7z d %~1.xpi manifest.json
+7z d %~1.xpi chrome\%~1\locale\branding
+7z d %~1.xpi localization\%~1\branding
+
+:: Unpack the language pack on top of the original
+7z x %~1.xpi
+rm -f %~1.xpi
+
+:: Move US branding
+mv chrome\en-US\locale\branding chrome\%~1\locale\branding\
+mv localization\en-US\branding\ localization\%~1\branding\
+
+:: Move some Devtools stuff which isn't localised at all and therefore not in the language packs.
+mv localization\en-US\devtools\server\ localization\%~1\devtools\server\
+mv localization\en-US\devtools\startup\ localization\%~1\devtools\startup\
+
+:: Remove original en-US locale, experiments showed that it isn't used as fallback
+:: when left in omni.ja. Leaving chrome/en-US even switched to that locale.
+rm -rf chrome\en-US
+rm -rf localization\en-US
+
+:: Delete inbuilt en-US dictionary.
+rm -rf dictionaries
+truncate -s 0 chrome\browser\content\built_in_addons.json
+
+:: lessecho uses LR instead of CRLF
+lessecho %~1> default.locale
+lessecho %~1> res\multilocale.txt
+
+:: Edit chrome\chrome.manifest
+sed -i -e 's/en-US en-US\/locale\/branding/%~1 %~1\/locale\/branding/' chrome\chrome.manifest
+sed -i -e 's/en-US en-US\/locale\/en-US/%~1 %~1\/locale\/%~1/' chrome\chrome.manifest
+sed -i -e 's/en-US en-US\/locale\/pdfviewer/%~1 %~1\/locale\/pdfviewer/' chrome\chrome.manifest
+
+:: Call script that provides extra strings
+bash ..\%~1.sh
+
+:: Pack the whole thing again
+7z a -tzip -m0=Copy omni.ja *
+
+cd ..
+copy betterbird-%~2.en-US.win64.installer-unsigned.exe betterbird-%~2.%~1.win64.installer.exe
+mkdir core
+mv %~1\omni.ja core\omni.ja
+7z u betterbird-%~2.%~1.win64.installer.exe core\omni.ja
+
+@if exist betterbird-%~2.%~1.win64.installer-unsigned.exe (
+  @echo "Replacing setup.exe"
+  7z e betterbird-%~2.%~1.win64.installer-unsigned.exe setup.exe
+  7z a betterbird-%~2.%~1.win64.installer.exe setup.exe
+  rm setup.exe
+)
+
+:: Sign
+C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "$cert = Get-ChildItem Cert:\\CurrentUser\\My\\ | Where-Object { $_.Thumbprint -eq 'c39501225a337c86f91e3ba7911acb06ff48acf3' }; Set-AuthenticodeSignature -FilePath betterbird-%~2.%~1.win64.installer.exe -Certificate $cert  -TimestampServer http://time.certum.pl"
+
+:: Keep omni.ja for later
+mkdir omni-win
+rm omni-win\omni-%~1.ja
+mv core\omni.ja omni-win\omni-%~1.ja
+rmdir /s /q core
+rmdir /s /q %~1
