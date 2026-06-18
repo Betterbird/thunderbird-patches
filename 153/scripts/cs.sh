@@ -6,10 +6,6 @@ sed -i -e 's/Thunderbird/Betterbird/' chrome/cs/locale/cs/messenger/appstrings.p
 # Fix a bad translation
 sed -i -e 's/label = Organisator/label = Organizátor/' localization/cs/messenger/messenger.ftl
 
-# Original strings:
-# groupButtonTooltipText=Add a new group
-echo "groupButtonTooltipText=Přidat novou skupinu" >> chrome/cs/locale/cs/messenger/search.properties
-
 # Original string:
 # <!ENTITY folderContextStartupFolder.label "Startup Folder">
 echo "<!ENTITY folderContextStartupFolder.label \"Výchozí složka\">" >> chrome/cs/locale/cs/messenger/messenger.dtd
@@ -205,8 +201,6 @@ echo "    .tooltiptext = Najít shody dle zobrazovaného jména (začíná na) n
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization/cs/messenger/preferences/preferences.ftl
 sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get-app\1Thunderbird\2/' localization/cs/messenger/preferences/preferences.ftl
 
-echo "Expires=Expires" >> chrome/cs/locale/cs/messenger/search-attributes.properties
-
 # New in 140:
 
 # Original strings:
@@ -245,22 +239,6 @@ echo "    CardDAV: Některá data byla serverem odstraněna, podrobnosti nalezne
 echo "carddav-directory-sync-failed =" >> localization/cs/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: Synchronizace se serverem selhala, podrobnosti naleznete v konzoli chyb" >> localization/cs/messenger/addressbook/abCardDAVProperties.ftl
 
-# Strings for bug 1972710:
-# folder-pane-context-reset-sort =
-#   .label = Reset Folder Order
-#   .accesskey = R
-echo "folder-pane-context-reset-sort =" >> localization/cs/messenger/about3Pane.ftl
-echo "  .label = Obnovit pořadí složek" >> localization/cs/messenger/about3Pane.ftl
-echo "  .accesskey = n"                 >> localization/cs/messenger/about3Pane.ftl
-
-# Strings for searching all mail accounts:
-# search-all-mail-accounts =
-#   .label = Search all mail accounts
-#   .accesskey = m
-echo "search-all-mail-accounts ="                      >> localization/cs/messenger/messenger.ftl
-echo "  .label = Vyhledat ve všech e-mailových účtech" >> localization/cs/messenger/messenger.ftl
-echo "  .accesskey = m"                                >> localization/cs/messenger/messenger.ftl
-
 # New Gloda facets:
 # gloda.message.attr._subjectMatches.facetNameLabel=Subject
 # gloda.message.attr._bodyMatches.facetNameLabel=Body
@@ -270,6 +248,7 @@ echo "gloda.message.attr._bodyMatches.facetNameLabel=Tělo"       >> chrome/cs/l
 # Categories:
 echo "about-addressbook-details-categories-header = Kategorie" >> localization/cs/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-header-categories2 = Kategorie" >> localization/cs/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-a11y-categories2 = Kategorie" >> localization/cs/messenger/addressbook/aboutAddressBook.ftl
 echo "  .title = Řadit podle kategorií"                        >> localization/cs/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-label-categories2 ="            >> localization/cs/messenger/addressbook/aboutAddressBook.ftl
 echo "  .label = Kategorie"                                    >> localization/cs/messenger/addressbook/aboutAddressBook.ftl
@@ -280,4 +259,29 @@ echo "vcard-categories-header = Kategorie"                     >> localization/c
 echo "vcard-category-add = Přidat kategorii"                   >> localization/cs/messenger/addressbook/vcard.ftl
 echo "vcard-category-input-label = Kategorie"                  >> localization/cs/messenger/addressbook/vcard.ftl
 echo "vcard-category-input-title = Název kategorie"            >> localization/cs/messenger/addressbook/vcard.ftl
-echo "Categories=Kategorie" >> chrome/cs/locale/cs/messenger/search-attributes.properties
+
+# Migrated to Fluent in 153:
+
+# Original strings:
+# search-add-group-button =
+#   .label = +( )
+#   .tooltiptext = Add a new group
+echo "search-add-group-button ="             >> localization/cs/messenger/searchWidgets.ftl
+echo "  .label = +( )"                       >> localization/cs/messenger/searchWidgets.ftl
+echo "  .tooltiptext = Přidat novou skupinu" >> localization/cs/messenger/searchWidgets.ftl
+
+echo "search-attrib-expires = Expires"      >> localization/cs/messenger/searchWidgets.ftl
+echo "search-attrib-categories = Kategorie" >> localization/cs/messenger/searchWidgets.ftl
+
+# Strings for searching all mail accounts:
+# search-all-mail-accounts =
+#   .label = Search all mail accounts
+#   .accesskey = m
+echo "search-all-mail-accounts ="                      >> localization/cs/messenger/searchDialog.ftl
+echo "  .label = Vyhledat ve všech e-mailových účtech" >> localization/cs/messenger/searchDialog.ftl
+echo "  .accesskey = m"                                >> localization/cs/messenger/searchDialog.ftl
+
+# New in 153:
+
+echo "recent-sort-order-combined ="                                                        >> localization/cs/messenger/preferences/preferences.ftl
+echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/cs/messenger/preferences/preferences.ftl

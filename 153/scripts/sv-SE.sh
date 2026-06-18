@@ -3,10 +3,6 @@
 # Fix strings in appstrings.properties.
 sed -i -e 's/Thunderbird/Betterbird/' chrome/sv-SE/locale/sv-SE/messenger/appstrings.properties
 
-# Original strings:
-# groupButtonTooltipText=Add a new group
-echo "groupButtonTooltipText=Lägg till en ny grupp" >> chrome/sv-SE/locale/sv-SE/messenger/search.properties
-
 # Original string:
 # <!ENTITY folderContextStartupFolder.label "Startup Folder">
 echo "<!ENTITY folderContextStartupFolder.label \"Startmapp\">" >> chrome/sv-SE/locale/sv-SE/messenger/messenger.dtd
@@ -202,8 +198,6 @@ echo "    .tooltiptext = Matcha på visningsnamn (börjar med) eller smeknamn (e
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization/sv-SE/messenger/preferences/preferences.ftl
 sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get-app\1Thunderbird\2/' localization/sv-SE/messenger/preferences/preferences.ftl
 
-echo "Expires=Expires" >> chrome/sv-SE/locale/sv-SE/messenger/search-attributes.properties
-
 # New in 140:
 
 # Original strings:
@@ -242,22 +236,6 @@ echo "    CardDAV: Viss data togs bort av servern, kontrollera felkonsolen för 
 echo "carddav-directory-sync-failed =" >> localization/sv-SE/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: Synkronisering med servern misslyckades, kontrollera felkonsolen för mer information" >> localization/sv-SE/messenger/addressbook/abCardDAVProperties.ftl
 
-# Strings for bug 1972710:
-# folder-pane-context-reset-sort =
-#   .label = Reset Folder Order
-#   .accesskey = R
-echo "folder-pane-context-reset-sort =" >> localization/sv-SE/messenger/about3Pane.ftl
-echo "  .label = Återställ mappordning" >> localization/sv-SE/messenger/about3Pane.ftl
-echo "  .accesskey = t"                 >> localization/sv-SE/messenger/about3Pane.ftl
-
-# Strings for searching all mail accounts:
-# search-all-mail-accounts =
-#   .label = Search all mail accounts
-#   .accesskey = m
-echo "search-all-mail-accounts ="         >> localization/sv-SE/messenger/messenger.ftl
-echo "  .label = Sök i alla e-postkonton" >> localization/sv-SE/messenger/messenger.ftl
-echo "  .accesskey = p"                   >> localization/sv-SE/messenger/messenger.ftl
-
 # New Gloda facets:
 # gloda.message.attr._subjectMatches.facetNameLabel=Subject
 # gloda.message.attr._bodyMatches.facetNameLabel=Body
@@ -267,6 +245,7 @@ echo "gloda.message.attr._bodyMatches.facetNameLabel=Innehållet" >> chrome/sv-S
 # Categories:
 echo "about-addressbook-details-categories-header = Kategorier" >> localization/sv-SE/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-header-categories2 = Kategorier" >> localization/sv-SE/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-a11y-categories2 = Kategorier" >> localization/sv-SE/messenger/addressbook/aboutAddressBook.ftl
 echo "  .title = Sortera efter kategorier"                      >> localization/sv-SE/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-label-categories2 ="             >> localization/sv-SE/messenger/addressbook/aboutAddressBook.ftl
 echo "  .label = Kategorier"                                    >> localization/sv-SE/messenger/addressbook/aboutAddressBook.ftl
@@ -277,4 +256,29 @@ echo "vcard-categories-header = Kategorier"                     >> localization/
 echo "vcard-category-add = Lägg till kategori"                  >> localization/sv-SE/messenger/addressbook/vcard.ftl
 echo "vcard-category-input-label = Kategori"                    >> localization/sv-SE/messenger/addressbook/vcard.ftl
 echo "vcard-category-input-title = Kategorinamn"                >> localization/sv-SE/messenger/addressbook/vcard.ftl
-echo "Categories=Kategorier" >> chrome/sv-SE/locale/sv-SE/messenger/search-attributes.properties
+
+# Migrated to Fluent in 153:
+
+# Original strings:
+# search-add-group-button =
+#   .label = +( )
+#   .tooltiptext = Add a new group
+echo "search-add-group-button ="              >> localization/sv-SE/messenger/searchWidgets.ftl
+echo "  .label = +( )"                        >> localization/sv-SE/messenger/searchWidgets.ftl
+echo "  .tooltiptext = Lägg till en ny grupp" >> localization/sv-SE/messenger/searchWidgets.ftl
+
+echo "search-attrib-expires = Expires"       >> localization/sv-SE/messenger/searchWidgets.ftl
+echo "search-attrib-categories = Kategorier" >> localization/sv-SE/messenger/searchWidgets.ftl
+
+# Strings for searching all mail accounts:
+# search-all-mail-accounts =
+#   .label = Search all mail accounts
+#   .accesskey = m
+echo "search-all-mail-accounts ="         >> localization/sv-SE/messenger/searchDialog.ftl
+echo "  .label = Sök i alla e-postkonton" >> localization/sv-SE/messenger/searchDialog.ftl
+echo "  .accesskey = p"                   >> localization/sv-SE/messenger/searchDialog.ftl
+
+# New in 153:
+
+echo "recent-sort-order-combined ="                                                        >> localization/sv-SE/messenger/preferences/preferences.ftl
+echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/sv-SE/messenger/preferences/preferences.ftl

@@ -3,10 +3,6 @@
 # Fix strings in appstrings.properties.
 sed -i -e 's/Thunderbird/Betterbird/' chrome/it/locale/it/messenger/appstrings.properties
 
-# Original strings:
-# groupButtonTooltipText=Add a new group
-echo "groupButtonTooltipText=Aggiungi nuovo gruppo" >> chrome/it/locale/it/messenger/search.properties
-
 # Original string:
 # <!ENTITY folderContextStartupFolder.label "Startup Folder">
 echo "<!ENTITY folderContextStartupFolder.label \"Cartella di avvio\">" >> chrome/it/locale/it/messenger/messenger.dtd
@@ -202,8 +198,6 @@ echo "    .tooltiptext = Corrisponde al Nome visualizzato (inizia con) o al Sopr
 sed -i -e 's/^qr-export-pane-header\(.*\){ -brand-product-name }\(.*\)/qr-export-pane-header\1Thunderbird\2/' localization/it/messenger/preferences/preferences.ftl
 sed -i -e 's/^qr-export-get-app\(.*\){ -brand-product-name }\(.*\)/qr-export-get-app\1Thunderbird\2/' localization/it/messenger/preferences/preferences.ftl
 
-echo "Expires=Expires" >> chrome/it/locale/it/messenger/search-attributes.properties
-
 # New in 140:
 
 # Original strings:
@@ -242,22 +236,6 @@ echo "    CardDAV: Alcuni dati sono stati eliminati dal server, controlla la Con
 echo "carddav-directory-sync-failed =" >> localization/it/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: Sincronizzazione con il server non riuscita, controlla la Console degli errori per maggiori dettagli" >> localization/it/messenger/addressbook/abCardDAVProperties.ftl
 
-# Strings for bug 1972710:
-# folder-pane-context-reset-sort =
-#   .label = Reset Folder Order
-#   .accesskey = R
-echo "folder-pane-context-reset-sort ="     >> localization/it/messenger/about3Pane.ftl
-echo "  .label = Reimposta ordine cartelle" >> localization/it/messenger/about3Pane.ftl
-echo "  .accesskey = R"                     >> localization/it/messenger/about3Pane.ftl
-
-# Strings for searching all mail accounts:
-# search-all-mail-accounts =
-#   .label = Search all mail accounts
-#   .accesskey = m
-echo "search-all-mail-accounts ="                     >> localization/it/messenger/messenger.ftl
-echo "  .label = Cerca in tutti gli account di posta" >> localization/it/messenger/messenger.ftl
-echo "  .accesskey = s"                               >> localization/it/messenger/messenger.ftl
-
 # New Gloda facets:
 # gloda.message.attr._subjectMatches.facetNameLabel=Subject
 # gloda.message.attr._bodyMatches.facetNameLabel=Body
@@ -267,6 +245,7 @@ echo "gloda.message.attr._bodyMatches.facetNameLabel=Corpo"      >> chrome/it/lo
 # Categories:
 echo "about-addressbook-details-categories-header = Categorie" >> localization/it/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-header-categories2 = Categorie" >> localization/it/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-a11y-categories2 = Categorie" >> localization/it/messenger/addressbook/aboutAddressBook.ftl
 echo "  .title = Ordina per categorie"                         >> localization/it/messenger/addressbook/aboutAddressBook.ftl
 echo "about-addressbook-column-label-categories2 ="            >> localization/it/messenger/addressbook/aboutAddressBook.ftl
 echo "  .label = Categorie"                                    >> localization/it/messenger/addressbook/aboutAddressBook.ftl
@@ -277,4 +256,29 @@ echo "vcard-categories-header = Categorie"                     >> localization/i
 echo "vcard-category-add = Aggiungi categoria"                 >> localization/it/messenger/addressbook/vcard.ftl
 echo "vcard-category-input-label = Categoria"                  >> localization/it/messenger/addressbook/vcard.ftl
 echo "vcard-category-input-title = Nome della categoria"       >> localization/it/messenger/addressbook/vcard.ftl
-echo "Categories=Categorie" >> chrome/it/locale/it/messenger/search-attributes.properties
+
+# Migrated to Fluent in 153:
+
+# Original strings:
+# search-add-group-button =
+#   .label = +( )
+#   .tooltiptext = Add a new group
+echo "search-add-group-button ="              >> localization/it/messenger/searchWidgets.ftl
+echo "  .label = +( )"                        >> localization/it/messenger/searchWidgets.ftl
+echo "  .tooltiptext = Aggiungi nuovo gruppo" >> localization/it/messenger/searchWidgets.ftl
+
+echo "search-attrib-expires = Expires"      >> localization/it/messenger/searchWidgets.ftl
+echo "search-attrib-categories = Categorie" >> localization/it/messenger/searchWidgets.ftl
+
+# Strings for searching all mail accounts:
+# search-all-mail-accounts =
+#   .label = Search all mail accounts
+#   .accesskey = m
+echo "search-all-mail-accounts ="                     >> localization/it/messenger/searchDialog.ftl
+echo "  .label = Cerca in tutti gli account di posta" >> localization/it/messenger/searchDialog.ftl
+echo "  .accesskey = s"                               >> localization/it/messenger/searchDialog.ftl
+
+# New in 153:
+
+echo "recent-sort-order-combined ="                                                        >> localization/it/messenger/preferences/preferences.ftl
+echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/it/messenger/preferences/preferences.ftl
