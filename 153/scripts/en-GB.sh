@@ -160,7 +160,6 @@ echo "vcard-category-input-title = Category name"               >> localization/
 
 # Migrated to Fluent in 153:
 
-# Original strings:
 echo "search-add-group-button ="        >> localization/en-GB/messenger/searchWidgets.ftl
 echo "  .label = +( )"                  >> localization/en-GB/messenger/searchWidgets.ftl
 echo "  .tooltiptext = Add a new group" >> localization/en-GB/messenger/searchWidgets.ftl
