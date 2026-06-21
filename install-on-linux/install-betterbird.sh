@@ -6,6 +6,7 @@
 # Configuration
 lang="en-US"  # Language options: en-US, de, fr, es-ES, ja, it, nl, pt-BR, ru.
 version="release"  # Version options: previous, release, latest, future. Only 'release' is guaranteed to work.
+force=false
 tmpDir="$HOME/tmp/betterbird"
 tmpFile=""  # Will be filled by script.
 tmpLocFile="$tmpDir/download.txt"
@@ -48,8 +49,12 @@ checkInstalledVersion() {
     betterbirdVersion=$("$installDir"/betterbird/betterbird -v 2>/dev/null | sed 's/Betterbird\ Project\ Betterbird\ //')
     length=${#betterbirdVersion}
     if [ -n "$betterbirdVersion" ] && [ "${fileToDownload:11:$length}" = "$betterbirdVersion" ]; then
-      echoLog "Betterbird is up to date. No need to upgrade."
-      exit 1
+      if [ "$force" = true ]; then
+        echoLog "Betterbird is up to date, but --force given. Re-installing."
+      else
+        echoLog "Betterbird is up to date. No need to upgrade."
+        exit 1
+      fi
     fi
   fi
 }
@@ -160,6 +165,29 @@ registerMIME() {
     echoLog "xdg-mime not found, skipping MIME registration."
   fi
 }
+
+usage() {
+  echo "Usage: $0 [-f|--force]"
+  echo "  -f, --force  Force re-install even if the same version is already installed."
+  exit 1
+}
+
+# Parse command line arguments
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f|--force)
+      force=true
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "Unknown option: $1"
+      usage
+      ;;
+  esac
+  shift
+done
 
 # Main execution
 checkIfBetterbirdIsRunning
