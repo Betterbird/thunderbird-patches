@@ -82,7 +82,7 @@ downloadUpdate() {
 checkHash() {
   local hash=$(sha256sum "$tmpFile" | awk '{print $1}')
   wget -q -O "$tmpDir/sha256.txt" "$shaFile"
-  local update=$(grep $hash $tmpDir/sha256.txt | awk '{print $2}')
+  local update=$(grep "$hash" "$tmpDir/sha256.txt" | awk '{print $2}')
   if [ "$update" == "" ]; then
     echoLog "Hash $hash not found in $shaFile."
     echoLog "Removing downloaded archive..."
@@ -98,7 +98,7 @@ backup() {
   echoLog "Checking if existing Betterbird installation needs to be backed up..."
   if [ -d "$installDir/betterbird" ]; then
     echoLog "Remove existing backups."
-    rm -r "$installDir/betterbird_backup_"*
+    rm -rf "$installDir/betterbird_backup_"*
     echoLog "Creating backup of the current installation..."
     cp -r "$installDir/betterbird" "$backupDir"
     if [ $? -eq 0 ]; then
@@ -119,11 +119,18 @@ extract() {
 
 addCustomIcons() {
   if [ -n "$customIconsDir" ] && [ -d "$customIconsDir" ]; then
-    cp "$customIconsDir"/* "$installDir/betterbird/chrome/icons/default/"
-    if [ $? -eq 0 ]; then
-      echoLog "Successfully replaced with custom icons."
+    shopt -s nullglob
+    local icons=("$customIconsDir"/*)
+    shopt -u nullglob
+    if [ ${#icons[@]} -gt 0 ]; then
+      cp "${icons[@]}" "$installDir/betterbird/chrome/icons/default/"
+      if [ $? -eq 0 ]; then
+        echoLog "Successfully replaced with custom icons."
+      else
+        echoLog "Failed to replace the icons."
+      fi
     else
-      echoLog "Failed to replace the icons."
+      echoLog "No custom icons found in $customIconsDir."
     fi
   fi
 }
@@ -142,12 +149,16 @@ registerMIME() {
   # This environment variable tells the desktop environment where to find desktop files.
   # Example: export XDG_DATA_DIRS="/desktop/file/directory:$XDG_DATA_DIRS"
   # For more details, see: https://specifications.freedesktop.org/menu-spec/latest/ar01s02.html
-  xdg-mime default eu.betterbird.Betterbird.desktop x-scheme-handler/mailto
-  echoLog "MIME handler for x-scheme-handler/mailto registered."
+  if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default eu.betterbird.Betterbird.desktop x-scheme-handler/mailto
+    echoLog "MIME handler for x-scheme-handler/mailto registered."
 
-  # Query the current default application set for handling mailto: links.
-  local mimeHandler=$(xdg-mime query default x-scheme-handler/mailto)
-  echoLog "Current default MIME handler for mailto: $mimeHandler."
+    # Query the current default application set for handling mailto: links.
+    local mimeHandler=$(xdg-mime query default x-scheme-handler/mailto)
+    echoLog "Current default MIME handler for mailto: $mimeHandler."
+  else
+    echoLog "xdg-mime not found, skipping MIME registration."
+  fi
 }
 
 # Main execution
