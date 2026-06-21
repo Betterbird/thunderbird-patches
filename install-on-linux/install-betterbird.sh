@@ -10,6 +10,7 @@ tmpDir="$HOME/tmp/betterbird"
 tmpFile=""  # Will be filled by script.
 tmpLocFile="$tmpDir/download.txt"
 installDir="/opt"
+customIconsDir= # Custom Icons folder, change to /path/to/custom/icons/folder or leave empty.
 desktopFile="/usr/share/applications/eu.betterbird.Betterbird.desktop"  # Do not change this configuration without reading comment in registerMIME().
 backupDir="/opt/betterbird_backup_$(date +%Y%m%d%H%M)"
 logFile="/var/log/betterbird/update.log"
@@ -42,6 +43,15 @@ checkIfBetterbirdIsRunning() {
   fi
 }
 
+checkInstalledVersion() {
+  betterbirdVersion=$("$installDir"/betterbird/betterbird -v | sed 's/Betterbird\ Project\ Betterbird\ //')
+  length=${#betterbirdVersion}
+  if [ "${fileToDownload:11:$length}" = "$betterbirdVersion" ]; then
+    echoLog "Betterbird is up to date. No need to upgrade."
+    exit 1
+  fi
+}
+
 downloadUpdate() {
   mkdir -p "$tmpDir"
   wget -q -O "$tmpLocFile" "https://www.betterbird.eu/downloads/getloc.php?os=linux&lang=$lang&version=$version"
@@ -53,17 +63,18 @@ downloadUpdate() {
   echoLog "Download found: $fileToDownload."
   tmpFile="$tmpDir/$fileToDownload"
 
+  checkInstalledVersion
+
   # Delete old downloads.
   find "$tmpDir" -type f ! -name "$fileToDownload" -delete
 
   if [ -f "$tmpFile" ]; then
-    echoLog "$tmpFile already present. Exiting."
-    exit 0;
+    echoLog "$tmpFile already present. Skipping download."
+  else
+    echoLog "Starting download..."
+    wget -q --show-progress -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
+    echoLog "Downloaded archive."
   fi
-
-  echoLog "Starting download..."
-  wget -q -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
-  echoLog "Downloaded archive."
 }
 
 checkHash() {
@@ -72,6 +83,8 @@ checkHash() {
   local update=$(grep $hash $tmpDir/sha256.txt | awk '{print $2}')
   if [ "$update" == "" ]; then
     echoLog "Hash $hash not found in $shaFile."
+    echoLog "Removing downloaded archive..."
+    rm "$tmpFile"
     exit 1
   else
     echoLog "Hash check OK, hash matched ${update:1}."
@@ -82,6 +95,8 @@ checkHash() {
 backup() {
   echoLog "Checking if existing Betterbird installation needs to be backed up..."
   if [ -d "$installDir/betterbird" ]; then
+    echoLog "Remove existing backups."
+    rm -r "$installDir/betterbird_backup_"*
     echoLog "Creating backup of the current installation..."
     cp -r "$installDir/betterbird" "$backupDir"
     if [ $? -eq 0 ]; then
@@ -98,6 +113,17 @@ extract() {
   rm -rf "$installDir/betterbird"
   tar xf "$tmpFile" -C "$installDir"
   echoLog "Extracted to $installDir/betterbird."
+}
+
+addCustomIcons() {
+  if [ -d "$customIconsDir" ]; then
+    cp "$customIconsDir"/* "$installDir/betterbird/chrome/icons/default/"
+    if [ $? -eq 0 ]; then
+      echoLog "Successfully replaced with custom icons."
+    else
+      echoLog "Failed to replace the icons."
+    fi
+  fi
 }
 
 createDesktopFile() {
@@ -128,6 +154,7 @@ downloadUpdate
 checkHash
 backup
 extract
+addCustomIcons
 createDesktopFile
 registerMIME
 echoLog "Install successful: Betterbird installed in $installDir/betterbird."
