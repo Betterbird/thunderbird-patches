@@ -10,7 +10,7 @@ tmpDir="$HOME/tmp/betterbird"
 tmpFile=""  # Will be filled by script.
 tmpLocFile="$tmpDir/download.txt"
 installDir="/opt"
-customIconsDir="/path/to/custom/icons/folder" # Custom Icons folder (change to your saved location)
+customIconsDir= # Custom Icons folder, change to /path/to/custom/icons/folder or leave empty.
 desktopFile="/usr/share/applications/eu.betterbird.Betterbird.desktop"  # Do not change this configuration without reading comment in registerMIME().
 backupDir="/opt/betterbird_backup_$(date +%Y%m%d%H%M)"
 logFile="/var/log/betterbird/update.log"
@@ -44,9 +44,9 @@ checkIfBetterbirdIsRunning() {
 }
 
 checkInstalledVersion() {
-  betterbirdVersion=$(betterbird -v | sed 's/Betterbird\ Project\ Betterbird\ //')
-  chara=${#betterbirdVersion}
-  if [ "${fileToDownload:11:$chara}" = "$betterbirdVersion" ]; then
+  betterbirdVersion=$("$installDir"/betterbird/betterbird -v | sed 's/Betterbird\ Project\ Betterbird\ //')
+  length=${#betterbirdVersion}
+  if [ "${fileToDownload:11:$length}" = "$betterbirdVersion" ]; then
     echoLog "Betterbird is up to date. No need to upgrade."
     exit 1
   fi
@@ -72,14 +72,14 @@ downloadUpdate() {
     echoLog "$tmpFile already present. Skipping download."
   else
     echoLog "Starting download..."
-    wget -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
+    wget -q --show-progress -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
     echoLog "Downloaded archive."
   fi
 }
 
 checkHash() {
   local hash=$(sha256sum "$tmpFile" | awk '{print $1}')
-  wget -O "$tmpDir/sha256.txt" "$shaFile"
+  wget -q -O "$tmpDir/sha256.txt" "$shaFile"
   local update=$(grep $hash $tmpDir/sha256.txt | awk '{print $2}')
   if [ "$update" == "" ]; then
     echoLog "Hash $hash not found in $shaFile."
@@ -116,11 +116,13 @@ extract() {
 }
 
 addCustomIcons() {
-  cp "$customIconsDir"/* "$installDir/betterbird/chrome/icons/default/"
-  if [ $? -eq 0 ]; then
-    echoLog "Successfully replaced with custom icons."
-  else
-    echoLog "Failed to replace the icons."
+  if [ -d "$customIconsDir" ]; then
+    cp "$customIconsDir"/* "$installDir/betterbird/chrome/icons/default/"
+    if [ $? -eq 0 ]; then
+      echoLog "Successfully replaced with custom icons."
+    else
+      echoLog "Failed to replace the icons."
+    fi
   fi
 }
 
