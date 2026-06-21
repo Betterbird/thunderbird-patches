@@ -44,11 +44,13 @@ checkIfBetterbirdIsRunning() {
 }
 
 checkInstalledVersion() {
-  betterbirdVersion=$("$installDir"/betterbird/betterbird -v | sed 's/Betterbird\ Project\ Betterbird\ //')
-  length=${#betterbirdVersion}
-  if [ "${fileToDownload:11:$length}" = "$betterbirdVersion" ]; then
-    echoLog "Betterbird is up to date. No need to upgrade."
-    exit 1
+  if [ -x "$installDir/betterbird/betterbird" ]; then
+    betterbirdVersion=$("$installDir"/betterbird/betterbird -v 2>/dev/null | sed 's/Betterbird\ Project\ Betterbird\ //')
+    length=${#betterbirdVersion}
+    if [ -n "$betterbirdVersion" ] && [ "${fileToDownload:11:$length}" = "$betterbirdVersion" ]; then
+      echoLog "Betterbird is up to date. No need to upgrade."
+      exit 1
+    fi
   fi
 }
 
@@ -116,7 +118,7 @@ extract() {
 }
 
 addCustomIcons() {
-  if [ -d "$customIconsDir" ]; then
+  if [ -n "$customIconsDir" ] && [ -d "$customIconsDir" ]; then
     cp "$customIconsDir"/* "$installDir/betterbird/chrome/icons/default/"
     if [ $? -eq 0 ]; then
       echoLog "Successfully replaced with custom icons."
