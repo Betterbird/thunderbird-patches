@@ -74,7 +74,7 @@ downloadUpdate() {
     echoLog "$tmpFile already present. Skipping download."
   else
     echoLog "Starting download..."
-    wget -q -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
+    wget -q --show-progress -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
     echoLog "Downloaded archive."
   fi
 }
