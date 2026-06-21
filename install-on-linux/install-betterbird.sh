@@ -5,13 +5,13 @@
 
 # Configuration
 lang="en-US"  # Language options: en-US, de, fr, es-ES, ja, it, nl, pt-BR, ru.
-version="release"  # Version options: previous, release, latest, future. Only 'release' is guaranteed to work.
+channel="release"  # Channel options: previous, release, latest, future. Only 'release' is guaranteed to work.
 force=false
 tmpDir="$HOME/tmp/betterbird"
 tmpFile=""  # Will be filled by script.
 tmpLocFile="$tmpDir/download.txt"
 installDir="/opt"
-customIconsDir= # Custom Icons folder, change to /path/to/custom/icons/folder or leave empty.
+customIconsDir=  # Custom Icons folder, change to /path/to/custom/icons/folder or leave empty.
 desktopFile="/usr/share/applications/eu.betterbird.Betterbird.desktop"  # Do not change this configuration without reading comment in registerMIME().
 backupDir="/opt/betterbird_backup_$(date +%Y%m%d%H%M)"
 logFile="/var/log/betterbird/update.log"
@@ -61,7 +61,7 @@ checkInstalledVersion() {
 
 downloadUpdate() {
   mkdir -p "$tmpDir"
-  wget -q -O "$tmpLocFile" "https://www.betterbird.eu/downloads/getloc.php?os=linux&lang=$lang&version=$version"
+  wget -q -O "$tmpLocFile" "https://www.betterbird.eu/downloads/getloc.php?os=linux&lang=$lang&version=$channel"
   read -r fileToDownload < "$tmpLocFile"
   fileToDownload=$(basename "$fileToDownload")
   # extract major version (3 characters after "betterbird-")
@@ -79,7 +79,7 @@ downloadUpdate() {
     echoLog "$tmpFile already present. Skipping download."
   else
     echoLog "Starting download..."
-    wget -q --show-progress -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$version"
+    wget -q --show-progress -O "$tmpFile" "https://www.betterbird.eu/downloads/get.php?os=linux&lang=$lang&version=$channel"
     echoLog "Downloaded archive."
   fi
 }
@@ -167,8 +167,11 @@ registerMIME() {
 }
 
 usage() {
-  echo "Usage: $0 [-f|--force]"
-  echo "  -f, --force  Force re-install even if the same version is already installed."
+  echo "Usage: $0 [-f|--force] [-l|--lang LANG] [-c|--channel CH]"
+  echo "  -f, --force        Force re-install even if the same version is already installed."
+  echo "  -l, --lang LANG    Set language (default: en-US). Options: en-US, de, fr, es-ES, ja, it, nl, pt-BR, ru."
+  echo "  -c, --channel CH   Set update channel (default: release). Options: previous, release, latest, future."
+  echo "                     Only release is guaranteed to work."
   exit 1
 }
 
@@ -177,6 +180,22 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -f|--force)
       force=true
+      ;;
+    -l|--lang)
+      if [ -z "$2" ]; then
+        echo "Missing argument for $1"
+        usage
+      fi
+      lang="$2"
+      shift
+      ;;
+    -c|--channel)
+      if [ -z "$2" ]; then
+        echo "Missing argument for $1"
+        usage
+      fi
+      channel="$2"
+      shift
       ;;
     -h|--help)
       usage
