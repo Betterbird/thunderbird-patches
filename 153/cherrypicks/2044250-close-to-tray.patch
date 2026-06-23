@@ -1,0 +1,866 @@
+# HG changeset patch
+# User Michal Szopinski <mszopinski@mssnt.pl>
+# Date 1782069600 -43200
+# Node ID 835e07554d036cdead02d7a26168f29626393441
+# Parent  bd3b0ebb75e6fe86c088215424d17509bc215f0c
+Bug 2044250 - Replace "minimize to tray" with "close to tray", add start in tray. r=aleca,darktrojan,tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D304012
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -1408,9 +1408,10 @@ pref("toolkit.telemetry.bhrPing.enabled"
+   pref("toolkit.telemetry.ecosystemtelemetry.enabled", false);
+ #endif
+ 
+ #ifdef XP_WIN
+-pref("mail.minimizeToTray", false);
++pref("mail.closeToTray", false);
++pref("mail.closeToTray.startInTray", false);
+ #endif
+ 
+ pref("prompts.defaultModalType", 3);
+ 
+diff --git a/mail/base/content/closeToTray.mjs b/mail/base/content/closeToTray.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/base/content/closeToTray.mjs
+@@ -0,0 +1,21 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++window.addEventListener("close", event => {
++  if (!Services.prefs.getBoolPref("mail.closeToTray", false)) {
++    return;
++  }
++
++  // Only move to the tray when the last three-pane window is being closed.
++  if (Array.from(Services.wm.getEnumerator("mail:3pane")).length > 1) {
++    return;
++  }
++
++  event.preventDefault();
++
++  const baseWindow = window.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow);
++  Cc["@mozilla.org/messenger/osintegration;1"]
++    .getService(Ci.nsIMessengerWindowsIntegration)
++    .hideWindow(baseWindow);
++});
+diff --git a/mail/base/content/mail3PaneWindowCommands.js b/mail/base/content/mail3PaneWindowCommands.js
+--- a/mail/base/content/mail3PaneWindowCommands.js
++++ b/mail/base/content/mail3PaneWindowCommands.js
+@@ -191,9 +191,9 @@ function CloseTabOrWindow() {
+     return;
+   }
+   if (tabmail.tabInfo.length == 1) {
+     if (Services.prefs.getBoolPref("mail.tabs.closeWindowWithLastTab")) {
+-      window.close();
++      requestWindowClose();
+     }
+   } else {
+     tabmail.removeCurrentTab();
+   }
+diff --git a/mail/base/content/mailCore.js b/mail/base/content/mailCore.js
+--- a/mail/base/content/mailCore.js
++++ b/mail/base/content/mailCore.js
+@@ -796,8 +796,22 @@ function safeModeRestart() {
+     MailUtils.restartApplication();
+   }
+ }
+ 
++/**
++ * Dispatch a cancelable close event and close the window.
++ */
++function requestWindowClose() {
++  const closeEvent = new CustomEvent("close", {
++    bubbles: true,
++    cancelable: true,
++  });
++
++  if (window.dispatchEvent(closeEvent)) {
++    window.close();
++  }
++}
++
+ function getMostRecentMailWindow() {
+   let win = null;
+ 
+   win = Services.wm.getMostRecentWindow("mail:3pane", true);
+diff --git a/mail/base/content/messenger-titlebar-items.inc.xhtml b/mail/base/content/messenger-titlebar-items.inc.xhtml
+--- a/mail/base/content/messenger-titlebar-items.inc.xhtml
++++ b/mail/base/content/messenger-titlebar-items.inc.xhtml
+@@ -17,8 +17,8 @@
+                    oncommand="window.restore();"
+                    data-l10n-id="messenger-window-restore-down-button"/>
+     <toolbarbutton class="titlebar-button titlebar-close"
+                    titlebar-btn="close"
+-                   oncommand="window.close()"
++                   oncommand="requestWindowClose();"
+                    data-l10n-id="messenger-window-close-button"/>
+   </hbox>
+ </hbox>
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -101,8 +101,10 @@ let _resolveDelayedStartup;
+ var delayedStartupPromise = new Promise(resolve => {
+   _resolveDelayedStartup = resolve;
+ });
+ 
++let _restoredWindowStatePromise;
++
+ var gMailInit = {
+   onBeforeInitialXULLayout() {
+     // Set a sane starting width/height for all resolutions on new profiles.
+     // Do this before the window loads.
+@@ -130,8 +132,54 @@ var gMailInit = {
+ 
+     // Call this after we set attributes that might change toolbars' computed
+     // text color.
+     ToolbarIconColor.init();
++
++    // Check if this is the first window, initialize the SessionStoreManager.
++    // This will restore other windows once the session state has been loaded.
++    const firstWindow = !SessionStoreManager.initialized;
++    _restoredWindowStatePromise = SessionStoreManager.loadingWindow(window);
++
++    // Hide this window on startup (if required).
++    this._startInTray(firstWindow);
++  },
++
++  _startInTrayEnabled() {
++    const closeToTray = Services.prefs.getBoolPref("mail.closeToTray", false);
++    return (
++      closeToTray &&
++      Services.prefs.getBoolPref("mail.closeToTray.startInTray", false)
++    );
++  },
++
++  async _startInTray(firstWindow) {
++    if (!this._startInTrayEnabled()) {
++      return;
++    }
++
++    // When start in tray is enabled, hide the first window as well as all
++    // windows restored by the SessionStoreManager.
++    const hideWindow = () => {
++      const baseWindow = window.docShell.treeOwner.QueryInterface(
++        Ci.nsIBaseWindow
++      );
++      Cc["@mozilla.org/messenger/osintegration;1"]
++        .getService(Ci.nsIMessengerWindowsIntegration)
++        .hideWindow(baseWindow);
++    };
++
++    if (firstWindow) {
++      // This is the first window ever displayed, hide it now.
++      hideWindow();
++      return;
++    }
++
++    const restoredWindowState = await _restoredWindowStatePromise;
++    if (restoredWindowState != null) {
++      // This window is one of the windows that are being restored, hide it as
++      // soon as its state is known.
++      hideWindow();
++    }
+   },
+ 
+   /**
+    * Called on startup to initialize various parts of the main window.
+@@ -189,18 +237,27 @@ var gMailInit = {
+     }
+ 
+     window.addEventListener("AppCommand", HandleAppCommandEvent, true);
+ 
+-    this._boundDelayedStartup = this._delayedStartup.bind(this);
+-    window.addEventListener("MozAfterPaint", this._boundDelayedStartup);
+-
+     // Listen for the messages sent to the main 3 pane window.
+     window.addEventListener("message", this._onMessageReceived);
++
++    if (!this._startInTrayEnabled()) {
++      // Perform delayed startup after the first paint of the window.
++      this._boundDelayedStartup = this._delayedStartup.bind(this);
++      window.addEventListener("MozAfterPaint", this._boundDelayedStartup);
++    } else {
++      // Start to tray is enabled, the window will not be painted straight away.
++      // Perform delayed startup now.
++      this._delayedStartup();
++    }
+   },
+ 
+   _cancelDelayedStartup() {
+-    window.removeEventListener("MozAfterPaint", this._boundDelayedStartup);
+-    this._boundDelayedStartup = null;
++    if (this._boundDelayedStartup) {
++      window.removeEventListener("MozAfterPaint", this._boundDelayedStartup);
++      this._boundDelayedStartup = null;
++    }
+   },
+ 
+   /**
+    * Handle the messages sent via postMessage() method to the main 3 pane
+@@ -600,9 +657,9 @@ function getWindowStateForSessionPersist
+  *   needed if the window was opened with a folder or a message as an argument.
+  * @returns {boolean} true if the restoration was successful, false otherwise.
+  */
+ async function atStartupRestoreTabs(aDontRestoreFirstTab) {
+-  const state = await SessionStoreManager.loadingWindow(window);
++  const state = await _restoredWindowStatePromise;
+   if (state) {
+     const tabsState = state.tabs;
+     const tabmail = document.getElementById("tabmail");
+     try {
+diff --git a/mail/base/content/messenger.xhtml b/mail/base/content/messenger.xhtml
+--- a/mail/base/content/messenger.xhtml
++++ b/mail/base/content/messenger.xhtml
+@@ -186,9 +186,9 @@
+ #ifdef XP_MACOSX
+   <script defer="defer" src="chrome://global/content/macWindowMenu.js"></script>
+ #endif
+ #ifdef XP_WIN
+-  <script defer="defer" src="chrome://messenger/content/minimizeToTray.js"></script>
++  <script type="module" src="chrome://messenger/content/closeToTray.mjs"></script>
+ #endif
+   <!-- calendar-management.js also needed for multiple calendar support and today pane -->
+   <script defer="defer" src="chrome://calendar/content/calendar-management.js"></script>
+   <script defer="defer" src="chrome://calendar/content/calendar-ui-utils.js"></script>
+diff --git a/mail/base/content/minimizeToTray.js b/mail/base/content/minimizeToTray.js
+deleted file mode 100644
+--- a/mail/base/content/minimizeToTray.js
++++ /dev/null
+@@ -1,19 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+-/* globals docShell, Services, windowState */
+-
+-addEventListener("sizemodechange", () => {
+-  if (
+-    windowState == window.STATE_MINIMIZED &&
+-    Services.prefs.getBoolPref("mail.minimizeToTray", false)
+-  ) {
+-    setTimeout(() => {
+-      var bw = docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow);
+-      Cc["@mozilla.org/messenger/osintegration;1"]
+-        .getService(Ci.nsIMessengerWindowsIntegration)
+-        .hideWindow(bw);
+-    });
+-  }
+-});
+diff --git a/mail/base/jar.mn b/mail/base/jar.mn
+--- a/mail/base/jar.mn
++++ b/mail/base/jar.mn
+@@ -57,9 +57,9 @@ messenger.jar:
+     content/messenger/messenger.js                  (content/messenger.js)
+ *   content/messenger/messenger.xhtml               (content/messenger.xhtml)
+     content/messenger/webextensions.css             (content/webextensions.css)
+ #ifdef XP_WIN
+-    content/messenger/minimizeToTray.js             (content/minimizeToTray.js)
++    content/messenger/closeToTray.mjs               (content/closeToTray.mjs)
+ #endif
+     content/messenger/migrationProgress.js          (content/migrationProgress.js)
+     content/messenger/migrationProgress.xhtml       (content/migrationProgress.xhtml)
+     content/messenger/msgHdrView.js                 (content/msgHdrView.js)
+diff --git a/mail/base/test/browser/browser3.toml b/mail/base/test/browser/browser3.toml
+--- a/mail/base/test/browser/browser3.toml
++++ b/mail/base/test/browser/browser3.toml
+@@ -45,5 +45,10 @@ tags = ["oauth"]
+ 
+ ["browser_smartFolderDelete.js"]
+ tags = ["virtualfolders"]
+ 
++["browser_startInTray.js"]
++run-if = [
++  "os == 'win'",
++]
++
+ ["browser_statusFeedback.js"]
+diff --git a/mail/base/test/browser/browser_startInTray.js b/mail/base/test/browser/browser_startInTray.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/browser/browser_startInTray.js
+@@ -0,0 +1,262 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* globals gMailInit */
++
++const { sinon } = ChromeUtils.importESModule(
++  "resource://testing-common/Sinon.sys.mjs"
++);
++
++const { SessionStoreManager } = ChromeUtils.importESModule(
++  "resource:///modules/SessionStoreManager.sys.mjs"
++);
++
++Services.scriptloader.loadSubScript(
++  "chrome://mochikit/content/tests/SimpleTest/MockObjects.js",
++  this
++);
++
++const hideWindow = sinon.spy();
++
++add_setup(() => {
++  class MockOSIntegration {
++    QueryInterface = ChromeUtils.generateQI(["nsIMessengerWindowsIntegration"]);
++    hideWindow = hideWindow;
++  }
++  const osIntegration = new MockObjectRegisterer(
++    "@mozilla.org/messenger/osintegration;1",
++    MockOSIntegration
++  );
++
++  osIntegration.register();
++  registerCleanupFunction(() => {
++    osIntegration.unregister();
++  });
++});
++
++function enableStartInTray(prefs = { closeToTray: true, startInTray: true }) {
++  Services.prefs.setBoolPref("mail.closeToTray", prefs.closeToTray);
++  Services.prefs.setBoolPref("mail.closeToTray.startInTray", prefs.startInTray);
++}
++
++registerCleanupFunction(() => {
++  Services.prefs.clearUserPref("mail.closeToTray");
++  Services.prefs.clearUserPref("mail.closeToTray.startInTray");
++});
++
++/**
++ * Run gMailInit.onBeforeInitialXULLayout and only resolve once start in tray
++ * has finished.
++ */
++function runOnBeforeInitialXULLayout() {
++  return new Promise(resolve => {
++    const oldStartInTray = gMailInit._startInTray.bind(gMailInit);
++
++    gMailInit._startInTray = async (...args) => {
++      await oldStartInTray(...args);
++      gMailInit._startInTray = oldStartInTray;
++      resolve();
++    };
++
++    gMailInit.onBeforeInitialXULLayout();
++  });
++}
++
++add_task(async function test_noStartInTray() {
++  enableStartInTray({ closeToTray: false, startInTray: false });
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.notCalled,
++    "Should not hide window when start in tray is off"
++  );
++});
++
++add_task(async function test_onlyCloseToTray() {
++  enableStartInTray({ closeToTray: true, startInTray: false });
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.notCalled,
++    "Should not hide window when close to tray is on but start in tray is off"
++  );
++});
++
++add_task(async function test_onlyStartInTray() {
++  enableStartInTray({ closeToTray: false, startInTray: true });
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.notCalled,
++    "Should not hide window when start in tray is on but close to tray is off"
++  );
++});
++
++add_task(async function test_firstWindowNoState() {
++  enableStartInTray();
++  const initialized = sinon
++    .stub(SessionStoreManager, "initialized")
++    .get(() => false);
++  const loadingWindow = sinon
++    .stub(SessionStoreManager, "loadingWindow")
++    .returns(null);
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.calledOnce,
++    "Should hide window when loading the first window and there is no initial state"
++  );
++
++  initialized.restore();
++  loadingWindow.restore();
++  hideWindow.resetHistory();
++});
++
++add_task(async function test_firstWindowWithState() {
++  enableStartInTray();
++  const initialized = sinon
++    .stub(SessionStoreManager, "initialized")
++    .get(() => false);
++  const loadingWindow = sinon
++    .stub(SessionStoreManager, "loadingWindow")
++    .returns({});
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.calledOnce,
++    "Should hide window when loading the first window and initial state is present"
++  );
++
++  initialized.restore();
++  loadingWindow.restore();
++  hideWindow.resetHistory();
++});
++
++add_task(async function test_reopenedWindowRestored() {
++  enableStartInTray();
++  const initialized = sinon
++    .stub(SessionStoreManager, "initialized")
++    .get(() => true);
++  const loadingWindow = sinon
++    .stub(SessionStoreManager, "loadingWindow")
++    .returns({});
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.calledOnce,
++    "Should hide window when loading windows opened by the SessionStoreManager"
++  );
++
++  initialized.restore();
++  loadingWindow.restore();
++  hideWindow.resetHistory();
++});
++
++add_task(async function test_reopenedWindowNotRestored() {
++  enableStartInTray();
++  const initialized = sinon
++    .stub(SessionStoreManager, "initialized")
++    .get(() => true);
++  const loadingWindow = sinon
++    .stub(SessionStoreManager, "loadingWindow")
++    .returns(null);
++
++  await runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.notCalled,
++    "Should not hide window when loading windows opened after startup"
++  );
++
++  initialized.restore();
++  loadingWindow.restore();
++  hideWindow.resetHistory();
++});
++
++add_task(async function test_firstWindowAsap() {
++  enableStartInTray();
++  const initialized = sinon
++    .stub(SessionStoreManager, "initialized")
++    .get(() => false);
++  const loadingWindow = sinon
++    .stub(SessionStoreManager, "loadingWindow")
++    .returns({});
++
++  const startInTrayFinished = runOnBeforeInitialXULLayout();
++
++  Assert.ok(hideWindow.calledOnce, "Should hide the first window immediately");
++
++  await startInTrayFinished;
++
++  Assert.ok(
++    hideWindow.calledOnce,
++    "Should not hide the first window again once its state is known"
++  );
++
++  initialized.restore();
++  loadingWindow.restore();
++  hideWindow.resetHistory();
++});
++
++add_task(async function test_reopenedWindowAsap() {
++  enableStartInTray();
++  const initialized = sinon
++    .stub(SessionStoreManager, "initialized")
++    .get(() => true);
++  const loadingWindow = sinon
++    .stub(SessionStoreManager, "loadingWindow")
++    .returns({});
++
++  const startInTrayFinished = runOnBeforeInitialXULLayout();
++
++  Assert.ok(
++    hideWindow.notCalled,
++    "Should not hide subsequent window immediately"
++  );
++
++  await startInTrayFinished;
++
++  Assert.ok(
++    hideWindow.calledOnce,
++    "Should hide subsequent window as soon as its state is known"
++  );
++
++  initialized.restore();
++  loadingWindow.restore();
++  hideWindow.resetHistory();
++});
++
++add_task(async function test_delayedStartupDelayed() {
++  enableStartInTray({ closeToTray: false, startInTray: false });
++  const mock = sinon.mock(gMailInit);
++  mock.expects("_delayedStartup").never();
++
++  gMailInit.onLoad();
++
++  mock.verify();
++  Assert.ok(
++    true,
++    "Should not immediately call _delayedStartup when start to tray is off"
++  );
++});
++
++add_task(async function test_delayedStartupImmediate() {
++  enableStartInTray();
++  const mock = sinon.mock(gMailInit);
++  mock.expects("_delayedStartup").once();
++
++  gMailInit.onLoad();
++
++  mock.verify();
++  Assert.ok(
++    true,
++    "Should immediately call _delayedStartup when start to tray is on"
++  );
++});
+diff --git a/mail/components/MailGlue.sys.mjs b/mail/components/MailGlue.sys.mjs
+--- a/mail/components/MailGlue.sys.mjs
++++ b/mail/components/MailGlue.sys.mjs
+@@ -1627,9 +1627,10 @@ class PreferenceTelemetry {
+     // Platform-specific preferences
+     if (AppConstants.platform === "win") {
+       this.#booleanPrefs.push(
+         "mail.biff.show_tray_icon",
+-        "mail.minimizeToTray"
++        "mail.closeToTray",
++        "mail.closeToTray.startInTray"
+       );
+     }
+ 
+     if (AppConstants.platform !== "macosx") {
+diff --git a/mail/components/preferences/general.inc.xhtml b/mail/components/preferences/general.inc.xhtml
+--- a/mail/components/preferences/general.inc.xhtml
++++ b/mail/components/preferences/general.inc.xhtml
+@@ -105,10 +105,15 @@
+         </hbox>
+       </hbox>
+ #ifdef XP_WIN
+       <hbox align="start">
+-        <checkbox data-l10n-id="minimize-to-tray-label"
+-                  preference="mail.minimizeToTray"/>
++        <checkbox data-l10n-id="close-to-tray-label"
++                  preference="mail.closeToTray"/>
++      </hbox>
++      <hbox align="start" class="indent">
++          <checkbox id="startInTray"
++                    data-l10n-id="start-in-tray-label"
++                    preference="mail.closeToTray.startInTray"/>
+       </hbox>
+ #endif
+       <hbox id="searchIntegrationContainer">
+         <checkbox id="searchIntegration"
+diff --git a/mail/components/preferences/general.js b/mail/components/preferences/general.js
+--- a/mail/components/preferences/general.js
++++ b/mail/components/preferences/general.js
+@@ -114,9 +114,12 @@ Preferences.addAll([
+   { id: "mail.folder_widget.recent_sort_order", type: "int" },
+   { id: "mail.folder_widget.max_recent", type: "int" },
+ ]);
+ if (AppConstants.platform == "win") {
+-  Preferences.add({ id: "mail.minimizeToTray", type: "bool" });
++  Preferences.addAll([
++    { id: "mail.closeToTray", type: "bool" },
++    { id: "mail.closeToTray.startInTray", type: "bool" },
++  ]);
+ }
+ 
+ var ICON_URL_APP = "";
+ 
+@@ -216,8 +219,12 @@ var gGeneralPane = {
+         this.sort.bind(this, header.getAttribute("sort-type"))
+       );
+     }
+ 
++    if (AppConstants.platform == "win") {
++      this.updateCloseToTray();
++    }
++
+     this.updateStartPage();
+     this.updatePlaySound(
+       !Preferences.get("mail.biff.play_sound").value,
+       Preferences.get("mail.biff.play_sound.url").value,
+@@ -668,8 +675,13 @@ var gGeneralPane = {
+         .value;
+     }
+   },
+ 
++  updateCloseToTray() {
++    const startInTray = document.getElementById("startInTray");
++    startInTray.disabled = !Preferences.get("mail.closeToTray").value;
++  },
++
+   async updateWebSearch() {
+     const self = this;
+     lazy.SearchService.init().then(async () => {
+       const defaultEngine = await lazy.SearchService.getDefault();
+@@ -3061,4 +3073,10 @@ Preferences.get("layers.acceleration.dis
+ Preferences.get("mail.biff.show_alert").on(
+   "change",
+   gGeneralPane.updateShowAlert
+ );
++if (AppConstants.platform == "win") {
++  Preferences.get("mail.closeToTray").on(
++    "change",
++    gGeneralPane.updateCloseToTray
++  );
++}
+diff --git a/mail/locales/en-US/messenger/preferences/preferences.ftl b/mail/locales/en-US/messenger/preferences/preferences.ftl
+--- a/mail/locales/en-US/messenger/preferences/preferences.ftl
++++ b/mail/locales/en-US/messenger/preferences/preferences.ftl
+@@ -191,11 +191,14 @@ adding-opensearch-provider-failed-title 
+ # Variables:
+ # $url (String) - URL an OpenSearch provider was requested for.
+ adding-opensearch-provider-failed-text = Could not add OpenSearch Provider for { $url }.
+ 
+-minimize-to-tray-label =
+-    .label = When { -brand-short-name } is minimized, move it to the tray
+-    .accesskey = m
++close-to-tray-label =
++    .label = When { -brand-short-name } is closed, move it to the tray
++    .accesskey = c
++start-in-tray-label =
++    .label = Start { -brand-short-name } in the tray
++    .accesskey = S
+ 
+ new-message-arrival = When new messages arrive:
+ mail-play-sound-label =
+     .label = { PLATFORM() ->
+diff --git a/mail/metrics.yaml b/mail/metrics.yaml
+--- a/mail/metrics.yaml
++++ b/mail/metrics.yaml
+@@ -199,8 +199,10 @@ mail:
+       - mail.chat.enabled
+       - mail.chat.play_sound
+       - mail.chat.show_desktop_notifications
+       - mail.close_message_window.on_delete
++      - mail.closeToTray
++      - mail.closeToTray.startInTray
+       - mail.collect_email_address_outgoing
+       - mail.compose.attachment_reminder
+       - mail.compose.autosave
+       - mail.compose.big_attachments.notify
+@@ -218,9 +220,8 @@ mail:
+       - mail.inappnotifications.isFlatpak
+       - mail.inappnotifications.isSnap
+       - mail.inappnotifications.pkceUpgradeForYahooAol
+       - mail.mdn.report.enabled
+-      - mail.minimizeToTray
+       - mail.operate_on_msgs_in_collapsed_threads
+       - mail.phishing.detection.enabled
+       - mail.prompt_purge_threshold
+       - mail.purge.ask
+diff --git a/mail/modules/MailMigrator.sys.mjs b/mail/modules/MailMigrator.sys.mjs
+--- a/mail/modules/MailMigrator.sys.mjs
++++ b/mail/modules/MailMigrator.sys.mjs
+@@ -28,9 +28,9 @@ export var MailMigrator = {
+    */
+   _migrateUI() {
+     // The code for this was ported from
+     // mozilla/browser/components/nsBrowserGlue.js
+-    const UI_VERSION = 60;
++    const UI_VERSION = 61;
+     const UI_VERSION_PREF = "mail.ui-rdf.version";
+     let currentUIVersion = Services.prefs.getIntPref(UI_VERSION_PREF, 0);
+ 
+     if (currentUIVersion >= UI_VERSION) {
+@@ -457,8 +457,16 @@ export var MailMigrator = {
+           "calendar_toggle_show_completed_in_view_command"
+         );
+       }
+ 
++      if (currentUIVersion < 61) {
++        if (Services.prefs.prefHasUserValue("mail.minimizeToTray")) {
++          const old = Services.prefs.getBoolPref("mail.minimizeToTray");
++          Services.prefs.setBoolPref("mail.closeToTray", old);
++          Services.prefs.clearUserPref("mail.minimizeToTray");
++        }
++      }
++
+       // Migration tasks that may take a long time are not run immediately, but
+       // added to the MigrationTasks object then run at the end.
+       //
+       // See the documentation on MigrationTask and MigrationTasks for how to
+diff --git a/mail/modules/SessionStoreManager.sys.mjs b/mail/modules/SessionStoreManager.sys.mjs
+--- a/mail/modules/SessionStoreManager.sys.mjs
++++ b/mail/modules/SessionStoreManager.sys.mjs
+@@ -13,8 +13,12 @@ var SESSION_AUTO_SAVE_DEFAULT_MS = 30000
+ 
+ export var SessionStoreManager = {
+   _initialized: false,
+ 
++  get initialized() {
++    return this._initialized;
++  },
++
+   /**
+    * Session restored successfully on startup; use this to test for an early
+    * failed startup which does not restore user tab state to ensure a session
+    * save on close will not overwrite the last good session state.
+diff --git a/mail/test/marionette/manifest.toml b/mail/test/marionette/manifest.toml
+--- a/mail/test/marionette/manifest.toml
++++ b/mail/test/marionette/manifest.toml
+@@ -1,7 +1,12 @@
+ [DEFAULT]
+ support-files = ["data/**", "scripts/**"]
+ 
++["test_close_to_tray.py"]
++run-if = [
++  "os == 'win'",
++]
++
+ ["test_commandline.py"]
+ 
+ ["test_menubar_migration.py"]
+ run-if = [
+diff --git a/mail/test/marionette/test_close_to_tray.py b/mail/test/marionette/test_close_to_tray.py
+new file mode 100644
+--- /dev/null
++++ b/mail/test/marionette/test_close_to_tray.py
+@@ -0,0 +1,98 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, you can obtain one at http://mozilla.org/MPL/2.0/.
++
++from marionette_driver import Wait
++from marionette_driver.keys import Keys
++from marionette_harness import MarionetteTestCase
++
++
++class TestCloseToTray(MarionetteTestCase):
++    def setUp(self):
++        super().setUp()
++
++        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++        self.marionette.execute_script("""
++            window.hideWindowFactory = {
++                classId: Services.uuid.generateUUID(),
++                QueryInterface: ChromeUtils.generateQI([
++                    "nsIFactory",
++                    "nsIMessengerWindowsIntegration"
++                ]),
++                createInstance(iid) {
++                    return this.QueryInterface(iid);
++                },
++                hideWindowCount: 0,
++                hideWindow() {
++                    this.hideWindowCount++;
++                }
++            };
++
++            const registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
++            const contractId = "@mozilla.org/messenger/osintegration;1";
++
++            window.hideWindowFactory.oldClassId = registrar.contractIDToCID(contractId);
++            registrar.registerFactory(window.hideWindowFactory.classId, "", contractId, window.hideWindowFactory);
++        """)
++
++    def tearDown(self):
++        super().tearDown()
++
++        self.marionette.execute_script("""
++            const registrar = Components.manager.QueryInterface(Ci.nsIComponentRegistrar);
++            const contractId = "@mozilla.org/messenger/osintegration;1";
++
++            registrar.unregisterFactory(window.hideWindowFactory.classId, window.hideWindowFactory);
++            registrar.registerFactory(window.hideWindowFactory.oldClassId, "", contractId, null);
++            delete window.hideWindowFactory;
++        """)
++
++    def get_hideWindow_count(self):
++        return self.marionette.execute_script("return window.hideWindowFactory.hideWindowCount")
++
++    def test_close_to_tray(self):
++        self.marionette.set_pref("mail.closeToTray", True)
++
++        # Click the close button in the first window.
++        self.assertEqual(0, self.get_hideWindow_count())
++
++        close_button = self.marionette.find_element("css selector", "[titlebar-btn=close]")
++        close_button.click()
++
++        # The window should call hideWindow.
++        self.assertEqual(1, self.get_hideWindow_count())
++
++        # Open a second window.
++        self.marionette.execute_script("openTab('calendar', {}, 'window')")
++        Wait(self.marionette, timeout=10).until(
++            lambda marionette: len(marionette.chrome_window_handles) == 2
++        )
++
++        # Click the close button in the second window.
++        self.marionette.switch_to_window(self.marionette.chrome_window_handles[1])
++        close_button = self.marionette.find_element("css selector", "[titlebar-btn=close]")
++        close_button.click()
++
++        # The window should close.
++        Wait(self.marionette, timeout=10).until(
++            lambda marionette: len(marionette.chrome_window_handles) == 1
++        )
++
++        # Click the close button in the first window.
++        self.marionette.switch_to_window(self.marionette.chrome_window_handles[0])
++        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++
++        close_button = self.marionette.find_element("css selector", "[titlebar-btn=close]")
++        close_button.click()
++
++        # The window should call hideWindow.
++        self.assertEqual(2, self.get_hideWindow_count())
++
++        # Check if CTRL+W triggers close to tray.
++        key_chain = self.marionette.actions.sequence("key", "keyboard_id")
++        key_chain.key_down(Keys.CONTROL).key_down("w").key_up("w").key_up(Keys.CONTROL).perform()
++        self.assertEqual(3, self.get_hideWindow_count())
++
++        # Check if ALT+F4 triggers close to tray.
++        key_chain.key_down(Keys.ALT).key_down(Keys.F4).key_up(Keys.F4).key_up(Keys.ALT).perform()
++        self.assertEqual(4, self.get_hideWindow_count())
+diff --git a/mailnews/base/src/nsMessengerWinIntegration.cpp b/mailnews/base/src/nsMessengerWinIntegration.cpp
+--- a/mailnews/base/src/nsMessengerWinIntegration.cpp
++++ b/mailnews/base/src/nsMessengerWinIntegration.cpp
+@@ -155,9 +155,10 @@ LRESULT CALLBACK nsMessengerWinIntegrati
+             continue;
+           }
+ 
+           HWND hwnd = (HWND)(widget->GetNativeData(NS_NATIVE_WIDGET));
+-          ::ShowWindow(hwnd, SW_RESTORE);
++          // Restore the window if it is minimized.
++          if (::IsIconic(hwnd)) ::ShowWindow(hwnd, SW_RESTORE);
+           ::SetForegroundWindow(hwnd);
+ 
+           nsCOMPtr<nsIObserverService> obs =
+               mozilla::services::GetObserverService();
