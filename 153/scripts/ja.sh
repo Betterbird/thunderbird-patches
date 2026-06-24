@@ -282,3 +282,17 @@ echo "  .accesskey = m"                >> localization/ja/messenger/searchDialog
 
 echo "recent-sort-order-combined ="                                                        >> localization/ja/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/ja/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+echo "close-to-tray-label ="                                   >> localization/ja/messenger/preferences/preferences.ftl
+echo "  .label = 閉じたときに { -brand-short-name } をタスクトレイにしまう" >> localization/ja/messenger/preferences/preferences.ftl
+echo "  .accesskey = c"                                        >> localization/ja/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                   >> localization/ja/messenger/preferences/preferences.ftl
+echo "  .label = タスクトレイで { -brand-short-name } を起動する"      >> localization/ja/messenger/preferences/preferences.ftl
+echo "  .accesskey = s"                                        >> localization/ja/messenger/preferences/preferences.ftl

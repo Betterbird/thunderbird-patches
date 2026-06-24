@@ -285,3 +285,17 @@ echo "  .accesskey = c"                                  >> localization/pt-PT/m
 
 echo "recent-sort-order-combined ="                                                        >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/pt-PT/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+echo "close-to-tray-label ="                                                         >> localization/pt-PT/messenger/preferences/preferences.ftl
+echo "  .label = Quando o { -brand-short-name } for fechado, movê-lo para a bandeja" >> localization/pt-PT/messenger/preferences/preferences.ftl
+echo "  .accesskey = f"                                                              >> localization/pt-PT/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                         >> localization/pt-PT/messenger/preferences/preferences.ftl
+echo "  .label = Iniciar o { -brand-short-name } na bandeja"                         >> localization/pt-PT/messenger/preferences/preferences.ftl
+echo "  .accesskey = I"                                                              >> localization/pt-PT/messenger/preferences/preferences.ftl

@@ -285,3 +285,18 @@ echo "  .accesskey = m"                                >> localization/cs/messen
 
 echo "recent-sort-order-combined ="                                                        >> localization/cs/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/cs/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+# Note that the Thunderbird folks assigned gender "masculine" to -brand-short-name, so we can hard-code that variant.
+echo "close-to-tray-label ="                                                           >> localization/cs/messenger/preferences/preferences.ftl
+echo "  .label = Při zavření { -brand-short-name } ho přesunout do oznamovací oblasti" >> localization/cs/messenger/preferences/preferences.ftl
+echo "  .accesskey = z"                                                                >> localization/cs/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                           >> localization/cs/messenger/preferences/preferences.ftl
+echo "  .label = Spustit { -brand-short-name } v oznamovací oblasti"                   >> localization/cs/messenger/preferences/preferences.ftl
+echo "  .accesskey = S"                                                                >> localization/cs/messenger/preferences/preferences.ftl

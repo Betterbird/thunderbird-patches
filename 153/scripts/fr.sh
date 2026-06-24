@@ -282,3 +282,17 @@ echo "  .accesskey = c"                                        >> localization/f
 
 echo "recent-sort-order-combined ="                                                        >> localization/fr/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/fr/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+echo "close-to-tray-label ="                                                                       >> localization/fr/messenger/preferences/preferences.ftl
+echo "  .label = Quand { -brand-short-name } est fermé, le déplacer dans la barre de notification" >> localization/fr/messenger/preferences/preferences.ftl
+echo "  .accesskey = f"                                                                            >> localization/fr/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                                       >> localization/fr/messenger/preferences/preferences.ftl
+echo "  .label = Démarrer { -brand-short-name } dans la barre de notification"                     >> localization/fr/messenger/preferences/preferences.ftl
+echo "  .accesskey = D"                                                                            >> localization/fr/messenger/preferences/preferences.ftl

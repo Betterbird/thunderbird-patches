@@ -282,3 +282,17 @@ echo "  .accesskey = п"                                   >> localization/uk/me
 
 echo "recent-sort-order-combined ="                                                        >> localization/uk/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/uk/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+echo "close-to-tray-label ="                                          >> localization/uk/messenger/preferences/preferences.ftl
+echo "  .label = Закривати { -brand-short-name } в область сповіщень" >> localization/uk/messenger/preferences/preferences.ftl
+echo "  .accesskey = к"                                               >> localization/uk/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                          >> localization/uk/messenger/preferences/preferences.ftl
+echo "  .label = Запускати { -brand-short-name } в області сповіщень" >> localization/uk/messenger/preferences/preferences.ftl
+echo "  .accesskey = п"                                               >> localization/uk/messenger/preferences/preferences.ftl

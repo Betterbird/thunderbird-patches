@@ -176,3 +176,11 @@ echo "  .accesskey = m"                    >> localization/en-GB/messenger/searc
 
 echo "recent-sort-order-combined ="                                                        >> localization/en-GB/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/en-GB/messenger/preferences/preferences.ftl
+
+# Close to tray:
+echo "close-to-tray-label ="                                                >> localization/en-GB/messenger/preferences/preferences.ftl
+echo "  .label = When { -brand-short-name } is closed, move it to the tray" >> localization/en-GB/messenger/preferences/preferences.ftl
+echo "  .accesskey = c"                                                     >> localization/en-GB/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                >> localization/en-GB/messenger/preferences/preferences.ftl
+echo "  .label = Start { -brand-short-name } in the tray"                   >> localization/en-GB/messenger/preferences/preferences.ftl
+echo "  .accesskey = S"                                                     >> localization/en-GB/messenger/preferences/preferences.ftl

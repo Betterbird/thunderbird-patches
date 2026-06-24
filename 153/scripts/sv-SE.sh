@@ -282,3 +282,17 @@ echo "  .accesskey = p"                   >> localization/sv-SE/messenger/search
 
 echo "recent-sort-order-combined ="                                                        >> localization/sv-SE/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/sv-SE/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+echo "close-to-tray-label ="                                                       >> localization/sv-SE/messenger/preferences/preferences.ftl
+echo "  .label = När { -brand-short-name } stängs, flytta den till aktivitetsfält" >> localization/sv-SE/messenger/preferences/preferences.ftl
+echo "  .accesskey = t"                                                            >> localization/sv-SE/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                       >> localization/sv-SE/messenger/preferences/preferences.ftl
+echo "  .label = Starta { -brand-short-name } i aktivitetsfältet"                  >> localization/sv-SE/messenger/preferences/preferences.ftl
+echo "  .accesskey = S"                                                            >> localization/sv-SE/messenger/preferences/preferences.ftl

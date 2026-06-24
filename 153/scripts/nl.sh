@@ -282,3 +282,17 @@ echo "  .accesskey = m"                          >> localization/nl/messenger/se
 
 echo "recent-sort-order-combined ="                                                        >> localization/nl/messenger/preferences/preferences.ftl
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/nl/messenger/preferences/preferences.ftl
+
+# Close to tray:
+# close-to-tray-label =
+#   .label = When { -brand-short-name } is closed, move it to the tray
+#   .accesskey = c
+# start-in-tray-label =
+#   .label = Start { -brand-short-name } in the tray
+#   .accesskey = S
+echo "close-to-tray-label ="                                                                >> localization/nl/messenger/preferences/preferences.ftl
+echo "  .label = Naar de systeembalk verplaatsen wanneer { -brand-short-name } is gesloten" >> localization/nl/messenger/preferences/preferences.ftl
+echo "  .accesskey = g"                                                                     >> localization/nl/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                                >> localization/nl/messenger/preferences/preferences.ftl
+echo "  .label = { -brand-short-name } in de systeembalk starten"                           >> localization/nl/messenger/preferences/preferences.ftl
+echo "  .accesskey = s"                                                                     >> localization/nl/messenger/preferences/preferences.ftl
