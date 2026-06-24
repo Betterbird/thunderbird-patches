@@ -178,6 +178,9 @@ echo "recent-sort-order-combined ="                                             
 echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabetic.label }" >> localization/en-GB/messenger/preferences/preferences.ftl
 
 # Close to tray:
+# echo "minimize-to-tray-label ="                                                >> localization/en-GB/messenger/preferences/preferences.ftl
+# echo "  .label = When { -brand-short-name } is minimised, move it to the tray" >> localization/en-GB/messenger/preferences/preferences.ftl
+# echo "  .accesskey = m"                                                        >> localization/en-GB/messenger/preferences/preferences.ftl
 echo "close-to-tray-label ="                                                >> localization/en-GB/messenger/preferences/preferences.ftl
 echo "  .label = When { -brand-short-name } is closed, move it to the tray" >> localization/en-GB/messenger/preferences/preferences.ftl
 echo "  .accesskey = c"                                                     >> localization/en-GB/messenger/preferences/preferences.ftl

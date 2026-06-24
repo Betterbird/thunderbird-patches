@@ -294,6 +294,9 @@ echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabeti
 #   .label = Start { -brand-short-name } in the tray
 #   .accesskey = S
 # Note that the Thunderbird folks assigned gender "masculine" to -brand-short-name, so we can hard-code that variant.
+# echo "minimize-to-tray-label ="                                                             >> localization/cs/messenger/preferences/preferences.ftl
+# echo "  .label = Při minimalizaci { -brand-short-name } ho přesunout do oznamovací oblasti" >> localization/cs/messenger/preferences/preferences.ftl
+# echo "  .accesskey = o"                                                                     >> localization/cs/messenger/preferences/preferences.ftl
 echo "close-to-tray-label ="                                                           >> localization/cs/messenger/preferences/preferences.ftl
 echo "  .label = Při zavření { -brand-short-name } ho přesunout do oznamovací oblasti" >> localization/cs/messenger/preferences/preferences.ftl
 echo "  .accesskey = z"                                                                >> localization/cs/messenger/preferences/preferences.ftl
