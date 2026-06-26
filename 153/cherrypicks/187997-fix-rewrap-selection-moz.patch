@@ -1,0 +1,128 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1782478581 0
+# Node ID 5499394d00477119128d811193aba66f12bd9f36
+# Parent  7630a5263cb8c5b28d9b6d172cb39bc1263b5afe
+Bug 187997 - Maintain quoting when rewrapping a selection inside a mail quote. r=edgar
+
+Differential Revision: https://phabricator.services.mozilla.com/D307590
+
+
+diff --git a/dom/serializers/nsDocumentEncoder.cpp b/dom/serializers/nsDocumentEncoder.cpp
+--- a/dom/serializers/nsDocumentEncoder.cpp
++++ b/dom/serializers/nsDocumentEncoder.cpp
+@@ -215,17 +215,17 @@ struct ContextInfoDepth {
+ };
+ 
+ class nsDocumentEncoder : public nsIDocumentEncoder {
+  protected:
+   class RangeNodeContext {
+    public:
+     virtual ~RangeNodeContext() = default;
+ 
+-    virtual bool IncludeInContext(nsINode& aNode) const { return false; }
++    virtual bool IncludeInContext(nsINode& aNode) const;
+ 
+     virtual int32_t GetImmediateContextCount(
+         const nsTArray<nsINode*>& aAncestorArray) const {
+       return -1;
+     }
+   };
+ 
+  public:
+@@ -1297,16 +1297,27 @@ nsresult nsDocumentEncoder::RangeSeriali
+     }
+ 
+     childAsNode = GetNextSibling(childAsNode, j);
+   }
+ 
+   return NS_OK;
+ }
+ 
++bool nsDocumentEncoder::RangeNodeContext::IncludeInContext(
++    nsINode& aNode) const {
++  // Thunderbird wraps quoted replies in <span _moz_quote="true">, styled
++  // pre-wrap so the plaintext serializer leaves the "> " lines unwrapped.
++  // Re-emit it as context; otherwise selecting only its contents drops the
++  // span's start tag and the quote is re-wrapped without its "> " markers.
++  const nsIContent* const content = nsIContent::FromNodeOrNull(&aNode);
++  return content && content->IsHTMLElement(nsGkAtoms::span) &&
++         content->AsElement()->HasAttr(nsGkAtoms::mozquote);
++}
++
+ nsresult nsDocumentEncoder::RangeContextSerializer::SerializeRangeContextStart(
+     const nsTArray<nsINode*>& aAncestorArray) {
+   if (mDisableContextSerialize) {
+     return NS_OK;
+   }
+ 
+   AutoTArray<nsINode*, 8>* serializedContext = mRangeContexts.AppendElement();
+ 
+diff --git a/dom/serializers/tests/mochitest/mochitest.toml b/dom/serializers/tests/mochitest/mochitest.toml
+--- a/dom/serializers/tests/mochitest/mochitest.toml
++++ b/dom/serializers/tests/mochitest/mochitest.toml
+@@ -143,8 +143,10 @@ skip-if = [
+ 
+ ["test_htmlcopyencoder_range_end.html"]
+ 
+ ["test_htmlcopyencoder_table.html"]
+ 
+ ["test_plaintext_linebreak.html"]
+ 
+ ["test_plaintext_linebreak_compress.html"]
++
++["test_plaintext_selection_quote_span.html"]
+diff --git a/dom/serializers/tests/mochitest/test_plaintext_selection_quote_span.html b/dom/serializers/tests/mochitest/test_plaintext_selection_quote_span.html
+new file mode 100644
+--- /dev/null
++++ b/dom/serializers/tests/mochitest/test_plaintext_selection_quote_span.html
+@@ -0,0 +1,47 @@
++<!DOCTYPE HTML>
++<html>
++<head>
++<title>Test plaintext encoding of a selection inside a mail quote span</title>
++<script src="/tests/SimpleTest/SimpleTest.js"></script>
++<link rel="stylesheet" type="text/css" href="/tests/SimpleTest/test.css" />
++</head>
++<body>
++<a target="_blank" href="https://bugzilla.mozilla.org/show_bug.cgi?id=187997">Mozilla Bug 187997</a>
++<p id="display"></p>
++<div id="content" style="display: none"></div>
++<div id="container">
++  <div id="reply">On 19 Feb 2025 21:23, user wrote:<br><br><span id="quote" _moz_quote="true" style="display: block; width: 98vw;">&gt; Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since 1966, when designers at Letraset and James Mosley, the librarian at St Bride Printing Library in London, took a 1914 Cicero translation and scrambled it to make dummy text for Letraset's Body Type sheets. It has survived not only many decades, but also the leap into electronic typesetting, remaining essentially unchanged.</span></div>
++</div>
++<script>
++
++const de = SpecialPowers.Ci.nsIDocumentEncoder;
++const QUOTE_WRAP_COLUMN = 72;
++
++function serializeQuoteSelectionForRewrap(aSelection) {
++  const encoder = SpecialPowers.Cu.createDocumentEncoder("text/plain");
++  encoder.init(document, "text/plain",
++    de.OutputFormatted | de.OutputLFLineBreak | de.OutputSelectionOnly);
++  encoder.setWrapColumn(QUOTE_WRAP_COLUMN);
++  encoder.setSelection(aSelection);
++  return encoder.encodeToString();
++}
++
++add_task(async function test_quote_span_keeps_markers() {
++  const quote = document.getElementById("quote");
++  const selection = window.getSelection();
++  selection.removeAllRanges();
++  const quoteRange = document.createRange();
++  quoteRange.selectNodeContents(quote);
++  selection.addRange(quoteRange);
++
++  const serializedQuote = serializeQuoteSelectionForRewrap(selection);
++
++  const quoteLines = serializedQuote.split("\n").filter(line => line.trim().length);
++  const unquotedLines = quoteLines.filter(line => !line.startsWith(">"));
++  is(unquotedLines.join("\n"), "",
++     "every serialized quote line keeps its '>' marker");
++});
++
++</script>
++</body>
++</html>
+

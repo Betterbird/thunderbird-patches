@@ -1,0 +1,377 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1782365309 0
+# Node ID 103bb291ada96b9d423b265fa3afbf6712ac9df5
+# Parent  caa23202c20dcf1fd3fd001aa2a6d355398a4964
+Bug 647046 - Prefer full e-mail address over local part when guessing credentials, and fix saved-username fallback. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D290785
+
+
+diff --git a/mail/components/accountcreation/modules/AccountConfig.sys.mjs b/mail/components/accountcreation/modules/AccountConfig.sys.mjs
+--- a/mail/components/accountcreation/modules/AccountConfig.sys.mjs
++++ b/mail/components/accountcreation/modules/AccountConfig.sys.mjs
+@@ -37,16 +37,34 @@ export function AccountConfig() {
+     realname: "%REALNAME%",
+     // email address of user, as shown in From of outgoing mails
+     emailAddress: "%EMAILADDRESS%",
+   };
+   this.inputFields = [];
+   this.domains = [];
+ }
+ 
++/**
++ * Build an AccountConfig for the guess-config flow, preferring the full
++ * e-mail address as the username for both incoming and outgoing servers,
++ * with the local part kept as a fallback in `usernameSaved`.
++ *
++ * @param {string} email - The user's full e-mail address.
++ * @returns {AccountConfig}
++ */
++AccountConfig.guessConfigFromEmail = function (email) {
++  const config = new AccountConfig();
++  const emailLocal = lazy.InputSanitizer.nonemptystring(email.split("@")[0]);
++
++  config.incoming.username = email;
++  config.outgoing.username = email;
++  config.usernameSaved = emailLocal != email ? emailLocal : null;
++  return config;
++};
++
+ AccountConfig.prototype = {
+   // @see createNewIncoming()
+   incoming: null,
+   // @see createNewOutgoing()
+   outgoing: null,
+   /**
+    * Other servers which can be used instead of |incoming|,
+    * in order of decreasing preference.
+diff --git a/mail/components/accountcreation/modules/ConfigVerifier.sys.mjs b/mail/components/accountcreation/modules/ConfigVerifier.sys.mjs
+--- a/mail/components/accountcreation/modules/ConfigVerifier.sys.mjs
++++ b/mail/components/accountcreation/modules/ConfigVerifier.sys.mjs
+@@ -33,16 +33,17 @@ export class ConfigVerifier {
+   }
+ 
+   /**
+    * @param {nsIMsgWindow} msgWindow
+    * @param {AbortSignal} abortSignal
+    */
+   constructor(msgWindow, abortSignal) {
+     this.msgWindow = msgWindow;
++    this._triedBothUsernames = false;
+     this._log = console.createInstance({
+       prefix: "mail.setup",
+       maxLogLevel: "Warn",
+       maxLogLevelPref: "mail.setup.loglevel",
+     });
+     this.signal = abortSignal;
+     this.signal.addEventListener("abort", this, { once: true });
+   }
+@@ -125,18 +126,22 @@ export class ConfigVerifier {
+    * Try next logon variation.
+    *
+    * @param {nsIURI} url - The URL being processed.
+    * @throws {Error} in some cases where verifyLogon fails.
+    */
+   tryNextLogon(url) {
+     this._log.debug("Trying next logon variation");
+     // check if we tried full email address as username
+-    if (this.config.incoming.username != this.config.identity.emailAddress) {
++    if (
++      !this._triedBothUsernames &&
++      this.config.incoming.username != this.config.identity.emailAddress
++    ) {
+       this._log.debug("Changing username to email address.");
++      this._triedBothUsernames = true;
+       this.config.usernameSaved = this.config.incoming.username;
+       this.config.incoming.username = this.config.identity.emailAddress;
+       this.config.outgoing.username = this.config.identity.emailAddress;
+       this.server.username = this.config.incoming.username;
+       this.server.password = this.config.incoming.password;
+       this.verifyLogon();
+       return;
+     }
+@@ -145,16 +150,26 @@ export class ConfigVerifier {
+       this._log.debug("Re-setting username.");
+       // If we tried the full email address as the username, then let's go
+       // back to trying just the username before trying the other cases.
+       this.config.incoming.username = this.config.usernameSaved;
+       this.config.outgoing.username = this.config.usernameSaved;
+       this.config.usernameSaved = null;
+       this.server.username = this.config.incoming.username;
+       this.server.password = this.config.incoming.password;
++      // If the saved username came from the initial guess config, it has not
++      // been tried with this auth method yet, so verify it now. If the
++      // e-mail address branch above ran instead, the restored username
++      // already failed with this auth method; fall through to the next auth
++      // method.
++      if (!this._triedBothUsernames) {
++        this._triedBothUsernames = true;
++        this.verifyLogon();
++        return;
++      }
+     }
+ 
+     // sec auth seems to have failed, and we've tried both
+     // varieties of user name, sadly.
+     // So fall back to non-secure auth, and
+     // again try the user name and email address as username
+     if (this.server.socketType == Ci.nsMsgSocketType.SSL) {
+       this._log.debug("Using SSL");
+@@ -180,16 +195,17 @@ export class ConfigVerifier {
+         this.config.outgoing.auth == brokenAuth &&
+         this.config.outgoing.authAlternatives.includes(
+           this.config.incoming.auth
+         )
+       ) {
+         this.config.outgoing.auth = this.config.incoming.auth;
+       }
+       this._log.debug(`Trying next auth method: ${this.server.authMethod}`);
++      this._triedBothUsernames = false;
+       this.verifyLogon();
+       return;
+     }
+ 
+     // Tried all variations we can. Give up.
+     this._log.debug("Have tried all variations. Giving up.");
+     this._failed(url);
+   }
+@@ -348,16 +364,17 @@ export class ConfigVerifier {
+    *   because we have not found anything or because there was an error
+    *   (e.g. no network connection).
+    *   The ex.message will contain a user-presentable message.
+    */
+   async verifyConfig(config, alter) {
+     this.alter = alter;
+     return new Promise((resolve, reject) => {
+       this.config = config;
++      this._triedBothUsernames = false;
+       this.successCallback = resolve;
+       this.errorCallback = reject;
+       if (
+         MailServices.accounts.findServer(
+           config.incoming.username,
+           config.incoming.hostname,
+           config.incoming.type,
+           config.incoming.port
+diff --git a/mail/components/accountcreation/test/xpcshell/test_accountConfig.js b/mail/components/accountcreation/test/xpcshell/test_accountConfig.js
+--- a/mail/components/accountcreation/test/xpcshell/test_accountConfig.js
++++ b/mail/components/accountcreation/test/xpcshell/test_accountConfig.js
+@@ -134,16 +134,43 @@ add_task(function test_usesPasswordlessA
+   configIncomingHandlesOutgoing.incoming.type = "ews";
+ 
+   Assert.ok(
+     configIncomingHandlesOutgoing.usesPasswordlessAuthentication(),
+     "Passwordless incoming with derived outgoing should not require a password."
+   );
+ });
+ 
++add_task(function test_guessConfigFromEmail() {
++  const config = AccountConfig.guessConfigFromEmail("user@example.invalid");
++
++  Assert.equal(
++    config.incoming.username,
++    "user@example.invalid",
++    "Should try the full e-mail address first for incoming"
++  );
++  Assert.equal(
++    config.outgoing.username,
++    "user@example.invalid",
++    "Should try the full e-mail address first for outgoing"
++  );
++  Assert.equal(
++    config.usernameSaved,
++    "user",
++    "Should keep the local part as a fallback username"
++  );
++
++  const malformedConfig = AccountConfig.guessConfigFromEmail("user");
++  Assert.equal(
++    malformedConfig.usernameSaved,
++    null,
++    "Should skip the fallback when the local part matches the full input"
++  );
++});
++
+ add_task(function test_configureOutgoingFromIncoming() {
+   const imapConfig = new AccountConfig();
+   imapConfig.incoming.type = "imap";
+   Assert.ok(
+     !imapConfig.configureOutgoingFromIncoming(),
+     "IMAP should not use incoming settings for outgoing"
+   );
+ 
+diff --git a/mail/components/accountcreation/test/xpcshell/test_configVerifier.js b/mail/components/accountcreation/test/xpcshell/test_configVerifier.js
+new file mode 100644
+--- /dev/null
++++ b/mail/components/accountcreation/test/xpcshell/test_configVerifier.js
+@@ -0,0 +1,100 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++const { AccountConfig } = ChromeUtils.importESModule(
++  "resource:///modules/accountcreation/AccountConfig.sys.mjs"
++);
++const { ConfigVerifier } = ChromeUtils.importESModule(
++  "resource:///modules/accountcreation/ConfigVerifier.sys.mjs"
++);
++
++/**
++ * Drive a ConfigVerifier's tryNextLogon() with every attempt failing, and
++ * record the username and auth method of each logon attempt it makes.
++ *
++ * @param {AccountConfig} config - The config to verify.
++ * @returns {string[]} the attempted "username:authMethod" combinations, in
++ *   order, including the initial attempt.
++ */
++function driveFailingLogons(config) {
++  const verifier = new ConfigVerifier(null, new AbortController().signal);
++  verifier.config = config;
++  verifier.server = {
++    username: config.incoming.username,
++    password: config.incoming.password,
++    authMethod: config.incoming.auth,
++  };
++  const attempts = [`${config.incoming.username}:${config.incoming.auth}`];
++  let failed = false;
++  verifier.verifyLogon = () => {
++    attempts.push(`${config.incoming.username}:${config.incoming.auth}`);
++  };
++  verifier._failed = () => {
++    failed = true;
++  };
++  // Each tryNextLogon() call simulates the previous attempt failing. Cap the
++  // iterations so a regression to the old infinite loop fails the test
++  // instead of hanging it.
++  for (let i = 0; !failed && i < 20; i++) {
++    verifier.tryNextLogon(null);
++  }
++  Assert.ok(failed, "Verifier should give up after trying all variations");
++  return attempts;
++}
++
++/**
++ * Set up the auth methods so there is one alternative to fall back to.
++ *
++ * @param {AccountConfig} config - The config to set up.
++ */
++function setupAuthMethods(config) {
++  config.incoming.auth = Ci.nsMsgAuthMethod.passwordEncrypted;
++  config.incoming.authAlternatives = [Ci.nsMsgAuthMethod.passwordCleartext];
++  config.outgoing.auth = Ci.nsMsgAuthMethod.passwordEncrypted;
++  config.outgoing.authAlternatives = [Ci.nsMsgAuthMethod.passwordCleartext];
++}
++
++add_task(function test_guessConfigLogonOrder() {
++  const config = AccountConfig.guessConfigFromEmail("user@example.invalid");
++  config.identity.emailAddress = "user@example.invalid";
++  setupAuthMethods(config);
++
++  const attempts = driveFailingLogons(config);
++  const encrypted = Ci.nsMsgAuthMethod.passwordEncrypted;
++  const cleartext = Ci.nsMsgAuthMethod.passwordCleartext;
++  Assert.deepEqual(
++    attempts,
++    [
++      `user@example.invalid:${encrypted}`,
++      `user:${encrypted}`,
++      `user:${cleartext}`,
++      `user@example.invalid:${cleartext}`,
++    ],
++    "Should try the full e-mail address before the local part, both usernames per auth method, with no duplicate attempts"
++  );
++});
++
++add_task(function test_localPartConfigLogonOrder() {
++  const config = new AccountConfig();
++  config.incoming.username = "user";
++  config.outgoing.username = "user";
++  config.identity.emailAddress = "user@example.invalid";
++  setupAuthMethods(config);
++
++  const attempts = driveFailingLogons(config);
++  const encrypted = Ci.nsMsgAuthMethod.passwordEncrypted;
++  const cleartext = Ci.nsMsgAuthMethod.passwordCleartext;
++  Assert.deepEqual(
++    attempts,
++    [
++      `user:${encrypted}`,
++      `user@example.invalid:${encrypted}`,
++      `user:${cleartext}`,
++      `user@example.invalid:${cleartext}`,
++    ],
++    "Should fall back to the full e-mail address, both usernames per auth method, with no duplicate attempts"
++  );
++});
+diff --git a/mail/components/accountcreation/test/xpcshell/xpcshell.toml b/mail/components/accountcreation/test/xpcshell/xpcshell.toml
+--- a/mail/components/accountcreation/test/xpcshell/xpcshell.toml
++++ b/mail/components/accountcreation/test/xpcshell/xpcshell.toml
+@@ -9,16 +9,18 @@ prefs = [
+ 
+ ["test_accountCreationUtils.js"]
+ 
+ ["test_autoconfigUtils.js"]
+ 
+ ["test_autoconfigXML.js"]
+ tags = ["oauth"]
+ 
++["test_configVerifier.js"]
++
+ ["test_exchangeAutoDiscover.js"]
+ 
+ ["test_fetchConfig.js"]
+ skip-if = [
+   "os == 'win' && msix", # MSIX cannot write to application directory
+ ]
+ 
+ ["test_fetchHTTP.js"]
+diff --git a/mail/components/accountcreation/views/email.mjs b/mail/components/accountcreation/views/email.mjs
+--- a/mail/components/accountcreation/views/email.mjs
++++ b/mail/components/accountcreation/views/email.mjs
+@@ -21,17 +21,16 @@ ChromeUtils.defineESModuleGetters(lazy, 
+   CreateInBackend:
+     "resource:///modules/accountcreation/CreateInBackend.sys.mjs",
+   enforcePrimaryPassword: "resource:///modules/PrimaryPassword.sys.mjs",
+   FetchConfig: "resource:///modules/accountcreation/FetchConfig.sys.mjs",
+   FindConfig: "resource:///modules/accountcreation/FindConfig.sys.mjs",
+   getAddonsList:
+     "resource:///modules/accountcreation/ExchangeAutoDiscover.sys.mjs",
+   GuessConfig: "resource:///modules/accountcreation/GuessConfig.sys.mjs",
+-  InputSanitizer: "resource:///modules/accountcreation/InputSanitizer.sys.mjs",
+   OAuth2Module: "resource:///modules/OAuth2Module.sys.mjs",
+   OAuth2Providers: "resource:///modules/OAuth2Providers.sys.mjs",
+   RemoteAddressBookUtils:
+     "resource:///modules/accountcreation/RemoteAddressBookUtils.sys.mjs",
+   openLinkExternally: "resource:///modules/LinkHelper.sys.mjs",
+ });
+ 
+ import "chrome://messenger/content/accountcreation/content/widgets/account-hub-step.mjs"; // eslint-disable-line import/no-unassigned-import
+@@ -1366,20 +1365,19 @@ class AccountHubEmail extends HTMLElemen
+ 
+       if (discoveryDone) {
+         this.abortable = null;
+       }
+     }
+ 
+     if (!config) {
+       try {
+-        const initialConfig = new lazy.AccountConfig();
+-        const emailLocal = lazy.InputSanitizer.nonemptystring(emailSplit[0]);
+-        initialConfig.incoming.username = emailLocal;
+-        initialConfig.outgoing.username = emailLocal;
++        const initialConfig = lazy.AccountConfig.guessConfigFromEmail(
++          this.#email
++        );
+ 
+         config = await this.#guessConfig(domain, initialConfig);
+       } catch (error) {
+         this.#discoveryStream = null;
+         if (
+           error instanceof UserCancelledException ||
+           error instanceof UserSkippedError
+         ) {
+

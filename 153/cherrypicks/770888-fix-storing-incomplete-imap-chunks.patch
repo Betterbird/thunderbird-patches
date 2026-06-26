@@ -1,0 +1,353 @@
+
+# HG changeset patch
+# User Jascha Schubert <jascha.schubert@z-opti.com>
+# Date 1782257396 25200
+# Node ID 4730808bc7e60af0836382b856108a323f88a092
+# Parent  8c95eb1c21ed4f14df7cb9b9502c2adb89adb3da
+Bug 770888 - Don't store a truncated chunked IMAP body as a complete offline message. r=BenC
+
+
+When a message body is fetched in chunks and the server stops sending data
+before the announced RFC822.SIZE is reached (premature connection close or a
+short chunk mid-stream, with no death signal or parse error), the short chunk
+was treated as the final chunk and the partial body was finalized as a
+complete offline copy (nsMsgMessageFlags::Offline). Thunderbird then never
+re-fetched the message and silently displayed it truncated, e.g. with
+attachments missing. Repairing the folder was the only workaround.
+
+When concluding the final chunk of a whole-message body download, detect that
+fewer octets were received than the server announced (fTotalDownloadSize, from
+RFC822.SIZE) and abort the download instead of finalizing it, so the partial
+offline copy is discarded and re-fetched on next access. The compared octet
+counts are raw server octets (same units as RFC822.SIZE) and are therefore
+unaffected by the CRLF/LF line-ending normalization applied to the stored
+stream. Only chunked body fetches are guarded: a truncated single literal
+already aborts via the parser, and a complete-but-short literal is the separate
+wrong-RFC822.SIZE case (bug 92111).
+
+Adds an xpcshell regression test with a fakeserver hook that delivers a
+truncated chunked body while still reporting the true RFC822.SIZE.
+
+Differential Revision: https://phabricator.services.mozilla.com/D306978
+
+diff --git a/mailnews/imap/src/nsImapServerResponseParser.cpp b/mailnews/imap/src/nsImapServerResponseParser.cpp
+--- a/mailnews/imap/src/nsImapServerResponseParser.cpp
++++ b/mailnews/imap/src/nsImapServerResponseParser.cpp
+@@ -1760,17 +1760,45 @@ void nsImapServerResponseParser::msg_fet
+       fLastChunk = msg_fetch_literal(chunk, origin);
+   } else
+     AdvanceToNextToken();  // eat "NIL"
+ 
+   if (fLastChunk) {
+     // complete the message download
+     if (ContinueParse()) {
+       if (fReceivedHeaderOrSizeForUID == CurrentResponseUID()) {
+-        fServerConnection.NormalMessageEndDownload();
++        // When a message body is fetched in chunks, a chunk that is smaller
++        // than the requested chunk size is taken to be the final chunk (see
++        // lastChunk in msg_fetch_literal()). If that happens before we have
++        // received as many octets as the server announced for the message
++        // (fTotalDownloadSize, derived from RFC822.SIZE), the body is truncated
++        // -- e.g. the server closed the connection or returned a short chunk
++        // mid-stream without us seeing a death signal or parse error. Finishing
++        // the download here would store the partial body as a *complete*
++        // offline copy (nsMsgMessageFlags::Offline) that is never re-fetched,
++        // silently hiding the missing parts (e.g. attachments). Abort instead
++        // so the partial copy is discarded and re-downloaded on next access.
++        //
++        // origin and numberOfCharsInThisChunk are raw server octet counts (same
++        // units as RFC822.SIZE), so this check is unaffected by the CRLF/LF
++        // line-ending normalization later applied to the stored stream. Only
++        // chunked body fetches are guarded here: a truncated single-literal
++        // fetch leaves the parser unable to continue and already aborts above,
++        // and a complete-but-short literal indicates a wrong server
++        // RFC822.SIZE, which is a separate problem.
++        if (chunk && !GetDownloadingHeaders() && fTotalDownloadSize > 0 &&
++            (origin + numberOfCharsInThisChunk) < fTotalDownloadSize) {
++          MOZ_LOG(IMAP, mozilla::LogLevel::Warning,
++                  ("PARSER: truncated message body, received %d of %d octets; "
++                   "discarding incomplete offline copy",
++                   origin + numberOfCharsInThisChunk, fTotalDownloadSize));
++          fServerConnection.AbortMessageDownLoad();
++        } else {
++          fServerConnection.NormalMessageEndDownload();
++        }
+         fReceivedHeaderOrSizeForUID = ImapUid_None;
+       } else
+         fReceivedHeaderOrSizeForUID = CurrentResponseUID();
+     } else
+       fServerConnection.AbortMessageDownLoad();
+   }
+ }
+ 
+diff --git a/mailnews/imap/test/unit/test_imapTruncatedOfflineBody.js b/mailnews/imap/test/unit/test_imapTruncatedOfflineBody.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_imapTruncatedOfflineBody.js
+@@ -0,0 +1,183 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that a truncated chunked body download is not stored as a complete
++ * offline message.
++ *
++ * When a message body is downloaded in chunks and the server stops delivering
++ * data partway through without any protocol error (e.g. a premature connection
++ * close), the short chunk must not be treated as the final chunk and stored as
++ * a *complete* offline copy (nsMsgMessageFlags::Offline). Doing so would mean
++ * the message is never re-fetched and the user silently sees a truncated
++ * message (e.g. missing attachments). Instead, the download must be detected as
++ * incomplete -- fewer octets received than the server announced in RFC822.SIZE
++ * -- and aborted, so the partial copy is discarded and re-fetched on next
++ * access.
++ *
++ * The test uses the fakeserver's `_truncateBodyAt` hook to simulate the
++ * truncation while keeping RFC822.SIZE reporting the true (larger) size; this
++ * is distinct from the wrong-RFC822.SIZE case (where the server under-reports
++ * the size, covered by bug 92111).
++ *
++ * See bug 770888 for the original report.
++ */
++
++var { PromiseTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
++);
++
++// Chunk parameters -- small so the body spans several chunks.
++const CHUNK_SIZE = 4000;
++const CHUNK_THRESHOLD = 2000;
++
++// A body large enough to require multiple chunks. The truncation point is set
++// roughly in the middle, on a chunk boundary that is *before* the end of the
++// message, so the short chunk is mistaken for the final one.
++const BODY_LINE =
++  "This is a line of the test message body, padding it out.\r\n"; // 58 bytes
++const BODY_LINES = 800; // ~41 KB body
++const TRUNCATE_AT = 20000; // deliver only the first ~20 KB
++
++var gIMAPService;
++var gFullMsgFile, gTruncMsgFile;
++var gFullMsg, gTruncMsg;
++
++function writeMessageFile(subject) {
++  const headers =
++    `From: sender@example.com\r\n` +
++    `To: receiver@example.com\r\n` +
++    `Subject: ${subject}\r\n` +
++    `Message-ID: <${subject}@example.com>\r\n` +
++    `Content-Type: text/plain\r\n` +
++    `\r\n`;
++  const body = BODY_LINE.repeat(BODY_LINES);
++  const content = headers + body;
++
++  const file = Services.dirsvc.get("TmpD", Ci.nsIFile);
++  file.append(`truncated-offline-${subject}.eml`);
++  file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
++  const fos = Cc["@mozilla.org/network/file-output-stream;1"].createInstance(
++    Ci.nsIFileOutputStream
++  );
++  fos.init(file, 0x02 | 0x08 | 0x20, 0o600, 0); // write | create | truncate
++  fos.write(content, content.length);
++  fos.close();
++  return file;
++}
++
++function addMessageToServer(file, mailbox) {
++  const uri = Services.io.newFileURI(file).QueryInterface(Ci.nsIFileURL);
++  const msg = new ImapMessage(uri.spec, mailbox.uidnext++, []);
++  // Do NOT call setSize(): RFC822.SIZE then reports the true file size, so the
++  // truncated delivery is genuinely short of what the server announced.
++  mailbox.addMessage(msg);
++  return msg;
++}
++
++async function streamMessageToOfflineStore(msgHdr) {
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  const streamListener = new PromiseTestUtils.PromiseStreamListener();
++  gIMAPService.streamMessage(
++    IMAPPump.inbox.getUriForMsg(msgHdr),
++    streamListener,
++    null,
++    listener,
++    false,
++    "",
++    false
++  );
++  // The truncated download aborts, so the stream/url may resolve with an error.
++  // Swallow it -- the assertions below check the resulting offline state.
++  await streamListener.promise.catch(() => {});
++  await listener.promise.catch(() => {});
++}
++
++add_setup(async function () {
++  Services.prefs.setBoolPref("mail.biff.play_sound", false);
++  Services.prefs.setBoolPref("mail.biff.show_alert", false);
++  Services.prefs.setBoolPref("mail.biff.show_tray_icon", false);
++  Services.prefs.setBoolPref("mail.biff.animate_dock_icon", false);
++  Services.prefs.setBoolPref(
++    "mail.server.server1.autosync_offline_stores",
++    false
++  );
++  Services.prefs.setBoolPref("mail.server.server1.offline_download", true);
++
++  // Force download-by-chunks with small chunks so the body is fetched in
++  // several BODY[]<start.count> requests.
++  Services.prefs.setBoolPref("mail.server.default.fetch_by_chunks", true);
++  Services.prefs.setIntPref("mail.imap.chunk_size", CHUNK_SIZE);
++  Services.prefs.setIntPref(
++    "mail.imap.min_chunk_size_threshold",
++    CHUNK_THRESHOLD
++  );
++  Services.prefs.setIntPref("mail.imap.chunk_add", 0);
++
++  setupIMAPPump();
++
++  IMAPPump.inbox.hierarchyDelimiter = "/";
++  IMAPPump.inbox.verifiedAsOnlineFolder = true;
++
++  gFullMsgFile = writeMessageFile("full");
++  gTruncMsgFile = writeMessageFile("truncated");
++
++  const inbox = IMAPPump.daemon.getMailbox("INBOX");
++  gFullMsg = addMessageToServer(gFullMsgFile, inbox);
++  gTruncMsg = addMessageToServer(gTruncMsgFile, inbox);
++  // Make the second message deliver a truncated body.
++  gTruncMsg._truncateBodyAt = TRUNCATE_AT;
++
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  IMAPPump.inbox.updateFolderWithListener(null, listener);
++  await listener.promise;
++
++  gIMAPService = Cc[
++    "@mozilla.org/messenger/messageservice;1?type=imap"
++  ].getService(Ci.nsIMsgMessageService);
++});
++
++/**
++ * Positive control: a complete chunked download must be stored offline.
++ */
++add_task(async function fullMessageIsMarkedOffline() {
++  const db = IMAPPump.inbox.msgDatabase;
++  const hdr = db.getMsgHdrForMessageID("full@example.com");
++  Assert.ok(!!hdr, "header for full message exists");
++
++  await streamMessageToOfflineStore(hdr);
++
++  Assert.notEqual(
++    hdr.flags & Ci.nsMsgMessageFlags.Offline,
++    0,
++    "a fully-downloaded chunked message is marked as offline-complete"
++  );
++});
++
++/**
++ * A truncated chunked download must NOT be stored as a complete offline copy.
++ */
++add_task(async function truncatedMessageIsNotMarkedOffline() {
++  const db = IMAPPump.inbox.msgDatabase;
++  const hdr = db.getMsgHdrForMessageID("truncated@example.com");
++  Assert.ok(!!hdr, "header for truncated message exists");
++
++  await streamMessageToOfflineStore(hdr);
++
++  Assert.equal(
++    hdr.flags & Ci.nsMsgMessageFlags.Offline,
++    0,
++    "a truncated chunked message must not be marked as offline-complete"
++  );
++});
++
++add_task(function endTest() {
++  teardownIMAPPump();
++  try {
++    gFullMsgFile.remove(false);
++    gTruncMsgFile.remove(false);
++  } catch (ex) {
++    // best effort cleanup
++  }
++});
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -84,16 +84,18 @@ tags = ["foldernames"]
+ ["test_imapRename.js"]
+ 
+ ["test_imapSearch.js"]
+ 
+ ["test_imapStatusCloseDBs.js"]
+ 
+ ["test_imapStoreMsgOffline.js"]
+ 
++["test_imapTruncatedOfflineBody.js"]
++
+ ["test_imapUndo.js"]
+ 
+ ["test_imapUrls.js"]
+ 
+ ["test_largeOfflineStore.js"]
+ run-if = [
+   "os != 'mac'",
+ ]
+diff --git a/mailnews/test/fakeserver/Imapd.sys.mjs b/mailnews/test/fakeserver/Imapd.sys.mjs
+--- a/mailnews/test/fakeserver/Imapd.sys.mjs
++++ b/mailnews/test/fakeserver/Imapd.sys.mjs
+@@ -376,16 +376,28 @@ export class ImapMailbox {
+     }
+     if (response.length > 0) {
+       delete this.__highestuid;
+     }
+     return response;
+   }
+ }
+ 
++/**
++ * A single message stored in a fakeserver mailbox.
++ *
++ * Optional per-instance test hooks:
++ *  - `_truncateBodyAt` {integer}: if set, the server never delivers body octets
++ *    at or beyond this offset, while RFC822.SIZE keeps reporting the true
++ *    (larger) size. A chunked BODY[]<start.count> fetch then receives a chunk
++ *    shorter than requested once it reaches the offset, simulating a server
++ *    that stops sending data partway through (e.g. a premature connection
++ *    close) without any protocol error. Useful for exercising truncated /
++ *    incomplete download handling.
++ */
+ export class ImapMessage {
+   constructor(URI, uid, flags) {
+     this._URI = URI;
+     this.uid = uid;
+     this.size = 0;
+     this.flags = [];
+     for (const flag in flags) {
+       this.flags.push(flag);
+@@ -1707,16 +1719,27 @@ export class IMAP_RFC3501_handler {
+ 
+     if (parts[1].length == 0) {
+       // Easy case: we have BODY[], just send the message...
+       let response = "BODY[]";
+       var text;
+       if (parts[3]) {
+         response += "<" + parts[3][0] + ">";
+         text = message.getText(parts[3][0], parts[3][1]);
++        // Honour the optional `_truncateBodyAt` truncation hook (see the
++        // ImapMessage class documentation): never deliver octets past that
++        // offset, so a chunked fetch receives a short final chunk.
++        if (message._truncateBodyAt !== undefined) {
++          const start = parts[3][0];
++          if (start >= message._truncateBodyAt) {
++            text = "";
++          } else if (start + text.length > message._truncateBodyAt) {
++            text = text.substring(0, message._truncateBodyAt - start);
++          }
++        }
+       } else {
+         text = message.getText();
+       }
+       response += " {" + text.length + "}\r\n";
+       response += text;
+       return response;
+     }
+ 
+

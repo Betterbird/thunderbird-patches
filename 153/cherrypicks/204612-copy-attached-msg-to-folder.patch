@@ -1,0 +1,519 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1782388869 25200
+# Node ID 1994d5850906dcf3d522828c4c41f58fb5a490c3
+# Parent  aea1dfd86d7c9abfd135894cc5f7dcf85baa60b6
+Bug 204612 - Add "Copy To" folder context menu for message/rfc822 attachments. r=mkmelin
+
+Allow copying attached messages (message/rfc822) directly to a mail folder
+via the attachment item context menu. The menu is only shown when all
+selected attachments are of type message/rfc822 (or have an .eml filename
+as fallback for messages with wrong MIME type), and uses the existing
+folder-menupopup for folder selection and AttachmentInfo.importToFolder()
+for the import.
+
+Also wrap the importToFolder temp-file lifecycle in try/finally to ensure
+cleanup even when copyFileMessageAsync fails.
+
+Differential Revision: https://phabricator.services.mozilla.com/D308590
+
+
+diff --git a/mail/base/content/msgHdrPopup.inc.xhtml b/mail/base/content/msgHdrPopup.inc.xhtml
+--- a/mail/base/content/msgHdrPopup.inc.xhtml
++++ b/mail/base/content/msgHdrPopup.inc.xhtml
+@@ -25,16 +25,21 @@
+     <menuitem id="context-openAttachment"
+               label="&openAttachmentCmd.label;"
+               accesskey="&openAttachmentCmd.accesskey;"
+               oncommand="HandleMultipleAttachments(this.parentNode.attachments, 'open');"/>
+     <menuitem id="context-saveAttachment"
+               label="&saveAsAttachmentCmd.label;"
+               accesskey="&saveAsAttachmentCmd.accesskey;"
+               oncommand="HandleMultipleAttachments(this.parentNode.attachments, 'saveAs');"/>
++    <menu id="context-copyToFolder"
++          data-l10n-id="menu-copy-to"
++          oncommand="HandleCopyAttachmentToFolder(event, this.parentNode.attachments);">
++      <menupopup is="folder-menupopup" mode="filing"/>
++    </menu>
+     <menuseparator id="context-menu-separator"/>
+     <menuitem id="context-detachAttachment"
+               label="&detachAttachmentCmd.label;"
+               accesskey="&detachAttachmentCmd.accesskey;"
+               oncommand="HandleMultipleAttachments(this.parentNode.attachments, 'detach');"/>
+     <menuitem id="context-deleteAttachment"
+               label="&deleteAttachmentCmd.label;"
+               accesskey="&deleteAttachmentCmd.accesskey;"
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -1686,16 +1686,17 @@ function onShowAttachmentToolbarContextM
+  */
+ function onShowAttachmentItemContextMenu() {
+   const attachmentList = document.getElementById("attachmentList");
+   const attachmentInfo = document.getElementById("attachmentInfo");
+   const attachmentName = document.getElementById("attachmentName");
+   const contextMenu = document.getElementById("attachmentItemContext");
+   const openMenu = document.getElementById("context-openAttachment");
+   const saveMenu = document.getElementById("context-saveAttachment");
++  const copyToFolderMenu = document.getElementById("context-copyToFolder");
+   const detachMenu = document.getElementById("context-detachAttachment");
+   const deleteMenu = document.getElementById("context-deleteAttachment");
+   const copyUrlMenuSep = document.getElementById(
+     "context-menu-copyurl-separator"
+   );
+   const copyUrlMenu = document.getElementById("context-copyAttachmentUrl");
+   const openFolderMenu = document.getElementById("context-openFolder");
+ 
+@@ -1741,16 +1742,24 @@ function onShowAttachmentItemContextMenu
+   detachMenu.disabled = !canDetachSelected || !allAllowedURL;
+   deleteMenu.disabled = !canDetachSelected || !allAllowedURL;
+   copyUrlMenuSep.hidden = copyUrlMenu.hidden = !(
+     allLinkAttachment || allFileAttachment
+   );
+   openFolderMenu.hidden = !allFileAttachment || !allAllowedURL;
+   openFolderMenu.disabled = allDeleted;
+ 
++  const allRfc822 = selectedAttachments.every(
++    attachment =>
++      attachment.contentType == "message/rfc822" ||
++      /[?&]filename=.*\.eml(&|$)/.test(attachment.url)
++  );
++  copyToFolderMenu.hidden = !allRfc822 || !allAllowedURL;
++  copyToFolderMenu.disabled = allDeleted;
++
+   Enigmail.hdrView.onShowAttachmentContextMenu();
+ }
+ 
+ /**
+  * Close the attachment item context menu, performing any cleanup as necessary.
+  */
+ function onHideAttachmentItemContextMenu() {
+   const attachmentName = document.getElementById("attachmentName");
+@@ -2321,16 +2330,44 @@ function TryHandleAllAttachments(action)
+   try {
+     HandleAllAttachments(action);
+   } catch (e) {
+     console.error(e);
+   }
+ }
+ 
+ /**
++ * Copy message/rfc822 attachments to a selected folder.
++ *
++ * @param {Event} event - The command event from the folder-menupopup.
++ * @param {AttachmentInfo[]} attachments - Selected AttachmentInfo objects.
++ */
++async function HandleCopyAttachmentToFolder(event, attachments) {
++  const folder = event.target._folder;
++  if (!folder || folder.isServer || !folder.canFileMessages) {
++    return;
++  }
++
++  for (const attachment of attachments) {
++    if (
++      attachment.contentType != "message/rfc822" &&
++      !/[?&]filename=.*\.eml(&|$)/.test(attachment.url)
++    ) {
++      continue;
++    }
++    try {
++      await attachment.importToFolder(folder);
++    } catch (ex) {
++      console.error(`Importing message to ${folder.URI} FAILED.`, ex);
++    }
++  }
++  MailUtils.updateFolderAsync(folder).catch(console.warn);
++}
++
++/**
+  * Handle the currently-selected attachments in this message (save them, open
+  * them, etc).
+  *
+  * @param {"open"|"save"|"saveAs"|"detach"|"delete"} action
+  */
+ function HandleSelectedAttachments(action) {
+   HandleMultipleAttachments(
+     [...document.getElementById("attachmentList").selectedItems].map(
+diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.sys.mjs
+--- a/mail/modules/AttachmentInfo.sys.mjs
++++ b/mail/modules/AttachmentInfo.sys.mjs
+@@ -363,25 +363,27 @@ export class AttachmentInfo {
+     }
+ 
+     // Join once to prevent intermediate string garbage collection
+     const rawStr = chunks.join("");
+     const normalized = rawStr.replace(/\r\n?|\n/g, "\r\n");
+ 
+     // Write to a temp file, then import into the target folder.
+     const tempFile = await this.#setupTempFile("imported-message.eml");
+-    await IOUtils.write(
+-      tempFile.path,
+-      lazy.MailStringUtils.byteStringToUint8Array(normalized)
+-    );
++    try {
++      await IOUtils.write(
++        tempFile.path,
++        lazy.MailStringUtils.byteStringToUint8Array(normalized)
++      );
+ 
+-    await lazy.MailUtils.copyFileMessageAsync(tempFile, targetFolder, null);
+-
+-    // Clean up the temp file now that the copy is done.
+-    await IOUtils.remove(tempFile.path);
++      await lazy.MailUtils.copyFileMessageAsync(tempFile, targetFolder, null);
++    } finally {
++      // Clean up the temp file even if the copy fails.
++      await IOUtils.remove(tempFile.path);
++    }
+   }
+ 
+   /**
+    * Open this attachment.
+    *
+    * @param {BrowsingContext} browsingContext - The browsingContext of the
+    *   browser that this attachment is being opened from.
+    */
+diff --git a/mail/test/browser/attachment/browser.toml b/mail/test/browser/attachment/browser.toml
+--- a/mail/test/browser/attachment/browser.toml
++++ b/mail/test/browser/attachment/browser.toml
+@@ -29,13 +29,15 @@ support-files = ["data/**"]
+ ["browser_attachmentInAltPart.js"]
+ 
+ ["browser_attachmentInPlainMsg.js"]
+ 
+ ["browser_attachmentMenus.js"]
+ 
+ ["browser_attachmentSize.js"]
+ 
++["browser_copyToFolderContextMenu.js"]
++
+ ["browser_openAttachment.js"]
+ 
+ ["browser_rfc822Base64Attachment.js"]
+ 
+ ["browser_unreferencedRelatedPart.js"]
+diff --git a/mail/test/browser/attachment/browser_copyToFolderContextMenu.js b/mail/test/browser/attachment/browser_copyToFolderContextMenu.js
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/attachment/browser_copyToFolderContextMenu.js
+@@ -0,0 +1,291 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests the "Copy To" folder context menu item for message/rfc822 attachments.
++ *
++ * - Verifies the menu appears and is enabled for message/rfc822 attachments.
++ * - Verifies the menu is hidden for non-rfc822 attachments.
++ * - Verifies selecting a folder triggers importToFolder.
++ *
++ * NetUtil.asyncFetch cannot resolve message URLs in mochitest, so we mock
++ * importToFolder on the prototype to exercise the import pipeline.
++ */
++
++"use strict";
++
++var { close_popup, create_folder, get_about_message, open_message_from_file } =
++  ChromeUtils.importESModule(
++    "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
++  );
++var { AttachmentInfo } = ChromeUtils.importESModule(
++  "resource:///modules/AttachmentInfo.sys.mjs"
++);
++var { MailStringUtils } = ChromeUtils.importESModule(
++  "resource:///modules/MailStringUtils.sys.mjs"
++);
++var { MailUtils } = ChromeUtils.importESModule(
++  "resource:///modules/MailUtils.sys.mjs"
++);
++
++let targetFolder;
++
++add_setup(async function () {
++  targetFolder = await create_folder("CopyToFolderTarget");
++  targetFolder.setFlag(Ci.nsMsgFolderFlags.Mail);
++});
++
++registerCleanupFunction(() => {
++  targetFolder.deleteSelf(null);
++});
++
++/**
++ * Open the attachment item context menu for the first attachment and return
++ * the aboutMessage window and the context menu element.
++ */
++async function openAttachmentContextMenu(aboutMessage) {
++  const attachmentList = aboutMessage.document.getElementById("attachmentList");
++  const contextMenu = aboutMessage.document.getElementById(
++    "attachmentItemContext"
++  );
++  const shownPromise = BrowserTestUtils.waitForEvent(contextMenu, "popupshown");
++  EventUtils.synthesizeMouseAtCenter(
++    attachmentList.getItemAtIndex(0),
++    { type: "contextmenu" },
++    aboutMessage
++  );
++  await shownPromise;
++  return { aboutMessage, contextMenu, attachmentList };
++}
++
++/**
++ * Test that the "Copy To" menu is visible and enabled for message/rfc822
++ * attachments.
++ */
++add_task(async function test_copyToFolder_visible_for_rfc822() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/rfc822_base64_attachment.eml")
++  );
++  const msgc = await open_message_from_file(file);
++  const aboutMessage = get_about_message(msgc);
++
++  // Show the attachment pane.
++  EventUtils.synthesizeMouseAtCenter(
++    aboutMessage.document.getElementById("attachmentToggle"),
++    {},
++    aboutMessage
++  );
++
++  const attachmentList = aboutMessage.document.getElementById("attachmentList");
++  Assert.equal(attachmentList.itemCount, 1, "should have one attachment");
++  Assert.equal(
++    attachmentList.getItemAtIndex(0).attachment.contentType,
++    "message/rfc822",
++    "attachment should be message/rfc822"
++  );
++
++  const { contextMenu } = await openAttachmentContextMenu(aboutMessage);
++
++  try {
++    const copyToMenu = aboutMessage.document.getElementById(
++      "context-copyToFolder"
++    );
++    Assert.ok(
++      !copyToMenu.hidden,
++      "Copy To menu should be visible for rfc822 attachment"
++    );
++    Assert.ok(
++      !copyToMenu.disabled,
++      "Copy To menu should be enabled for rfc822 attachment"
++    );
++  } finally {
++    await close_popup(aboutMessage, contextMenu);
++  }
++
++  await BrowserTestUtils.closeWindow(msgc);
++});
++
++/**
++ * Test that the "Copy To" menu is hidden for non-rfc822 attachments.
++ */
++add_task(async function test_copyToFolder_hidden_for_non_rfc822() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/multiple_attachments.eml")
++  );
++  const msgc = await open_message_from_file(file);
++  const aboutMessage = get_about_message(msgc);
++
++  // Show the attachment pane.
++  EventUtils.synthesizeMouseAtCenter(
++    aboutMessage.document.getElementById("attachmentToggle"),
++    {},
++    aboutMessage
++  );
++
++  const attachmentList = aboutMessage.document.getElementById("attachmentList");
++  Assert.greater(attachmentList.itemCount, 0, "should have attachments");
++  Assert.notEqual(
++    attachmentList.getItemAtIndex(0).attachment.contentType,
++    "message/rfc822",
++    "first attachment should not be message/rfc822"
++  );
++
++  const { contextMenu } = await openAttachmentContextMenu(aboutMessage);
++
++  try {
++    const copyToMenu = aboutMessage.document.getElementById(
++      "context-copyToFolder"
++    );
++    Assert.ok(
++      copyToMenu.hidden,
++      "Copy To menu should be hidden for non-rfc822 attachment"
++    );
++  } finally {
++    await close_popup(aboutMessage, contextMenu);
++  }
++
++  await BrowserTestUtils.closeWindow(msgc);
++});
++
++/**
++ * Test that the "Copy To" menu is visible for attachments with an .eml
++ * filename even when the content type is not message/rfc822. Some messages
++ * have wrong MIME types — the .eml filename fallback ensures these are
++ * still recognized as importable attached messages.
++ */
++add_task(async function test_copyToFolder_visible_for_eml_filename() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/eml_wrong_mime_type.eml")
++  );
++  const msgc = await open_message_from_file(file);
++  const aboutMessage = get_about_message(msgc);
++
++  // Show the attachment pane.
++  EventUtils.synthesizeMouseAtCenter(
++    aboutMessage.document.getElementById("attachmentToggle"),
++    {},
++    aboutMessage
++  );
++
++  const attachmentList = aboutMessage.document.getElementById("attachmentList");
++  Assert.equal(attachmentList.itemCount, 1, "should have one attachment");
++  Assert.notEqual(
++    attachmentList.getItemAtIndex(0).attachment.contentType,
++    "message/rfc822",
++    "content type should not be message/rfc822"
++  );
++  Assert.ok(
++    /[?&]filename=.*\.eml(&|$)/.test(
++      attachmentList.getItemAtIndex(0).attachment.url
++    ),
++    "url should contain an .eml filename"
++  );
++
++  const { contextMenu } = await openAttachmentContextMenu(aboutMessage);
++
++  try {
++    const copyToMenu = aboutMessage.document.getElementById(
++      "context-copyToFolder"
++    );
++    Assert.ok(
++      !copyToMenu.hidden,
++      "Copy To menu should be visible for .eml-named attachment with wrong MIME type"
++    );
++    Assert.ok(!copyToMenu.disabled, "Copy To menu should be enabled");
++  } finally {
++    await close_popup(aboutMessage, contextMenu);
++  }
++
++  await BrowserTestUtils.closeWindow(msgc);
++});
++
++/**
++ * Test that selecting a folder from the "Copy To" submenu triggers
++ * importToFolder and the message appears in the target folder.
++ */
++add_task(async function test_copyToFolder_imports_message() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/rfc822_base64_attachment.eml")
++  );
++  const msgc = await open_message_from_file(file);
++  const aboutMessage = get_about_message(msgc);
++
++  // Show the attachment pane.
++  EventUtils.synthesizeMouseAtCenter(
++    aboutMessage.document.getElementById("attachmentToggle"),
++    {},
++    aboutMessage
++  );
++
++  // Mock importToFolder on the prototype — the real method calls
++  // fetchAttachment() which needs a working NetUtil.asyncFetch.
++  const origImportToFolder = AttachmentInfo.prototype.importToFolder;
++  let importCalled = false;
++  AttachmentInfo.prototype.importToFolder = async function (_folder) {
++    importCalled = true;
++    const canned =
++      "From: test@example.com\r\n" +
++      "To: recipient@example.com\r\n" +
++      "Subject: Context menu imported\r\n" +
++      "Date: Thu, 01 Jan 2025 00:00:00 +0000\r\n" +
++      "Message-ID: <contextmenu@example.com>\r\n" +
++      "Content-Type: text/plain\r\n" +
++      "\r\n" +
++      "Context menu import body.\r\n";
++
++    const uint8 = new TextEncoder().encode(canned);
++    let rawStr = "";
++    for (let j = 0; j < uint8.length; j += 8192) {
++      rawStr += String.fromCharCode.apply(null, uint8.subarray(j, j + 8192));
++    }
++    const normalized = rawStr.replace(/\r\n?|\n/g, "\r\n");
++
++    const msgFilePath = await IOUtils.createUniqueFile(
++      PathUtils.tempDir,
++      "test-copyto-import.eml",
++      0o600
++    );
++    await IOUtils.write(
++      msgFilePath,
++      MailStringUtils.byteStringToUint8Array(normalized)
++    );
++    const msgFile = await IOUtils.getFile(msgFilePath);
++    await MailUtils.copyFileMessageAsync(msgFile, targetFolder, null);
++    await IOUtils.remove(msgFilePath);
++  };
++
++  try {
++    // Get the selected attachments from the context menu (same as
++    // onShowAttachmentItemContextMenu does).
++    const attachmentList =
++      aboutMessage.document.getElementById("attachmentList");
++    const attachments = [attachmentList.getItemAtIndex(0).attachment];
++
++    // Synthesize a fake event as if the folder-menupopup fired a command.
++    const fakeEvent = new Event("command", { bubbles: true });
++    Object.defineProperty(fakeEvent, "target", {
++      value: { _folder: targetFolder },
++    });
++
++    await aboutMessage.HandleCopyAttachmentToFolder(fakeEvent, attachments);
++
++    Assert.ok(importCalled, "importToFolder should have been called");
++
++    await TestUtils.waitForCondition(
++      () => targetFolder.getTotalMessages(false) > 0,
++      "Message should appear in target folder"
++    );
++
++    const msgs = [...targetFolder.messages];
++    Assert.equal(msgs.length, 1, "one message should have been imported");
++    Assert.equal(
++      msgs[0].mime2DecodedSubject,
++      "Context menu imported",
++      "imported message should have the correct subject"
++    );
++  } finally {
++    AttachmentInfo.prototype.importToFolder = origImportToFolder;
++    await BrowserTestUtils.closeWindow(msgc);
++  }
++});
+diff --git a/mail/test/browser/attachment/data/eml_wrong_mime_type.eml b/mail/test/browser/attachment/data/eml_wrong_mime_type.eml
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/attachment/data/eml_wrong_mime_type.eml
+@@ -0,0 +1,22 @@
++Subject: eml attachment with wrong mime type
++From: sender@test.invalid
++To: recipient@test.invalid
++Message-ID: <wrong.mime.555@test.invalid>
++MIME-Version: 1.0
++Content-Type: multipart/mixed; boundary="=_outer_boundary"
++
++--=_outer_boundary
++Content-Type: text/plain
++
++Outer body.
++
++--=_outer_boundary
++Content-Type: application/octet-stream;
++ name="forwarded.eml"
++Content-Transfer-Encoding: base64
++Content-Disposition: attachment;
++ filename="forwarded.eml"
++
++U3ViamVjdDogSGkKRnJvbTogYWxpY2VAbWltZS50ZXN0LmludmFsaWQKVG86IGJvYkBtaW1lLnRlc3QuaW52YWxpZApNZXNzYWdlLUlEOiA8aW5uZXIubXNnLjU1NUB0ZXN0LmludmFsaWQ+CkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOAoKSGkgdGhlcmUuCg==
++
++--=_outer_boundary--
+

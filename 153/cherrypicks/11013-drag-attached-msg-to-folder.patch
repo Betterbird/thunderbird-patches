@@ -1,0 +1,389 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1782382831 0
+# Node ID 9ed2cdca76f6a8792976b7092e743a75bcd64719
+# Parent  103bb291ada96b9d423b265fa3afbf6712ac9df5
+Bug 11013 - Implement drag and drop of attached messages to mail folders. r=mkmelin
+
+Allow dragging message/rfc822 type MIME attachments from the attachment
+pane and dropping them directly onto a folder in the folder tree. The
+attached message is fetched via NetUtil.asyncFetch with outputformat=raw,
+line endings are normalized to CRLF as required by RFC 5322, and the
+message is written to a temp file and imported via copyFileMessage.
+
+Differential Revision: https://phabricator.services.mozilla.com/D222994
+
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -47,23 +47,23 @@ ChromeUtils.defineESModuleGetters(
+       "chrome://messenger/content/FolderReorderListener.mjs",
+     UserFeedbackListener: "chrome://messenger/content/UserFeedbackListener.mjs",
+   },
+   { global: "current" }
+ );
+ 
+ ChromeUtils.defineESModuleGetters(this, {
+   AccountColorUtils: "moz-src:///comm/mail/modules/AccountColorUtils.sys.mjs",
++  AttachmentInfo: "resource:///modules/AttachmentInfo.sys.mjs",
+   CalMetronome: "resource:///modules/CalMetronome.sys.mjs",
+   FolderPaneUtils: "resource:///modules/FolderPaneUtils.sys.mjs",
+   FolderTreeProperties: "resource:///modules/FolderTreeProperties.sys.mjs",
+   FolderUtils: "resource:///modules/FolderUtils.sys.mjs",
+   Gloda: "resource:///modules/gloda/GlodaPublic.sys.mjs",
+   MailE10SUtils: "resource:///modules/MailE10SUtils.sys.mjs",
+-  MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   repairMbox: "resource:///modules/MboxRepair.sys.mjs",
+   SmartMailboxUtils: "resource:///modules/SmartMailboxUtils.sys.mjs",
+   TagUtils: "resource:///modules/TagUtils.sys.mjs",
+   UIDensity: "resource:///modules/UIDensity.sys.mjs",
+   UIFontSize: "resource:///modules/UIFontSize.sys.mjs",
+   XULStoreUtils: "resource:///modules/XULStoreUtils.sys.mjs",
+ });
+@@ -3292,26 +3292,36 @@ var folderPane = {
+           return;
+         }
+       }
+       event.dataTransfer.dropEffect = "copy";
+     } else if (
+       types.includes("text/x-moz-url-data") ||
+       types.includes("text/x-moz-url")
+     ) {
+-      // Allow subscribing to feeds by dragging an url to a feed account.
+-      if (
++      // Check if this is a message/rfc822 attachment being dragged.
++      const urlInfo = event.dataTransfer
++        .mozGetDataAt("text/x-moz-url", 0)
++        ?.split("\n");
++      if (urlInfo?.length > 3 && urlInfo[3] == "message/rfc822") {
++        if (targetFolder.isServer || !targetFolder.canFileMessages) {
++          return;
++        }
++        event.dataTransfer.dropEffect = "copy";
++      } else if (
++        // Allow subscribing to feeds by dragging an url to a feed account.
+         targetFolder.server.type == "rss" &&
+         !targetFolder.isSpecialFolder(Ci.nsMsgFolderFlags.Trash, true) &&
+         event.dataTransfer.items.length == 1 &&
+         FeedUtils.getFeedUriFromDataTransfer(event.dataTransfer)
+       ) {
+         return;
++      } else {
++        event.dataTransfer.dropEffect = "link";
+       }
+-      event.dataTransfer.dropEffect = "link";
+     } else {
+       return;
+     }
+ 
+     this._clearDropTarget();
+     row.classList.add("drop-target");
+   },
+ 
+@@ -3632,21 +3642,52 @@ var folderPane = {
+           ).catch(console.warn);
+         }
+         await MailUtils.updateFolderAsync(targetFolder).catch(console.warn);
+       }
+     } else if (
+       types.includes("text/x-moz-url-data") ||
+       types.includes("text/x-moz-url")
+     ) {
+-      // This is a potential rss feed. A link image as well as link text url
+-      // should be handled; try to extract a url from non moz apps as well.
+-      const feedURI = FeedUtils.getFeedUriFromDataTransfer(event.dataTransfer);
+-      if (feedURI) {
+-        FeedUtils.subscribeToFeed(feedURI.spec, targetFolder);
++      // Check if this is a message/rfc822 attachment being dragged from
++      // the attachment pane onto a folder.
++      const urlInfo = event.dataTransfer
++        .mozGetDataAt("text/x-moz-url", 0)
++        ?.split("\n");
++      if (urlInfo?.length > 3 && urlInfo[3] == "message/rfc822") {
++        for (let i = 0; i < event.dataTransfer.mozItemCount; i++) {
++          const url = event.dataTransfer.mozGetDataAt("text/x-moz-url-data", i);
++          if (!url) {
++            continue;
++          }
++          try {
++            const attachment = new AttachmentInfo({
++              contentType: urlInfo[3],
++              url,
++              name: urlInfo[1] || "message.eml",
++              uri: urlInfo[4],
++            });
++            await attachment.importToFolder(targetFolder);
++          } catch (ex) {
++            console.error(
++              `Importing message to ${targetFolder.URI} FAILED.`,
++              ex
++            );
++          }
++        }
++        await MailUtils.updateFolderAsync(targetFolder).catch(console.warn);
++      } else {
++        // This is a potential rss feed. A link image as well as link text url
++        // should be handled; try to extract a url from non moz apps as well.
++        const feedURI = FeedUtils.getFeedUriFromDataTransfer(
++          event.dataTransfer
++        );
++        if (feedURI) {
++          FeedUtils.subscribeToFeed(feedURI.spec, targetFolder);
++        }
+       }
+     }
+ 
+     event.preventDefault();
+   },
+ 
+   _onDragEnd(event) {
+     this._clearDragTarget();
+diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.sys.mjs
+--- a/mail/modules/AttachmentInfo.sys.mjs
++++ b/mail/modules/AttachmentInfo.sys.mjs
+@@ -338,16 +338,53 @@ export class AttachmentInfo {
+ 
+     Cc["@mozilla.org/uriloader/external-helper-app-service;1"]
+       .getService(Ci.nsPIExternalAppLauncher)
+       .deleteTemporaryFileOnExit(tempFile);
+     return tempFile;
+   }
+ 
+   /**
++   * Import this message/rfc822 attachment into a mail folder.
++   * Fetches the raw data via fetchAttachment(), normalizes line endings to
++   * CRLF, writes to a temp file, and imports via copyFileMessageAsync.
++   *
++   * @param {nsIMsgFolder} targetFolder - The folder to import into.
++   */
++  async importToFolder(targetFolder) {
++    const buffer = await this.fetchAttachment();
++
++    // Normalize line endings to CRLF. The raw fetch may return data with
++    // native LF line endings. IMAP APPEND requires CRLF per RFC 5322 §2.1.
++    const uint8 = new Uint8Array(buffer);
++    const chunks = [];
++
++    // Process in 8KB chunks to stay under the Function.apply argument limit
++    for (let j = 0; j < uint8.length; j += 8192) {
++      chunks.push(String.fromCharCode.apply(null, uint8.subarray(j, j + 8192)));
++    }
++
++    // Join once to prevent intermediate string garbage collection
++    const rawStr = chunks.join("");
++    const normalized = rawStr.replace(/\r\n?|\n/g, "\r\n");
++
++    // Write to a temp file, then import into the target folder.
++    const tempFile = await this.#setupTempFile("imported-message.eml");
++    await IOUtils.write(
++      tempFile.path,
++      lazy.MailStringUtils.byteStringToUint8Array(normalized)
++    );
++
++    await lazy.MailUtils.copyFileMessageAsync(tempFile, targetFolder, null);
++
++    // Clean up the temp file now that the copy is done.
++    await IOUtils.remove(tempFile.path);
++  }
++
++  /**
+    * Open this attachment.
+    *
+    * @param {BrowsingContext} browsingContext - The browsingContext of the
+    *   browser that this attachment is being opened from.
+    */
+   async open(browsingContext) {
+     if (!this.hasFile) {
+       return;
+diff --git a/mail/test/browser/folder-pane/browser.toml b/mail/test/browser/folder-pane/browser.toml
+--- a/mail/test/browser/folder-pane/browser.toml
++++ b/mail/test/browser/folder-pane/browser.toml
+@@ -40,11 +40,13 @@ skip-if = [
+ ["browser_folderPaneConsumers.js"]
+ skip-if = [
+   "true", # TODO
+ ]
+ # skip-if = ["os == 'mac'"]
+ 
+ ["browser_folderPaneDragDrop.js"]
+ 
++["browser_dragDropAttachedMessages.js"]
++
+ ["browser_folderPaneHeader.js"]
+ 
+ ["browser_folderPaneModeContextMenu.js"]
+diff --git a/mail/test/browser/folder-pane/browser_dragDropAttachedMessages.js b/mail/test/browser/folder-pane/browser_dragDropAttachedMessages.js
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/folder-pane/browser_dragDropAttachedMessages.js
+@@ -0,0 +1,166 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that dropping a message/rfc822 attachment onto a folder imports the
++ * attached message.
++ *
++ * The drag-and-drop UI wiring is tested via a synthetic drop event.
++ * NetUtil.asyncFetch cannot resolve message URLs in mochitest, so we mock
++ * importToFolder on the prototype to exercise the pipeline.
++ */
++
++"use strict";
++
++var { be_in_folder, create_folder } = ChromeUtils.importESModule(
++  "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
++);
++var { inboxFolder } = ChromeUtils.importESModule(
++  "resource://testing-common/mail/MessageInjectionHelpers.sys.mjs"
++);
++var { add_message_to_folder, create_message } = ChromeUtils.importESModule(
++  "resource://testing-common/mail/MessageInjectionHelpers.sys.mjs"
++);
++var { AttachmentInfo } = ChromeUtils.importESModule(
++  "resource:///modules/AttachmentInfo.sys.mjs"
++);
++var { MailStringUtils } = ChromeUtils.importESModule(
++  "resource:///modules/MailStringUtils.sys.mjs"
++);
++var { MailUtils } = ChromeUtils.importESModule(
++  "resource:///modules/MailUtils.sys.mjs"
++);
++
++const tabmail = document.getElementById("tabmail");
++const about3Pane = tabmail.currentAbout3Pane;
++
++let targetFolder;
++
++add_setup(async function () {
++  targetFolder = await create_folder("DragDropTarget");
++  targetFolder.setFlag(Ci.nsMsgFolderFlags.Mail);
++
++  // Put a test message in the inbox so we have a valid URL for the data
++  // transfer used in the drag-and-drop test.
++  await add_message_to_folder(
++    [inboxFolder],
++    create_message({ subject: "Test message for drag source" })
++  );
++});
++
++registerCleanupFunction(() => {
++  inboxFolder.propagateDelete(targetFolder, true);
++});
++
++/**
++ * Test drag-and-drop: firing a synthetic drop event on the folder tree
++ * triggers importToFolder on the AttachmentInfo instance. We mock
++ * importToFolder on the prototype because NetUtil.asyncFetch cannot resolve
++ * message URLs in mochitest.
++ */
++add_task(async function test_drop_triggers_import() {
++  await be_in_folder(inboxFolder);
++  const msgHdr = [...inboxFolder.messages][0];
++  Assert.ok(msgHdr, "inbox should have at least one message");
++
++  const msgUri = msgHdr.folder.getUriForMsg(msgHdr);
++
++  // Build the same data transfer setupDataTransfer() in mailCore.js produces.
++  const contentType = "message/rfc822";
++  const name = "test-message.eml";
++  // Use a mailbox: URL (not mailbox-message:) — AttachmentInfo rejects
++  // -message: schemes. setupDataTransfer() uses attachment.url which is
++  // always a necko-compatible URL like imap: or mailbox:.
++  const attachmentUrl = msgUri.replace("mailbox-message:", "mailbox:");
++  const transferInfo = [
++    attachmentUrl +
++      "&type=" +
++      contentType +
++      "&filename=" +
++      encodeURIComponent(name),
++    name,
++    0,
++    contentType,
++    msgUri,
++  ];
++
++  const dataTransfer = new DataTransfer();
++  dataTransfer.mozSetDataAt("text/x-moz-url", transferInfo.join("\n"), 0);
++  dataTransfer.mozSetDataAt("text/x-moz-url-data", attachmentUrl, 0);
++  dataTransfer.mozSetDataAt("text/x-moz-url-desc", name, 0);
++  dataTransfer.mozSetDataAt(
++    "application/x-moz-file-promise-url",
++    attachmentUrl,
++    0
++  );
++
++  // Mock importToFolder on the prototype — the real method calls
++  // fetchAttachment() which needs a working NetUtil.asyncFetch.
++  const origImportToFolder = AttachmentInfo.prototype.importToFolder;
++  let importCalled = false;
++  AttachmentInfo.prototype.importToFolder = async function (_folder) {
++    importCalled = true;
++    const canned =
++      "From: test@example.com\r\n" +
++      "To: recipient@example.com\r\n" +
++      "Subject: Drag-drop imported\r\n" +
++      "Date: Thu, 01 Jan 2025 00:00:00 +0000\r\n" +
++      "Message-ID: <dragdrop@example.com>\r\n" +
++      "Content-Type: text/plain\r\n" +
++      "\r\n" +
++      "Drag-drop body.\r\n";
++
++    const uint8 = new TextEncoder().encode(canned);
++    let rawStr = "";
++    for (let j = 0; j < uint8.length; j += 8192) {
++      rawStr += String.fromCharCode.apply(null, uint8.subarray(j, j + 8192));
++    }
++    const normalized = rawStr.replace(/\r\n?|\n/g, "\r\n");
++
++    const msgFilePath = await IOUtils.createUniqueFile(
++      PathUtils.tempDir,
++      "test-import.eml",
++      0o600
++    );
++    await IOUtils.write(
++      msgFilePath,
++      MailStringUtils.byteStringToUint8Array(normalized)
++    );
++    const msgFile = await IOUtils.getFile(msgFilePath);
++    await MailUtils.copyFileMessageAsync(msgFile, targetFolder, null);
++    await IOUtils.remove(msgFilePath);
++  };
++
++  try {
++    const targetRow = about3Pane.folderPane.getRowForFolder(targetFolder);
++    const dropEvent = new DragEvent("drop", {
++      bubbles: true,
++      cancelable: true,
++      dataTransfer,
++    });
++    Object.defineProperty(dropEvent, "target", { value: targetRow });
++    Object.defineProperty(dropEvent.dataTransfer, "dropEffect", {
++      value: "copy",
++    });
++
++    await about3Pane.folderPane._onDrop(dropEvent);
++
++    Assert.ok(importCalled, "importToFolder should have been called");
++
++    await TestUtils.waitForCondition(
++      () => targetFolder.getTotalMessages(false) > 0,
++      "Message should appear in target folder"
++    );
++
++    const msgs = [...targetFolder.messages];
++    Assert.equal(msgs.length, 1, "one message should have been imported");
++    Assert.equal(
++      msgs[0].mime2DecodedSubject,
++      "Drag-drop imported",
++      "imported message should have the correct subject"
++    );
++  } finally {
++    AttachmentInfo.prototype.importToFolder = origImportToFolder;
++  }
++});
+
