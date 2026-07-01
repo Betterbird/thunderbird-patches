@@ -1,15 +1,80 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1782899766 -7200
+# Date 1782940672 -7200
 # Parent  7288bf4aab55c7a83129cc0be67edc1153534259
 Bug 637830 - introduce pref mail.notification.show_on_app_screen.
-* * *
-NNN28 - Fix flashing new mail alert window.
 
+diff --git a/mailnews/base/content/newmailalert.js b/mailnews/base/content/newmailalert.js
+--- a/mailnews/base/content/newmailalert.js
++++ b/mailnews/base/content/newmailalert.js
+@@ -77,32 +77,45 @@ async function doOnAlertLoad() {
+   //
+   // Falls back to the alert's own screen if the screen manager is
+   // unavailable (unlikely, but safe).
+   let targetScreen;
+-  try {
+-    const screenManager = Cc["@mozilla.org/gfx/screenmanager;1"].getService(
+-      Ci.nsIScreenManager
+-    );
+-    const primaryScreen = screenManager.primaryScreen;
+-    const availLeft = {};
+-    const availTop = {};
+-    const availWidth = {};
+-    const availHeight = {};
+-    primaryScreen.GetAvailRect(availLeft, availTop, availWidth, availHeight);
+-    targetScreen = {
+-      availLeft: availLeft.value,
+-      availTop: availTop.value,
+-      availWidth: availWidth.value,
+-      availHeight: availHeight.value,
+-    };
+-  } catch (e) {
+-    // Fallback: convert alert's own screen (CSS px) to device px.
++  if (
++    Services.prefs.getBoolPref("mail.notification.show_on_app_screen", false)
++  ) {
++    // Use the screen the notification is already on, since it was moved there
++    // when it was first created.
+     targetScreen = {
+       availLeft: screen.availLeft * window.devicePixelRatio,
+       availTop: screen.availTop * window.devicePixelRatio,
+       availWidth: screen.availWidth * window.devicePixelRatio,
+       availHeight: screen.availHeight * window.devicePixelRatio,
+     };
++  } else {
++    try {
++      const screenManager = Cc["@mozilla.org/gfx/screenmanager;1"].getService(
++        Ci.nsIScreenManager
++      );
++      const primaryScreen = screenManager.primaryScreen;
++      const availLeft = {};
++      const availTop = {};
++      const availWidth = {};
++      const availHeight = {};
++      primaryScreen.GetAvailRect(availLeft, availTop, availWidth, availHeight);
++      targetScreen = {
++        availLeft: availLeft.value,
++        availTop: availTop.value,
++        availWidth: availWidth.value,
++        availHeight: availHeight.value,
++      };
++    } catch (e) {
++      // Fallback: convert alert's own screen (CSS px) to device px.
++      targetScreen = {
++        availLeft: screen.availLeft * window.devicePixelRatio,
++        availTop: screen.availTop * window.devicePixelRatio,
++        availWidth: screen.availWidth * window.devicePixelRatio,
++        availHeight: screen.availHeight * window.devicePixelRatio,
++      };
++    }
+   }
+ 
+   const snapToCorner = () => {
+     // targetScreen is in device pixels. Convert to alert's CSS px.
 diff --git a/mailnews/base/src/MailNotificationManager.sys.mjs b/mailnews/base/src/MailNotificationManager.sys.mjs
 --- a/mailnews/base/src/MailNotificationManager.sys.mjs
 +++ b/mailnews/base/src/MailNotificationManager.sys.mjs
-@@ -584,15 +584,51 @@ export const MailNotificationManager = n
+@@ -584,15 +584,55 @@ export const MailNotificationManager = n
      // inherits the correct DPI scaling from the start.  The alert queries the
      // primary screen directly via nsIScreenManager to position itself.
      const features = "chrome,dialog,titlebar=no,alert=yes,left=0,top=0";
@@ -22,41 +87,45 @@ diff --git a/mailnews/base/src/MailNotificationManager.sys.mjs b/mailnews/base/s
        features,
        args
      );
-+    // Move window to its final position, so in case it
-+    // flashes, it will at least "flash in place".
-+    let screenToUse = win.screen;
-+    let scaleX = 0;
-+    let scaleY = 0;
++
 +    if (
 +      Services.prefs.getBoolPref("mail.notification.show_on_app_screen", false)
 +    ) {
 +      const appWindow = Services.wm.getMostRecentWindow("mail:3pane");
 +      if (
 +        appWindow &&
-+        (appWindow.screenLeft < 0 || appWindow.screenLeft > win.screen.width)
++        // To the left of main    or ...
++        (appWindow.screenLeft < 0 ||
++          // to the right of main.
++          appWindow.devicePixelRatio * appWindow.screenLeft > win.screen.width)
 +      ) {
 +        // Application screen to the left or the right of the primary screen.
-+        screenToUse = appWindow.screen;
++        const targetScreen = appWindow.screen;
 +
-+        // If were are on the right screen, and the alert was created on the
-+        // left screen, we need to scale compute everything based on the left screen.
-+        if (appWindow.screenLeft > win.screen.width) {
-+          scaleX = win.screen.width / screenToUse.width;
-+          scaleY = win.screen.height / screenToUse.height;
++        // Hack: Assume minimum standard size of 560 x 80.
++        const scaleX = win.screen.width / targetScreen.width;
++        const scaleY = win.screen.height / targetScreen.height;
++        let x;
++        const y =
++          (targetScreen.availTop + targetScreen.availHeight) * scaleY -
++          80 -
++          10 * scaleY * appWindow.devicePixelRatio;
++        if (appWindow.screenLeft < 0) {
++          // If app is on the left screen, and the alert was created on the
++          // right screen, we need to scale compute everything based on the right screen.
++          x = 0 - appWindow.devicePixelRatio * (560 + 10);
++        } else {
++          // If app is on the right screen, and the alert was created on the
++          // left screen, we need to scale compute everything based on the left screen.
++          x =
++            win.screen.width +
++            targetScreen.availWidth * scaleX -
++            560 -
++            10 * scaleX;
 +        }
++        win.moveTo(x, y);
 +      }
 +    }
-+    let x;
-+    let y;
-+    // Hack: Assume minimum standard size of 560 x 80.
-+    if (scaleX) {
-+      x = win.screen.width + screenToUse.availWidth * scaleX - 560 - 10 * scaleX;
-+      y = (screenToUse.availTop + screenToUse.availHeight) * scaleY - 80 - 10 * scaleY;
-+    } else {
-+      x = screenToUse.availLeft + screenToUse.availWidth - 560 - 10;
-+      y = screenToUse.availTop + screenToUse.availHeight - 80 - 10;
-+    }
-+    win.moveTo(x, y);
 +
      this._customizedAlertShown = true;
      this._saveNotificationTime(folder, newMsgKeys);
