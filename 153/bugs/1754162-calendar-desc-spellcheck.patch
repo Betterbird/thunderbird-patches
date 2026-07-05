@@ -1,55 +1,150 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1781544818 -7200
-# Parent  218e0445009b4cb7ac9af26be51943d7d7dd85c5
+# Date 1783242166 -7200
+# Parent  77a357cc496905a03c8fbd86238d819c176772bd
 Bug 1754162 - Apply correct dictionaries to calendar description editor.
 
 diff --git a/calendar/base/content/item-editing/calendar-item-iframe.js b/calendar/base/content/item-editing/calendar-item-iframe.js
 --- a/calendar/base/content/item-editing/calendar-item-iframe.js
 +++ b/calendar/base/content/item-editing/calendar-item-iframe.js
-@@ -639,11 +639,40 @@ function loadDialog(aItem) {
+@@ -454,8 +454,9 @@ onLoad.hasLoaded = false;
+ function onEventDialogUnload() {
+   Services.obs.removeObserver(eventDialogRequestObserver, "http-on-modify-request");
+   Services.obs.removeObserver(eventDialogQuitObserver, "quit-application-requested");
+   eventDialogCalendarObserver.cancel();
++  checkerReadyObserver.removeObserver();
+ }
+ 
+ /**
+  * Handler function to be called when the accept button is pressed.
+@@ -583,8 +584,46 @@ function cancelItem() {
+ function getCurrentCalendar() {
+   return document.getElementById("item-calendar").selectedItem.calendar;
+ }
+ 
++var checkerReadyObserver = {
++  _topic: "inlineSpellChecker-spellCheck-ended",
++  _isReady: false,
++
++  observe(aSubject, aTopic) {
++    if (aSubject != this._subject || aTopic != this._topic) {
++      return;
++    }
++    this._isReady = true;
++  },
++
++  _isAdded: false,
++
++  addObserver(subject) {
++    if (this._isAdded) {
++      return;
++    }
++
++    Services.obs.addObserver(this, this._topic);
++    this._isAdded = true;
++    this._subject = subject;
++  },
++
++  removeObserver() {
++    if (!this._isAdded) {
++      return;
++    }
++
++    Services.obs.removeObserver(this, this._topic);
++    this._isAdded = false;
++    this._isReady = false;
++  },
++
++  isReady() {
++    return this._isReady;
++  },
++};
++
+ /**
+  * Sets up all dialog controls from the information of the passed item.
+  *
+  * @param {calIItemBase} aItem - The item to parse information out of.
+@@ -637,15 +676,8 @@ function loadDialog(aItem) {
+   link.rel = "stylesheet";
+   link.href = "chrome://messenger/skin/shared/editorContent.css";
    editorElement.contentDocument.head.appendChild(link);
  
-   try {
-     const checker = editor.getInlineSpellChecker(true);
+-  try {
+-    const checker = editor.getInlineSpellChecker(true);
 -    checker.enableRealTimeSpell = Services.prefs.getBoolPref("mail.spellcheck.inline", true);
-+    let prefValue = Services.prefs.getCharPref("spellchecker.dictionary");
-+    // Get rid of empty entries caused by trailing commas in pref value.
-+    const dictionaries = Array.from(new Set(prefValue?.split(","))).filter(Boolean);
-+    if (dictionaries.length) {
-+      checker.enableRealTimeSpell = Services.prefs.getBoolPref("mail.spellcheck.inline", true);
-+      // The deal is this:
-+      // When the spell check is enabled, it will only take new dictionaries
-+      // when the initial spellcheck is complete. The sophisticated solution can be seen in:
-+      // https://github.com/Betterbird/thunderbird-patches/blob/main/140/bugs/NNN11-fix-multiple-dicts.patch
-+      // Here we will just hope and pray that things will work with a timeout.
-+      setTimeout(async () => {
-+        try {
-+          await checker.spellChecker.setCurrentDictionaries(dictionaries);
-+          prefValue = dictionaries.join(",");
-+          console.info("Set calendar spellcheck dictionaries", prefValue);
-+          // After we set the dictionaries, we need to recheck.
-+          checker.spellCheckRange(null);
-+
-+          // Unfortunately, `setCurrentDictionaries()` triggers this code:
-+          // https://searchfox.org/firefox-main/rev/4524afcc186654ad357e48fec686249515860ac8/editor/spellchecker/EditorSpellCheck.cpp#620-621
-+          // https://searchfox.org/firefox-main/rev/4524afcc186654ad357e48fec686249515860ac8/editor/spellchecker/EditorSpellCheck.cpp#103
-+          // which appends a trailing comma. This greatly upsets the code in MsgComposeCommands.js.
-+          // So fix the pref here.
-+          Services.prefs.setCharPref("spellchecker.dictionary", prefValue);
-+        } catch (ex) {
-+          console.error("Cannot set calendar spellcheck dictionaries", ex);
-+        }
-+      }, 1500);
-+    }
-   } catch (ex) {
+-  } catch (ex) {
 -    // No dictionaries.
-+    // Let's see what's wrong here.
-+    console.error(ex);
-   }
- 
+-  }
+-
    if (aItem.descriptionText) {
      const docFragment = cal.view.textToHtmlDocumentFragment(
+       aItem.descriptionText,
+       editorElement.contentDocument,
+@@ -783,8 +815,64 @@ function loadDialog(aItem) {
+     const tabs = document.getElementById("event-grid-tabs");
+     const attendeeTab = document.getElementById("event-grid-tab-attendees");
+     tabs.selectedItem = attendeeTab;
+   }
++
++  // Worry about the spell check when everything else is done.
++  async function setDicts(_editor) {
++    try {
++      const checker = _editor.getInlineSpellChecker(true);
++      let prefValue = Services.prefs.getCharPref("spellchecker.dictionary");
++      // Get rid of empty entries caused by trailing commas in pref value.
++      const dictionaries = Array.from(new Set(prefValue?.split(","))).filter(Boolean);
++      if (dictionaries.length) {
++        checker.enableRealTimeSpell = Services.prefs.getBoolPref("mail.spellcheck.inline", true);
++        if (checker.enableRealTimeSpell) {
++          _editor.flags |= Ci.nsIEditor.eEditorMailMask;
++          checkerReadyObserver.addObserver(_editor);
++          // The deal is this:
++          // When the spell check is enabled, it will only take new dictionaries
++          // when the initial spellcheck is complete.
++          try {
++            let count = 0;
++            while (count++ < 20 && !checker.spellChecker) {
++              await new Promise(r => setTimeout(r, 100));
++            }
++
++            await checker.spellChecker.setCurrentDictionaries(dictionaries);
++            prefValue = dictionaries.join(",");
++            console.info("Set calendar spellcheck dictionaries", prefValue);
++            // Unfortunately, `setCurrentDictionaries()` triggers this code:
++            // https://searchfox.org/firefox-main/rev/4524afcc186654ad357e48fec686249515860ac8/editor/spellchecker/EditorSpellCheck.cpp#620-621
++            // https://searchfox.org/firefox-main/rev/4524afcc186654ad357e48fec686249515860ac8/editor/spellchecker/EditorSpellCheck.cpp#103
++            // which appends a trailing comma. This greatly upsets the code in MsgComposeCommands.js.
++            // So fix the pref here.
++            Services.prefs.setCharPref("spellchecker.dictionary", prefValue);
++            // EditorSpellCheck::UpdateCurrentDictionary() reads the lang
++            // attribute from the document element via GetLang() to determine
++            // the spellcheck dictionary (Priority 2, bug 967494).
++            const docElem = window.document.documentElement;
++            docElem.setAttribute("lang", prefValue);
++
++            // After we set the dictionaries, we need to recheck.
++            count = 0;
++            while (count++ < 20 && !checkerReadyObserver.isReady()) {
++              await new Promise(r => setTimeout(r, 100));
++            }
++
++            checker.spellCheckRange(null);
++          } catch (ex) {
++            console.error("Cannot set calendar spellcheck dictionaries", ex);
++          }
++        }
++      }
++    } catch (ex) {
++      // Let's see what's wrong here.
++      console.error(ex);
++    }
++  }
++
++  setDicts(editor);
+ }
+ 
+ /**
+  * Enables/disables undiscloseCheckbox on (un)checking notifyCheckbox
 diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
 --- a/mail/components/compose/content/MsgComposeCommands.js
 +++ b/mail/components/compose/content/MsgComposeCommands.js
