@@ -1,0 +1,100 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1782924034 0
+# Node ID 9c87d729738974d03dab8de0685462f6cb13d73b
+# Parent  349c4ae9c259955b9ff22a07e1a879dec5a14c3a
+Bug 1661960 - Fix ClearHdrCache crash. r=tobyp,kaie
+
+Differential Revision: https://phabricator.services.mozilla.com/D309417
+
+
+diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+--- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
++++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+@@ -485,20 +485,24 @@ nsresult nsMsgDatabase::AddHdrToCache(
+       }
+ 
+       PLDHashEntryHdr* entry =
+           m_cachedHeaders->Add((void*)(uintptr_t)key, mozilla::fallible);
+       if (!entry) {
+         return NS_ERROR_OUT_OF_MEMORY;  // XXX out of memory
+       }
+ 
+-      MsgHdrHashElement* element = static_cast<MsgHdrHashElement*>(entry);
+-      element->mHdr = hdr;
+-      element->mKey = key;
+-      NS_ADDREF(hdr);  // make the cache hold onto the header
++      auto* element = static_cast<MsgHdrHashElement*>(entry);
++      nsIMsgDBHdr* oldHdr = element->mHdr;
++      if (oldHdr != hdr) {
++        element->mHdr = hdr;
++        element->mKey = key;
++        NS_ADDREF(hdr);  // make the cache hold onto the header
++        NS_IF_RELEASE(oldHdr);
++      }
+       return NS_OK;
+     }
+   }
+   return NS_ERROR_FAILURE;
+ }
+ 
+ NS_IMETHODIMP nsMsgDatabase::SetMsgHdrCacheSize(uint32_t aSize) {
+   m_cacheSize = aSize;
+@@ -621,18 +625,19 @@ nsresult nsMsgDatabase::ClearHdrCache(bo
+ 
+ nsresult nsMsgDatabase::RemoveHdrFromCache(nsIMsgDBHdr* hdr, nsMsgKey key) {
+   if (m_cachedHeaders) {
+     if (key == nsMsgKey_None) hdr->GetMessageKey(&key);
+ 
+     PLDHashEntryHdr* entry =
+         m_cachedHeaders->Search((const void*)(uintptr_t)key);
+     if (entry) {
++      nsIMsgDBHdr* cachedHdr = static_cast<MsgHdrHashElement*>(entry)->mHdr;
+       m_cachedHeaders->Remove((void*)(uintptr_t)key);
+-      NS_RELEASE(hdr);  // get rid of extra ref the cache was holding.
++      NS_IF_RELEASE(cachedHdr);  // get rid of extra ref the cache was holding.
+     }
+   }
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgDatabase::GetHdrFromUseCache(nsMsgKey key, nsIMsgDBHdr** result) {
+   NS_ENSURE_ARG_POINTER(result);
+ 
+diff --git a/mailnews/db/msgdb/test/unit/test_maildb.js b/mailnews/db/msgdb/test/unit/test_maildb.js
+--- a/mailnews/db/msgdb/test/unit/test_maildb.js
++++ b/mailnews/db/msgdb/test/unit/test_maildb.js
+@@ -90,8 +90,31 @@ add_task(function test_deletion() {
+         "deleted message should be inaccessible"
+       );
+     }
+     */
+   } finally {
+     localAccountUtils.clearAll();
+   }
+ });
++
++add_task(function test_stale_delete_cache() {
++  localAccountUtils.loadLocalMailAccount();
++  try {
++    const folder = localAccountUtils.inboxFolder;
++    const db = folder.msgDatabase;
++    const staleHdr = db.attachHdr(db.createNewHdr(), false);
++    const key = staleHdr.messageKey;
++
++    db.getMsgHdrForKey(key);
++    db.forceClosed();
++    folder.msgDatabase = null;
++
++    const reopenedDB = folder.msgDatabase;
++    const freshHdr = reopenedDB.getMsgHdrForKey(key);
++    Assert.notEqual(staleHdr, freshHdr);
++    reopenedDB.deleteHeader(staleHdr, null, false, false);
++    Assert.equal(reopenedDB.getMsgHdrForKey(key), freshHdr);
++    reopenedDB.clearCachedHdrs();
++  } finally {
++    localAccountUtils.clearAll();
++  }
++});
+

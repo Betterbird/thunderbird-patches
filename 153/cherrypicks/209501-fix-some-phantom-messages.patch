@@ -1,0 +1,208 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1783380210 0
+# Node ID 49e084b41d0292a3877a57209e6c1fbeb10f7407
+# Parent  93cffa28df07cb8cf26a5fa7d4400610f5e0e1b9
+Bug 209501 - Prevent empty phantom messages from incomplete message-file copies. r=BenC
+
+Differential Revision: https://phabricator.services.mozilla.com/D307853
+
+
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -2207,25 +2207,38 @@ MOZ_CAN_RUN_SCRIPT_BOUNDARY NS_IMETHODIM
+ nsMsgLocalMailFolder::EndCopy(bool aCopySucceeded) {
+   if (!mCopyState) return NS_OK;
+ 
+   // Flush any remaining data (i.e if the last line of the message had
+   // no EOL).
+   mCopyState->m_LineReader.Flush(
+       std::bind(&nsMsgLocalMailFolder::CopyLine, this, std::placeholders::_1));
+ 
++  // Committing a header is only correct once the parser has finalized it, which
++  // happens at the blank line between headers and body. An empty, headerless,
++  // or truncated source never reaches that point, so its header is never parsed
++  // and carries no date (rendering as 1970). Treat such input as a failed copy
++  // and discard it rather than persisting an empty, dateless placeholder.
++  if (aCopySucceeded && !mCopyState->m_writeFailed &&
++      mCopyState->m_parseMsgState) {
++    nsMailboxParseState parseState;
++    mCopyState->m_parseMsgState->GetState(&parseState);
++    if (parseState == nsIMsgParseMailMsgState::ParseHeadersState) {
++      // Mark the copy as failed and let the shared cleanup path below discard
++      // the in-progress message.
++      aCopySucceeded = false;
++    }
++  }
++
+   // we are the destination folder for a move/copy
+   nsresult rv = aCopySucceeded ? NS_OK : NS_ERROR_FAILURE;
+ 
+   if (!aCopySucceeded || mCopyState->m_writeFailed) {
+     if (mCopyState->m_fileStream) {
+-      if (mCopyState->m_curDstKey != nsMsgKey_None) {
+-        mCopyState->m_msgStore->DiscardNewMessage(this,
+-                                                  mCopyState->m_fileStream);
+-      }
++      mCopyState->m_msgStore->DiscardNewMessage(this, mCopyState->m_fileStream);
+       mCopyState->m_fileStream = nullptr;
+     }
+ 
+     if (!mCopyState->m_isMove) {
+       // passing true because the messages that have been successfully
+       // copied have their corresponding hdrs in place. The message that has
+       // failed has been truncated so the msf file and berkeley mailbox
+       // are in sync.
+diff --git a/mailnews/local/test/unit/test_copyFileMessageIntegrity.js b/mailnews/local/test/unit/test_copyFileMessageIntegrity.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/local/test/unit/test_copyFileMessageIntegrity.js
+@@ -0,0 +1,123 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { PromiseTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
++);
++
++const CRLF = "\r\n";
++
++// Two well-formed sources, one with a Date: header and one without. Both reach
++// the header/body separator, so both must be stored regardless of the date.
++const VALID_SOURCES = {
++  "a complete message":
++    [
++      "From: alice@example.invalid",
++      "To: bob@example.invalid",
++      "Subject: A complete message",
++      "Date: Wed, 10 Jun 2026 12:00:00 +0000",
++      "Message-ID: <complete@example.invalid>",
++      "",
++      "Body text.",
++    ].join(CRLF) + CRLF,
++  "a complete message without a Date header":
++    [
++      "From: alice@example.invalid",
++      "To: bob@example.invalid",
++      "Subject: A complete message without a Date header",
++      "Message-ID: <nodate@example.invalid>",
++      "",
++      "Body text.",
++    ].join(CRLF) + CRLF,
++};
++
++// The truncated entry carries a valid Date: but still has no header/body
++// separator, proving the separator (not the date) is what decides storage.
++const INCOMPLETE_SOURCES = {
++  "an empty file": "",
++  "a body with no headers": "Loose text with no headers at all." + CRLF,
++  "headers truncated before the separator":
++    [
++      "From: alice@example.invalid",
++      "To: bob@example.invalid",
++      "Subject: Cut off mid-transfer",
++      "Date: Wed, 10 Jun 2026 12:00:00 +0000",
++      "Message-ID: <truncated@example.invalid>",
++    ].join(CRLF) + CRLF,
++};
++
++async function writeTempFile(name, contents) {
++  const file = Services.dirsvc.get("TmpD", Ci.nsIFile);
++  file.append(name);
++  if (file.exists()) {
++    file.remove(false);
++  }
++  await IOUtils.writeUTF8(file.path, contents);
++  return file;
++}
++
++async function copyFileInto(subName, contents) {
++  const dest = localAccountUtils.rootFolder.createLocalSubfolder(subName);
++  const file = await writeTempFile(`${subName}.eml`, contents);
++  const listener = new PromiseTestUtils.PromiseCopyListener();
++  try {
++    MailServices.copy.copyFileMessage(
++      file,
++      dest,
++      null,
++      false,
++      0,
++      "",
++      listener,
++      null
++    );
++    await listener.promise;
++  } catch (ex) {
++    // A rejected copy is an acceptable outcome; only a stored phantom is not.
++    info(`copyFileMessage rejected (acceptable): ${ex}`);
++  }
++  return dest;
++}
++
++async function withLocalAccount(store, body) {
++  Services.prefs.setCharPref("mail.serverDefaultStoreContractID", store);
++  localAccountUtils.loadLocalMailAccount();
++  try {
++    await body();
++  } finally {
++    localAccountUtils.clearAll();
++  }
++}
++
++add_task(async function test_validSourcesAreStored() {
++  for (const store of localAccountUtils.pluggableStores) {
++    await withLocalAccount(store, async () => {
++      for (const [description, contents] of Object.entries(VALID_SOURCES)) {
++        const dest = await copyFileInto(`valid-${description}`, contents);
++        Assert.equal(
++          dest.getTotalMessages(false),
++          1,
++          `${description} is stored as exactly one message (${store})`
++        );
++      }
++    });
++  }
++});
++
++add_task(async function test_incompleteSourcesAreNotStored() {
++  for (const store of localAccountUtils.pluggableStores) {
++    await withLocalAccount(store, async () => {
++      for (const [description, contents] of Object.entries(
++        INCOMPLETE_SOURCES
++      )) {
++        const dest = await copyFileInto(`incomplete-${description}`, contents);
++        Assert.equal(
++          dest.getTotalMessages(false),
++          0,
++          `${description} is not a message and must not be stored (${store})`
++        );
++      }
++    });
++  }
++});
+diff --git a/mailnews/local/test/unit/xpcshell.toml b/mailnews/local/test/unit/xpcshell.toml
+--- a/mailnews/local/test/unit/xpcshell.toml
++++ b/mailnews/local/test/unit/xpcshell.toml
+@@ -102,16 +102,18 @@ requesttimeoutfactor = 12
+ ["test_pop3Proxy.js"]
+ 
+ ["test_pop3Pump.js"]
+ 
+ ["test_pop3ServerDisconnect.js"]
+ 
+ ["test_pop3StateDeadlock.js"]
+ 
++["test_copyFileMessageIntegrity.js"]
++
+ ["test_preview.js"]
+ 
+ ["test_saveMessage.js"]
+ 
+ ["test_streamHeaders.js"]
+ 
+ ["test_undoDelete.js"]
+ 
+
