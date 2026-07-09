@@ -1,0 +1,491 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1783551500 0
+# Node ID 0ab048e0b59b6aa45f3ccaab0246d464e4e89029
+# Parent  85053fc81a77f7f1ba5af7aa1866bc7bfc0e569e
+Bug 2051476 - Normalize file URIs from command-line attachments. r=darktrojan
+
+When external applications pass attachments via `-compose`, they sometimes use
+URL-encoded Windows paths such as `file:///C%3A%5Ctemp%5Cinfo.pdf`. The backend
+correctly resolved these to native files, but `ComposeStartup` stored the raw
+`uri.spec` — preserving percent-encoded backslashes in the URL string.
+
+This broke the UI's filename extraction (`attachment.url.split("/").pop()`),
+since there are no forward slashes in a `%5C`-delimited path.
+
+Fix by rebuilding `attachment.url` from the resolved native file path via
+`PathUtils.toFileURI()`, which produces a standard-compliant URI with forward
+slashes regardless of the input form. Non-file URIs continue to use `uri.spec`.
+
+Also add marionette tests for the `--compose` attachment code path, covering:
+- a single file with a comma in the name (exercises the comma-in-URI fix from
+  bug 900117)
+- multiple comma-separated file URIs
+- that the resulting `attachment.url` is a well-formed `file:///` URI
+
+Differential Revision: https://phabricator.services.mozilla.com/D310203
+
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -4762,24 +4762,27 @@ async function ComposeStartup() {
+           const uri = window.arguments[1].resolveURI(attachmentName);
+           let attachment = Cc[
+             "@mozilla.org/messengercompose/attachment;1"
+           ].createInstance(Ci.nsIMsgAttachment);
+           // If uri is for a file and it exists set the attachment size.
+           if (uri instanceof Ci.nsIFileURL) {
+             if (uri.file.exists()) {
+               attachment.size = uri.file.fileSize;
++              // Rebuild a standard-compliant URI from the native file path.
++              attachment.url = PathUtils.toFileURI(uri.file.path);
+             } else {
+               attachment = null;
+             }
++          } else {
++            attachment.url = uri.spec;
+           }
+ 
+           // Only want to attach if a file that exists or it is not a file.
+           if (attachment) {
+-            attachment.url = uri.spec;
+             composeFields.addAttachment(attachment);
+           } else {
+             const title = getComposeBundle().getString("errorFileAttachTitle");
+             const msg = getComposeBundle().getFormattedString(
+               "errorFileAttachMessage",
+               [attachmentName]
+             );
+             Services.prompt.alert(null, title, msg);
+diff --git a/mail/test/marionette/manifest.toml b/mail/test/marionette/manifest.toml
+--- a/mail/test/marionette/manifest.toml
++++ b/mail/test/marionette/manifest.toml
+@@ -3,16 +3,18 @@ support-files = ["data/**", "scripts/**"
+ 
+ ["test_close_to_tray.py"]
+ run-if = [
+   "os == 'win'",
+ ]
+ 
+ ["test_commandline.py"]
+ 
++["test_compose_commandline.py"]
++
+ ["test_menubar_migration.py"]
+ run-if = [
+   "os != 'mac'",
+ ]
+ 
+ ["test_sessionstore.py"]
+ 
+ ["test_systemintegration.py"]
+diff --git a/mail/test/marionette/scripts/get_attachment_info.js b/mail/test/marionette/scripts/get_attachment_info.js
+new file mode 100644
+--- /dev/null
++++ b/mail/test/marionette/scripts/get_attachment_info.js
+@@ -0,0 +1,26 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* global arguments */
++
++const [resolve] = arguments;
++
++function finish() {
++  const bucket = document.getElementById("attachmentBucket");
++  const items = [];
++  for (let i = 0; i < bucket.itemCount; i++) {
++    const item = bucket.getItemAtIndex(i);
++    items.push({
++      name: item.attachment.name,
++      url: item.attachment.url,
++    });
++  }
++  resolve(items);
++}
++
++if (window.composeEditorReady) {
++  finish();
++} else {
++  window.addEventListener("compose-editor-ready", finish, { once: true });
++}
+diff --git a/mail/test/marionette/scripts/get_compose_details.js b/mail/test/marionette/scripts/get_compose_details.js
+new file mode 100644
+--- /dev/null
++++ b/mail/test/marionette/scripts/get_compose_details.js
+@@ -0,0 +1,28 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* global arguments */
++
++const [resolve] = arguments;
++
++function finish() {
++  function getRecipients(field) {
++    return Array.from(
++      document.querySelectorAll(`#${field} mail-address-pill`),
++      pill => pill.label
++    );
++  }
++  resolve({
++    to: getRecipients("addressRowTo"),
++    cc: getRecipients("addressRowCc"),
++    bcc: getRecipients("addressRowBcc"),
++    subject: document.getElementById("msgSubject").value,
++  });
++}
++
++if (window.composeEditorReady) {
++  finish();
++} else {
++  window.addEventListener("compose-editor-ready", finish, { once: true });
++}
+diff --git a/mail/test/marionette/scripts/tabs.js b/mail/test/marionette/scripts/get_tabs.js
+rename from mail/test/marionette/scripts/tabs.js
+rename to mail/test/marionette/scripts/get_tabs.js
+diff --git a/mail/test/marionette/test_commandline.py b/mail/test/marionette/test_commandline.py
+--- a/mail/test/marionette/test_commandline.py
++++ b/mail/test/marionette/test_commandline.py
+@@ -3,17 +3,17 @@
+ # file, you can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ import os.path
+ 
+ from marionette_harness import MarionetteTestCase
+ 
+ here = os.path.dirname(__file__)
+ 
+-with open(os.path.join(here, "scripts", "tabs.js")) as script:
++with open(os.path.join(here, "scripts", "get_tabs.js")) as script:
+     get_tabs = script.read()
+ mail_3pane_tab = {"mode": "mail3PaneTab"}
+ close_tabs = """
+     const tabmail = document.getElementById("tabmail");
+     tabmail.closeOtherTabs(0);
+ """
+ 
+ 
+@@ -111,106 +111,16 @@ class TestCommandLine(MarionetteTestCase
+         self.assertEqual("mail:3pane", self.marionette.get_window_type())
+ 
+         tabs = self.marionette.execute_async_script(get_tabs)
+         self.assertEqual(expected_tabs, tabs)
+ 
+         self.marionette.execute_script(close_tabs)
+         self.marionette.instance.app_args = []
+ 
+-    get_compose_details = """
+-        const [resolve] = arguments;
+-
+-        function finish() {
+-            function getRecipients(field) {
+-                return Array.from(
+-                    document.querySelectorAll(`#${field} mail-address-pill`),
+-                    pill => pill.label
+-                );
+-            }
+-            resolve({
+-                to: getRecipients("addressRowTo"),
+-                cc: getRecipients("addressRowCc"),
+-                bcc: getRecipients("addressRowBcc"),
+-                subject: document.getElementById("msgSubject").value,
+-            });
+-        }
+-
+-        if (window.composeEditorReady) {
+-            finish();
+-        } else {
+-            window.addEventListener("compose-editor-ready", finish, { once: true });
+-        }
+-    """
+-
+-    def test_compose(self):
+-        """
+-        Opens the main window and a compose window with the compose fields from the command-line.
+-        Note that there's a different code path for this if you include the `--compose` flag.
+-        That can't currently be tested because it only opens the compose window.
+-        """
+-
+-        # Just enough preferences to allow composing a message.
+-        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
+-        self.marionette.set_prefs(
+-            {
+-                "mail.account.account1.identities": "id1",
+-                "mail.account.account1.server": "server1",
+-                "mail.accountmanager.accounts": "account1",
+-                "mail.accountmanager.defaultaccount": "account1",
+-                "mail.identity.id1.fullName": "Marionette",
+-                "mail.identity.id1.useremail": "marionette@invalid",
+-                "mail.identity.id1.valid": True,
+-                "mail.server.server1.hostname": "localhost",
+-                "mail.server.server1.login_at_startup": False,
+-                "mail.server.server1.type": "pop3",
+-            }
+-        )
+-        self.marionette.quit(in_app=True)
+-
+-        self.marionette.instance.app_args = [
+-            "mailto:test@invalid?cc=everybody@invalid&subject=I'm having a party!"
+-        ]
+-        self.marionette.start_session()
+-
+-        handles = self.marionette.chrome_window_handles
+-        self.assertEqual(2, len(handles))
+-
+-        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
+-        self.assertEqual("mail:3pane", self.marionette.get_window_type())
+-        tabs = self.marionette.execute_async_script(get_tabs)
+-        self.assertEqual([mail_3pane_tab], tabs)
+-
+-        self.marionette.switch_to_window(handles[1], True)
+-        self.assertEqual("msgcompose", self.marionette.get_window_type())
+-
+-        compose_details = self.marionette.execute_async_script(self.get_compose_details)
+-        self.assertEqual(
+-            {
+-                "to": ["test@invalid"],
+-                "cc": ["everybody@invalid"],
+-                "bcc": [],
+-                "subject": "I'm having a party!",
+-            },
+-            compose_details,
+-        )
+-
+-        self.marionette.clear_pref("mail.account.account1.identities")
+-        self.marionette.clear_pref("mail.account.account1.server")
+-        self.marionette.clear_pref("mail.accountmanager.accounts")
+-        self.marionette.clear_pref("mail.accountmanager.defaultaccount")
+-        self.marionette.clear_pref("mail.identity.id1.fullName")
+-        self.marionette.clear_pref("mail.identity.id1.useremail")
+-        self.marionette.clear_pref("mail.identity.id1.valid")
+-        self.marionette.clear_pref("mail.server.server1.hostname")
+-        self.marionette.clear_pref("mail.server.server1.login_at_startup")
+-        self.marionette.clear_pref("mail.server.server1.type")
+-        self.marionette.close_chrome_window()
+-        self.marionette.instance.app_args = []
+-
+     def test_thunderbird_url(self):
+         self.marionette.set_context(self.marionette.CONTEXT_CHROME)
+         self.marionette.quit(in_app=True)
+ 
+         # Open Thunderbird, passing a net.thunderbird URL.
+         self.marionette.instance.app_args = ["net.thunderbird://replay/hello"]
+         self.marionette.start_session()
+         self.marionette.set_context(self.marionette.CONTEXT_CHROME)
+diff --git a/mail/test/marionette/test_compose_commandline.py b/mail/test/marionette/test_compose_commandline.py
+new file mode 100644
+--- /dev/null
++++ b/mail/test/marionette/test_compose_commandline.py
+@@ -0,0 +1,184 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, you can obtain one at http://mozilla.org/MPL/2.0/.
++
++import os.path
++import tempfile
++
++from marionette_harness import MarionetteTestCase
++
++here = os.path.dirname(__file__)
++
++with open(os.path.join(here, "scripts", "get_tabs.js")) as script:
++    get_tabs = script.read()
++with open(os.path.join(here, "scripts", "get_compose_details.js")) as script:
++    get_compose_details = script.read()
++with open(os.path.join(here, "scripts", "get_attachment_info.js")) as script:
++    get_attachment_info = script.read()
++mail_3pane_tab = {"mode": "mail3PaneTab"}
++
++
++class TestComposeCommandLine(MarionetteTestCase):
++    # Shared account prefs needed for compose tests.
++    _COMPOSE_PREFS = {
++        "mail.account.account1.identities": "id1",
++        "mail.account.account1.server": "server1",
++        "mail.accountmanager.accounts": "account1",
++        "mail.accountmanager.defaultaccount": "account1",
++        "mail.identity.id1.fullName": "Marionette",
++        "mail.identity.id1.useremail": "marionette@invalid",
++        "mail.identity.id1.valid": True,
++        "mail.server.server1.hostname": "localhost",
++        "mail.server.server1.login_at_startup": False,
++        "mail.server.server1.type": "pop3",
++    }
++    _COMPOSE_PREF_KEYS = list(_COMPOSE_PREFS.keys())
++
++    def _setup_compose_prefs(self):
++        """Set up account preferences and restart for a compose test."""
++        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++        self.marionette.set_prefs(self._COMPOSE_PREFS)
++        self.marionette.quit(in_app=True)
++
++    def _teardown_compose_prefs(self):
++        """Clean up account preferences and quit the session."""
++        for key in self._COMPOSE_PREF_KEYS:
++            self.marionette.clear_pref(key)
++        self.marionette.instance.app_args = []
++        self.marionette.quit(in_app=True)
++
++    def _assert_attachments(self, temp_paths, attachment_items):
++        """Assert attachment names and URL format match the given paths."""
++        self.assertEqual(len(temp_paths), len(attachment_items))
++        for temp_path, item in zip(temp_paths, attachment_items):
++            self.assertEqual(os.path.basename(temp_path), item["name"])
++            url = item["url"]
++            self.assertTrue(url.startswith("file:///"))
++            self.assertNotIn("\\", url, "URL should not contain backslashes")
++            # The URL should end with the filename (comma may or may not be
++            # percent-encoded, both forms are valid in file URIs).
++            filename = os.path.basename(temp_path)
++            self.assertTrue(
++                url.endswith(filename) or url.endswith(filename.replace(",", "%2C")),
++            )
++
++    def test_compose(self):
++        """
++        Opens the main window and a compose window with the compose fields from the
++        command-line (uses the mailto: code path).
++        """
++
++        self._setup_compose_prefs()
++
++        self.marionette.instance.app_args = [
++            "mailto:test@invalid?cc=everybody@invalid&subject=I'm having a party!"
++        ]
++        self.marionette.start_session()
++
++        handles = self.marionette.chrome_window_handles
++        self.assertEqual(2, len(handles))
++
++        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++        self.assertEqual("mail:3pane", self.marionette.get_window_type())
++        tabs = self.marionette.execute_async_script(get_tabs)
++        self.assertEqual([mail_3pane_tab], tabs)
++
++        self.marionette.switch_to_window(handles[1], True)
++        self.assertEqual("msgcompose", self.marionette.get_window_type())
++
++        compose_details = self.marionette.execute_async_script(
++            get_compose_details
++        )
++        self.assertEqual(
++            {
++                "to": ["test@invalid"],
++                "cc": ["everybody@invalid"],
++                "bcc": [],
++                "subject": "I'm having a party!",
++            },
++            compose_details,
++        )
++
++        self._teardown_compose_prefs()
++
++    def test_compose_attachment(self):
++        """
++        Opens a compose window with a file attachment from the --compose command line.
++        Uses a filename containing a comma to verify comma-in-URI handling (bug 900117)
++        and verifies the URL is a well-formed file:/// URI (bug 2051476).
++        """
++
++        # Create a temp file with a comma in the name (exercises comma-in-URI fix).
++        tmpdir = tempfile.mkdtemp()
++        temp_path = os.path.join(tmpdir, "tb-attach,test.txt")
++        with open(temp_path, "wb") as f:
++            f.write(b"test content")
++
++        try:
++            self._setup_compose_prefs()
++
++            self.marionette.instance.app_args = [
++                "--compose",
++                f"attachment='file://{temp_path}'",
++            ]
++            self.marionette.start_session()
++
++            handles = self.marionette.chrome_window_handles
++            self.assertEqual(2, len(handles))
++
++            self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++            self.assertEqual("mail:3pane", self.marionette.get_window_type())
++
++            self.marionette.switch_to_window(handles[1], True)
++            self.assertEqual("msgcompose", self.marionette.get_window_type())
++
++            items = self.marionette.execute_async_script(get_attachment_info)
++            self._assert_attachments([temp_path], items)
++
++            self._teardown_compose_prefs()
++        finally:
++            os.unlink(temp_path)
++            os.rmdir(tmpdir)
++
++    def test_compose_attachment_multiple(self):
++        """
++        Opens a compose window with multiple comma-separated file URIs from the
++        --compose command line. Verifies each attachment has the correct filename
++        and a well-formed URL.
++        """
++
++        # Create two temporary files to attach.
++        temp_paths = []
++        for suffix in ("-first.txt", "-second.txt"):
++            with tempfile.NamedTemporaryFile(
++                prefix="tb-attach", suffix=suffix, delete=False
++            ) as f:
++                f.write(b"test content")
++                temp_paths.append(f.name)
++
++        try:
++            self._setup_compose_prefs()
++
++            attachment_arg = ",".join(f"file://{p}" for p in temp_paths)
++            self.marionette.instance.app_args = [
++                "--compose",
++                f"attachment='{attachment_arg}'",
++            ]
++            self.marionette.start_session()
++
++            handles = self.marionette.chrome_window_handles
++            self.assertEqual(2, len(handles))
++
++            self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++            self.assertEqual("mail:3pane", self.marionette.get_window_type())
++
++            self.marionette.switch_to_window(handles[1], True)
++            self.assertEqual("msgcompose", self.marionette.get_window_type())
++
++            items = self.marionette.execute_async_script(get_attachment_info)
++            self._assert_attachments(temp_paths, items)
++
++            self._teardown_compose_prefs()
++        finally:
++            for p in temp_paths:
++                os.unlink(p)
+diff --git a/mail/test/marionette/test_sessionstore.py b/mail/test/marionette/test_sessionstore.py
+--- a/mail/test/marionette/test_sessionstore.py
++++ b/mail/test/marionette/test_sessionstore.py
+@@ -4,17 +4,17 @@
+ 
+ import json
+ import os.path
+ 
+ from marionette_harness import MarionetteTestCase
+ 
+ here = os.path.dirname(__file__)
+ 
+-with open(os.path.join(here, "scripts", "tabs.js")) as script:
++with open(os.path.join(here, "scripts", "get_tabs.js")) as script:
+     get_tabs = script.read()
+ mail_3pane_tab = {"mode": "mail3PaneTab"}
+ close_tabs = """
+     const tabmail = document.getElementById("tabmail");
+     tabmail.closeOtherTabs(0);
+ """
+ 
+ 
+

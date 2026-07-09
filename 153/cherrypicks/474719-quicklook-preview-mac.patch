@@ -1,0 +1,674 @@
+
+# HG changeset patch
+# User Nomis101 <Nomis101@web.de>
+# Date 1783463330 0
+# Node ID f9c60baf64aa2dc3fcf028ada38ee4fd9e84ccbc
+# Parent  36892bdfeb7a6ccebd2a94f309963372c01e6a0e
+Bug 474719 - add preview functionality (QuickLook-like) for attachments. r=mkmelin,edicharry,arschmitz,tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D301150
+
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -35,16 +35,33 @@ ChromeUtils.defineESModuleGetters(this, 
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   MessageArchiver: "resource:///modules/MessageArchiver.sys.mjs",
+   PgpSqliteDb2: "chrome://openpgp/content/modules/sqliteDb.sys.mjs",
+   PhishingDetector: "resource:///modules/PhishingDetector.sys.mjs",
+   calendarDeactivator:
+     "resource:///modules/calendar/calCalendarDeactivator.sys.mjs",
+ });
+ 
++ChromeUtils.defineLazyGetter(this, "gQuickLookManager", () => {
++  // QuickLookManager.sys.mjs and the nsIMacQuickLook interface it depends on
++  // are only built and packaged on macOS. On other platforms the module's
++  // resource URL does not resolve, and merely referencing it in
++  // ChromeUtils.importESModule() trips CheckForBrokenChromeURL (a try/catch
++  // does not prevent that, since the broken-URL check happens before JS
++  // throws). Gate on the Mac-only interface so the import is never reached
++  // off macOS.
++  if (!("nsIMacQuickLook" in Ci)) {
++    return null;
++  }
++  const { QuickLookManager } = ChromeUtils.importESModule(
++    "resource:///modules/QuickLookManager.sys.mjs"
++  );
++  return QuickLookManager;
++});
++
+ XPCOMUtils.defineLazyServiceGetter(
+   this,
+   "gDbService",
+   "@mozilla.org/msgDatabase/msgDBService;1",
+   Ci.nsIMsgDBService
+ );
+ XPCOMUtils.defineLazyServiceGetter(
+   this,
+@@ -1514,16 +1531,20 @@ function UpdateExpandedMessageHeaders() 
+  * Clear global header data in anticipation of a new message to be displayed.
+  */
+ function ClearCurrentHeaders() {
+   currentHeaderData = {};
+ 
+   currentAttachments = [];
+   currentCharacterSet = "";
+ 
++  if (gQuickLookManager?.isAvailable) {
++    gQuickLookManager.close();
++  }
++
+   // Get rid of earlier event handlers on #attachmentName.
+   const attachmentName = document.getElementById("attachmentName");
+   attachmentName.replaceWith(attachmentName.cloneNode(true));
+ 
+   document.getElementById("attachmentList").replaceChildren();
+ }
+ 
+ function ShowMessageHeaderPane() {
+@@ -1913,16 +1934,22 @@ async function displayAttachmentsForExpa
+     attachmentView.collapsed = true;
+     attachmentSplitter.collapsed = true;
+   } else if (!gBuildAttachmentsForCurrentMsg) {
+     attachmentView.collapsed = false;
+ 
+     var attachmentList = document.getElementById("attachmentList");
+     attachmentList.controllers.appendController(AttachmentListController);
+ 
++    if (gQuickLookManager?.isAvailable) {
++      attachmentList.addEventListener("quicklook", event => {
++        gQuickLookManager.toggle(currentAttachments, event.detail.index);
++      });
++    }
++
+     toggleAttachmentList(false);
+ 
+     for (const attachment of currentAttachments) {
+       // Create a new attachment widget
+       var displayName = SanitizeAttachmentDisplayName(attachment);
+       var item = attachmentList.appendItem(attachment, displayName);
+       item.setAttribute("tooltiptext", attachment.name);
+ 
+diff --git a/mail/base/content/widgets/attachment-list.mjs b/mail/base/content/widgets/attachment-list.mjs
+--- a/mail/base/content/widgets/attachment-list.mjs
++++ b/mail/base/content/widgets/attachment-list.mjs
+@@ -24,16 +24,22 @@ class MozAttachmentlist extends MozEleme
+     );
+ 
+     this.addEventListener("keypress", event => {
+       switch (event.key) {
+         case " ":
+           // Allow plain spacebar to select the focused item.
+           if (!event.shiftKey && !event.ctrlKey) {
+             this.addItemToSelection(this.currentItem);
++            this.dispatchEvent(
++              new CustomEvent("quicklook", {
++                bubbles: true,
++                detail: { index: this.getIndexOfItem(this.currentItem) },
++              })
++            );
+           }
+           // Prevent inbuilt scrolling.
+           event.preventDefault();
+           break;
+ 
+         case "Enter":
+           if (this.currentItem && !event.ctrlKey && !event.shiftKey) {
+             this.addItemToSelection(this.currentItem);
+diff --git a/mail/components/shell/components.conf b/mail/components/shell/components.conf
+--- a/mail/components/shell/components.conf
++++ b/mail/components/shell/components.conf
+@@ -29,9 +29,15 @@ if buildconfig.substs["MOZ_WIDGET_TOOLKI
+ if buildconfig.substs["OS_ARCH"] == "Darwin":
+     Classes += [
+         {
+             "cid": "{85a27035-b970-4079-b9d2-e21f69e6b21f}",
+             "contract_ids": ["@mozilla.org/mail/shell-service;1"],
+             "type": "nsMacShellService",
+             "headers": ["/comm/mail/components/shell/nsMacShellService.h"],
+         },
++        {
++            "cid": "{c4a1b3e7-8d5f-4e2a-9c6b-3f7d1e8a5c2d}",
++            "contract_ids": ["@mozilla.org/mail/mac-quick-look;1"],
++            "type": "nsMacQuickLook",
++            "headers": ["/comm/mail/components/shell/nsMacQuickLook.h"],
++        },
+     ]
+diff --git a/mail/components/shell/moz.build b/mail/components/shell/moz.build
+--- a/mail/components/shell/moz.build
++++ b/mail/components/shell/moz.build
+@@ -20,19 +20,26 @@ if CONFIG["OS_ARCH"] == "WINNT":
+     ]
+     OS_LIBS += [
+         "bcrypt",
+         "crypt32",
+         "propsys",
+     ]
+ 
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
++    XPIDL_SOURCES += [
++        "nsIMacQuickLook.idl",
++    ]
+     SOURCES += [
++        "nsMacQuickLook.mm",
+         "nsMacShellService.cpp",
+     ]
++    OS_LIBS += [
++        "-framework Quartz",
++    ]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+     SOURCES += [
+         "nsGNOMEShellService.cpp",
+     ]
+ 
+ if SOURCES:
+     FINAL_LIBRARY = "mailcomps"
+ 
+diff --git a/mail/components/shell/nsIMacQuickLook.idl b/mail/components/shell/nsIMacQuickLook.idl
+new file mode 100644
+--- /dev/null
++++ b/mail/components/shell/nsIMacQuickLook.idl
+@@ -0,0 +1,63 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++/**
++ * Provides a thin XPCOM wrapper around the macOS QuickLook (QLPreviewPanel)
++ * API, allowing JavaScript callers in Thunderbird to display the system
++ * preview panel for one or more local files (typically message attachments
++ * that have been written to a temporary location).
++ *
++ * The implementation drives the shared QLPreviewPanel, so at most one
++ * preview session is active at any time. This interface is only available
++ * on macOS.
++ */
++[scriptable, uuid(a3d22a1e-63f7-4b5c-9b4a-1d8e5f2c9b3a)]
++interface nsIMacQuickLook : nsISupports
++{
++  /**
++   * Opens the QuickLook preview panel for the supplied set of files and
++   * makes it the key window.
++   *
++   * The two arrays must have the same length: the entry at position i in
++   * aTitles is used as the display title for the file at position i in
++   * aFilePaths. Passing an empty aFilePaths array, or arrays of differing
++   * lengths, results in NS_ERROR_INVALID_ARG.
++   *
++   * @param aFilePaths Absolute paths to the local files to preview.
++   * @param aTitles    Display titles to show in the preview panel,
++   *                   one per file in aFilePaths.
++   * @param aIndex     Zero-based index of the item that should be shown
++   *                   initially. Values outside the range of aFilePaths
++   *                   are ignored and the panel's current index is left
++   *                   unchanged.
++   */
++  void show(in Array<AString> aFilePaths, in Array<AString> aTitles,
++            in unsigned long aIndex);
++
++  /**
++   * Closes the QuickLook preview panel if it is currently visible.
++   * Has no effect when the panel is already hidden.
++   */
++  void close();
++
++  /**
++   * True while the shared QuickLook preview panel is visible on screen,
++   * false otherwise. Useful for toggling preview state from callers.
++   */
++  readonly attribute boolean isOpen;
++
++  /**
++   * Switches the currently visible QuickLook preview panel to the item
++   * at the given zero-based index. Has no effect if the panel is not
++   * currently visible.
++   *
++   * @param aIndex Zero-based index of the item to display. The caller is
++   *               responsible for ensuring the index is valid for the
++   *               item set most recently passed to show().
++   */
++  void navigateToIndex(in unsigned long aIndex);
++};
+diff --git a/mail/components/shell/nsMacQuickLook.h b/mail/components/shell/nsMacQuickLook.h
+new file mode 100644
+--- /dev/null
++++ b/mail/components/shell/nsMacQuickLook.h
+@@ -0,0 +1,27 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef COMM_MAIL_COMPONENTS_SHELL_NSMACQUICKLOOK_H_
++#define COMM_MAIL_COMPONENTS_SHELL_NSMACQUICKLOOK_H_
++
++#include "nsIMacQuickLook.h"
++#include "nsTArray.h"
++#include "nsString.h"
++
++class nsMacQuickLook : public nsIMacQuickLook {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_DECL_NSIMACQUICKLOOK
++
++  nsMacQuickLook() = default;
++
++ private:
++  virtual ~nsMacQuickLook();
++
++  nsTArray<nsString> mFilePaths;
++  nsTArray<nsString> mTitles;
++};
++
++#endif  // COMM_MAIL_COMPONENTS_SHELL_NSMACQUICKLOOK_H_
+diff --git a/mail/components/shell/nsMacQuickLook.mm b/mail/components/shell/nsMacQuickLook.mm
+new file mode 100644
+--- /dev/null
++++ b/mail/components/shell/nsMacQuickLook.mm
+@@ -0,0 +1,159 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#import <Quartz/Quartz.h>
++
++#include "nsMacQuickLook.h"
++#include "nsObjCExceptions.h"
++#include "nsCocoaUtils.h"
++
++// Wraps a single preview item for QLPreviewPanel.
++@interface MOZQuickLookItem : NSObject <QLPreviewItem>
++@property(readonly, nonatomic) NSURL* previewItemURL;
++@property(readonly, nonatomic) NSString* previewItemTitle;
++- (instancetype)initWithURL:(NSURL*)url title:(NSString*)title;
++@end
++
++@implementation MOZQuickLookItem
++- (instancetype)initWithURL:(NSURL*)url title:(NSString*)title {
++  self = [super init];
++  if (self) {
++    _previewItemURL = [url retain];
++    _previewItemTitle = [title copy];
++  }
++  return self;
++}
++
++- (void)dealloc {
++  [_previewItemURL release];
++  [_previewItemTitle release];
++  [super dealloc];
++}
++@end
++
++// Data source and delegate for QLPreviewPanel.
++@interface MOZQuickLookDelegate
++    : NSObject <QLPreviewPanelDataSource, QLPreviewPanelDelegate>
++@property(nonatomic, strong) NSMutableArray<MOZQuickLookItem*>* items;
++@end
++
++@implementation MOZQuickLookDelegate
++
++- (NSInteger)numberOfPreviewItemsInPreviewPanel:(QLPreviewPanel*)panel {
++  return self.items.count;
++}
++
++- (id<QLPreviewItem>)previewPanel:(QLPreviewPanel*)panel
++               previewItemAtIndex:(NSInteger)index {
++  if (index < 0 || (NSUInteger)index >= self.items.count) {
++    return nil;
++  }
++  return self.items[index];
++}
++
++@end
++
++static MOZQuickLookDelegate* sDelegate = nil;
++
++NS_IMPL_ISUPPORTS(nsMacQuickLook, nsIMacQuickLook)
++
++nsMacQuickLook::~nsMacQuickLook() {
++  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
++  if (sDelegate) {
++    QLPreviewPanel* panel = [QLPreviewPanel sharedPreviewPanel];
++    if ([panel isVisible]) {
++      [panel orderOut:nil];
++    }
++    panel.dataSource = nil;
++    panel.delegate = nil;
++    [sDelegate release];
++    sDelegate = nil;
++  }
++  NS_OBJC_END_TRY_IGNORE_BLOCK;
++}
++
++NS_IMETHODIMP
++nsMacQuickLook::Show(const nsTArray<nsString>& aFilePaths,
++                     const nsTArray<nsString>& aTitles, uint32_t aIndex) {
++  NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
++
++  if (aFilePaths.IsEmpty()) {
++    return NS_ERROR_INVALID_ARG;
++  }
++  if (aFilePaths.Length() != aTitles.Length()) {
++    return NS_ERROR_INVALID_ARG;
++  }
++
++  mFilePaths = aFilePaths.Clone();
++  mTitles = aTitles.Clone();
++
++  if (!sDelegate) {
++    sDelegate = [[MOZQuickLookDelegate alloc] init];
++  }
++
++  NSMutableArray* items =
++      [NSMutableArray arrayWithCapacity:aFilePaths.Length()];
++  for (uint32_t i = 0; i < aFilePaths.Length(); i++) {
++    NSString* path = nsCocoaUtils::ToNSString(aFilePaths[i]);
++    NSString* title = nsCocoaUtils::ToNSString(aTitles[i]);
++    NSURL* url = [NSURL fileURLWithPath:path];
++    MOZQuickLookItem* item = [[MOZQuickLookItem alloc] initWithURL:url
++                                                             title:title];
++    [items addObject:item];
++    [item release];
++  }
++  sDelegate.items = items;
++
++  QLPreviewPanel* panel = [QLPreviewPanel sharedPreviewPanel];
++  panel.dataSource = sDelegate;
++  panel.delegate = sDelegate;
++  [panel reloadData];
++  if (aIndex < aFilePaths.Length()) {
++    [panel setCurrentPreviewItemIndex:aIndex];
++  }
++  [panel makeKeyAndOrderFront:nil];
++
++  return NS_OK;
++
++  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE);
++}
++
++NS_IMETHODIMP
++nsMacQuickLook::Close() {
++  NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
++
++  QLPreviewPanel* panel = [QLPreviewPanel sharedPreviewPanel];
++  if ([panel isVisible]) {
++    [panel orderOut:nil];
++  }
++
++  return NS_OK;
++
++  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE);
++}
++
++NS_IMETHODIMP
++nsMacQuickLook::GetIsOpen(bool* aResult) {
++  NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
++
++  *aResult = [[QLPreviewPanel sharedPreviewPanel] isVisible];
++  return NS_OK;
++
++  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE);
++}
++
++NS_IMETHODIMP
++nsMacQuickLook::NavigateToIndex(uint32_t aIndex) {
++  NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
++
++  QLPreviewPanel* panel = [QLPreviewPanel sharedPreviewPanel];
++  if ([panel isVisible]) {
++    [panel setCurrentPreviewItemIndex:aIndex];
++  }
++
++  return NS_OK;
++
++  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE);
++}
+diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.sys.mjs
+--- a/mail/modules/AttachmentInfo.sys.mjs
++++ b/mail/modules/AttachmentInfo.sys.mjs
+@@ -319,17 +319,17 @@ export class AttachmentInfo {
+   }
+ 
+   /**
+    * Create a temp file in an appropriate non-predictable temp folder.
+    *
+    * @param {string} filename - Preferred filename.
+    * @returns {nsIFile} the created file.
+    */
+-  async #setupTempFile(filename) {
++  async setupTempFile(filename) {
+     const tmpPath = PathUtils.join(
+       PathUtils.tempDir,
+       "pid-" + Services.appinfo.processID
+     );
+     await IOUtils.makeDirectory(tmpPath, { permissions: 0o700 });
+     const tempFile = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+     tempFile.initWithPath(tmpPath);
+ 
+@@ -362,17 +362,17 @@ export class AttachmentInfo {
+       chunks.push(String.fromCharCode.apply(null, uint8.subarray(j, j + 8192)));
+     }
+ 
+     // Join once to prevent intermediate string garbage collection
+     const rawStr = chunks.join("");
+     const normalized = rawStr.replace(/\r\n?|\n/g, "\r\n");
+ 
+     // Write to a temp file, then import into the target folder.
+-    const tempFile = await this.#setupTempFile("imported-message.eml");
++    const tempFile = await this.setupTempFile("imported-message.eml");
+     try {
+       await IOUtils.write(
+         tempFile.path,
+         lazy.MailStringUtils.byteStringToUint8Array(normalized)
+       );
+ 
+       await lazy.MailUtils.copyFileMessageAsync(tempFile, targetFolder, null);
+     } finally {
+@@ -452,17 +452,17 @@ export class AttachmentInfo {
+         // that the name is included in the URI of the message that is
+         // opened, and possibly saved as a file later by the user.
+         let sanitizedName = lazy.DownloadPaths.sanitize(this.name);
+         if (!sanitizedName) {
+           sanitizedName = "message.eml";
+         } else if (!/\.eml$/i.test(sanitizedName)) {
+           sanitizedName += ".eml";
+         }
+-        tempFile = await this.#setupTempFile(sanitizedName);
++        tempFile = await this.setupTempFile(sanitizedName);
+         await this.saveToFile(tempFile.path, true);
+ 
+         this.#temporaryFiles.set(this.url, tempFile);
+       }
+ 
+       lazy.MailUtils.openEMLFile(
+         win,
+         tempFile,
+@@ -493,17 +493,17 @@ export class AttachmentInfo {
+       mimeInfo.preferredAction = Ci.nsIHandlerInfo.alwaysAsk;
+     }
+ 
+     // If we know what to do, do it.
+ 
+     const name = lazy.DownloadPaths.sanitize(this.name);
+ 
+     const createTemporaryFileAndOpen = async fileMimeInfo => {
+-      const tempFile = await this.#setupTempFile(name);
++      const tempFile = await this.setupTempFile(name);
+ 
+       await this.saveToFile(tempFile.path, true);
+       // Before opening from the temp dir, make the file read-only so that
+       // users don't edit and lose their edits...
+       await IOUtils.setPermissions(tempFile.path, 0o400); // Set read-only
+       this._openFile(fileMimeInfo, tempFile);
+     };
+ 
+diff --git a/mail/modules/QuickLookManager.sys.mjs b/mail/modules/QuickLookManager.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/modules/QuickLookManager.sys.mjs
+@@ -0,0 +1,141 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
++const lazy = {};
++
++ChromeUtils.defineESModuleGetters(lazy, {
++  DownloadPaths: "resource://gre/modules/DownloadPaths.sys.mjs",
++});
++
++/**
++ * Manages macOS Quick Look preview of email attachments.
++ */
++export const QuickLookManager = {
++  _service: null,
++  _tempFiles: new Map(),
++  _sessionId: 0,
++
++  get isAvailable() {
++    return (
++      AppConstants.platform === "macosx" &&
++      "@mozilla.org/mail/mac-quick-look;1" in Cc
++    );
++  },
++
++  _getService() {
++    if (!this._service) {
++      this._service = Cc["@mozilla.org/mail/mac-quick-look;1"].createInstance(
++        Ci.nsIMacQuickLook
++      );
++    }
++    return this._service;
++  },
++
++  get isOpen() {
++    if (!this.isAvailable) {
++      return false;
++    }
++    return this._getService().isOpen;
++  },
++
++  async toggle(attachments, selectedIndex) {
++    if (this.isOpen) {
++      this.close();
++    } else {
++      await this.show(attachments, selectedIndex);
++    }
++  },
++
++  /**
++   * @param {AttachmentInfo[]} attachments - The attachments to preview.
++   * @param {number} selectedIndex - Index of the initially selected attachment.
++   */
++  async show(attachments, selectedIndex) {
++    const validAttachments = attachments.filter(
++      a => !a.isDeleted && a.hasFile && a.size !== 0
++    );
++    if (!validAttachments.length) {
++      return;
++    }
++
++    // Clamp selectedIndex to valid range. If the original index pointed to a
++    // filtered-out attachment, default to 0.
++    let adjustedIndex = 0;
++    if (selectedIndex >= 0 && selectedIndex < attachments.length) {
++      const selectedAttachment = attachments[selectedIndex];
++      const idx = validAttachments.indexOf(selectedAttachment);
++      if (idx >= 0) {
++        adjustedIndex = idx;
++      }
++    }
++
++    const sessionId = ++this._sessionId;
++    const paths = [];
++    const titles = [];
++
++    for (const attachment of validAttachments) {
++      if (sessionId !== this._sessionId) {
++        return;
++      }
++      const path = await this._ensureTempFile(attachment);
++      paths.push(path);
++      titles.push(attachment.name);
++    }
++
++    if (sessionId !== this._sessionId) {
++      return;
++    }
++
++    if (!paths.length) {
++      return;
++    }
++
++    if (adjustedIndex >= paths.length) {
++      adjustedIndex = 0;
++    }
++
++    this._getService().show(paths, titles, adjustedIndex);
++  },
++
++  close() {
++    if (!this.isAvailable) {
++      return;
++    }
++    try {
++      this._getService().close();
++    } catch (e) {}
++    this._tempFiles.clear();
++    this._sessionId++;
++  },
++
++  /**
++   * Returns a file path for the given attachment, using cache when possible.
++   * For file attachments, returns the existing local path directly.
++   *
++   * @param {AttachmentInfo} attachment
++   * @returns {string} the file path.
++   */
++  async _ensureTempFile(attachment) {
++    if (attachment.isFileAttachment) {
++      const url = Services.io.newURI(attachment.url);
++      if (url instanceof Ci.nsIFileURL) {
++        return url.file.path;
++      }
++    }
++
++    const cacheKey = attachment.url;
++    if (this._tempFiles.has(cacheKey)) {
++      return this._tempFiles.get(cacheKey);
++    }
++
++    const tempFile = await attachment.setupTempFile(
++      lazy.DownloadPaths.sanitize(attachment.name)
++    );
++    await attachment.saveToFile(tempFile.path, true);
++    this._tempFiles.set(cacheKey, tempFile.path);
++    return tempFile.path;
++  },
++};
+diff --git a/mail/modules/moz.build b/mail/modules/moz.build
+--- a/mail/modules/moz.build
++++ b/mail/modules/moz.build
+@@ -57,8 +57,13 @@ EXTRA_JS_MODULES.sessionstore += [
+     "SessionStore.sys.mjs",
+     "TabStateFlusher.sys.mjs",
+ ]
+ 
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+     EXTRA_JS_MODULES += [
+         "WindowsJumpLists.sys.mjs",
+     ]
++
++if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
++    EXTRA_JS_MODULES += [
++        "QuickLookManager.sys.mjs",
++    ]
+

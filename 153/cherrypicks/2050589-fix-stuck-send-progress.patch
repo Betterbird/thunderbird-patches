@@ -1,0 +1,612 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1783396687 -43200
+# Node ID 682a44153e393ccc3635f733849a27519c44afdf
+# Parent  6dff13b9c2c925e8927f8ac98e8de4f44d786410
+Bug 2050589 - Fix send progress getting stuck on Filter complete. r=BenC
+
+Differential Revision: https://phabricator.services.mozilla.com/D310458
+
+
+diff --git a/mailnews/compose/public/nsIMsgCompose.idl b/mailnews/compose/public/nsIMsgCompose.idl
+--- a/mailnews/compose/public/nsIMsgCompose.idl
++++ b/mailnews/compose/public/nsIMsgCompose.idl
+@@ -270,17 +270,8 @@ interface nsIMsgCompose : nsIMsgSendList
+ 
+   /* for easier use of nsIMsgSendListener */
+   void removeMsgSendListener(in nsIMsgSendListener sendListener);
+ 
+   /// Access during mail-set-sender observer if needed, see nsIMsgCompDeliverMode.
+   readonly attribute MSG_DeliverMode deliverMode;
+ 
+ };
+-
+-/* send listener interface */
+-[scriptable, uuid(ad6ee068-b225-47f9-a50e-8e48440282ca)]
+-interface nsIMsgComposeSendListener : nsISupports {
+-
+-  void setMsgCompose(in nsIMsgCompose msgCompose);
+-  void setDeliverMode(in MSG_DeliverMode deliverMode);
+-
+-};
+diff --git a/mailnews/compose/src/components.conf b/mailnews/compose/src/components.conf
+--- a/mailnews/compose/src/components.conf
++++ b/mailnews/compose/src/components.conf
+@@ -30,22 +30,16 @@ Classes = [
+     },
+     {
+         "cid": "{cb998a00-c079-11d4-9daa-8df64bab2efc}",
+         "contract_ids": ["@mozilla.org/messengercompose/composeparams;1"],
+         "type": "nsMsgComposeParams",
+         "headers": ["/comm/mailnews/compose/src/nsMsgComposeParams.h"],
+     },
+     {
+-        "cid": "{acc72781-2cea-11d5-9daa-bacdeac1eefc}",
+-        "contract_ids": ["@mozilla.org/messengercompose/composesendlistener;1"],
+-        "type": "nsMsgComposeSendListener",
+-        "headers": ["/comm/mailnews/compose/src/nsMsgCompose.h"],
+-    },
+-    {
+         "cid": "{1e0e7c01-3e4c-11d5-9daa-f88d288130fc}",
+         "contract_ids": ["@mozilla.org/messengercompose/composeprogressparameters;1"],
+         "type": "nsMsgComposeProgressParams",
+         "headers": ["/comm/mailnews/compose/src/nsMsgComposeProgressParams.h"],
+     },
+     {
+         "cid": "{e64b0f51-0d7b-4e2f-8c60-3862ee8c174f}",
+         "contract_ids": ["@mozilla.org/messengercompose/composefields;1"],
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -1080,59 +1080,49 @@ nsMsgCompose::SendMsgToServer(MSG_Delive
+     if (!mMsgSend)
+       mMsgSend = do_CreateInstance("@mozilla.org/messengercompose/send;1");
+ 
+     if (mMsgSend) {
+       nsString bodyString;
+       rv = m_compFields->GetBody(bodyString);
+       NS_ENSURE_SUCCESS(rv, rv);
+ 
+-      // Create the listener for the send operation...
+-      nsCOMPtr<nsIMsgComposeSendListener> composeSendListener =
+-          do_CreateInstance(
+-              "@mozilla.org/messengercompose/composesendlistener;1");
+-      if (!composeSendListener) return NS_ERROR_OUT_OF_MEMORY;
+-
+       // right now, AutoSaveAsDraft is identical to SaveAsDraft as
+       // far as the msg send code is concerned. This way, we don't have
+       // to add an nsMsgDeliverMode for autosaveasdraft, and add cases for
+       // it in the msg send code.
+       if (deliverMode == nsIMsgCompDeliverMode::AutoSaveAsDraft)
+         deliverMode = nsIMsgCompDeliverMode::SaveAsDraft;
+ 
+       // When saving a draft, ensure each instance has a new messageId generated
+       // so imap search finds a unique match. This is needed for non-UIDPLUS
+       // imap servers.
+       if (deliverMode == nsIMsgCompDeliverMode::SaveAsDraft ||
+           deliverMode == nsIMsgCompDeliverMode::SaveAsTemplate)
+         m_compFields->SetMessageId("");
+ 
+-      RefPtr<nsIMsgCompose> msgCompose(this);
+-      composeSendListener->SetMsgCompose(msgCompose);
+-      composeSendListener->SetDeliverMode(deliverMode);
++      // Create the listener for the send operation...
++      RefPtr<nsMsgComposeSendListener> composeSendListener =
++          new nsMsgComposeSendListener(this, deliverMode);
+ 
+       if (mProgress) {
+-        nsCOMPtr<nsIWebProgressListener> progressListener =
+-            do_QueryInterface(composeSendListener);
+-        mProgress->RegisterListener(progressListener);
++        mProgress->RegisterListener(composeSendListener);
+       }
+ 
+       // If we are composing HTML, then this should be sent as
+       // multipart/related which means we pass the editor into the
+       // backend...if not, just pass nullptr
+       //
+-      nsCOMPtr<nsIMsgSendListener> sendListener =
+-          do_QueryInterface(composeSendListener);
+       RefPtr<mozilla::dom::Promise> promise;
+       mSendInFlight = true;
+       rv = mMsgSend->CreateAndSendMessage(
+           m_composeHTML ? m_editor.get() : nullptr, identity, accountKey,
+           m_compFields, false, false, (nsMsgDeliverMode)deliverMode, nullptr,
+           m_composeHTML ? TEXT_HTML : TEXT_PLAIN, bodyString, nullptr,
+-          mProgress, sendListener, mSmtpPassword, mOriginalMsgURI, mType,
++          mProgress, composeSendListener, mSmtpPassword, mOriginalMsgURI, mType,
+           getter_AddRefs(promise));
+       promise.forget(aPromise);
+     } else
+       rv = NS_ERROR_FAILURE;
+   } else
+     rv = NS_ERROR_NOT_INITIALIZED;
+ 
+   return rv;
+@@ -2965,115 +2955,100 @@ NS_IMETHODIMP nsMsgCompose::OnGetDraftFo
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////////
+ // This is the listener class for both the send operation and the copy
+ // operation. We have to create this class to listen for message send completion
+ // and deal with failures in both send and copy operations
+ ////////////////////////////////////////////////////////////////////////////////////
+ 
+-NS_IMPL_ISUPPORTS(nsMsgComposeSendListener, nsIMsgComposeSendListener,
+-                  nsIMsgSendListener, nsIMsgCopyServiceListener,
+-                  nsIWebProgressListener, nsISupportsWeakReference)
+-
+-nsMsgComposeSendListener::nsMsgComposeSendListener(void) { mDeliverMode = 0; }
++NS_IMPL_ISUPPORTS(nsMsgComposeSendListener, nsIMsgSendListener,
++                  nsIMsgCopyServiceListener, nsIWebProgressListener,
++                  nsISupportsWeakReference)
++
++nsMsgComposeSendListener::nsMsgComposeSendListener(nsIMsgCompose* compose,
++                                                   MSG_DeliverMode deliverMode)
++    : mWeakComposeObj(do_GetWeakReference(compose)),
++      mComposeKeepAlive(compose),
++      mDeliverMode(deliverMode) {}
+ 
+ nsMsgComposeSendListener::~nsMsgComposeSendListener(void) {}
+ 
+-NS_IMETHODIMP nsMsgComposeSendListener::SetMsgCompose(nsIMsgCompose* obj) {
+-  mWeakComposeObj = do_GetWeakReference(obj);
+-  return NS_OK;
+-}
+-
+-NS_IMETHODIMP nsMsgComposeSendListener::SetDeliverMode(
+-    MSG_DeliverMode deliverMode) {
+-  mDeliverMode = deliverMode;
+-  return NS_OK;
+-}
+-
+ nsresult nsMsgComposeSendListener::OnStartSending(const char* aMsgID,
+                                                   uint32_t aMsgSize) {
+-  nsresult rv;
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnStartSending(aMsgID, aMsgSize);
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
++  if (msgCompose) {
++    msgCompose->OnStartSending(aMsgID, aMsgSize);
++  }
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnSendProgress(const char* aMsgID,
+                                                   uint32_t aProgress,
+                                                   uint32_t aProgressMax) {
+-  nsresult rv;
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnSendProgress(aMsgID, aProgress, aProgressMax);
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
++  if (msgCompose) {
++    msgCompose->OnSendProgress(aMsgID, aProgress, aProgressMax);
++  }
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnStatus(const char* aMsgID,
+                                             const char16_t* aMsg) {
+-  nsresult rv;
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnStatus(aMsgID, aMsg);
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
++  if (msgCompose) {
++    msgCompose->OnStatus(aMsgID, aMsg);
++  }
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnSendNotPerformed(const char* aMsgID,
+                                                       nsresult aStatus) {
+   // since OnSendNotPerformed is called in the case where the user aborts the
+   // operation by closing the compose window, we need not do the stuff required
+   // for closing the windows. However we would need to do the other operations
+   // as below.
+ 
+-  nsresult rv = NS_OK;
+-  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj, &rv);
+-  if (msgCompose)
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
++  if (msgCompose) {
+     msgCompose->NotifyStateListeners(
+         nsIMsgComposeNotificationType::ComposeProcessDone, aStatus);
+-
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnSendNotPerformed(aMsgID, aStatus);
+-
+-  return rv;
++    msgCompose->OnSendNotPerformed(aMsgID, aStatus);
++  }
++
++  // A send that was not performed gets no OnStopCopy() callback.
++  mComposeKeepAlive = nullptr;
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgComposeSendListener::OnTransportSecurityError(
+     const char* msgID, nsresult status, nsITransportSecurityInfo* secInfo,
+     nsACString const& location) {
+-  nsresult rv;
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnTransportSecurityError(msgID, status, secInfo,
+-                                                  location);
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
++  if (msgCompose) {
++    msgCompose->OnTransportSecurityError(msgID, status, secInfo, location);
++  }
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnStopSending(const char* aMsgID,
+                                                  nsresult aStatus,
+                                                  const char16_t* aMsg,
+                                                  nsIFile* returnFile) {
+   nsresult rv = NS_OK;
+-
+-  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj, &rv);
++  bool shouldCloseProgress = NS_FAILED(aStatus);
++
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
+   if (msgCompose) {
+     nsCOMPtr<nsIMsgProgress> progress;
+     msgCompose->GetProgress(getter_AddRefs(progress));
+ 
+-    bool shouldCloseProgress = NS_FAILED(aStatus);
+-
+     if (NS_SUCCEEDED(aStatus)) {
+       // only process the reply flags if we successfully sent the message
+       msgCompose->ProcessReplyFlags();
+ 
+       // Remove the current draft msg when sending draft is done.
+       bool deleteDraft;
+       msgCompose->GetDeleteDraft(&deleteDraft);
+       if (deleteDraft) RemoveCurrentDraftMessage(msgCompose, false, false);
+@@ -3095,45 +3070,48 @@ nsresult nsMsgComposeSendListener::OnSto
+           nsIMsgComposeNotificationType::ComposeProcessDone, aStatus);
+       if (progress) {
+         progress->CloseProgressDialog(true);
+         progress->UnregisterListener(this);
+       }
+     }
+   }
+ 
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnStopSending(aMsgID, aStatus, aMsg, returnFile);
+-
++  if (msgCompose) {
++    msgCompose->OnStopSending(aMsgID, aStatus, aMsg, returnFile);
++  }
++
++  // A successful send with a copy/save step still needs OnStopCopy() to
++  // finish, so we keep the compose object alive for it. After a failure we
++  // are done.
++  if (shouldCloseProgress) {
++    mComposeKeepAlive = nullptr;
++  }
+   return rv;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnGetDraftFolderURI(
+     const char* aMsgID, const nsACString& aFolderURI) {
+-  nsresult rv;
+-  nsCOMPtr<nsIMsgSendListener> composeSendListener =
+-      do_QueryReferent(mWeakComposeObj, &rv);
+-  if (NS_SUCCEEDED(rv) && composeSendListener)
+-    composeSendListener->OnGetDraftFolderURI(aMsgID, aFolderURI);
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
++  if (msgCompose) {
++    msgCompose->OnGetDraftFolderURI(aMsgID, aFolderURI);
++  }
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnStartCopy() { return NS_OK; }
+ 
+ nsresult nsMsgComposeSendListener::OnProgress(uint32_t aProgress,
+                                               uint32_t aProgressMax) {
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::OnStopCopy(nsresult aStatus) {
+-  nsresult rv = NS_OK;
+-  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj, &rv);
++  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(mWeakComposeObj);
+   if (msgCompose) {
+     if (mDeliverMode == nsIMsgSend::nsMsgQueueForLater ||
+         mDeliverMode == nsIMsgSend::nsMsgDeliverBackground ||
+         mDeliverMode == nsIMsgSend::nsMsgSaveAsDraft) {
+       msgCompose->RememberQueuedDisposition();
+     }
+ 
+     // Ok, if we are here, we are done with the send/copy operation so
+@@ -3169,17 +3147,20 @@ nsresult nsMsgComposeSendListener::OnSto
+           msgCompose->SetDeleteDraft(true);
+           RemoveCurrentDraftMessage(msgCompose, true, false);
+         }
+       }
+     }
+     msgCompose->ClearMessageSend();
+   }
+ 
+-  return rv;
++  // OnStopCopy() is the final callback for sends that reached the copy/save
++  // step.
++  mComposeKeepAlive = nullptr;
++  return NS_OK;
+ }
+ 
+ nsresult nsMsgComposeSendListener::GetMsgFolder(nsIMsgCompose* compObj,
+                                                 nsIMsgFolder** msgFolder) {
+   nsCString folderUri;
+ 
+   nsresult rv = compObj->GetSavedFolderURI(folderUri);
+   NS_ENSURE_SUCCESS(rv, rv);
+@@ -3386,16 +3367,21 @@ NS_IMETHODIMP nsMsgComposeSendListener::
+           bundle->GetStringFromName("msgCancelling", msg);
+           progress->OnStatusChange(nullptr, nullptr, NS_OK, msg.get());
+         }
+       }
+ 
+       nsCOMPtr<nsIMsgSend> msgSend;
+       msgCompose->GetMessageSend(getter_AddRefs(msgSend));
+       if (msgSend) msgSend->Abort();
++
++      // A rejected send promise produces no further send/copy callback, not
++      // even from the Abort() above, so this is our last chance to stop
++      // keeping the compose object alive.
++      mComposeKeepAlive = nullptr;
+     }
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgComposeSendListener::OnProgressChange(
+     nsIWebProgress* aWebProgress, nsIRequest* aRequest,
+     int32_t aCurSelfProgress, int32_t aMaxSelfProgress,
+diff --git a/mailnews/compose/src/nsMsgCompose.h b/mailnews/compose/src/nsMsgCompose.h
+--- a/mailnews/compose/src/nsMsgCompose.h
++++ b/mailnews/compose/src/nsMsgCompose.h
+@@ -187,30 +187,26 @@ class QuotingOutputStreamListener : publ
+   bool mQuoteOriginal;
+   nsCString mHtmlToQuote;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////////
+ // This is the listener class for the send operation. We have to create this
+ // class to listen for message send completion and eventually notify the caller
+ ////////////////////////////////////////////////////////////////////////////////////
+-class nsMsgComposeSendListener : public nsIMsgComposeSendListener,
+-                                 public nsIMsgSendListener,
++class nsMsgComposeSendListener : public nsIMsgSendListener,
+                                  public nsIMsgCopyServiceListener,
+                                  public nsIWebProgressListener,
+                                  public nsSupportsWeakReference {
+  public:
+-  nsMsgComposeSendListener(void);
++  nsMsgComposeSendListener(nsIMsgCompose* compose, MSG_DeliverMode deliverMode);
+ 
+   // nsISupports interface
+   NS_DECL_ISUPPORTS
+ 
+-  // nsIMsgComposeSendListener interface
+-  NS_DECL_NSIMSGCOMPOSESENDLISTENER
+-
+   // nsIMsgSendListener interface
+   NS_DECL_NSIMSGSENDLISTENER
+ 
+   // nsIMsgCopyServiceListener interface
+   NS_DECL_NSIMSGCOPYSERVICELISTENER
+ 
+   // nsIWebProgressListener interface
+   NS_DECL_NSIWEBPROGRESSLISTENER
+@@ -218,17 +214,30 @@ class nsMsgComposeSendListener : public 
+   nsresult RemoveDraftOrTemplate(nsIMsgCompose* compObj, nsCString msgURI,
+                                  bool isSaveTemplate);
+   nsresult RemoveCurrentDraftMessage(nsIMsgCompose* compObj, bool calledByCopy,
+                                      bool isSaveTemplate);
+   nsresult GetMsgFolder(nsIMsgCompose* compObj, nsIMsgFolder** msgFolder);
+ 
+  private:
+   virtual ~nsMsgComposeSendListener();
++
++  // The working handle to the compose object. Weak, because the send and
++  // copy operations keep this listener alive, and the compose object keeps
++  // those operations alive; a strong handle would turn that into a permanent
++  // reference loop.
+   nsWeakPtr mWeakComposeObj;
++  // Only here to keep the compose object alive while a send is in flight,
++  // never used as a handle. MessageSend resolves its send promise before the
++  // deferred final OnStopCopy() callback, so JS may otherwise drop the
++  // compose object before we are done with it. The terminal send, copy, and
++  // progress callbacks drop this reference; if a deferred OnStopCopy() still
++  // arrives after that (e.g. after a canceled copy), the weak reference
++  // covers it as long as the compose window is open.
++  nsCOMPtr<nsIMsgCompose> mComposeKeepAlive;
+   MSG_DeliverMode mDeliverMode;
+ };
+ 
+ /******************************************************************************
+  * nsMsgMailList
+  ******************************************************************************/
+ struct nsMsgMailList {
+   explicit nsMsgMailList(nsIAbDirectory* directory);
+diff --git a/mailnews/compose/test/unit/test_nsMsgComposeSendListener.js b/mailnews/compose/test/unit/test_nsMsgComposeSendListener.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/compose/test/unit/test_nsMsgComposeSendListener.js
+@@ -0,0 +1,134 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/*
++ * Tests nsMsgComposeSendListener, as a regression test for bug 2050589:
++ * onStopCopy() must close the progress dialog even if GC dropped the JS
++ * references to the compose object. Intentionally incomplete.
++ *
++ * TODO: Add more nsMsgComposeSendListener test coverage here.
++ */
++
++add_setup(function () {
++  localAccountUtils.loadLocalMailAccount();
++});
++
++add_task(async function testOnStopCopyClosesProgressAfterGC() {
++  const fakeSend = {
++    listener: null,
++
++    observe(subject) {
++      // "mail-set-sender" fires right before sendMsg() creates the real
++      // MessageSend, so the fake takes its place here.
++      const compose = subject.QueryInterface(Ci.nsIMsgCompose);
++      compose.messageSend = this.QueryInterface(Ci.nsIMsgSend);
++    },
++
++    createAndSendMessage(
++      _editor,
++      _identity,
++      _accountKey,
++      _fields,
++      _isDigest,
++      _dontDeliver,
++      _deliverMode,
++      _msgToReplace,
++      _bodyType,
++      _body,
++      _parentWindow,
++      _progress,
++      listener
++    ) {
++      this.listener = listener;
++      return Promise.resolve();
++    },
++
++    QueryInterface: ChromeUtils.generateQI(["nsIObserver", "nsIMsgSend"]),
++  };
++
++  Services.obs.addObserver(fakeSend, "mail-set-sender");
++  registerCleanupFunction(() => {
++    Services.obs.removeObserver(fakeSend, "mail-set-sender");
++  });
++
++  const identity = getSmtpIdentity(
++    "sender@example.invalid",
++    getBasicSmtpServer()
++  );
++  const fields = Cc[
++    "@mozilla.org/messengercompose/composefields;1"
++  ].createInstance(Ci.nsIMsgCompFields);
++  fields.to = "recipient@example.invalid";
++  fields.subject = "Test OnStopCopy after compose GC";
++  fields.body = "Body";
++
++  const params = Cc[
++    "@mozilla.org/messengercompose/composeparams;1"
++  ].createInstance(Ci.nsIMsgComposeParams);
++  params.composeFields = fields;
++
++  let msgCompose = MailServices.compose.initCompose(params);
++  const progress = Cc["@mozilla.org/messenger/progress;1"].createInstance(
++    Ci.nsIMsgProgress
++  );
++
++  const progressStopped = Promise.withResolvers();
++  const progressListener = {
++    onStateChange(_webProgress, _request, stateFlags, status) {
++      if (stateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
++        progressStopped.resolve(status);
++      }
++    },
++    onProgressChange() {},
++    onLocationChange() {},
++    onStatusChange() {},
++    onSecurityChange() {},
++    onContentBlockingEvent() {},
++
++    QueryInterface: ChromeUtils.generateQI([
++      "nsIWebProgressListener",
++      "nsISupportsWeakReference",
++    ]),
++  };
++  progress.registerListener(progressListener);
++
++  const sendPromise = msgCompose.sendMsg(
++    Ci.nsIMsgSend.nsMsgDeliverNow,
++    identity,
++    "",
++    progress
++  );
++  Assert.ok(fakeSend.listener, "sendMsg should create a send listener");
++  await sendPromise;
++  await new Promise(resolve => do_timeout(0, resolve));
++
++  const copyListener = fakeSend.listener.QueryInterface(
++    Ci.nsIMsgCopyServiceListener
++  );
++
++  // MessageSend defers onStopCopy() until after the send promise resolves.
++  // Force the garbage collection that may drop the weak compose reference in
++  // that gap.
++  msgCompose = null;
++  Cu.forceGC();
++  Cu.forceCC();
++  Cu.forceGC();
++
++  copyListener.onStopCopy(Cr.NS_OK);
++
++  const stopStatus = await Promise.race([
++    progressStopped.promise,
++    new Promise((_, reject) =>
++      do_timeout(1000, () =>
++        reject(new Error("Timed out waiting for progress to stop"))
++      )
++    ),
++  ]);
++
++  Assert.equal(
++    stopStatus,
++    Cr.NS_OK,
++    "onStopCopy should close the progress dialog after compose GC"
++  );
++});
+diff --git a/mailnews/compose/test/unit/xpcshell.toml b/mailnews/compose/test/unit/xpcshell.toml
+--- a/mailnews/compose/test/unit/xpcshell.toml
++++ b/mailnews/compose/test/unit/xpcshell.toml
+@@ -50,16 +50,18 @@ skip-if = [
+ ["test_nsIMsgCompFields.js"]
+ 
+ ["test_nsMsgCompose1.js"]
+ 
+ ["test_nsMsgCompose2.js"]
+ 
+ ["test_nsMsgCompose3.js"]
+ 
++["test_nsMsgComposeSendListener.js"]
++
+ ["test_nsMsgOutgoingServerService1.js"]
+ 
+ ["test_saveDraft.js"]
+ 
+ ["test_sendBackground.js"]
+ 
+ ["test_sendMailAddressIDN.js"]
+ 
+

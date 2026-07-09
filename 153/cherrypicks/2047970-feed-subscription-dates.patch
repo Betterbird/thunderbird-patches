@@ -1,0 +1,201 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1783551500 0
+# Node ID 85053fc81a77f7f1ba5af7aa1866bc7bfc0e569e
+# Parent  0153becc0c43d6661d315e5293ec06db5203e8c3
+Bug 2047970 - Feed subscriptions should use <published> date instead of <updated>. r=arschmitz
+
+The fix way back only added item-level published as a fallback for feeds that previously had no usable date.
+
+Atom 0.3 spec uses issued/modified (and not published/updated) - fixing that here as well.
+
+Differential Revision: https://phabricator.services.mozilla.com/D307496
+
+
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -677,23 +677,23 @@ FeedParser.prototype = {
+         }
+       }
+ 
+       item.author = author || item.author || aFeed.title;
+ 
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_03_NS,
+-        "modified"
++        "issued"
+       );
+       if (!tags || !this.getNodeValue(tags[0])) {
+         tags = this.childrenByTagNameNS(
+           itemNode,
+           lazy.FeedUtils.ATOM_03_NS,
+-          "issued"
++          "modified"
+         );
+       }
+       if (!tags || !this.getNodeValue(tags[0])) {
+         tags = this.childrenByTagNameNS(
+           channel,
+           lazy.FeedUtils.ATOM_03_NS,
+           "created"
+         );
+@@ -967,23 +967,23 @@ FeedParser.prototype = {
+       }
+       lazy.FeedUtils.log.trace(
+         "FeedParser.parseAsAtomIETF: author(s) - " + item.author
+       );
+ 
+       tags = this.childrenByTagNameNS(
+         itemNode,
+         lazy.FeedUtils.ATOM_IETF_NS,
+-        "updated"
++        "published"
+       );
+       if (!tags || !this.getNodeValue(tags[0])) {
+         tags = this.childrenByTagNameNS(
+           itemNode,
+           lazy.FeedUtils.ATOM_IETF_NS,
+-          "published"
++          "updated"
+         );
+       }
+       if (!tags || !this.getNodeValue(tags[0])) {
+         tags = this.childrenByTagNameNS(
+           source,
+           lazy.FeedUtils.ATOM_IETF_NS,
+           "published"
+         );
+diff --git a/mailnews/extensions/newsblog/test/unit/resources/atom03_dates.xml b/mailnews/extensions/newsblog/test/unit/resources/atom03_dates.xml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/resources/atom03_dates.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<feed version="0.3" xmlns="http://purl.org/atom/ns#">
++  <title>Atom 0.3 date test</title>
++  <link rel="alternate" type="text/html" href="http://example.com/"/>
++  <modified>2026-05-19T22:43:20Z</modified>
++  <entry>
++    <title>Has both dates</title>
++    <link rel="alternate" type="text/html" href="http://example.com/both"/>
++    <id>http://example.com/both</id>
++    <issued>2026-03-17T17:35:43Z</issued>
++    <modified>2026-05-19T22:43:20Z</modified>
++  </entry>
++  <entry>
++    <title>Only modified</title>
++    <link rel="alternate" type="text/html" href="http://example.com/modified-only"/>
++    <id>http://example.com/modified-only</id>
++    <modified>2026-05-04T16:56:28Z</modified>
++  </entry>
++</feed>
+diff --git a/mailnews/extensions/newsblog/test/unit/resources/atom_dates.xml b/mailnews/extensions/newsblog/test/unit/resources/atom_dates.xml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/resources/atom_dates.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<feed xmlns="http://www.w3.org/2005/Atom">
++  <title>Atom date test</title>
++  <link href="http://example.com/"/>
++  <id>http://example.com/</id>
++  <updated>2026-05-19T22:43:20+00:00</updated>
++  <entry>
++    <title>Has both dates</title>
++    <link href="http://example.com/both"/>
++    <id>http://example.com/both</id>
++    <published>2026-03-17T17:35:43+00:00</published>
++    <updated>2026-05-19T22:43:20+00:00</updated>
++  </entry>
++  <entry>
++    <title>Only updated</title>
++    <link href="http://example.com/updated-only"/>
++    <id>http://example.com/updated-only</id>
++    <updated>2026-05-04T16:56:28+00:00</updated>
++  </entry>
++</feed>
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedparser.js b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feedparser.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+@@ -69,16 +69,77 @@ add_task(async function test_rss1() {
+       {
+         url: "http://xml.com/pub/2000/08/09/rdfdb/index.html",
+         title: "Putting RDF to Work",
+       },
+     ]);
+   }
+ });
+ 
++// Test that the Atom parser prefers <published> over <updated> for the item
++// date, falling back to <updated> when <published> is absent
++// Like YouTube feeds.
++add_task(async function test_atom_dates() {
++  const account = FeedUtils.createRssAccount("test_atom_dates");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("atomdates");
++
++  const doc = await do_parse_document("resources/atom_dates.xml", "text/xml");
++  const feed = new Feed("https://example.com/atom_dates.xml", folder);
++  feed.parseItems = true;
++  feed.onParseError = function () {
++    throw new Error("PARSE ERROR");
++  };
++  const parser = new FeedParser();
++  const items = parser.parseAsAtomIETF(feed, doc);
++
++  assertItemsEqual(items, [
++    {
++      title: "Has both dates",
++      date: "2026-03-17T17:35:43+00:00",
++    },
++    {
++      title: "Only updated",
++      date: "2026-05-04T16:56:28+00:00",
++    },
++  ]);
++});
++
++// Same as test_atom_dates, but for the older Atom 0.3 parser, where <issued>
++// is the publication date and <modified> the last-changed date.
++add_task(async function test_atom03_dates() {
++  const account = FeedUtils.createRssAccount("test_atom03_dates");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("atom03dates");
++
++  const doc = await do_parse_document("resources/atom03_dates.xml", "text/xml");
++  const feed = new Feed("https://example.com/atom03_dates.xml", folder);
++  feed.parseItems = true;
++  feed.onParseError = function () {
++    throw new Error("PARSE ERROR");
++  };
++  const parser = new FeedParser();
++  const items = parser.parseAsAtom(feed, doc);
++
++  assertItemsEqual(items, [
++    {
++      title: "Has both dates",
++      date: "2026-03-17T17:35:43Z",
++    },
++    {
++      title: "Only modified",
++      date: "2026-05-04T16:56:28Z",
++    },
++  ]);
++});
++
+ // Test feed downloading.
+ // Mainly checking that it doesn't crash and that the right feed parser is used.
+ add_task(async function test_download() {
+   // Boilerplate
+   const account = FeedUtils.createRssAccount("test_feed_download");
+   const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
+     Ci.nsIMsgLocalMailFolder
+   );
+

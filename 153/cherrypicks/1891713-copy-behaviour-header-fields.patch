@@ -1,0 +1,146 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1783463329 0
+# Node ID 9ebb2be8023857aa5269503ad15727ebd3f788ab
+# Parent  1fc3165eb15448188f75d48702b3130691c24939
+Bug 1891713 - Fix copy behavior in message header fields. r=aleca
+
+Previously, right-clicking and copying a message header field without an
+active text selection relied on extracting DOM `.textContent`. Because
+modern header WebComponents include structural UI labels and hidden
+accessibility elements (e.g., screen-reader-only colons), copying the
+field would incorrectly include this extraneous text.
+
+This patch updates `gMessageHeader.copyString` to bypass the DOM when
+no specific text is highlighted. It now resolves the `data-header-name`
+and fetches the clean, raw string directly from the `currentHeaderData`
+representation. Manual text selections are still respected, and a fallback
+remains for custom headers not present in the data model.
+
+A new mochitest `test_copy_string_clean_value` is included to verify
+the pure string extraction logic.
+
+Differential Revision: https://phabricator.services.mozilla.com/D295481
+
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -3326,21 +3326,39 @@ const gMessageHeader = {
+    */
+   copyString(event) {
+     // This method is used inside the copyPopup menupopup, which is triggered by
+     // both HTML headers fields and XUL labels. We need to account for those
+     // different widgets in order to properly copy the text.
+     const target =
+       event.currentTarget.parentNode.triggerNode ||
+       event.currentTarget.parentNode.headerField;
+-    navigator.clipboard.writeText(
+-      window.getSelection().isCollapsed
+-        ? target.textContent
+-        : window.getSelection().toString()
+-    );
++
++    // If the user actively highlighted something, honor their exact selection.
++    if (!window.getSelection().isCollapsed) {
++      navigator.clipboard.writeText(window.getSelection().toString());
++      return;
++    }
++
++    // Otherwise, find the data-header-name to look up the exact value.
++    const headerName =
++      target.dataset.headerName ||
++      target.closest("[data-header-name]")?.dataset.headerName;
++
++    let textToCopy = "";
++
++    if (headerName && currentHeaderData[headerName]) {
++      // Grab the exact value.
++      textToCopy = currentHeaderData[headerName].headerValue;
++    } else {
++      // Fallback for custom/edge-case UI elements not in the data model.
++      textToCopy = target.textContent;
++    }
++
++    navigator.clipboard.writeText(textToCopy.trim());
+   },
+ 
+   /**
+    * Open the message filter dialog prefilled with available data.
+    *
+    * @param {Event} event - The DOM Event.
+    */
+   createFilter(event) {
+diff --git a/mail/test/browser/message-header/browser_messageHeader.js b/mail/test/browser/message-header/browser_messageHeader.js
+--- a/mail/test/browser/message-header/browser_messageHeader.js
++++ b/mail/test/browser/message-header/browser_messageHeader.js
+@@ -1447,16 +1447,67 @@ add_task(async function test_folder_db_l
+   Assert.equal(
+     folder,
+     aboutMessage.gFolderDBListener.selectedFolder,
+     "The current folder was stored correctly"
+   );
+ });
+ 
+ /**
++ * Test that right-clicking a header and copying it yields the pure, raw
++ * backend value from currentHeaderData, ignoring the UI presentation.
++ */
++add_task(async function test_copy_string_clean_value() {
++  await be_in_folder(folder);
++
++  const hdr = folder.msgDatabase.getMsgHdrForMessageID(
++    gInterestingMessage.messageId
++  );
++  const curMessage = await select_click_row(
++    about3Pane.gDBView.findIndexOfMsgHdr(hdr, false)
++  );
++
++  await wait_for_message_display_completion(window);
++  await assert_selected_and_displayed(window, curMessage);
++
++  const subjectBox = aboutMessage.document.getElementById("expandedsubjectBox");
++
++  // Mock the clipboard to safely capture the output without OS permission errors
++  let copiedText = "";
++  const originalWriteText = aboutMessage.navigator.clipboard.writeText;
++  aboutMessage.navigator.clipboard.writeText = async text => {
++    copiedText = text;
++  };
++
++  // Find the actual copy popup in the DOM
++  const popup = aboutMessage.document.getElementById("copyPopup");
++
++  // Prime the popup with our target element (simulating right-click context)
++  popup.headerField = subjectBox;
++
++  // Find the menu item that triggers the copyString command
++  const copyItem = popup.querySelector("menuitem[oncommand*='copyString']");
++  Assert.ok(copyItem, "Found the copy menu item in the DOM");
++
++  aboutMessage.getSelection().removeAllRanges();
++
++  // Simulate the user clicking 'Copy' to securely execute gMessageHeader.copyString
++  copyItem.click();
++
++  Assert.equal(
++    copiedText,
++    gInterestingMessage.subject,
++    "The copied text should strictly match the backend subject value, with no UI labels attached"
++  );
++
++  // Restore the original clipboard behavior.
++  aboutMessage.navigator.clipboard.writeText = originalWriteText;
++});
++
++/**
+  * Remove the reference to the accessibility service so that it stops observing
+  * vsync notifications at the end of the test.
+  */
+ add_task(function cleanup() {
+   gAccService = null;
+   // The actual reference to the XPCOM object will be dropped at the next GC,
+   // so force one to happen immediately.
+   Cu.forceGC();
+
