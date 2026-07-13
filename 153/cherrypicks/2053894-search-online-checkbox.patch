@@ -1,0 +1,157 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1783893039 0
+# Node ID 3b7bbfb694d4606162976388479bb92b8689740b
+# Parent  30a20f9f52f95dfd6a752244f9ce6f00099ea64d
+Bug 2053894 - Fix 'Search online' checkbox always resetting to unchecked in Virtual Folder Properties. r=mkmelin
+
+The port of bug 2008041 (d89f225042b2) incorrectly moved the
+checkbox.checked = false assignment outside of the conditional in
+updateOnlineSearchState(). This caused the checkbox to be unchecked
+every time the dialog opens, even when online search was available.
+
+Restore the original logic: only clear the checkbox when there are
+no online servers (i.e., when it's disabled).
+
+Add a test that verifies the checkbox state is preserved across
+dialog opens when online servers are in the search folders.
+
+Differential Revision: https://phabricator.services.mozilla.com/D311485
+
+
+diff --git a/mail/base/test/browser/browser_virtualFolderEdit.js b/mail/base/test/browser/browser_virtualFolderEdit.js
+--- a/mail/base/test/browser/browser_virtualFolderEdit.js
++++ b/mail/base/test/browser/browser_virtualFolderEdit.js
+@@ -181,8 +181,106 @@ add_task(async function () {
+ 
+   // Check the state after we finish.
+   Assert.equal(wrappedVirtual.searchString, `ALL`);
+   Assert.equal(
+     wrappedVirtual.searchFolderURIs,
+     `${second.URI}|${third.URI}|${fourth.URI}`
+   );
+ });
++
++/**
++ * Tests that the "Search online" checkbox in virtual folder properties
++ * remembers its state across dialog opens (bug 2053894).
++ */
++add_task(async function test_searchOnline() {
++  // Create an IMAP account. IMAP servers have offlineSupportLevel > 0, which
++  // enables the "Search online" checkbox.
++  const imapServer = MailServices.accounts
++    .createIncomingServer("nobody", "imap.example.com", "imap")
++    .QueryInterface(Ci.nsIImapIncomingServer);
++  const imapAccount = MailServices.accounts.createAccount();
++  imapAccount.incomingServer = imapServer;
++  const imapIdentity = MailServices.accounts.createIdentity();
++  imapIdentity.email = "tinderbox@example.com";
++  imapAccount.addIdentity(imapIdentity);
++
++  const imapRootFolder = imapServer.rootFolder;
++
++  registerCleanupFunction(() => {
++    MailServices.accounts.removeAccount(imapAccount, false);
++  });
++
++  // Create a virtual folder that searches the IMAP root folder, with online
++  // search initially enabled.
++  const onlineWrapped = VirtualFolderHelper.createNewVirtualFolder(
++    "onlineTest",
++    rootFolder,
++    [imapRootFolder],
++    "ALL",
++    true
++  );
++  const onlineVF = onlineWrapped.virtualFolder;
++
++  // Helper: open the properties dialog via context menu.
++  async function openPropertiesViaContextMenu(winCallback) {
++    const virtualPropsPromise = BrowserTestUtils.promiseAlertDialog(
++      undefined,
++      "chrome://messenger/content/virtualFolderProperties.xhtml",
++      { callback: winCallback }
++    );
++
++    EventUtils.synthesizeMouseAtCenter(
++      about3Pane.folderPane.getRowForFolder(onlineVF).querySelector(".name"),
++      { type: "contextmenu" },
++      about3Pane
++    );
++    await BrowserTestUtils.waitForPopupEvent(context, "shown");
++    context.activateItem(
++      about3Pane.document.getElementById("folderPaneContext-properties")
++    );
++    await BrowserTestUtils.waitForPopupEvent(context, "hidden");
++    await virtualPropsPromise;
++  }
++
++  // First open: checkbox should be enabled and checked.
++  await openPropertiesViaContextMenu(async win => {
++    await SimpleTest.promiseFocus(win);
++    const doc = win.document;
++    if (doc.hasPendingL10nMutations) {
++      await BrowserTestUtils.waitForEvent(doc, "L10nMutationsFinished");
++    }
++
++    const checkbox = doc.getElementById("searchOnline");
++    Assert.ok(
++      !checkbox.disabled,
++      "Search online should be enabled for IMAP search folders"
++    );
++    Assert.ok(
++      checkbox.checked,
++      "Search online should be checked when onlineSearch was set to true at creation"
++    );
++
++    doc.querySelector("dialog").getButton("accept").click();
++  });
++
++  // Second open: the checkbox should still be enabled and checked — it must not
++  // have been reset by updateOnlineSearchState().
++  await openPropertiesViaContextMenu(async win => {
++    await SimpleTest.promiseFocus(win);
++    const doc = win.document;
++    if (doc.hasPendingL10nMutations) {
++      await BrowserTestUtils.waitForEvent(doc, "L10nMutationsFinished");
++    }
++
++    const checkbox = doc.getElementById("searchOnline");
++    Assert.ok(
++      !checkbox.disabled,
++      "Search online should still be enabled after reopening"
++    );
++    Assert.ok(
++      checkbox.checked,
++      "Search online should still be checked after reopening"
++    );
++
++    doc.querySelector("dialog").getButton("cancel").click();
++  });
++});
+diff --git a/mailnews/base/content/virtualFolderProperties.js b/mailnews/base/content/virtualFolderProperties.js
+--- a/mailnews/base/content/virtualFolderProperties.js
++++ b/mailnews/base/content/virtualFolderProperties.js
+@@ -140,17 +140,19 @@ function updateOnlineSearchState() {
+       .split("|")
+       .some(
+         folderURI =>
+           MailUtils.getExistingFolder(folderURI).server.offlineSupportLevel
+       );
+ 
+   const checkbox = document.getElementById("searchOnline");
+   checkbox.toggleAttribute("disabled", !includesOnlineServers);
+-  checkbox.checked = !includesOnlineServers;
++  if (!includesOnlineServers) {
++    checkbox.checked = false;
++  }
+ }
+ 
+ function InitDialogWithVirtualFolder(aVirtualFolder) {
+   const virtualFolderWrapper = VirtualFolderHelper.wrapVirtualFolder(
+     window.arguments[0].folder
+   );
+   gMsgFolder = window.arguments[0].folder;
+ 
+

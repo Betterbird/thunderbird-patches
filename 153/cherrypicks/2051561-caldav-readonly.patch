@@ -1,0 +1,229 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1783615829 0
+# Node ID 12fa0b523ac3364969b63ff63f7a783718d1daad
+# Parent  29b5c7411924f5f93a6393de8ad1b3d81f8ccf55
+Bug 2051561 - Don't treat DAV:write-properties as write access for CalDAV calendars. r=darktrojan
+
+Per RFC 3744, DAV:write-properties only authorizes PROPPATCH on a
+resource's own properties, not creating or modifying calendar object
+resources. Servers grant it on read-only shares (e.g. Nextcloud grants
+{read, read-acl, write-properties}), so counting it as a write privilege
+wrongly marks a read-only share as writable. Invitation accepts then PUT
+to it and fail with 404.
+
+Remove DAV:write-properties from the writable-privilege list and add
+DAV:bind (the privilege that permits creating a new resource via PUT), in
+the three sites that derive read-only from current-user-privilege-set:
+CalDavCalendar, CalDavProvider and CalICSProvider. Add regression tests
+for the privilege-set interpretation.
+
+Differential Revision: https://phabricator.services.mozilla.com/D309568
+
+
+diff --git a/calendar/providers/caldav/CalDavCalendar.sys.mjs b/calendar/providers/caldav/CalDavCalendar.sys.mjs
+--- a/calendar/providers/caldav/CalDavCalendar.sys.mjs
++++ b/calendar/providers/caldav/CalDavCalendar.sys.mjs
+@@ -1666,18 +1666,19 @@ CalDavCalendar.prototype = {
+             this.mDisabledByDavError = false;
+             lazy.ConnectionNotifications.connectionRestored(this.id);
+           }
+ 
+           const privs = response.firstProps["D:current-user-privilege-set"];
+           // Don't clear this.readOnly, only set it. The user may have write
+           // privileges but not want to use them.
+           if (!this.readOnly && privs && privs instanceof Set) {
+-            this.readOnly = !["D:write", "D:write-content", "D:write-properties", "D:all"].some(
+-              priv => privs.has(priv)
++            // Privileges that permit writing, per RFC 3744.
++            this.readOnly = !["D:write", "D:write-content", "D:bind", "D:all"].some(priv =>
++              privs.has(priv)
+             );
+           }
+ 
+           this.setCalHomeSet(true);
+           this.checkServerCaps(aChangeLogListener);
+         } else if (resourceType.has("D:collection")) {
+           // Not a CalDAV calendar
+           lazy.log.debug(
+diff --git a/calendar/providers/caldav/CalDavProvider.sys.mjs b/calendar/providers/caldav/CalDavProvider.sys.mjs
+--- a/calendar/providers/caldav/CalDavProvider.sys.mjs
++++ b/calendar/providers/caldav/CalDavProvider.sys.mjs
+@@ -403,17 +403,18 @@ class CalDavDetector {
+     const calendar = cal.manager.createCalendar("caldav", uri);
+     calendar.setProperty("color", color || cal.view.hashColor(uri.spec));
+     calendar.name = displayName;
+     calendar.id = cal.getUUID();
+     calendar.setProperty("username", this.username);
+     calendar.wrappedJSObject.session = this.session.toBaseSession();
+ 
+     // Attempt to discover if the user is allowed to write to this calendar.
++    // Privileges that permit writing, per RFC 3744.
+     const privs = props["D:current-user-privilege-set"];
+     if (privs && privs instanceof Set) {
+-      calendar.readOnly = !["D:write", "D:write-content", "D:write-properties", "D:all"].some(
+-        priv => privs.has(priv)
++      calendar.readOnly = !["D:write", "D:write-content", "D:bind", "D:all"].some(priv =>
++        privs.has(priv)
+       );
+     }
+     return calendar;
+   }
+ }
+diff --git a/calendar/providers/ics/CalICSProvider.sys.mjs b/calendar/providers/ics/CalICSProvider.sys.mjs
+--- a/calendar/providers/ics/CalICSProvider.sys.mjs
++++ b/calendar/providers/ics/CalICSProvider.sys.mjs
+@@ -444,18 +444,19 @@ class ICSDetector {
+     }
+ 
+     const calendar = cal.manager.createCalendar("ics", uri);
+     calendar.setProperty("color", color || cal.view.hashColor(uri.spec));
+     calendar.name = displayName;
+     calendar.id = cal.getUUID();
+ 
+     // Attempt to discover if the user is allowed to write to this calendar.
++    // Privileges that permit writing, per RFC 3744.
+     const privs = props["D:current-user-privilege-set"];
+     if (privs && privs instanceof Set) {
+-      calendar.readOnly = !["D:write", "D:write-content", "D:write-properties", "D:all"].some(
+-        priv => privs.has(priv)
++      calendar.readOnly = !["D:write", "D:write-content", "D:bind", "D:all"].some(priv =>
++        privs.has(priv)
+       );
+     }
+ 
+     return calendar;
+   }
+ }
+diff --git a/calendar/test/unit/providers/test_caldavCalendar_cached.js b/calendar/test/unit/providers/test_caldavCalendar_cached.js
+--- a/calendar/test/unit/providers/test_caldavCalendar_cached.js
++++ b/calendar/test/unit/providers/test_caldavCalendar_cached.js
+@@ -66,16 +66,61 @@ add_task(async function testCalendarWith
+   info("calendar set-up complete");
+ 
+   Assert.ok(!calendar.readOnly, "calendar was not marked read-only");
+ 
+   cal.manager.unregisterCalendar(calendar);
+ });
+ 
+ /**
++ * Writability is derived from "current-user-privilege-set" per RFC 3744.
++ */
++add_task(async function testReadOnlyFromPrivilegeSet() {
++  const cases = [
++    {
++      privileges:
++        "<d:privilege><d:read/></d:privilege><d:privilege><d:write-properties/></d:privilege>",
++      readOnly: true,
++      desc: "read + write-properties (read-only share)",
++    },
++    {
++      privileges:
++        "<d:privilege><d:read/></d:privilege><d:privilege><d:write-content/></d:privilege>",
++      readOnly: false,
++      desc: "read + write-content",
++    },
++    {
++      privileges: "<d:privilege><d:read/></d:privilege><d:privilege><d:bind/></d:privilege>",
++      readOnly: false,
++      desc: "read + bind",
++    },
++  ];
++
++  const uri = `${CalDAVServer.origin}/calendars/alice/test/`;
++  for (const { privileges, readOnly, desc } of cases) {
++    CalDAVServer.privileges = privileges;
++    calendarObserver._onLoadPromise = Promise.withResolvers();
++
++    const calendar = createCalendar("caldav", uri, true);
++    await calendarObserver._onLoadPromise.promise;
++
++    Assert.equal(
++      calendar.readOnly,
++      readOnly,
++      `calendar with ${desc} should be ${readOnly ? "read-only" : "writable"}`
++    );
++
++    cal.manager.unregisterCalendar(calendar);
++  }
++
++  // Restore the default privilege set for any later tests.
++  CalDAVServer.privileges = "<d:privilege><d:all/></d:privilege>";
++});
++
++/**
+  * Tests modifyItem() does not hang when the server reports no actual
+  * modifications were made.
+  */
+ add_task(async function testModifyItemWithNoChanges() {
+   const event = new CalEvent();
+   const calendar = createCalendar("caldav", `${CalDAVServer.origin}/calendars/alice/test/`, false);
+   event.id = "6f6dd7b6-0fbd-39e4-359a-a74c4c3745bb";
+   event.title = "A New Event";
+diff --git a/calendar/test/unit/providers/test_caldavCalendar_uncached.js b/calendar/test/unit/providers/test_caldavCalendar_uncached.js
+--- a/calendar/test/unit/providers/test_caldavCalendar_uncached.js
++++ b/calendar/test/unit/providers/test_caldavCalendar_uncached.js
+@@ -66,16 +66,61 @@ add_task(async function testCalendarWith
+   info("calendar set-up complete");
+ 
+   Assert.ok(!calendar.readOnly, "calendar was not marked read-only");
+ 
+   cal.manager.unregisterCalendar(calendar);
+ });
+ 
+ /**
++ * Writability is derived from "current-user-privilege-set" per RFC 3744.
++ */
++add_task(async function testReadOnlyFromPrivilegeSet() {
++  const cases = [
++    {
++      privileges:
++        "<d:privilege><d:read/></d:privilege><d:privilege><d:write-properties/></d:privilege>",
++      readOnly: true,
++      desc: "read + write-properties (read-only share)",
++    },
++    {
++      privileges:
++        "<d:privilege><d:read/></d:privilege><d:privilege><d:write-content/></d:privilege>",
++      readOnly: false,
++      desc: "read + write-content",
++    },
++    {
++      privileges: "<d:privilege><d:read/></d:privilege><d:privilege><d:bind/></d:privilege>",
++      readOnly: false,
++      desc: "read + bind",
++    },
++  ];
++
++  const uri = `${CalDAVServer.origin}/calendars/alice/test/`;
++  for (const { privileges, readOnly, desc } of cases) {
++    CalDAVServer.privileges = privileges;
++    calendarObserver._onLoadPromise = Promise.withResolvers();
++
++    const calendar = createCalendar("caldav", uri, false);
++    await calendarObserver._onLoadPromise.promise;
++
++    Assert.equal(
++      calendar.readOnly,
++      readOnly,
++      `calendar with ${desc} should be ${readOnly ? "read-only" : "writable"}`
++    );
++
++    cal.manager.unregisterCalendar(calendar);
++  }
++
++  // Restore the default privilege set for any later tests.
++  CalDAVServer.privileges = "<d:privilege><d:all/></d:privilege>";
++});
++
++/**
+  * Tests modifyItem() does not hang when the server reports no actual
+  * modifications were made.
+  */
+ add_task(async function testModifyItemWithNoChanges() {
+   const event = new CalEvent();
+   const calendar = createCalendar("caldav", `${CalDAVServer.origin}/calendars/alice/test/`, false);
+   event.id = "6f6dd7b6-0fbd-39e4-359a-a74c4c3745bb";
+   event.title = "A New Event";
+
