@@ -1,0 +1,153 @@
+
+# HG changeset patch
+# User Kai Engert <kaie@kuix.de>
+# Date 1782364834 0
+# Node ID dab97f1a0a692bfca1411e7a702f9f4f2eba2675
+# Parent  96b0719e8c50b4f7e6619c23b1ed9154933db141
+Bug 2028179 - Check candidate recipient encryption keys for unexpired encryption subkeys. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D291226
+
+
+diff --git a/mail/extensions/openpgp/content/modules/RNP.sys.mjs b/mail/extensions/openpgp/content/modules/RNP.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/RNP.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/RNP.sys.mjs
+@@ -4283,26 +4283,38 @@ export var RNP = {
+           throw new Error("rnp_key_is_sub failed");
+         }
+         if (is_subkey.value) {
+           continue;
+         }
+         if (this.isBadKey(handle, null, RNPLib.ffi)) {
+           continue;
+         }
+-        const key_revoked = new lazy.ctypes.bool();
+-        if (RNPLib.rnp_key_is_revoked(handle, key_revoked.address())) {
+-          throw new Error("rnp_key_is_revoked failed");
+-        }
+-
+-        if (key_revoked.value) {
++
++        const keyObj = {};
++        if (
++          !this.getKeyInfoFromHandle(
++            RNPLib.ffi,
++            handle,
++            keyObj,
++            false,
++            true,
++            false
++          )
++        ) {
++          // unexpected failure, skip
+           continue;
+         }
+ 
+-        if (this.isKeyExpired(handle)) {
++        if (
++          keyObj.keyTrust == "r" ||
++          keyObj.keyTrust == "e" ||
++          (onlyIfAcceptableAsRecipientKey &&
++            this.isExpiredTime(keyObj.effectiveExpiryTime))
++        ) {
+           continue;
+         }
+ 
+         if (RNPLib.rnp_key_get_uid_count(handle, uid_count.address())) {
+           throw new Error("rnp_key_get_uid_count failed");
+         }
+ 
+         let foundUid = false;
+diff --git a/mail/extensions/openpgp/test/unit/rnp/test_badKeys.js b/mail/extensions/openpgp/test/unit/rnp/test_badKeys.js
+--- a/mail/extensions/openpgp/test/unit/rnp/test_badKeys.js
++++ b/mail/extensions/openpgp/test/unit/rnp/test_badKeys.js
+@@ -80,16 +80,52 @@ add_task(async function testAvoidBadSubk
+   Assert.equal(
+     keyId,
+     "BC63472A109D5859",
+     "should obtain key ID of good subkey"
+   );
+ });
+ 
+ /**
++ * Import a key whose primary key is valid and non-expiring, but whose only
++ * encryption subkey has expired. Such a key must not be offered as a
++ * recipient key, because there is no usable (unexpired) encryption subkey.
++ * Without the recipient-key requirement, the key should still be found.
++ */
++add_task(async function testExpiredEncryptionSubkey() {
++  const email = "<expired-enc-subkey@example.org>";
++
++  const ids = await OpenPGPTestUtils.importKey(
++    null,
++    do_get_file(`${KEY_DIR}/expired-enc-subkey.pub.asc`),
++    true
++  );
++  Assert.equal(ids.length, 1, "should have imported the key");
++  // Accept the key as verified, to ensure the key is only rejected below
++  // because of the expired encryption subkey, and not because of acceptance.
++  await OpenPGPTestUtils.updateKeyIdAcceptance(
++    ids,
++    OpenPGPTestUtils.ACCEPTANCE_VERIFIED
++  );
++
++  const asRecipientKey = await RNP.findKeyByEmail(email, true);
++  Assert.equal(
++    asRecipientKey,
++    null,
++    "should not accept a key whose only encryption subkey has expired as a recipient key"
++  );
++
++  const anyKey = await RNP.findKeyByEmail(email, false);
++  Assert.ok(
++    anyKey,
++    "should still find the key when not required to be acceptable as a recipient key"
++  );
++});
++
++/**
+  * Test importing key with comment and empty line after the checksum.
+  */
+ add_task(async function testImportApple() {
+   const ids = await OpenPGPTestUtils.importKey(
+     null,
+     do_get_file(`${KEY_DIR}/apple-pub.asc`),
+     true
+   );
+diff --git a/mail/test/browser/openpgp/data/keys/expired-enc-subkey.pub.asc b/mail/test/browser/openpgp/data/keys/expired-enc-subkey.pub.asc
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/openpgp/data/keys/expired-enc-subkey.pub.asc
+@@ -0,0 +1,31 @@
++-----BEGIN PGP PUBLIC KEY BLOCK-----
++
++mQENBF4MicABCACewPR5eJh9OkWkof3D6UKeavyV9XfBiOEk+u1MaRG/sU5y+C7e
++cqRbGq6HaGqFPtHI1Ivp4SVFi7eR1otJ0luk5EOC9/uM1K2YVwr3bfGgEkZIKHQX
++TKjKnaTk4669X7RYcTqnaSnu17cFNcwRwXIx+/Hngey4upRYLgFdVl6XL/tPDQvf
++rUyY/rWTvkyYsHrlgMWKkg3+DKrR/XxujBvmkraeY11EomEHPKFrFLPjFk8ImH7h
++fYB6n3gZnxPU05ygN6nyF4MdTeFVQR6Q1k2ZxZgpyUZnW941w+o6AXNVlIzp8P/y
++Jj0NJMHF+45TtaOWDGn8P6o3P+kXOLH5+eh5ABEBAAG0OEV4cGlyZWQgRW5jIFN1
++YmtleSBUZXN0IDxleHBpcmVkLWVuYy1zdWJrZXlAZXhhbXBsZS5vcmc+iQFOBBMB
++CgA4FiEEgIWq4qNNv3/vIffiuSJhznj2II4FAl4MicACGwMFCwkIBwIGFQoJCAsC
++BBYCAwECHgECF4AACgkQuSJhznj2II6UHwgAmiGQDF8zZXZjNQBEjhhMpW6Rfjo8
++DnGohZSsV3HOpda/dbaAZklar+mI1lgvQT0zVJZD5DDRBIePIqTJswzs2GfxtwhG
++e8yu4xKvihQyWG+3sDRwO8dlU9ypIy2/k+OkxCnUhTg19GRKcrXvsZsTjwA8FvKe
++MoZi2etLRB3x6+H9LaeFIHgnVvYvhQKyHn8TUGpUMotxnnBHtLEo6Vg/MxYIosbM
++g2IsVOsqwJdeWGXicof3wScVj6RGJSlHB+fHU+KZBplwct+eH6jsobHktjc6lptH
++xISVjRU4ZSI4QOMskgNEIH8U8OTv8fhEIpDKJOmS9bt2R+GODWLx4LfhmbkBDQRe
++DInAAQgAzhOm8shPd+TCwRdTK3XYV6mKiSfEWrLQ8aS0e/RQBLUlr6tHuDJQRRmk
++SuKzFeHVTEffdzHsLAwBZS6IN8jqiCMvydgQ3YN7T1iaIKYoWfxEigzc79aaD0XL
++NsvBNQuIbpQVt8Qi4uufR25OEcqfqpy0Khp2xE74o7kvcRYHk5F1rYufwkvq974i
++kOr26xN4Fy5tL/o2G650BABgz6x3ub6J5agJHZmUILI+NReEJk0Qtcat1GNoPGLc
++NGoYTQxni5+ePCjlKUVHxYZAnyba1yFVUXXM/xHeQ+kguWD+TEhUPOJIX5ef2XnS
++QV1vsp5RhdDOFasYTk85otRHEskeKQARAQABiQE8BBgBCgAmFiEEgIWq4qNNv3/v
++IffiuSJhznj2II4FAl4MicACGwwFCQABUYAACgkQuSJhznj2II7VVQf7B5pHlGKe
++isVmeOoAfx+UuHmeEoiUSwK7xJINoHFEsQYseVCY3JifHZDNg4g2glArEvW8CRZX
++FzBIzHMniXDFLlj5LQQuev18kRdsUTDjWfbGc7mz/YsNuVnY+Bxk/3mBLiWddMI+
++5Q90O4zgo7BVQ0kcCzWLMvhQOaW+zgumSofJCktOTtehHwXxN5rYQCpw1xFWNRDx
++nTPwoulTVKzG7+H/XR9+eCuroFEb/2TjSEe88UX56+G5IB2rZEQ3AeHKWCA+JN7C
++lOmQH248UbADuQpt0lj8RLJhY2+UeztkVRe2Oc4BvT/4ohfJtUCe9yA0IXdWkkg0
++uqS6a+lD2WQuTA==
++=fNex
++-----END PGP PUBLIC KEY BLOCK-----
+

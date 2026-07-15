@@ -1,0 +1,78 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784023323 -7200
+# Node ID 20d5dce8f72853ab57824e1ed5f57ad1d3c48cdb
+# Parent  3b6e329ad8b8f4c27308440e95378f9db82ae471
+Bug 1852017 - Fix crash when going offline with an active IMAP IDLE connection. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D311906
+
+
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -125,16 +125,42 @@ class AutoProxyReleaseMsgWindow {
+  private:
+   nsIMsgWindow* mMsgWindow;
+ };
+ 
+ nsIMsgWindow** getter_AddRefs(AutoProxyReleaseMsgWindow& aSmartPtr) {
+   return aSmartPtr.StartAssignment();
+ }
+ 
++class ImapInputStreamCallback final : public nsIInputStreamCallback {
++ public:
++  NS_DECL_THREADSAFE_ISUPPORTS
++  NS_DECL_NSIINPUTSTREAMCALLBACK
++
++  explicit ImapInputStreamCallback(nsIInputStreamCallback* aCallback)
++      : mCallback(aCallback) {}
++
++ private:
++  ~ImapInputStreamCallback() {
++    // AsyncWait may release its callback on any thread, but nsImapProtocol
++    // owns main-thread-only objects.
++    NS_ReleaseOnMainThread("ImapInputStreamCallback::mCallback",
++                           mCallback.forget());
++  }
++
++  nsCOMPtr<nsIInputStreamCallback> mCallback;
++};
++
++NS_IMPL_ISUPPORTS(ImapInputStreamCallback, nsIInputStreamCallback)
++
++NS_IMETHODIMP ImapInputStreamCallback::OnInputStreamReady(
++    nsIAsyncInputStream* aStream) {
++  return mCallback->OnInputStreamReady(aStream);
++}
++
+ NS_IMPL_ISUPPORTS(nsMsgImapHdrXferInfo, nsIImapHeaderXferInfo)
+ 
+ nsMsgImapHdrXferInfo::nsMsgImapHdrXferInfo() : m_hdrInfos(kNumHdrsToXfer) {
+   m_nextFreeHdrInfo = 0;
+ }
+ 
+ nsMsgImapHdrXferInfo::~nsMsgImapHdrXferInfo() {}
+ 
+@@ -1600,17 +1626,18 @@ bool nsImapProtocol::HandleIdleResponses
+     if (m_imapMailFolderSinkSelected && untagged) {
+       Log("HandleIdleResponses", nullptr, "idle response");
+       m_imapMailFolderSinkSelected->OnNewIdleMessages();
+     } else {
+       // Enable async wait mode. Occurs when Idle() called.
+       nsCOMPtr<nsIAsyncInputStream> asyncInputStream =
+           do_QueryInterface(m_inputStream);
+       if (asyncInputStream) {
+-        asyncInputStream->AsyncWait(this, 0, 0, nullptr);
++        RefPtr callback = MakeRefPtr<ImapInputStreamCallback>(this);
++        asyncInputStream->AsyncWait(callback, 0, 0, nullptr);
+         Log("HandleIdleResponses", nullptr, "idle mode async waiting");
+       }
+     }
+   }
+   return rvIdleOk;
+ }
+ 
+ void nsImapProtocol::EstablishServerConnection() {
+

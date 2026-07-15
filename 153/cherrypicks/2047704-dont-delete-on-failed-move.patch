@@ -1,0 +1,289 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1783976876 0
+# Node ID fe76ada81a3c880289a214df3f4ee8f4ccc99c58
+# Parent  f2380bc2c80214cdcb083be35445bdaf05183fd9
+Bug 2047704 - Fix IMAP messages wrongly deleted on cross-server move failure when offline store is disabled. r=mkmelin
+
+When moving messages or folders from an IMAP account to Local Folders with
+offline storage disabled, the copy takes the batch path via
+CopyMessagesTo(), which calls nsImapService::CopyMessages with
+nsImapOnlineToOfflineMove. This action fetches all messages then issues
+STORE +FLAGS (\Deleted \Seen) for all of them — before any data has been
+written to the destination mbox. If the local write subsequently fails
+(e.g. "out of space"), the source messages are already gone from the
+server.
+
+When offline storage is enabled, the one-at-a-time path via
+CopyMessageTo() is used instead, which reads from local offline store and
+never invokes the IMAP protocol handler, so the bug does not manifest.
+
+Fix this by decoupling the two uses of the isMove parameter in
+nsMsgLocalMailFolder: the CopyMessageStreamListener still gets isMove=true
+so EndMove fires and handles source deletion with proper error gating, but
+the source message service is passed moveMessage=false so it uses
+nsImapOnlineToOfflineCopy instead — avoiding the independent deletion.
+
+Since nsImapOnlineToOfflineMove is no longer reachable, remove the
+associated dead code from nsImapService, nsImapProtocol, and
+nsImapMailFolder.
+
+Also extend test_moveCopyFoldersAcrossServers.js to verify that after a
+successful cross-server folder move, source messages are actually deleted
+(source folder should be empty). Previously the test only checked the
+destination side.
+
+Differential Revision: https://phabricator.services.mozilla.com/D311732
+
+
+diff --git a/mailnews/base/test/unit/test_moveCopyFoldersAcrossServers.js b/mailnews/base/test/unit/test_moveCopyFoldersAcrossServers.js
+--- a/mailnews/base/test/unit/test_moveCopyFoldersAcrossServers.js
++++ b/mailnews/base/test/unit/test_moveCopyFoldersAcrossServers.js
+@@ -183,20 +183,38 @@ async function subtestMove(folder, newPa
+   const srcParent = folder.parent;
+   const copyListener = new PromiseTestUtils.PromiseCopyListener();
+   MailServices.copy.copyFolder(folder, newParent, true, copyListener, null);
+   await copyListener.promise;
+   // Ensure the operation has finished. The copy listener promise resolves when
+   // the target folder is moved, but subfolder operations may still be going.
+   await new Promise(resolve => do_timeout(250, resolve));
+ 
++  const srcFolder = srcParent.getChildNamed(folderName);
+   Assert.ok(
+-    srcParent.getChildNamed(folderName),
++    srcFolder,
+     "the moved folder should still exist in the source parent folder"
+-  ); // IS it okay, really? Bug 1957032.
++  );
++
++  // After a cross-server move, the source folder is preserved but its
++  // messages should have been moved to the destination (deleted from source).
++  await TestUtils.waitForCondition(
++    () => srcFolder.getTotalMessages(false) == 0,
++    "the source folder should have no messages after a move"
++  );
++
++  const srcSubfolder = srcFolder.getChildNamed("subfolder");
++  Assert.ok(
++    srcSubfolder,
++    "the moved subfolder should still exist in the source parent folder"
++  );
++  await TestUtils.waitForCondition(
++    () => srcSubfolder.getTotalMessages(false) == 0,
++    "the source subfolder should have no messages after a move"
++  );
+ 
+   const destFolder = newParent.getChildNamed(folderName);
+   Assert.ok(
+     destFolder,
+     "the moved folder should have been created on the destination parent folder"
+   );
+   Assert.equal(
+     destFolder.getTotalMessages(false),
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -4371,32 +4371,16 @@ nsImapMailFolder::AbortMsgWriteStream() 
+ 
+ // message move/copy related methods
+ NS_IMETHODIMP
+ nsImapMailFolder::OnlineCopyCompleted(nsIImapProtocol* aProtocol,
+                                       ImapOnlineCopyState aCopyState) {
+   NS_ENSURE_ARG_POINTER(aProtocol);
+ 
+   nsresult rv;
+-  if (aCopyState == ImapOnlineCopyStateType::kSuccessfulCopy) {
+-    nsCOMPtr<nsIImapUrl> imapUrl;
+-    rv = aProtocol->GetRunningImapURL(getter_AddRefs(imapUrl));
+-    if (NS_FAILED(rv) || !imapUrl) return NS_ERROR_FAILURE;
+-    nsImapAction action;
+-    rv = imapUrl->GetImapAction(&action);
+-    if (NS_FAILED(rv)) return rv;
+-    if (action != nsIImapUrl::nsImapOnlineToOfflineMove)
+-      return NS_ERROR_FAILURE;  // don't assert here...
+-    nsCString messageIds;
+-    rv = imapUrl->GetListOfMessageIds(messageIds);
+-    if (NS_FAILED(rv)) return rv;
+-    nsCOMPtr<nsIImapService> imapService = mozilla::components::Imap::Service();
+-    return imapService->AddMessageFlags(this, nullptr, messageIds,
+-                                        kImapMsgDeletedFlag, true);
+-  }
+   /* unhandled copystate */
+   if (m_copyState)  // whoops, this is the wrong folder - should use the source
+                     // folder
+   {
+     nsCOMPtr<nsIMsgFolder> srcFolder;
+     srcFolder = do_QueryInterface(m_copyState->m_srcSupport, &rv);
+     if (srcFolder) srcFolder->NotifyFolderEvent(kDeleteOrMoveMsgCompleted);
+   } else
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -3301,62 +3301,34 @@ void nsImapProtocol::ProcessSelectedStat
+                               ? (ImapOnlineCopyState)
+                                     ImapOnlineCopyStateType::kSuccessfulDelete
+                               : (ImapOnlineCopyState)
+                                     ImapOnlineCopyStateType::kFailedDelete;
+               m_imapMailFolderSink->OnlineCopyCompleted(this, copyState);
+             }
+           }
+         } break;
+-        case nsIImapUrl::nsImapOnlineToOfflineCopy:
+-        case nsIImapUrl::nsImapOnlineToOfflineMove: {
+-          // Only happens for copy between servers, not for move.
++        case nsIImapUrl::nsImapOnlineToOfflineCopy: {
+           nsCString messageIdString;
+           nsresult rv = m_runningUrl->GetListOfMessageIds(messageIdString);
+           if (NS_SUCCEEDED(rv)) {
+             SetProgressString(IMAP_MESSAGES_STRING_INDEX);
+             m_progressCurrentNumber[m_stringIndex] = 0;
+             m_progressExpectedNumber =
+                 CountMessagesInIdString(messageIdString.get());
+ 
+             FetchMessage(messageIdString, kEveryThingRFC822Peek);
+ 
+             SetProgressString(IMAP_EMPTY_STRING_INDEX);
+             if (m_imapMailFolderSink) {
+               ImapOnlineCopyState copyStatus;
+               copyStatus = GetServerStateParser().LastCommandSuccessful()
+                                ? ImapOnlineCopyStateType::kSuccessfulCopy
+                                : ImapOnlineCopyStateType::kFailedCopy;
+-
+               m_imapMailFolderSink->OnlineCopyCompleted(this, copyStatus);
+-              if (GetServerStateParser().LastCommandSuccessful() &&
+-                  (m_imapAction == nsIImapUrl::nsImapOnlineToOfflineMove)) {
+-                // Note: action nsImapOnlineToOfflineMove never occurs.
+-                Store(messageIdString, "+FLAGS (\\Deleted \\Seen)",
+-                      bMessageIdsAreUids);
+-                if (GetServerStateParser().LastCommandSuccessful()) {
+-                  copyStatus = ImapOnlineCopyStateType::kSuccessfulDelete;
+-                  // Only when pref "expunge_after_delete" is set: if server is
+-                  // UIDPLUS capable, expunge the UIDs just marked deleted;
+-                  // otherwise, go ahead and expunge the full mailbox of ALL
+-                  // emails marked as deleted in mailbox, not just the ones
+-                  // marked as deleted here.
+-                  if (gExpungeAfterDelete) {
+-                    if (GetServerStateParser().GetCapabilityFlag() &
+-                        kUidplusCapability) {
+-                      UidExpunge(messageIdString);
+-                    } else {
+-                      Expunge();
+-                    }
+-                  }
+-                } else {
+-                  copyStatus = ImapOnlineCopyStateType::kFailedDelete;
+-                }
+-                m_imapMailFolderSink->OnlineCopyCompleted(this, copyStatus);
+-              }
+             }
+           } else
+             HandleMemoryFailure();
+         } break;
+         default:
+           if (GetServerStateParser().LastCommandSuccessful() && !uidValidityOk)
+             ProcessMailboxUpdate(false);  // handle uidvalidity change
+           break;
+diff --git a/mailnews/imap/src/nsImapService.cpp b/mailnews/imap/src/nsImapService.cpp
+--- a/mailnews/imap/src/nsImapService.cpp
++++ b/mailnews/imap/src/nsImapService.cpp
+@@ -510,17 +510,16 @@ NS_IMETHODIMP nsImapService::CopyMessage
+                                 aUrlListener, urlSpec, hierarchyDelimiter);
+       if (folder) {
+         nsCOMPtr<nsIMsgMailNewsUrl> msgurl(do_QueryInterface(imapUrl));
+         folder->HasMsgOffline(key, &hasMsgOffline);
+         if (msgurl) msgurl->SetMsgIsInLocalCache(hasMsgOffline);
+       }
+       // now try to download the message
+       nsImapAction imapAction = nsIImapUrl::nsImapOnlineToOfflineCopy;
+-      if (moveMessage) imapAction = nsIImapUrl::nsImapOnlineToOfflineMove;
+       nsCOMPtr<nsIURI> dummyURI;
+       nsAutoCString msgKey;
+       msgKey.AppendInt(key);
+       rv =
+           FetchMessage(imapUrl, imapAction, folder, imapMessageSink, aMsgWindow,
+                        aMailboxCopy, msgKey, false, getter_AddRefs(dummyURI));
+     }  // if we got an imap message sink
+   }  // if we decomposed the imap message
+@@ -550,27 +549,21 @@ NS_IMETHODIMP nsImapService::CopyMessage
+     // ignored. Does this need sorting out?
+     uint32_t numKeys = aKeys.Length();
+     AllocateImapUidString(aKeys.Elements(), numKeys, nullptr, messageIds);
+     nsCOMPtr<nsIImapUrl> imapUrl;
+     nsAutoCString urlSpec;
+     char hierarchyDelimiter = GetHierarchyDelimiter(folder);
+     rv = CreateStartOfImapUrl(uri, getter_AddRefs(imapUrl), folder,
+                               aUrlListener, urlSpec, hierarchyDelimiter);
+-    nsImapAction action;
+-    if (moveMessage)  // don't use ?: syntax here, it seems to break the Mac.
+-      action = nsIImapUrl::nsImapOnlineToOfflineMove;
+-    else
+-      action = nsIImapUrl::nsImapOnlineToOfflineCopy;
++    nsImapAction action = nsIImapUrl::nsImapOnlineToOfflineCopy;
+     imapUrl->SetCopyState(aMailboxCopy);
+     // now try to display the message
+     rv = FetchMessage(imapUrl, action, folder, imapMessageSink, aMsgWindow,
+                       aMailboxCopy, messageIds, false, aURL);
+-    // ### end of copy operation should know how to do the delete.if this is a
+-    // move
+ 
+   }  // if we got an imap message sink
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsImapService::Search(nsIMsgSearchSession* aSearchSession,
+                                     nsIMsgWindow* aMsgWindow,
+                                     nsIMsgFolder* aMsgFolder,
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -2702,18 +2702,23 @@ nsresult nsMsgLocalMailFolder::CopyMessa
+     if (srcLocalFolder) {
+       StartMessage();
+     }
+ 
+     RefPtr<CopyMessageStreamListener> streamListener =
+         new CopyMessageStreamListener(this, isMove);
+ 
+     nsCOMPtr<nsIURI> dummyNull;
++    // Pass moveMessage=false to the source message service to prevent it
++    // from independently deleting source messages (e.g. IMAP's
++    // nsImapOnlineToOfflineMove action). The destination (this local folder)
++    // handles source deletion in EndMove() after confirming the copy
++    // succeeded, which correctly gates on errors like "out of space".
+     rv = mCopyState->m_messageService->CopyMessages(
+-        keyArray, srcFolder, streamListener, isMove, nullptr, aMsgWindow,
++        keyArray, srcFolder, streamListener, false, nullptr, aMsgWindow,
+         getter_AddRefs(dummyNull));
+   }
+ 
+   return rv;
+ }
+ 
+ nsresult nsMsgLocalMailFolder::CopyMessageTo(nsISupports* message,
+                                              nsIMsgWindow* aMsgWindow,
+@@ -2738,17 +2743,22 @@ nsresult nsMsgLocalMailFolder::CopyMessa
+     rv = GetMessageServiceFromURI(uri,
+                                   getter_AddRefs(mCopyState->m_messageService));
+   }
+ 
+   if (NS_SUCCEEDED(rv) && mCopyState->m_messageService) {
+     RefPtr<CopyMessageStreamListener> streamListener =
+         new CopyMessageStreamListener(this, isMove);
+ 
+-    rv = mCopyState->m_messageService->CopyMessage(uri, streamListener, isMove,
++    // Pass moveMessage=false to the source message service to prevent it
++    // from independently deleting source messages (e.g. IMAP's
++    // nsImapOnlineToOfflineMove action). The destination (this local folder)
++    // handles source deletion in EndMove() after confirming the copy
++    // succeeded, which correctly gates on errors like "out of space".
++    rv = mCopyState->m_messageService->CopyMessage(uri, streamListener, false,
+                                                    nullptr, aMsgWindow);
+   }
+ 
+   return rv;
+ }
+ 
+ // A message is being deleted from a POP3 mail file, so check and see if we have
+ // the message being deleted in the server. If so, then we need to remove the
+

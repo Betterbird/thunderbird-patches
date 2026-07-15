@@ -1,0 +1,160 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1783976875 0
+# Node ID 6a9c8d5098d425793c7b0dac271740c5b2d2144b
+# Parent  e8349ae22c615904cfb5f464dfcdedd780827a1e
+Bug 2049110 - Make nsIMsgFolder.firstNewMessage infallible. r=mkmelin
+
+Previously, accessing firstNewMessage would throw NS_ERROR_ILLEGAL_VALUE when
+there were no new messages in the folder, requiring callers to guard with
+hasNewMessages or wrap in try-catch. This threw confusing errors into the
+console, particularly when clicking a new mail notification on a folder
+whose in-memory mNewMessages flag had fallen out of sync with the database.
+
+GetFirstNewMessage now returns nullptr with NS_OK when:
+- There is no database open
+- The database has no new messages (key == nsMsgKey_None)
+- The key doesn't resolve to a valid message header
+
+The IDL documentation is updated to match.
+
+JS callers are simplified:
+- onMessagesLoaded in mailCommon.js now just null-checks firstNewMessage
+  instead of using try-catch.
+- selectMessage in about3Pane.js now clears scrollToNewMessage before the
+  async folder load, preventing onMessagesLoaded from later scrolling the
+  user away from the message they clicked on in a notification.
+
+Differential Revision: https://phabricator.services.mozilla.com/D311486
+
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -6284,16 +6284,19 @@ function selectMessage(msgHdr) {
+       // The message might not match the current Quick Filter term.
+       goDoCommand("cmd_resetQuickFilterBar");
+       if (!foundIndexOfMsgHdrInView()) {
+         return;
+       }
+     } else {
+       threadPane.forgetSavedSelection(msgHdr.folder.URI);
+       displayFolder(msgHdr.folder.URI);
++      // If the folder update is asynchronous, onMessagesLoaded will fire later
++      // and should not scroll away from the message we just selected here.
++      threadPane.scrollToNewMessage = false;
+       if (!foundIndexOfMsgHdrInView()) {
+         // Quick Filter might be in sticky mode and still active.
+         goDoCommand("cmd_resetQuickFilterBar");
+         if (!foundIndexOfMsgHdrInView()) {
+           return;
+         }
+       }
+     }
+diff --git a/mail/base/content/mailCommon.js b/mail/base/content/mailCommon.js
+--- a/mail/base/content/mailCommon.js
++++ b/mail/base/content/mailCommon.js
+@@ -1176,27 +1176,23 @@ var dbViewWrapperListener = {
+     // Try to restore what was selected. Keep the saved selection (if there is
+     // one) until we have all of the messages. This will also reveal selected
+     // messages in collapsed threads.
+     window.threadPane.restoreSelection({ discard: all });
+ 
+     if (all || gViewWrapper.search.hasSearchTerms) {
+       let newMessageFound = false;
+       if (window.threadPane.scrollToNewMessage) {
+-        try {
+-          const index = gDBView.findIndexOfMsgHdr(
+-            gFolder.firstNewMessage,
+-            true
+-          );
++        const firstNewMsg = gFolder.firstNewMessage;
++        if (firstNewMsg) {
++          const index = gDBView.findIndexOfMsgHdr(firstNewMsg, true);
+           if (index != nsMsgViewIndex_None) {
+             window.threadTree.scrollToIndex(index, true);
+             newMessageFound = true;
+           }
+-        } catch (ex) {
+-          console.error(ex);
+         }
+         window.threadPane.scrollToNewMessage = false;
+       }
+       window.threadTree.reset();
+       if (!newMessageFound && !window.threadPane.scrollDetected) {
+         window.threadPane.scrollToLatestRowIfNoSelection();
+       }
+       if (all) {
+diff --git a/mailnews/base/public/nsIMsgFolder.idl b/mailnews/base/public/nsIMsgFolder.idl
+--- a/mailnews/base/public/nsIMsgFolder.idl
++++ b/mailnews/base/public/nsIMsgFolder.idl
+@@ -379,19 +379,17 @@ interface nsIMsgFolder : nsISupports {
+   attribute boolean hasNewMessages;
+ 
+   /**
+    * Indicates whether this folder or any of its subfolders have new messages.
+    */
+   readonly attribute boolean hasFolderOrSubfolderNewMessages;
+ 
+   /**
+-   * Return the first new message in the folder.
+-   * If there are no new messages, accessing this will throw an
+-   * error.
++   * Return the first new message in the folder, or null if there are none.
+    */
+   readonly attribute nsIMsgDBHdr firstNewMessage;
+ 
+   /**
+    * clear new status flag of all of the new messages
+    */
+   void clearNewMessages();
+ 
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -552,26 +552,34 @@ NS_IMETHODIMP nsMsgDBFolder::GetGettingN
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetGettingNewMessages(bool gettingNewMessages) {
+   mGettingNewMessages = gettingNewMessages;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetFirstNewMessage(nsIMsgDBHdr** firstNewMessage) {
+-  // If there's not a db then there can't be new messages.  Return failure since
+-  // you should use HasNewMessages first.
+-  if (!mDatabase) return NS_ERROR_FAILURE;
+-
+-  nsresult rv;
++  NS_ENSURE_ARG_POINTER(firstNewMessage);
++  *firstNewMessage = nullptr;
++
++  if (!mDatabase) {
++    return NS_OK;
++  }
++
+   nsMsgKey key;
+-  rv = mDatabase->GetFirstNew(&key);
+-  if (NS_FAILED(rv)) return rv;
+-
+-  return mDatabase->GetMsgHdrForKey(key, firstNewMessage);
++  nsresult rv = mDatabase->GetFirstNew(&key);
++  if (NS_FAILED(rv) || key == nsMsgKey_None) {
++    return NS_OK;
++  }
++
++  rv = mDatabase->GetMsgHdrForKey(key, firstNewMessage);
++  if (NS_FAILED(rv)) {
++    *firstNewMessage = nullptr;
++  }
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::ClearNewMessages() {
+   nsresult rv = NS_OK;
+   bool dbWasCached = mDatabase != nullptr;
+   if (!dbWasCached) GetDatabase();
+ 
+   if (mDatabase) {
+
