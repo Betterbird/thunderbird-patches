@@ -1,0 +1,808 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784239337 0
+# Node ID b94b18342d3b4993ffe6624184dcf803f1398cfc
+# Parent  a1e04e79919eb6a8eaed07055159da7a03964da3
+Bug 2055434 - Prevent duplicate IMAP biff due to messages read on another device while disconnected. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D312466
+
+
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -2517,28 +2517,32 @@ NS_IMETHODIMP nsImapMailFolder::UpdateIm
+   flagState->GetPartialUIDFetch(&partialUIDFetch);
+ 
+   // For partial UID fetches (i.e., occurs when CONDSTORE in effect), we can
+   // only trust the numUnread from the server. However, even that will only be
+   // correct if a recent imap STATUS occurred as indicated by
+   // numUnreadFromServer greater than -1.
+   if (partialUIDFetch) numNewUnread = numUnreadFromServer;
+ 
++  SyncFlags(flagState);
++  // Syncing the flags may mark a formerly new message read, which resets the
++  // new-message count through SetBiffState(nsMsgBiffState_NoMail). Set the
++  // count only after the flags, so it survives until HeaderFetchCompleted()
++  // announces the new mail.
+   // If we are performing biff for this folder, tell the
+   // stand-alone biff about the new high water mark
+   if (m_performingBiff && numNewUnread &&
+       static_cast<int32_t>(numNewUnread) != -1) {
+     // We must ensure that the server knows that we are performing biff.
+     // Otherwise the stand-alone biff won't fire.
+     nsCOMPtr<nsIMsgIncomingServer> server;
+     if (NS_SUCCEEDED(GetServer(getter_AddRefs(server))) && server)
+       server->SetPerformingBiff(true);
+     SetNumNewMessages(numNewUnread);
+   }
+-  SyncFlags(flagState);
+   if (mDatabase && numUnreadFromServer > -1 &&
+       (int32_t)(mNumUnreadMessages + m_uidsToFetch.Length()) >
+           numUnreadFromServer)
+     mDatabase->SyncCounts();
+ 
+   if (!m_uidsToFetch.IsEmpty() && aProtocol)
+     PrepareToAddHeadersToMailDB(aProtocol);
+   else {
+@@ -2654,16 +2658,20 @@ NS_IMETHODIMP nsImapMailFolder::UpdateIm
+   aSpec->GetNumMessages(&numTotal);
+   aSpec->GetNumRecentMessages(&m_numServerRecentMessages);
+   ImapUid prevNextUID = m_nextUID;
+   aSpec->GetNextUID(&m_nextUID);
+   bool summaryChanged = false;
+   // If a noop occurred, we don't know the server's UNSEEN number because NOOP
+   // does not return it. The next STATUS call response will provide numUnread.
+   bool haveServerUnseenCount = numUnread != -1;
++  bool folderSelected;
++  nsresult rv = aSpec->GetFolderSelected(&folderSelected);
++  NS_ENSURE_SUCCESS(rv, rv);
++  bool deferredNewMailBiff = false;
+ 
+   // If m_numServerUnseenMessages is 0, it means
+   // this is the first time we've done a Status.
+   // In that case, we count all the previous pending unread messages we know
+   // about as unread messages. We may want to do similar things with total
+   // messages, but the total messages include deleted messages if the folder
+   // hasn't been expunged.
+   int32_t previousUnreadMessages =
+@@ -2685,37 +2693,49 @@ NS_IMETHODIMP nsImapMailFolder::UpdateIm
+           numUnread - (mNumPendingUnreadMessages + mNumUnreadMessages);
+       if (numUnread - previousUnreadMessages != unreadDelta)
+         NS_WARNING("unread count should match server count");
+       ChangeNumPendingUnread(unreadDelta);
+       if (unreadDelta > 0 &&
+           !(mFlags & (nsMsgFolderFlags::Trash | nsMsgFolderFlags::Junk))) {
+         SetHasNewMessages(true);
+         SetNumNewMessages(unreadDelta);
+-        SetBiffState(nsMsgBiffState_NewMail);
++        if (folderSelected) {
++          // The flags of a selected folder are already synchronized, so the
++          // new mail can be announced right away.
++          SetBiffState(nsMsgBiffState_NewMail);
++        } else {
++          // The server counts unseen messages, but only the local flags tell
++          // us which of them are actually new. A message read elsewhere while
++          // this session was offline may still be new/unread locally, so
++          // announcing new mail from the STATUS numbers alone repeats
++          // notifications the user has already received. Instead we keep the
++          // biff pending, like OnNewIdleMessages() does, and let the
++          // UpdateFolder() below announce the new mail once, after the local
++          // flags match the server again.
++          SetPerformingBiff(true);
++          deferredNewMailBiff = true;
++        }
+       }
+     }
+     summaryChanged = true;
+   }
+-  SetPerformingBiff(false);
++  if (!deferredNewMailBiff) SetPerformingBiff(false);
+   if (m_numServerUnseenMessages != numUnread ||
+       m_numServerTotalMessages != numTotal) {
+     if (numUnread > m_numServerUnseenMessages ||
+         m_numServerTotalMessages > numTotal)
+       NotifyHasPendingMsgs();
+     summaryChanged = true;
+     m_numServerUnseenMessages = numUnread;
+     m_numServerTotalMessages = numTotal;
+   }
+   if (summaryChanged) {
+     SummaryChanged();
+     // Do UpdateFolder() below if folder not selected.
+-    bool folderSelected;
+-    nsresult rv = aSpec->GetFolderSelected(&folderSelected);
+-    NS_ENSURE_SUCCESS(rv, rv);
+     // folderSelected false means folderstatus URL caused imap STATUS to be
+     // sent by an imap connection not imap SELECTed on the URL target folder.
+     // folderSected true means NOOP was sent to the target folder for URL
+     // folderstatus because the target folder is already selected on the
+     // imap connection doing the URL, so UpdateFolder() is not needed.
+     if (!folderSelected) {
+       MOZ_LOG(IMAP, mozilla::LogLevel::Debug,
+               ("%s: folder=%s, do UpdateFolder(), summary change after STATUS",
+diff --git a/mailnews/imap/test/unit/test_imapBiff.js b/mailnews/imap/test/unit/test_imapBiff.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_imapBiff.js
+@@ -0,0 +1,325 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { IMAPServer } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/IMAPServer.sys.mjs"
++);
++const { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++let incomingServer;
++let server;
++let inbox;
++
++add_setup(async function () {
++  Services.prefs.setBoolPref(
++    "mail.server.default.autosync_offline_stores",
++    false
++  );
++  Services.prefs.setBoolPref("mail.biff.play_sound", false);
++  Services.prefs.setBoolPref("mail.biff.show_alert", false);
++
++  server = new IMAPServer({ extensions: ["RFC2177"] });
++
++  const account = MailServices.accounts.createAccount();
++  account.addIdentity(MailServices.accounts.createIdentity());
++  incomingServer = MailServices.accounts.createIncomingServer(
++    "user",
++    "localhost",
++    "imap"
++  );
++  incomingServer.password = "password";
++  incomingServer.port = server.port;
++  incomingServer.QueryInterface(Ci.nsIImapIncomingServer).useIdle = true;
++  account.incomingServer = incomingServer;
++
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  MailServices.imap.discoverAllFolders(
++    incomingServer.rootFolder,
++    listener,
++    null
++  );
++  await listener.promise;
++
++  inbox = incomingServer.rootFolder
++    .getChildNamed("INBOX")
++    .QueryInterface(Ci.nsIMsgImapMailFolder);
++  const updateListener = new PromiseTestUtils.PromiseUrlListener();
++  inbox.updateFolderWithListener(null, updateListener);
++  await updateListener.promise;
++
++  registerCleanupFunction(() => {
++    incomingServer.closeCachedConnections();
++    MailServices.accounts.removeIncomingServer(incomingServer, false);
++  });
++});
++
++/**
++ * Wait until the client connection for a mailbox is in RFC 2177 IDLE.
++ *
++ * @param {string} mailboxName
++ */
++async function waitForIdle(mailboxName) {
++  await TestUtils.waitForCondition(
++    () =>
++      server.daemon.getConnections(mailboxName).some(handler => handler.idling),
++    `${mailboxName} should enter IDLE`
++  );
++}
++
++async function waitForConnectionsToClose() {
++  await TestUtils.waitForCondition(
++    () => !server.daemon.getConnections().length,
++    "all cached IMAP connections should close"
++  );
++}
++
++async function updateFolder(folder) {
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  folder.updateFolderWithListener(null, listener);
++  await listener.promise;
++}
++
++/**
++ * Make the subset of an nsIMailboxSpec consumed by
++ * nsImapMailFolder::UpdateImapMailboxStatus.
++ *
++ * @param {object} values
++ * @returns {nsIMailboxSpec}
++ */
++function makeMailboxSpec(values) {
++  return {
++    QueryInterface: ChromeUtils.generateQI(["nsIMailboxSpec"]),
++    numMessages: values.numMessages,
++    numUnseenMessages: values.numUnseenMessages,
++    numRecentMessages: 0,
++    nextUID: values.nextUID,
++    folderSelected: true,
++  };
++}
++
++add_task(async function testIdleDeliveryBiffs() {
++  await waitForIdle("INBOX");
++
++  const folderListener = {
++    QueryInterface: ChromeUtils.generateQI(["nsIFolderListener"]),
++    biffNotifications: [],
++    onFolderIntPropertyChanged(folder, property, oldValue, newValue) {
++      if (property == "BiffState" || property == "NewMailReceived") {
++        this.biffNotifications.push({ folder, property, oldValue, newValue });
++      }
++    },
++  };
++  MailServices.mailSession.AddFolderListener(
++    folderListener,
++    Ci.nsIFolderListener.intPropertyChanged
++  );
++
++  const generator = new MessageGenerator();
++  await server.addMessages("INBOX", [generator.makeMessage()], false);
++  const messageAdded = PromiseTestUtils.promiseFolderNotification(
++    inbox,
++    "msgAdded"
++  );
++
++  Assert.equal(
++    server.daemon.sendUnsolicited("INBOX", "* 1 EXISTS"),
++    1,
++    "one idling connection should receive the new message count"
++  );
++
++  await messageAdded;
++  await TestUtils.waitForCondition(
++    () => incomingServer.biffState == Ci.nsIMsgFolder.nsMsgBiffState_NewMail,
++    "the unsolicited EXISTS response should result in biff"
++  );
++
++  Assert.equal(inbox.getTotalMessages(false), 1, "one header was downloaded");
++  Assert.equal(inbox.getNumUnread(false), 1, "the new message is unread");
++  Assert.equal(
++    inbox.getNumNewMessages(false),
++    1,
++    "the new message contributes to the biff count"
++  );
++  Assert.equal(
++    folderListener.biffNotifications.length,
++    1,
++    "the message produces one biff notification"
++  );
++
++  MailServices.mailSession.RemoveFolderListener(folderListener);
++});
++
++add_task(async function testStatusDefersBiffUntilFlagSync() {
++  // Build a three-message local cache with one older message still unread and
++  // new, matching the state left behind before the sleep/wake race.
++  incomingServer.closeCachedConnections();
++  await waitForConnectionsToClose();
++
++  const generator = new MessageGenerator();
++  await server.addMessages(
++    "INBOX",
++    generator.makeMessages({ count: 2 }),
++    false
++  );
++  const oldServerMessages = server.getMessagesInFolder(inbox);
++  oldServerMessages[1].setFlag("\\Seen");
++  oldServerMessages[2].setFlag("\\Seen");
++  await updateFolder(inbox);
++
++  Assert.equal(inbox.getTotalMessages(false), 3, "three messages are cached");
++  Assert.equal(inbox.getNumUnread(false), 1, "one cached message is unread");
++  Assert.equal(
++    inbox.getNumNewMessages(false),
++    1,
++    "the unread cached message remains new"
++  );
++
++  incomingServer.biffState = Ci.nsIMsgFolder.nsMsgBiffState_NoMail;
++  incomingServer.QueryInterface(Ci.nsIImapIncomingServer).useIdle = false;
++  incomingServer.closeCachedConnections();
++  await waitForConnectionsToClose();
++
++  // The old message is read on another device while one batch of four newer
++  // messages arrives. No further server mutation occurs after this point.
++  oldServerMessages[0].setFlag("\\Seen");
++  await server.addMessages(
++    "INBOX",
++    generator.makeMessages({ count: 4 }),
++    false
++  );
++
++  const biffNotifications = [];
++  const folderListener = {
++    QueryInterface: ChromeUtils.generateQI(["nsIFolderListener"]),
++    onFolderIntPropertyChanged(folder, property, oldValue, newValue) {
++      if (property == "BiffState" || property == "NewMailReceived") {
++        biffNotifications.push({ folder, property, oldValue, newValue });
++      }
++    },
++  };
++  MailServices.mailSession.AddFolderListener(
++    folderListener,
++    Ci.nsIFolderListener.intPropertyChanged
++  );
++
++  const statusListener = new PromiseTestUtils.PromiseUrlListener();
++  inbox.updateStatus(statusListener, null);
++  await statusListener.promise;
++  await TestUtils.waitForCondition(
++    () => inbox.getTotalMessages(false) == 7 && inbox.getNumUnread(false) == 4,
++    "the STATUS-triggered folder synchronization should finish"
++  );
++  info(
++    `After synchronization: new=${inbox.getNumNewMessages(false)}, ` +
++      `biffState=${incomingServer.biffState}, ` +
++      `performingBiff=${incomingServer.performingBiff}, ` +
++      `notifications=${biffNotifications.length}`
++  );
++  await TestUtils.waitForCondition(
++    () => inbox.getNumNewMessages(false) == 4 && !incomingServer.performingBiff,
++    "the synchronized folder should finish biff"
++  );
++
++  Assert.equal(inbox.getNumUnread(false), 4, "only the new batch is unread");
++  const oldHeader = inbox.msgDatabase.getMsgHdrForKey(oldServerMessages[0].uid);
++  Assert.ok(oldHeader.isRead, "the old message is reconciled as read");
++  Assert.ok(
++    !(oldHeader.flags & Ci.nsMsgMessageFlags.New),
++    "the old message is no longer locally new"
++  );
++  Assert.equal(
++    biffNotifications.filter(
++      event =>
++        event.property != "BiffState" ||
++        event.newValue == Ci.nsIMsgFolder.nsMsgBiffState_NewMail
++    ).length,
++    1,
++    "the stable server batch should produce only one positive biff"
++  );
++
++  MailServices.mailSession.RemoveFolderListener(folderListener);
++});
++
++add_task(function testNoFreshUnseenDoesNotBiff() {
++  const sink = inbox.QueryInterface(Ci.nsIImapMailFolderSink);
++
++  // Prime a last-known server count one above the reconciled local count,
++  // then model local processing having consumed the pending delta.
++  sink.UpdateImapMailboxStatus(
++    null,
++    makeMailboxSpec({ numMessages: 8, numUnseenMessages: 5, nextUID: 9 })
++  );
++  inbox.changeNumPendingUnread(-inbox.numPendingUnread);
++  incomingServer.biffState = Ci.nsIMsgFolder.nsMsgBiffState_NoMail;
++
++  const biffNotifications = [];
++  const folderListener = {
++    QueryInterface: ChromeUtils.generateQI(["nsIFolderListener"]),
++    onFolderIntPropertyChanged(folder, property, oldValue, newValue) {
++      if (property == "BiffState") {
++        biffNotifications.push({ folder, oldValue, newValue });
++      }
++    },
++  };
++  MailServices.mailSession.AddFolderListener(
++    folderListener,
++    Ci.nsIFolderListener.intPropertyChanged
++  );
++
++  // A selected-folder NOOP may update UIDNEXT, but it supplies no UNSEEN
++  // count. The last known count must not be interpreted as a fresh delta.
++  sink.UpdateImapMailboxStatus(
++    null,
++    makeMailboxSpec({ numMessages: 9, numUnseenMessages: -1, nextUID: 10 })
++  );
++
++  Assert.equal(
++    incomingServer.biffState,
++    Ci.nsIMsgFolder.nsMsgBiffState_NoMail,
++    "NOOP without a fresh UNSEEN count should not biff"
++  );
++  Assert.deepEqual(
++    biffNotifications,
++    [],
++    "NOOP without a fresh UNSEEN count should not notify biff"
++  );
++  Assert.equal(
++    inbox.numPendingUnread,
++    0,
++    "the pending count should not change"
++  );
++  Assert.equal(
++    inbox.serverUnseen,
++    5,
++    "the last known UNSEEN count should remain"
++  );
++  Assert.equal(
++    inbox.serverNextUID,
++    10,
++    "the fresh UIDNEXT value should be kept"
++  );
++
++  // A later STATUS with a genuine unseen increase must still biff once.
++  inbox.changeNumPendingUnread(1);
++  sink.UpdateImapMailboxStatus(
++    null,
++    makeMailboxSpec({ numMessages: 9, numUnseenMessages: 6, nextUID: 10 })
++  );
++
++  Assert.equal(
++    incomingServer.biffState,
++    Ci.nsIMsgFolder.nsMsgBiffState_NewMail,
++    "a fresh increase in UNSEEN should still biff"
++  );
++  Assert.equal(inbox.getNumNewMessages(false), 1, "one new unread should biff");
++  Assert.equal(
++    biffNotifications.length,
++    1,
++    "the fresh increase should produce exactly one biff notification"
++  );
++
++  MailServices.mailSession.RemoveFolderListener(folderListener);
++});
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -46,16 +46,18 @@ tags = ["foldernames"]
+ ["test_gmailOfflineMsgStore.js"]
+ 
+ ["test_ignoreSubscription.js"]
+ 
+ ["test_imapAttachmentSaves.js"]
+ 
+ ["test_imapAutoSync.js"]
+ 
++["test_imapBiff.js"]
++
+ ["test_imapChunks.js"]
+ 
+ ["test_imapClientid.js"]
+ 
+ ["test_imapContentLength.js"]
+ 
+ ["test_imapCopyTimeout.js"]
+ 
+diff --git a/mailnews/test/fakeserver/Imapd.sys.mjs b/mailnews/test/fakeserver/Imapd.sys.mjs
+--- a/mailnews/test/fakeserver/Imapd.sys.mjs
++++ b/mailnews/test/fakeserver/Imapd.sys.mjs
+@@ -67,16 +67,17 @@ export class ImapDaemon {
+     this.inbox = new ImapMailbox("INBOX", null, this.uidvalidity++);
+     this.root.addMailbox(this.inbox);
+     this.namespaces.push(this.root);
+     this.syncFunc = syncFunc;
+     // This can be used to cause the artificial failure of any given command.
+     this.commandToFail = "";
+     // This can be used to simulate timeouts on large copies
+     this.copySleep = 0;
++    this._handlers = new Set();
+   }
+   synchronize(mailbox, update) {
+     if (this.syncFunc) {
+       this.syncFunc.call(null, this);
+     }
+     if (update) {
+       for (var message of mailbox._messages) {
+         message.recent = false;
+@@ -212,16 +213,65 @@ export class ImapDaemon {
+       var parentBox = mailbox._parent == null ? this.root : mailbox._parent;
+       parentBox._children.splice(parentBox._children.indexOf(mailbox), 1);
+     } else {
+       // clear mailbox
+       mailbox._messages = [];
+       mailbox.flags.push("\\Noselect");
+     }
+   }
++
++  /**
++   * Return live protocol handlers, optionally restricted to a mailbox.
++   * Each handler represents one client connection.
++   *
++   * @param {ImapMailbox|string} [mailbox]
++   * @returns {IMAP_RFC3501_handler[]}
++   */
++  getConnections(mailbox) {
++    if (typeof mailbox == "string") {
++      mailbox = this.getMailbox(mailbox);
++      if (!mailbox) {
++        return [];
++      }
++    }
++    const handlers = [];
++    for (const handler of this._handlers) {
++      if (!handler._reader?.isRunning) {
++        this._handlers.delete(handler);
++      } else if (!mailbox || handler._selectedMailbox == mailbox) {
++        handlers.push(handler);
++      }
++    }
++    return handlers;
++  }
++
++  /**
++   * Send an unsolicited server response to connections with a mailbox
++   * selected. By default only connections waiting in IDLE receive it.
++   *
++   * @param {ImapMailbox|string} mailbox
++   * @param {string|string[]} responses
++   * @param {object} [options]
++   * @param {boolean} [options.idleOnly=true]
++   * @returns {number} The number of connections notified.
++   */
++  sendUnsolicited(mailbox, responses, { idleOnly = true } = {}) {
++    if (!Array.isArray(responses)) {
++      responses = [responses];
++    }
++    let notified = 0;
++    for (const handler of this.getConnections(mailbox)) {
++      if (!idleOnly || handler.idling) {
++        handler.sendUnsolicited(responses.join("\r\n"));
++        notified++;
++      }
++    }
++    return notified;
++  }
+ }
+ 
+ export class ImapMailbox {
+   constructor(name, parent, state) {
+     this.name = name;
+     this._parent = parent;
+     this._children = [];
+     this._messages = [];
+@@ -730,16 +780,18 @@ export class IMAP_RFC3501_handler {
+     this.kAuthSchemes = authSchemes; // Added by RFC2195 extension.
+     this.kCapabilities = [
+       /* "LOGINDISABLED", "STARTTLS", */
+       "CLIENTID",
+     ]; // Test may modify as needed.
+     this.kUidCommands = ["FETCH", "STORE", "SEARCH", "COPY"];
+ 
+     this._daemon = daemon;
++    this._daemon._handlers.add(this);
++    this._reader = null;
+     this.closing = false;
+     this.dropOnStartTLS = false;
+     // map: property = auth scheme {String}, value = start function on this obj
+     this._kAuthSchemeStartFunction = {};
+ 
+     this._enabledCommands = {
+       // IMAP_STATE_NOT_AUTHED
+       0: [
+@@ -834,16 +886,18 @@ export class IMAP_RFC3501_handler {
+       UID: ["atom", "..."],
+     };
+ 
+     this.resetTest();
+   }
+   resetTest() {
+     this._state = IMAP_STATE_NOT_AUTHED;
+     this._multiline = false;
++    this._idling = false;
++    this._selectedMailbox = null;
+     this._nextAuthFunction = undefined; // should be in RFC2195_ext, but too lazy
+   }
+   onStartup() {
+     this._state = IMAP_STATE_NOT_AUTHED;
+     return "* OK IMAP4rev1 Fakeserver started up";
+   }
+ 
+   // CENTRALIZED DISPATCH FUNCTIONS
+@@ -1582,28 +1636,40 @@ export class IMAP_RFC3501_handler {
+       return "BAD illegal command " + name;
+     }
+ 
+     args = this._treatArgs(args, name);
+     return this[name](args, true);
+   }
+ 
+   postCommand(reader) {
++    this._reader = reader;
+     if (this.closing) {
+       this.closing = false;
+       reader.closeSocket();
+     }
+     if (this.sendingLiteral) {
+       reader.preventLFMunge();
+     }
+     reader.setMultiline(this._multiline);
+     if (this._lastCommand == reader.watchWord) {
+       reader.stopTest();
+     }
+   }
++
++  get idling() {
++    return this._idling;
++  }
++
++  sendUnsolicited(response) {
++    if (!this._reader?.isRunning) {
++      throw new Error("IMAP connection is not running");
++    }
++    this._reader.send(response);
++  }
+   onServerFault(e) {
+     return (
+       ("_tag" in this ? this._tag : "*") + " BAD Internal server error: " + e
+     );
+   }
+ 
+   // FETCH sub commands and helpers
+ 
+@@ -1954,16 +2020,46 @@ export function mixinExtension(handler, 
+       // Hack to make arrays et al. work recursively
+       mixinExtension(handler[property], extension[property]);
+     } else {
+       handler[property] = extension[property];
+     }
+   }
+ }
+ 
++// Support for IDLE (RFC 2177).
++export var IMAP_RFC2177_extension = {
++  preload(toBeThis) {
++    toBeThis._preRFC2177_onMultiline = toBeThis.onMultiline;
++  },
++  kCapabilities: ["IDLE"],
++  _enabledCommands: {
++    2: ["IDLE"],
++  },
++  _argFormat: {
++    IDLE: [],
++  },
++  IDLE() {
++    this._idling = true;
++    this._multiline = true;
++    return "+ idling";
++  },
++  onMultiline(line) {
++    if (!this._idling) {
++      return this._preRFC2177_onMultiline(line);
++    }
++    if (line.toUpperCase() != "DONE") {
++      return undefined;
++    }
++    this._idling = false;
++    this._multiline = false;
++    return `${this._tag} OK IDLE terminated`;
++  },
++};
++
+ // Support for Gmail extensions: XLIST and X-GM-EXT-1
+ export var IMAP_GMAIL_extension = {
+   preload(toBeThis) {
+     toBeThis._preGMAIL_STORE = toBeThis.STORE;
+     toBeThis._preGMAIL_STORE_argFormat = toBeThis._argFormat.STORE;
+     toBeThis._argFormat.STORE = ["number", "atom", "..."];
+     toBeThis._DEFAULT_LIST = toBeThis.LIST;
+   },
+diff --git a/mailnews/test/fakeserver/Maild.sys.mjs b/mailnews/test/fakeserver/Maild.sys.mjs
+--- a/mailnews/test/fakeserver/Maild.sys.mjs
++++ b/mailnews/test/fakeserver/Maild.sys.mjs
+@@ -331,16 +331,17 @@ function readTo(input, count, arr) {
+  * CRLF sequences.
+  *
+  * The return of postCommand is ignored. The return of onMultiline is a bit
+  * complicated: it may or may not return a response string (returning one is
+  * necessary to trigger the postCommand handler).
+  *
+  * This object has the following supplemental functions for use by handlers:
+  * closeSocket  Performs a server-side socket closing
++ * send         Sends an unsolicited response to the client
+  * setMultiline Sets the multiline mode based on the argument
+  */
+ class nsMailReader {
+   constructor(server, handler, transport, debug, logTransaction) {
+     this._debug = debug;
+     this._server = server;
+     this._buffer = [];
+     this._lines = [];
+@@ -481,40 +482,18 @@ class nsMailReader {
+           dump(e.name + ": " + e.message + "\n");
+           dump("File: " + e.fileName + " Line: " + e.lineNumber + "\n");
+           dump("Stack trace:\n" + e.stack);
+         } else {
+           dump("Exception caught: " + e + "\n");
+         }
+       }
+ 
+-      if (!this._preventLFMunge) {
+-        response = response.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
+-      }
+-
+-      if (!response.endsWith("\n")) {
+-        response = response + "\r\n";
+-      }
+-
+-      if (this._debug == nsMailServer.debugRecvSend) {
+-        dump("SEND: " + response.split(" ", 1)[0] + "\n");
+-      } else if (this._debug == nsMailServer.debugAll) {
+-        var responses = response.split("\n");
+-        responses.forEach(function (responseLine) {
+-          dump("SEND: " + responseLine + "\n");
+-        });
+-      }
+-
+-      if (this.transaction) {
+-        this.transaction.us.push(response);
+-      }
+-
+       try {
+-        this._output.write(response, response.length);
+-        this._output.flush();
++        this.send(response, this._preventLFMunge);
+       } catch (ex) {
+         if (ex.result == Cr.NS_BASE_STREAM_CLOSED) {
+           dump("Stream closed whilst sending, this may be expected\n");
+           this._realCloseSocket();
+         } else {
+           // Some other issue, let the test see it.
+           throw ex;
+         }
+@@ -534,16 +513,54 @@ class nsMailReader {
+         Ci.nsITimer.TYPE_ONE_SHOT
+       );
+     }
+   }
+ 
+   closeSocket() {
+     this._signalStop = true;
+   }
++
++  /**
++   * Send a response that was not produced by an incoming command, such as an
++   * IMAP IDLE update.
++   *
++   * @param {string} response - The response to send.
++   * @param {boolean} [preventLFMunge=false] - Whether the response already has
++   *   the exact line endings required by the protocol.
++   */
++  send(response, preventLFMunge = false) {
++    if (!preventLFMunge) {
++      response = response.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
++    }
++
++    if (!response.endsWith("\n")) {
++      response += "\r\n";
++    }
++
++    if (this._debug == nsMailServer.debugRecvSend) {
++      dump("SEND: " + response.split(" ", 1)[0] + "\n");
++    } else if (this._debug == nsMailServer.debugAll) {
++      for (const responseLine of response.split("\n")) {
++        dump("SEND: " + responseLine + "\n");
++      }
++    }
++
++    if (this.transaction) {
++      this.transaction.us.push(response);
++    }
++
++    this._output.write(response, response.length);
++    this._output.flush();
++  }
++
++  get isRunning() {
++    return this._isRunning;
++  }
++
+   async _realCloseSocket() {
+     this._isRunning = false;
+     this._server.stopTest();
+ 
+     // Wait a moment, then close the connection. Closing immediately can
+     // prevent the last output stream message from reaching the client
+     // (although that's not supposed to happen).
+     await new Promise(resolve => setTimeout(resolve, 50));
+

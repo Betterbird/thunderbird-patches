@@ -1,0 +1,193 @@
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784324047 -7200
+# Parent  2ca561c2d03cbb78cea64f88dfea3d533aedc915
+Bug 1121151 - Prevent failed account setup from leaving incoming servers behind.
+
+diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsgAccountManager.cpp
+--- a/mailnews/base/src/nsMsgAccountManager.cpp
++++ b/mailnews/base/src/nsMsgAccountManager.cpp
+@@ -521,15 +521,27 @@ nsMsgAccountManager::RemoveIncomingServe
+   LogoutOfServer(aServer);
+ 
+   nsCOMPtr<nsIMsgFolder> rootFolder;
+   rv = aServer->GetRootFolder(getter_AddRefs(rootFolder));
+-  NS_ENSURE_SUCCESS(rv, rv);
++  if (NS_FAILED(rv)) {
++    NS_WARNING(nsPrintfCString("failed to get root folder for server %s: %s",
++                               serverKey.get(), mozilla::GetStaticErrorName(rv))
++                   .get());
++  }
+ 
+   nsTArray<RefPtr<nsIMsgFolder>> allDescendants;
+-  rv = rootFolder->GetDescendants(allDescendants);
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+-  if (!mozilla::StaticPrefs::mail_panorama_enabled_AtStartup()) {
++  if (rootFolder) {
++    rv = rootFolder->GetDescendants(allDescendants);
++    if (NS_FAILED(rv)) {
++      NS_WARNING(nsPrintfCString("failed to get descendants for server %s: %s",
++                                 serverKey.get(),
++                                 mozilla::GetStaticErrorName(rv))
++                     .get());
++      allDescendants.Clear();
++    }
++  }
++
++  if (rootFolder && !mozilla::StaticPrefs::mail_panorama_enabled_AtStartup()) {
+     // Remove every folder on the account from the folder cache.
+     for (const auto& folder : allDescendants) {
+       nsresult cacherv = RemoveFolderFromCache(folder);
+       if (NS_FAILED(cacherv)) {
+@@ -556,10 +568,17 @@ nsMsgAccountManager::RemoveIncomingServe
+ 
+     // Update the on-disk copy of the cache, so we don't end up with unneeded
+     // folders if e.g. Thunderbird crashes or gets SIGKILL'd later on.
+     nsCOMPtr<nsIMsgFolderCache> folderCache;
+-    MOZ_TRY(GetFolderCache(getter_AddRefs(folderCache)));
+-    MOZ_TRY(folderCache->Flush());
++    cacherv = GetFolderCache(getter_AddRefs(folderCache));
++    if (NS_SUCCEEDED(cacherv)) {
++      cacherv = folderCache->Flush();
++    }
++    if (NS_FAILED(cacherv)) {
++      NS_WARNING(nsPrintfCString("failed to flush folder cache: %s",
++                                 mozilla::GetStaticErrorName(cacherv))
++                     .get());
++    }
+   }
+   // Invalidate the `FindServer()` cache entry for this server. We need to do
+   // this after the folders have been removed from the folder cache, because the
+   // folders might end up querying the account manager to get a reference on
+@@ -589,15 +608,22 @@ nsMsgAccountManager::RemoveIncomingServe
+     nsCOMPtr<nsIMsgFolder> parentFolder;
+     folder->GetParent(getter_AddRefs(parentFolder));
+     mailSession->OnFolderRemoved(parentFolder, folder);
+   }
+-  notifier->NotifyFolderDeleted(rootFolder);
+-  mailSession->OnFolderRemoved(nullptr, rootFolder);
++  if (rootFolder) {
++    notifier->NotifyFolderDeleted(rootFolder);
++    mailSession->OnFolderRemoved(nullptr, rootFolder);
++  }
+ 
+   NotifyServerUnloaded(aServer);
+   if (aRemoveFiles) {
+-    rv = aServer->RemoveFiles();
+-    NS_ENSURE_SUCCESS(rv, rv);
++    nsresult filerv = aServer->RemoveFiles();
++    if (NS_FAILED(filerv)) {
++      NS_WARNING(nsPrintfCString("failed to remove files for server %s: %s",
++                                 serverKey.get(),
++                                 mozilla::GetStaticErrorName(filerv))
++                     .get());
++    }
+   }
+ 
+   nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
+   if (obs) {
+@@ -607,10 +633,12 @@ nsMsgAccountManager::RemoveIncomingServe
+ 
+   // now clear out the server once and for all.
+   // watch out! could be scary
+   aServer->ClearAllValues();
+-  rootFolder->Shutdown(true);
+-  return rv;
++  if (rootFolder) {
++    rootFolder->Shutdown(true);
++  }
++  return NS_OK;
+ }
+ 
+ nsresult nsMsgAccountManager::RemoveFolderFromCache(nsIMsgFolder* aFolder) {
+   MOZ_ASSERT(!mozilla::StaticPrefs::mail_panorama_enabled_AtStartup());
+diff --git a/mailnews/base/test/unit/test_accountMgrRemoveIncomingServer.js b/mailnews/base/test/unit/test_accountMgrRemoveIncomingServer.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/test/unit/test_accountMgrRemoveIncomingServer.js
+@@ -0,0 +1,70 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++
++add_setup(function () {
++  do_get_profile();
++});
++
++function createTestServer(username, hostname) {
++  return MailServices.accounts.createIncomingServer(username, hostname, "pop3");
++}
++
++function assertServerRemoved(server) {
++  Assert.ok(
++    !MailServices.accounts.allServers.some(item => item.key == server.key),
++    "server should be deregistered"
++  );
++  Assert.deepEqual(
++    Services.prefs.getChildList(`mail.server.${server.key}.`),
++    [],
++    "server preferences should be cleared"
++  );
++}
++
++add_task(function testRemoveWithUnavailableServerDirectory() {
++  const username = "server-directory-user";
++  const hostname = "server-directory.example.invalid";
++  const server = createTestServer(username, hostname);
++  server.wrappedJSObject.removeFiles = () => {
++    throw Components.Exception(
++      "server directory unavailable",
++      Cr.NS_ERROR_FILE_ACCESS_DENIED
++    );
++  };
++
++  MailServices.accounts.removeIncomingServer(server, true);
++
++  assertServerRemoved(server);
++
++  const retry = createTestServer(username, hostname);
++  Assert.ok(retry, "the same server should be creatable again");
++  MailServices.accounts.removeIncomingServer(retry, false);
++});
++
++add_task(function testRemoveWithUnavailableRootFolder() {
++  const username = "root-folder-user";
++  const hostname = "root-folder.example.invalid";
++  const server = createTestServer(username, hostname);
++  Object.defineProperty(server.wrappedJSObject, "rootFolder", {
++    configurable: true,
++    get() {
++      throw Components.Exception(
++        "root folder unavailable",
++        Cr.NS_ERROR_FAILURE
++      );
++    },
++  });
++
++  MailServices.accounts.removeIncomingServer(server, false);
++
++  assertServerRemoved(server);
++
++  const retry = createTestServer(username, hostname);
++  Assert.ok(retry, "the same server should be creatable again");
++  MailServices.accounts.removeIncomingServer(retry, false);
++});
+diff --git a/mailnews/base/test/unit/xpcshell.toml b/mailnews/base/test/unit/xpcshell.toml
+--- a/mailnews/base/test/unit/xpcshell.toml
++++ b/mailnews/base/test/unit/xpcshell.toml
+@@ -28,8 +28,10 @@ support-files = [
+ ["test_accountMgrMovedLocalFolders.js"]
+ 
+ ["test_accountMgrRemoveDefault.js"]
+ 
++["test_accountMgrRemoveIncomingServer.js"]
++
+ ["test_accountMgrUniqueServerKey.js"]
+ 
+ ["test_acctRepair.js"]
+ 
