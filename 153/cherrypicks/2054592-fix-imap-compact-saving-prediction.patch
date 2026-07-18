@@ -1,0 +1,124 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1784194471 -7200
+# Node ID e4859d1204a5d2ea0bfb1c08e6396a2490db2e94
+# Parent  8d450f52afff1b3cda06b85d4b0449f3393a5e84
+Bug 2054592 - Fix expungedBytes accumulation on imap. r=BenC
+
+Differential Revision: https://phabricator.services.mozilla.com/D312029
+
+
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -1299,26 +1299,38 @@ nsresult nsImapMailFolder::ExpungeAndCom
+ NS_IMETHODIMP nsImapMailFolder::Compact(nsIUrlListener* aListener,
+                                         nsIMsgWindow* aMsgWindow) {
+   return ExpungeAndCompact(aListener, aMsgWindow);
+ }
+ 
+ NS_IMETHODIMP nsImapMailFolder::MarkPendingRemoval(nsIMsgDBHdr* aHdr,
+                                                    bool aMark) {
+   NS_ENSURE_ARG_POINTER(aHdr);
++  // Only touch expungedBytes when the flag actually changes state. This method
++  // gets called repeatedly for the same headers (e.g. from
++  // ApplyRetentionSettings every time it runs), so unconditionally adjusting
++  // the count would let it drift far above the real reclaimable size.
++  nsAutoCString pendingRemoval;
++  aHdr->GetStringProperty("pendingRemoval", pendingRemoval);
++  bool wasMarked = !pendingRemoval.IsEmpty();
++  if (aMark == wasMarked) {
++    return NS_OK;
++  }
++
++  aHdr->SetStringProperty("pendingRemoval", aMark ? "1"_ns : ""_ns);
++
+   uint32_t offlineMessageSize;
+   aHdr->GetOfflineMessageSize(&offlineMessageSize);
+-  aHdr->SetStringProperty("pendingRemoval", aMark ? "1"_ns : ""_ns);
+-  if (!aMark) return NS_OK;
+   nsresult rv = GetDatabase();
+   NS_ENSURE_SUCCESS(rv, rv);
+   nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+   rv = mDatabase->GetDBFolderInfo(getter_AddRefs(dbFolderInfo));
+   NS_ENSURE_SUCCESS(rv, rv);
+-  return dbFolderInfo->ChangeExpungedBytes(offlineMessageSize);
++  return dbFolderInfo->ChangeExpungedBytes(
++      aMark ? (int32_t)offlineMessageSize : -(int32_t)offlineMessageSize);
+ }
+ 
+ NS_IMETHODIMP nsImapMailFolder::Expunge(nsIUrlListener* aListener,
+                                         nsIMsgWindow* aMsgWindow) {
+   nsCOMPtr<nsIImapService> imapService = mozilla::components::Imap::Service();
+   return imapService->Expunge(this, aListener, aMsgWindow);
+ }
+ 
+diff --git a/mailnews/imap/test/unit/test_autosync_date_constraints.js b/mailnews/imap/test/unit/test_autosync_date_constraints.js
+--- a/mailnews/imap/test/unit/test_autosync_date_constraints.js
++++ b/mailnews/imap/test/unit/test_autosync_date_constraints.js
+@@ -78,11 +78,63 @@ add_task(function test_applyRetentionSet
+         } else {
+           Assert.equal(header.getStringProperty("pendingRemoval"), "");
+         }
+       }
+     }
+   }
+ });
+ 
++// Regression test for bug 2054592. markPendingRemoval() gets called repeatedly
++// for the same headers (e.g. ApplyRetentionSettings re-marks every expired
++// offline message on each run). expungedBytes must reflect the state change,
++// not accumulate on every call.
++add_task(function test_markPendingRemovalAccounting() {
++  const folder = IMAPPump.inbox;
++  const header = [...folder.msgDatabase.enumerateMessages()][0];
++  Assert.ok(
++    header.flags & Ci.nsMsgMessageFlags.Offline,
++    "test message should be stored offline"
++  );
++  const size = header.offlineMessageSize;
++  Assert.greater(size, 0, "offline message should have a non-zero size");
++
++  const initial = folder.expungedBytes;
++
++  // First mark: expungedBytes grows by the message's offline size.
++  folder.markPendingRemoval(header, true);
++  Assert.equal(header.getStringProperty("pendingRemoval"), "1");
++  Assert.equal(
++    folder.expungedBytes,
++    initial + size,
++    "marking should add the message size once"
++  );
++
++  // Re-marking an already-marked message must be a no-op for expungedBytes.
++  folder.markPendingRemoval(header, true);
++  folder.markPendingRemoval(header, true);
++  Assert.equal(
++    folder.expungedBytes,
++    initial + size,
++    "re-marking must not inflate expungedBytes"
++  );
++
++  // Unmarking removes the message size again.
++  folder.markPendingRemoval(header, false);
++  Assert.equal(header.getStringProperty("pendingRemoval"), "");
++  Assert.equal(
++    folder.expungedBytes,
++    initial,
++    "unmarking should subtract the message size"
++  );
++
++  // Redundant unmark is likewise a no-op.
++  folder.markPendingRemoval(header, false);
++  Assert.equal(
++    folder.expungedBytes,
++    initial,
++    "redundant unmark should not change expungedBytes"
++  );
++});
++
+ add_task(function endTest() {
+   teardownIMAPPump();
+ });
+
