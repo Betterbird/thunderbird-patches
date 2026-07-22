@@ -3,7 +3,7 @@ Betterbird is a fork of Mozilla Thunderbird. Here are the patches that provide a
 
 ## Building Betterbird
 These instruction assume that you know how to build Thunderbird. The following instructions are specific to Betterbird.
-`NN` stands for the version you want to build. Currently `128` and `140` are supported.
+`NN` stands for the version you want to build. Currently `140` and `153` are supported.
 
 The build process is automated for Windows, Linux and Mac via a [build script](./build/build.sh).
 The development environment needs to be set up depending on the platform.
@@ -37,9 +37,9 @@ You need to install Xcode from the Apple App Store or [developer.apple.com/downl
 (which requires an Apple ID). Note the dependency of Xcode version and macOS version (details [here](https://xcodereleases.com/)).
 
 We are using this hardware for building:
-1. Betterbird 128 on Mac Intel: macOS 12.6.6 (Monterey) with Xcode 13.4.1 and SDK 14.4 (`.mozbuild`)
-1. Betterbird 128 on Mac Silicon: macOS 15.2/15.5 (Sequoia) with Xcode 16.2/16.4 and SDK 14.4 (`.mozbuild`)
 1. Betterbird 140 on Mac Intel and Silicon: macOS 15.5 (Sequoia) with Xcode 16.4 and SDK 15.5 (Xcode)
+1. Betterbird 153 on Mac Intel: macOS 15.7.7 (Sequoia) with Xcode 26.3 and SDK 26.2 (Xcode)
+1. Betterbird 153 on Mac Silicon: macOS 26.5.2 (Tahoe) with Xcode 26.6 and SDK 26.5 (Xcode)
 
 Then follow the first part of the (previous) [Firefox build instructions](https://firefox-source-docs.mozilla.org/setup/macos_build.html) copied below,
 the [Thunderbird documentation](https://developer.thunderbird.net/thunderbird-development/building-thunderbird/macos-build-prerequisites)
@@ -51,8 +51,8 @@ This needs to be removed (remove links) in order not to clash with `rustup-init`
 1. If necessary, add Xcode to the PATH: Add `export PATH=/opt/homebrew/bin:$PATH` to `.zshenv` in the home directory.
 1. Install Mercurial: `brew install hg`
 1. In a new shell: `hg version`
-1. Install Rust: `brew install rustup`
-1. In a new shell: `rustup-init` and `rustup override set 1.XX.0`, see `NN/NN.sh` for the required version
+1. Install Rust: `curl https://sh.rustup.rs -sSf | sh` and select option 1
+1. `$HOME/.cargo/bin/rustup override set 1.XX.0`, see `NN/NN.sh` for the required version
 1. Install wget: `brew install wget`
 1. Prepare a directory for all the action, let's say: `mkdir build && cd build`
 1. Copy the goodness from this repository: `git clone https://github.com/Betterbird/thunderbird-patches.git`
