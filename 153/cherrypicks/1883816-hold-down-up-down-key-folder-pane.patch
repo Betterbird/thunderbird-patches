@@ -1,0 +1,162 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1784933294 -7200
+# Parent  75e09a4507da24a13806f98289e9e8574dc7a824
+Bug 1883816 - Defer select event during typematic key repeat in TreeListboxMixin.
+
+diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
+--- a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
++++ b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
+@@ -6,8 +6,21 @@
+ const ANIMATION_EASING = "ease";
+ export const ANIMATION_DURATION_MS = 200;
+ export const reducedMotionMedia = matchMedia("(prefers-reduced-motion)");
+ 
++/**
++ * Navigation keys whose "select" event is deferred during typematic repeat
++ * to avoid overwhelming downstream handlers with rapid-fire events.
++ */
++const NAVIGATION_KEYS = new Set([
++  "ArrowUp",
++  "ArrowDown",
++  "Home",
++  "End",
++  "PageUp",
++  "PageDown",
++]);
++
+ const { AppConstants } = ChromeUtils.importESModule(
+   "resource://gre/modules/AppConstants.sys.mjs"
+ );
+ 
+@@ -142,23 +155,39 @@ export const TreeListboxMixin = Base =>
+       }
+ 
+       this.addEventListener("click", this);
+       this.addEventListener("keydown", this);
++      this.addEventListener("keyup", this);
++      this.addEventListener("blur", this);
+       this.addEventListener("contextmenu", this);
+       this._mutationObserver.observe(this, {
+         subtree: true,
+         childList: true,
+       });
+     }
+ 
++    /**
++     * If true, the "select" event dispatch is being deferred until keyup
++     * because the user is holding a navigation key (typematic repeat).
++     *
++     * @type {boolean}
++     */
++    #selectEventDeferred = false;
++
+     handleEvent(event) {
+       switch (event.type) {
+         case "click":
+           this._onClick(event);
+           break;
+         case "keydown":
+           this._onKeyDown(event);
+           break;
++        case "keyup":
++          this._onKeyUp(event);
++          break;
++        case "blur":
++          this._onBlur(event);
++          break;
+         case "contextmenu":
+           this._onContextMenu(event);
+           break;
+       }
+@@ -198,8 +227,20 @@ export const TreeListboxMixin = Base =>
+       if (event.altKey) {
+         return;
+       }
+ 
++      // For navigation keys that move the selection, defer the "select" event
++      // dispatch during typematic key repeats. This prevents expensive
++      // downstream handlers (e.g. folder loading in about:3pane) from being
++      // called on every repeated keydown, which causes the UI to freeze and
++      // then jump to an unpredictable position when the key is released.
++      // Visual updates (highlighting, scrolling) still happen on every repeat.
++      const suppressEvent = NAVIGATION_KEYS.has(event.key) && event.repeat;
++
++      if (suppressEvent) {
++        this.#selectEventDeferred = true;
++      }
++
+       switch (event.key) {
+         case "ArrowUp":
+           this.updateSelection(
+             this.getRowAtIndex(this._clampIndex(this.selectedIndex - 1)),
+@@ -317,8 +358,32 @@ export const TreeListboxMixin = Base =>
+       event.preventDefault();
+     }
+ 
+     /**
++     * Handle keyup events. If we deferred a "select" event due to typematic
++     * key repeat, dispatch it now so that downstream handlers (e.g. folder
++     * loading) execute once, on the final position.
++     */
++    _onKeyUp(_event) {
++      if (this.#selectEventDeferred) {
++        this.#selectEventDeferred = false;
++        this.dispatchEvent(new CustomEvent("select"));
++      }
++    }
++
++    /**
++     * Handle blur events. If the widget loses focus while a deferred "select"
++     * event is pending, dispatch it now to ensure downstream handlers are
++     * notified of the final selection.
++     */
++    _onBlur(_event) {
++      if (this.#selectEventDeferred) {
++        this.#selectEventDeferred = false;
++        this.dispatchEvent(new CustomEvent("select"));
++      }
++    }
++
++    /**
+      * Handle the context menu trigger on a tree row.
+      *
+      * @param {DOMEvent} event
+      */
+@@ -668,9 +733,9 @@ export const TreeListboxMixin = Base =>
+ 
+     /**
+      * Update the classes of the listbox to visually reflect the current state
+      * of selected items. This method also is responsible of emitting the
+-     * "select" custom event.
++     * "select" custom event, unless deferred by #selectEventDeferred.
+      */
+     updateRowClasses() {
+       this.classList.toggle("multi-selected", this.#selection.size > 1);
+ 
+@@ -680,9 +745,11 @@ export const TreeListboxMixin = Base =>
+       }
+ 
+       if (!this.#selection.size) {
+         this.removeAttribute("aria-activedescendant");
+-        this.dispatchEvent(new CustomEvent("select"));
++        if (!this.#selectEventDeferred) {
++          this.dispatchEvent(new CustomEvent("select"));
++        }
+         return;
+       }
+ 
+       // If the currently active row is no longer part of the selection,
+@@ -710,9 +777,11 @@ export const TreeListboxMixin = Base =>
+           }
+         }
+       });
+ 
+-      this.dispatchEvent(new CustomEvent("select"));
++      if (!this.#selectEventDeferred) {
++        this.dispatchEvent(new CustomEvent("select"));
++      }
+     }
+ 
+     /**
+      * Collapses the row at `index` if it can be collapsed. If the selected

@@ -1,0 +1,342 @@
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1784933072 -7200
+# Parent  629397005f2d0a076f0cbb53cce7488f9116f5dc
+Bug 2056063 - Fix spurious "Running Filters" prompt after running filters on newsgroups.
+
+diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterListDialog.js
+--- a/mail/base/content/FilterListDialog.js
++++ b/mail/base/content/FilterListDialog.js
+@@ -66,18 +66,14 @@ window.addEventListener("message", event
+       this.progressMeterVisible = true;
+     }
+     document.getElementById("statusbar-icon").removeAttribute("value");
+   } else if (event.data.meteors == "stop-meteors") {
+-    try {
+-      gRunFiltersButton.disabled = false;
+-      gRunningFilters = false;
+-
+-      if (this.progressMeterVisible) {
+-        document.getElementById("statusbar-progresspanel").collapsed = true;
+-        this.progressMeterVisible = false;
++    if (this.progressMeterVisible) {
++      const progressPanel = document.getElementById("statusbar-progresspanel");
++      if (progressPanel) {
++        progressPanel.collapsed = true;
+       }
+-    } catch (ex) {
+-      // can get here if closing window when running filters
++      this.progressMeterVisible = false;
+     }
+   }
+ });
+ 
+@@ -237,11 +233,9 @@ function setFilterFolder(msgFolder) {
+   if (gCurrentFilterList) {
+     gCurrentFilterList.saveToDefaultFile();
+   }
+ 
+-  // Setting this attribute should go away in bug 473009.
+   gServerMenu._folder = msgFolder;
+-  // Calling this should go away in bug 802609.
+   gServerMenu.menupopup.selectFolder(msgFolder);
+ 
+   // Calling getEditableFilterList will detect any errors in msgFilterRules.dat,
+   // backup the file, and alert the user.
+@@ -268,9 +262,13 @@ function setFilterFolder(msgFolder) {
+   runMenu._ensureInitialized();
+ 
+   const canFilterAfterTheFact = CanRunFiltersAfterTheFact(msgFolder.server);
+   gRunFiltersFolder.disabled = !canFilterAfterTheFact;
+-  gRunFiltersButton.disabled = !canFilterAfterTheFact;
++  gRunFiltersFolder._canFilterAfterTheFact = canFilterAfterTheFact;
++  // Always disable the run button here. It will be re-enabled by
++  // updateButtons() in setRunFolder() only after a folder is selected,
++  // so the button is never enabled while the picker shows "Choose folder…".
++  gRunFiltersButton.disabled = true;
+   document.getElementById("folderPickerPrefix").disabled =
+     !canFilterAfterTheFact;
+ 
+   if (canFilterAfterTheFact) {
+@@ -322,12 +320,17 @@ function setFilterFolder(msgFolder) {
+  *
+  * @param {nsIMsgFolder} aFolder - nsIMsgFolder folder to select.
+  */
+ function setRunFolder(aFolder) {
+-  // Setting this attribute should go away in bug 473009.
+   gRunFiltersFolder._folder = aFolder;
+-  // Calling this should go away in bug 802609.
+-  gRunFiltersFolder.menupopup.selectFolder(gRunFiltersFolder._folder);
++  const found =
++    gRunFiltersFolder.menupopup.selectFolder(gRunFiltersFolder._folder);
++  // selectFolder returns false if the folder wasn't found in the menu,
++  // e.g. because it hasn't been populated yet. Clear _folder so the
++  // button stays disabled and the picker shows "Choose folder…".
++  if (!found) {
++    gRunFiltersFolder._folder = null;
++  }
+   updateButtons();
+ }
+ 
+ /**
+@@ -552,8 +555,11 @@ function onDeleteFilter() {
+   }
+   if (newSelectionIndex > -1) {
+     gFilterListbox.selectedIndex = newSelectionIndex;
+     updateViewPosition(-1);
++  } else {
++    gFilterListbox.clearSelection();
++    updateButtons();
+   }
+ }
+ 
+ /**
+@@ -742,9 +748,31 @@ function runSelectedFilters() {
+ 
+   MailServices.filters.applyFiltersToFolders(
+     filterList,
+     [folder],
+-    gFilterListMsgWindow
++    gFilterListMsgWindow,
++    {
++      onStopOperation(_status) {
++        gRunningFilters = false;
++
++        // If the user closed the dialog while filters were running,
++        // the DOM is destroyed. Bail out instantly to avoid Dead Object
++        // exceptions and TypeErrors on null elements.
++        if (window.closed) {
++          return;
++        }
++
++        gRunFiltersButton.disabled = false;
++
++        // Failsafe against stray status/meteor messages.
++        // Once Bug 2002774 has landed, this can probably be removed.
++        if (window.progressMeterVisible) {
++          document.getElementById("statusbar-progresspanel").collapsed = true;
++          window.progressMeterVisible = false;
++        }
++        document.getElementById("statusText").setAttribute("value", "");
++      },
++    }
+   );
+ }
+ 
+ function moveCurrentFilter(motion) {
+@@ -922,13 +950,16 @@ function updateButtons() {
+   // "delete" only disabled when no filters are selected
+   gDeleteButton.disabled = !numFiltersSelected;
+ 
+   // we can run multiple filters on a folder
+-  // so only disable this UI if no filters are selected
+-  document.getElementById("folderPickerPrefix").disabled = !numFiltersSelected;
+-  gRunFiltersFolder.disabled = !numFiltersSelected;
++  // so only disable this UI if no filters are selected, or if the server
++  // can't run filters after the fact.
++  document.getElementById("folderPickerPrefix").disabled =
++    !numFiltersSelected || !gRunFiltersFolder._canFilterAfterTheFact;
++  gRunFiltersFolder.disabled =
++    !numFiltersSelected || !gRunFiltersFolder._canFilterAfterTheFact;
+   gRunFiltersButton.disabled =
+-    !numFiltersSelected || !gRunFiltersFolder._folder;
++    !numFiltersSelected || !gRunFiltersFolder._folder || !gRunFiltersFolder._canFilterAfterTheFact;
+   // "up" and "top" enabled only if one filter is selected, and it's not the first
+   // don't use gFilterListbox.currentIndex here, it's buggy when we've just changed the
+   // children in the list (via rebuildFilterList)
+   disabled = !(
+diff --git a/mail/test/browser/folder-widget/browser_messageFilters.js b/mail/test/browser/folder-widget/browser_messageFilters.js
+--- a/mail/test/browser/folder-widget/browser_messageFilters.js
++++ b/mail/test/browser/folder-widget/browser_messageFilters.js
+@@ -30,18 +30,19 @@ var { MailServices } = ChromeUtils.impor
+   "resource:///modules/MailServices.sys.mjs"
+ );
+ 
+ var folderA, NNTPAccount;
++var localServer;
+ 
+ add_setup(async function () {
+   setupNNTPDaemon();
+ 
+   folderA = await create_folder("FolderToolbarA");
+   // we need one message to select and open
+   await make_message_sets_in_folders([folderA], [{ count: 1 }]);
+ 
+-  const server = setupLocalServer(NNTP_PORT);
+-  NNTPAccount = MailServices.accounts.findAccountForServer(server);
++  localServer = setupLocalServer(NNTP_PORT);
++  NNTPAccount = MailServices.accounts.findAccountForServer(localServer);
+ 
+   registerCleanupFunction(() => {
+     folderA.deleteSelf(null);
+     // For some peculiar reason, removing won't work in --verify mode
+@@ -520,4 +521,169 @@ add_task(async function test_can_quit_on
+   );
+ 
+   await BrowserTestUtils.closeWindow(filterWin);
+ });
++
++async function create_simple_subject_filter(filterc) {
++  async function fill_in_filter_fields(fec) {
++    const filterName = fec.document.getElementById("filterName");
++    filterName.value = "A Simple Newsgroup Filter";
++    fec.document.getElementById("searchAttr0").value =
++      Ci.nsMsgSearchAttrib.Subject;
++    fec.document.getElementById("searchOp0").value = Ci.nsMsgSearchOp.Contains;
++    const searchVal = fec.document.getElementById("searchVal0").input;
++    searchVal.setAttribute("value", "doesnotexist");
++
++    const filterActions = fec.document.getElementById("filterActionList");
++    const firstAction = filterActions.getItemAtIndex(0);
++    firstAction.setAttribute("value", "markasflagged");
++
++    fec.document.querySelector("dialog").acceptDialog();
++  }
++
++  // Let's open the filter editor.
++  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
++    null,
++    "chrome://messenger/content/FilterEditor.xhtml",
++    {
++      callback: fill_in_filter_fields,
++    }
++  );
++  EventUtils.synthesizeMouseAtCenter(
++    filterc.document.getElementById("newButton"),
++    {},
++    filterc
++  );
++  await dialogPromise;
++}
++
++/**
++ * Test that after running a filter with a local-only action on an
++ * already-parsed folder, gRunningFilters is cleared correctly.
++ * This covers the bug where gRunningFilters stayed true permanently for
++ * filter runs that involve no URLs (offline search, local DB actions).
++ */
++add_task(async function test_filter_clears_running_state() {
++  const folder = await create_folder("FilterRunningState");
++  await make_message_sets_in_folders([folder], [{ count: 1 }]);
++  // Visit the folder to ensure its database is parsed, so filter execution
++  // uses only SearchWOUrls() and local DB actions — no URLs, no meteors.
++  await be_in_folder(folder);
++
++  info("Open the message filters dialog and create a simple filter");
++  const filterWin = await openFiltersDialogs();
++  await create_simple_subject_filter(filterWin);
++
++  info("Click the 'Run Now' button to run the filter");
++  const runFiltersButton =
++    filterWin.document.getElementById("runFiltersButton");
++  Assert.ok(!runFiltersButton.disabled, "'Run Now' button should be enabled");
++  EventUtils.synthesizeMouseAtCenter(runFiltersButton, {}, filterWin);
++
++  Assert.ok(
++    filterWin.gRunningFilters,
++    "gRunningFilters should be true while filters run"
++  );
++  info(
++    "Wait for filter execution to complete and gRunningFilters to be cleared"
++  );
++  await TestUtils.waitForCondition(
++    () => !filterWin.gRunningFilters,
++    "gRunningFilters should be cleared after filter execution completes"
++  );
++  Assert.ok(
++    !runFiltersButton.disabled,
++    "'Run Now' button should still be enabled"
++  );
++
++  await BrowserTestUtils.closeWindow(filterWin);
++});
++
++/**
++ * Test that the "Run Filters" button becomes enabled when a folder is
++ * selected and filters exist.
++ */
++add_task(async function test_run_button_disabled_state() {
++  await be_in_folder(localServer.rootFolder);
++
++  info("Open the message filters dialog on the news server.");
++  const filterWin = await openFiltersDialogs();
++
++  const runFiltersButton =
++    filterWin.document.getElementById("runFiltersButton");
++  const editFiltersButton = filterWin.document.getElementById("editButton");
++  Assert.ok(runFiltersButton.disabled, "'Run Now' button should be disabled");
++  Assert.ok(editFiltersButton.disabled, "'Edit' button should be disabled");
++
++  info("Select a newsgroup folder in the server menu.");
++  const serverMenu = filterWin.document.getElementById("serverMenu");
++  let popupshown = BrowserTestUtils.waitForEvent(serverMenu, "popupshown");
++  EventUtils.synthesizeMouseAtCenter(serverMenu, {}, serverMenu.documentGlobal);
++  await popupshown;
++
++  const nntp = serverMenu.firstElementChild.children.item(1);
++  Assert.equal(
++    nntp.label,
++    "localhost",
++    "should show 'localhost' nntp server item in menu"
++  );
++  popupshown = BrowserTestUtils.waitForEvent(nntp, "popupshown");
++  EventUtils.synthesizeMouseAtCenter(nntp, {}, nntp.documentGlobal);
++  await popupshown;
++
++  EventUtils.synthesizeKey("KEY_ArrowDown", {}, filterWin);
++  EventUtils.synthesizeKey("KEY_ArrowDown", {}, filterWin);
++  const popuphidden = BrowserTestUtils.waitForEvent(serverMenu, "popuphidden");
++  EventUtils.synthesizeKey("KEY_Enter", {}, filterWin);
++  await popuphidden;
++
++  Assert.equal(
++    serverMenu.label,
++    "test.filter",
++    "should show 'test.filter' newsgroup item in menu"
++  );
++  Assert.ok(
++    runFiltersButton.disabled,
++    "'Run Now' button should still be disabled"
++  );
++  Assert.ok(
++    editFiltersButton.disabled,
++    "'Edit' button should still be disabled"
++  );
++
++  info("Create a simple filter");
++  await create_simple_subject_filter(filterWin);
++
++  Assert.ok(
++    filterWin.gRunFiltersFolder._canFilterAfterTheFact,
++    "news server should support after-the-fact filtering"
++  );
++
++  Assert.ok(
++    !runFiltersButton.disabled,
++    "'Run Now' button should now be enabled"
++  );
++  Assert.ok(!editFiltersButton.disabled, "'Edit' button should now be enabled");
++
++  info("Delete the filter");
++  const deleteAlertPromise = BrowserTestUtils.promiseAlertDialogOpen(
++    "",
++    "chrome://global/content/commonDialog.xhtml",
++    {
++      async callback(win) {
++        EventUtils.synthesizeKey("KEY_Enter", {}, win);
++      },
++    }
++  );
++  EventUtils.synthesizeKey("KEY_Delete", {}, filterWin);
++  await deleteAlertPromise;
++  Assert.ok(
++    runFiltersButton.disabled,
++    "'Run Now' button should be disabled again"
++  );
++  Assert.ok(
++    editFiltersButton.disabled,
++    "'Edit' button should be disabled again"
++  );
++
++  await BrowserTestUtils.closeWindow(filterWin);
++});

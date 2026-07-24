@@ -1,0 +1,185 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784628841 -7200
+# Node ID 8465a67db60d7fc839ed126c5322fd2cbee3b3eb
+# Parent  031844cf189b0939adab77e7e586f86915dd354e
+Bug 2054385 - Fix body search for quoted-printable messages ending on a soft line break. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D312884
+
+
+diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
+--- a/mailnews/search/src/nsMsgSearchTerm.cpp
++++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -792,59 +792,64 @@ nsresult nsMsgSearchTerm::MatchBody(nsIM
+   // on negative terms. i.e. opDoesntContain must look at all lines
+   bool boolContinueLoop;
+   GetMatchAllBeforeDeciding(&boolContinueLoop);
+   bool result = boolContinueLoop;
+ 
+   nsCString compare;
+   nsMsgBodyHandler bodyHandler(scope, msg);
+   uint32_t seen = 0;
++  // Kept outside the loop because GetNextLine() does not set it at EOF, and
++  // text accumulated in `compare` must be matched with its part's charset.
++  nsAutoCString charset;
+   while (result == boolContinueLoop) {
+     // Small hack so we don't look all through a message when someone has
+     // specified "BODY IS foo".
+     if (m_operator == nsMsgSearchOp::Is || m_operator == nsMsgSearchOp::Isnt) {
+       if (seen > m_value.utf8String.Length()) {
+         break;
+       }
+     }
+ 
+     nsAutoCString buf;
+-    nsAutoCString charset;
+     bool needsQPReset = false;
+     int32_t n = bodyHandler.GetNextLine(buf, charset, needsQPReset);
+-    if (n < 0) {
+-      break;  // EOF
++    bool eof = n < 0;
++    if (!eof) {
++      seen += n;
++      bool softLineBreak = false;
++      // Do in-place decoding of quoted printable
++      if (bodyHandler.IsQP()) {
++        softLineBreak = StringEndsWith(buf, "="_ns);
++        MsgStripQuotedPrintable(buf);
++        // If soft line break, chop off the last char as well.
++        size_t bufLength = buf.Length();
++        if ((bufLength > 0) && softLineBreak) buf.SetLength(bufLength - 1);
++      }
++      if (needsQPReset) {
++        bodyHandler.resetQP();
++      }
++      compare.Append(buf);
++      // If this line ends with a soft line break, loop around and get the
++      // next line before looking for the search string. A malformed message
++      // may end on a soft line break; we then match the leftover text at EOF
++      // below.
++      if (softLineBreak) continue;
+     }
+-    seen += n;
+-    bool softLineBreak = false;
+-    // Do in-place decoding of quoted printable
+-    if (bodyHandler.IsQP()) {
+-      softLineBreak = StringEndsWith(buf, "="_ns);
+-      MsgStripQuotedPrintable(buf);
+-      // If soft line break, chop off the last char as well.
+-      size_t bufLength = buf.Length();
+-      if ((bufLength > 0) && softLineBreak) buf.SetLength(bufLength - 1);
+-    }
+-    if (needsQPReset) {
+-      bodyHandler.resetQP();
+-    }
+-    compare.Append(buf);
+-    // If this line ends with a soft line break, loop around
+-    // and get the next line before looking for the search string.
+-    // This assumes the message can't end on a QP soft line break.
+-    // That seems like a pretty safe assumption.
+-    if (softLineBreak) continue;
+     if (!compare.IsEmpty()) {
+       char startChar = (char)compare.CharAt(0);
+       if (startChar != '\r' && startChar != '\n') {
+         rv = MatchString(
+             compare, charset.IsEmpty() ? msgCharset : charset.get(), &result);
+       }
+       compare.Truncate();
+     }
++    if (eof) {
++      break;
++    }
+   }
+ 
+   *pResult = result;
+   return rv;
+ }
+ 
+ nsresult nsMsgSearchTerm::InitializeAddressBook() {
+   // the search attribute value has the URI for the address book we need to
+diff --git a/mailnews/search/test/unit/test_searchBody.js b/mailnews/search/test/unit/test_searchBody.js
+--- a/mailnews/search/test/unit/test_searchBody.js
++++ b/mailnews/search/test/unit/test_searchBody.js
+@@ -102,16 +102,21 @@ var Files = [
+ 
+   // S/MIME encrypted message.
+   "../../../../mail/test/browser/smime/data/alice.env.eml",
+ 
+   // Bare "Content-Type: text" and missing Content-Type.
+   "../../../data/bare-text-type.eml",
+   "../../../data/no-content-type.eml",
+ 
++  // Quoted-printable bodies ending on a soft line break, i.e. with a
++  // trailing "=" at the end of the message.
++  "../../../data/qp-trailing-equals-plain.eml",
++  "../../../data/qp-trailing-equals-html.eml",
++
+   // TODO: apparently search opaque does not work
+   //"../../../../mail/test/browser/smime/data/alice.sig.SHA256.opaque.env.eml",
+ ];
+ var Tests = [
+   // Message basic1 has body: "Hello, world!"
+   { value: "Hello, world!", op: Is, count: 1 },
+   { value: "Hello, world!", op: Isnt, count: Files.length - 1 },
+ 
+@@ -221,16 +226,21 @@ var Tests = [
+   { value: "coworker", op: Contains, count: 1 },
+ 
+   // 5. Test for Word Mergers (Tier 1).
+   // The test file contains "Sale&nbsp;Today".
+   // The entity should become a space. Searching for the exact phrase should work,
+   // but searching for the merged word should fail.
+   { value: "Sale Today", op: Contains, count: 1 },
+   { value: "SaleToday", op: Contains, count: 0 },
++
++  // Body text accumulated across quoted-printable soft line breaks must
++  // still be searched when the message ends on one.
++  { value: "qptrailingplain", op: Contains, count: 1 },
++  { value: "qptrailinghtml", op: Contains, count: 1 },
+ ];
+ 
+ function fixFile(file) {
+   var fstream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(
+     Ci.nsIFileInputStream
+   );
+   fstream.init(file, -1, -1, Ci.nsIFileInputStream.CLOSE_ON_EOF);
+   var sstream = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(
+diff --git a/mailnews/test/data/qp-trailing-equals-html.eml b/mailnews/test/data/qp-trailing-equals-html.eml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/qp-trailing-equals-html.eml
+@@ -0,0 +1,15 @@
++To: recipient@example.invalid
++From: sender@example.invalid
++Subject: HTML quoted-printable body ending on a soft line break
++Message-ID: <qp-trailing-equals-html@example.invalid>
++Date: Mon, 6 Jul 2026 06:06:06 +0000
++MIME-Version: 1.0
++Content-Type: text/html; charset="utf-8"
++Content-Transfer-Encoding: quoted-printable
++
++<html>
++<body>
++<p>The needle qptrailinghtml sits in the aggregated part.</p>
++</body>
++</html>
++=
+diff --git a/mailnews/test/data/qp-trailing-equals-plain.eml b/mailnews/test/data/qp-trailing-equals-plain.eml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/qp-trailing-equals-plain.eml
+@@ -0,0 +1,11 @@
++To: recipient@example.invalid
++From: sender@example.invalid
++Subject: Plaintext quoted-printable body ending on a soft line break
++Message-ID: <qp-trailing-equals-plain@example.invalid>
++Date: Mon, 6 Jul 2026 06:06:06 +0000
++MIME-Version: 1.0
++Content-Type: text/plain; charset="utf-8"
++Content-Transfer-Encoding: quoted-printable
++
++This message body ends on a quoted-printable soft line break.
++The needle qptrailingplain sits on the final line=
+

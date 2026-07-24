@@ -1,0 +1,147 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784608649 0
+# Node ID 5f5fa03eeb3793b9965a1655434aa1589d799ab4
+# Parent  3938d201f9f642f03f71aa7d3495f4ed186a73f8
+Bug 1524247 - Prevent shutdown hangs during IMAP OAuth authentication. r=jtracey
+
+Differential Revision: https://phabricator.services.mozilla.com/D312849
+
+
+diff --git a/mailnews/imap/src/nsSyncRunnableHelpers.cpp b/mailnews/imap/src/nsSyncRunnableHelpers.cpp
+--- a/mailnews/imap/src/nsSyncRunnableHelpers.cpp
++++ b/mailnews/imap/src/nsSyncRunnableHelpers.cpp
+@@ -527,37 +527,44 @@ void OAuth2ThreadHelper::GetXOAuth2Strin
+ 
+   // Acquire a lock early, before reading anything. Guarantees memory visibility
+   // issues.
+   MonitorAutoLock lockGuard(mMonitor);
+ 
+   // Umm... what are you trying to do?
+   if (!mOAuth2Support) return;
+ 
+-  nsCOMPtr<nsIRunnable> runInit =
+-      NewRunnableMethod("OAuth2ThreadHelper::GetXOAuth2String", this,
+-                        &OAuth2ThreadHelper::Connect);
++  nsCOMPtr<nsIRunnable> runInit = NS_NewRunnableFunction(
++      "OAuth2ThreadHelper::GetXOAuth2String", [self = RefPtr(this)]() {
++        if (mozilla::PastShutdownPhase(
++                mozilla::ShutdownPhase::AppShutdownConfirmed)) {
++          MonitorAutoLock lockGuard(self->mMonitor);
++          self->mOAuth2String.Truncate();
++          lockGuard.Notify();
++          return;
++        }
++
++        // Connect is asynchronous and might never call its listener. Register
++        // the shutdown wake-up before starting it, while the main thread can
++        // still do so safely.
++        mozilla::RunOnShutdown(
++            [self]() {
++              MonitorAutoLock lockGuard(self->mMonitor);
++              self->mOAuth2String.Truncate();
++              lockGuard.Notify();
++            },
++            mozilla::ShutdownPhase::AppShutdownConfirmed);
++        self->Connect();
++      });
+   nsresult rv = NS_DispatchToMainThread(runInit);
+   if (NS_WARN_IF(NS_FAILED(rv))) {
+     return;
+   }
+   mMonitor.Wait();
+ 
+-  nsCOMPtr<nsIRunnable> shutdownNotify = NS_NewRunnableFunction(
+-      "GetXOAuth2StringShutdownNotifier", [self = RefPtr(this)]() {
+-        mozilla::RunOnShutdown([self]() {
+-          // Notify anyone waiting that we're done.
+-          self->mMonitor.Notify();
+-        });
+-      });
+-  rv = NS_DispatchToMainThread(shutdownNotify.forget());
+-  if (NS_WARN_IF(NS_FAILED(rv))) {
+-    return;
+-  }
+-
+   // Now we either have the string, or we failed (in which case the string is
+   // empty).
+   base64Str = mOAuth2String;
+ }
+ 
+ void OAuth2ThreadHelper::Init() {
+   MOZ_ASSERT(NS_IsMainThread(), "Can't touch JS off-main-thread");
+   MonitorAutoLock lockGuard(mMonitor);
+diff --git a/mailnews/imap/test/unit/test_imapOAuth2Shutdown.js b/mailnews/imap/test/unit/test_imapOAuth2Shutdown.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_imapOAuth2Shutdown.js
+@@ -0,0 +1,53 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++var { MockRegistrar } = ChromeUtils.importESModule(
++  "resource://testing-common/MockRegistrar.sys.mjs"
++);
++
++const oauth2Connect = Promise.withResolvers();
++const oauth2Module = {
++  QueryInterface: ChromeUtils.generateQI(["msgIOAuth2Module"]),
++
++  initFromMail() {
++    return true;
++  },
++
++  connect(withUI, listener) {
++    Assert.ok(withUI, "OAuth2 authentication allows prompting");
++    Assert.ok(listener, "OAuth2 authentication has a result listener");
++    oauth2Connect.resolve();
++  },
++};
++
++add_task(async function test_shutdown_during_oauth2_connect() {
++  MockRegistrar.register("@mozilla.org/mail/oauth2-module;1", oauth2Module);
++
++  const daemon = new ImapDaemon();
++  const server = makeServer(daemon, "", {
++    kAuthSchemes: ["XOAUTH2"],
++  });
++  const incomingServer = createLocalIMAPServer(server.port);
++  incomingServer.authMethod = Ci.nsMsgAuthMethod.OAuth2;
++
++  registerCleanupFunction(() => {
++    incomingServer.closeCachedConnections();
++    server.stop();
++  });
++
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  incomingServer.verifyLogon(listener, null);
++  await oauth2Connect.promise;
++
++  Services.startup.advanceShutdownPhase(
++    Services.startup.SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED
++  );
++  await Assert.rejects(
++    listener.promise,
++    error => Number(error.message) == Cr.NS_ERROR_FAILURE,
++    "the pending IMAP URL should stop with NS_ERROR_FAILURE during shutdown"
++  );
++});
+diff --git a/mailnews/imap/test/unit/xpcshell-mbox.toml b/mailnews/imap/test/unit/xpcshell-mbox.toml
+--- a/mailnews/imap/test/unit/xpcshell-mbox.toml
++++ b/mailnews/imap/test/unit/xpcshell-mbox.toml
+@@ -5,8 +5,10 @@ tags = [
+   "cpp",
+ ]
+ dupe-manifest = true
+ run-sequentially = true
+ 
+ ["include:xpcshell-shared.toml"]
+ 
+ ["test_fetchWhileLocked.js"]
++
++["test_imapOAuth2Shutdown.js"]
+
