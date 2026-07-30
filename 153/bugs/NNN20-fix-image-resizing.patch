@@ -1,7 +1,7 @@
 # HG changeset patch
-# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# User alta88@fixall.com, Betterbird <betterbird@betterbird.eu> and DeepSeek
 # Date 1784805534 -7200
-# Parent  386415301b8f5ad847c7e8e15c671da85fc6c914
+# Parent  ec0f2b6b16aa0bea3e86ff8086c9a4f9fa9b555b
 NNN20 - Fix image resizing regressions.
 
 diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
@@ -22,7 +22,7 @@ diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderb
 diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
 --- a/mail/base/content/aboutMessage.js
 +++ b/mail/base/content/aboutMessage.js
-@@ -66,8 +66,12 @@ function getMessagePaneBrowser() {
+@@ -66,44 +66,55 @@ function getMessagePaneBrowser() {
  }
  
  /**
@@ -35,9 +35,17 @@ diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.
  async function messagePaneOnResize() {
    const doc = getMessagePaneBrowser().contentDocument;
    // Bail out if it's http content or we don't have images.
-@@ -79,31 +83,40 @@ async function messagePaneOnResize() {
-     document.body.scrollWidth,
-     window.visualViewport.width
+   if (doc?.URL.startsWith("http") || !doc?.images) {
+     return;
+   }
+ 
+-  const availableWidth = Math.max(
+-    document.body.scrollWidth,
+-    window.visualViewport.width
++  // Note that visualViewport.width is a float, and this property returns 0
++  // for chrome windows (in case someone naïly tests that).
++  const availableWidth = Math.floor(
++    Math.max(document.body.scrollWidth, window.visualViewport.width)
    );
  
 -  const adjustImg = img => {
@@ -63,11 +71,10 @@ diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.
    for (const img of doc.querySelectorAll(
      "img:is([shrinktofit],[overflowing])"
    )) {
-+    let isLink = false;
-     if (img.closest("[href]")) {
+-    if (img.closest("[href]")) {
 -      continue;
-+      isLink = true;
-     }
+-    }
++    const isLink = !!img.closest("[href]");
      if (!img.complete) {
 -      img.addEventListener("load", event => adjustImg(event.target), {
 -        once: true,
@@ -89,14 +96,15 @@ diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.
 diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
 --- a/mail/base/content/msgHdrView.js
 +++ b/mail/base/content/msgHdrView.js
-@@ -1140,25 +1140,42 @@ var messageProgressListener = {
+@@ -1140,25 +1140,58 @@ var messageProgressListener = {
          });
        });
      }
  
 -    // Scale any overflowing images, exclude http content.
-+    // Initialize the image zoom system. All images get [shrinktofit] to
-+    // constrain them, and [overflowing] if they exceed the viewport width
++    // Initialize the image zoom system. Images get [shrinktofit] if their
++    // width is greater than minimum viewport width to constrain them with
++    // correct aspect ratio, and [overflowing] if they exceed the viewport width
 +    // AND zooming is allowed (non-links, or links with the pref set).
 +    // The CSS in messageBody.css defines three visual states based on
 +    // these two attributes. Click toggling happens in contentAreaClick.js
@@ -104,9 +112,27 @@ diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
      if (!browser.contentDocument.URL.startsWith("http")) {
 -      const adjustImg = img => {
 -        img.toggleAttribute("overflowing", img.naturalWidth > img.clientWidth);
++      // Note that visualViewport.width is a float, and this property returns 0
++      // for chrome windows (in case someone naïly tests that).
++      const availableWidth = Math.floor(
++        Math.max(document.body.scrollWidth, window.visualViewport.width)
++      );
 +      const adjustImg = (img, allowZoom) => {
-+        const isOverflowing = img.naturalWidth > img.clientWidth;
-+        img.toggleAttribute("overflowing", isOverflowing && allowZoom);
++        // Do not adjust images smaller than the messagepane viewport width.
++        const shrinktofit = img.width > 200;
++        let isOverflowing =
++          img.clientWidth > availableWidth ||
++          img.naturalWidth > img.clientWidth;
++        // Adding shrinktofit attribute will cause a CSS constraint which
++        // alters the overflowing calculation and may create a false overflow.
++        // If the image overflows both before and after the constraint, then it
++        // is zoomable.
++        img.toggleAttribute("shrinktofit", shrinktofit);
++        isOverflowing &&= img.naturalWidth > img.clientWidth;
++        img.toggleAttribute(
++          "overflowing",
++          shrinktofit && isOverflowing && allowZoom
++        );
        };
 +      const zoomImageLinks = Services.prefs.getBoolPref(
 +        "mail.allow_zooming_image_links",
@@ -114,15 +140,15 @@ diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
 +      );
        for (const img of browser.contentDocument.images) {
 -        // No zooming for children of clickable links.
-+        let isLink = false;
-         if (img.closest("[href]")) {
+-        if (img.closest("[href]")) {
 -          continue;
-+          isLink = true;
-         }
+-        }
+-        img.toggleAttribute("shrinktofit", true);
++        img.classList.add("moz-message-image");
++        const isLink = !!img.closest("[href]");
 +        // Any overflowing image must be click zoomable. An overflowing link
 +        // image will have the url displayed on hover and can be opened via
 +        // contextmenu.
-         img.toggleAttribute("shrinktofit", true);
          if (!img.complete) {
 -          img.addEventListener("load", event => adjustImg(event.target), {
 -            once: true,
@@ -144,13 +170,14 @@ diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
 diff --git a/mail/themes/shared/mail/messageBody.css b/mail/themes/shared/mail/messageBody.css
 --- a/mail/themes/shared/mail/messageBody.css
 +++ b/mail/themes/shared/mail/messageBody.css
-@@ -119,24 +119,39 @@ mailattachcount {
+@@ -119,24 +119,37 @@ mailattachcount {
      page: auto !important;
    }
  }
  
 -/* ::::: images ::::: */
 -
+-img {
 +/* ::::: image zoom system ::::: */
 +/*
 + * Two attributes (shrinktofit, overflowing) create three visual states
@@ -168,16 +195,17 @@ diff --git a/mail/themes/shared/mail/messageBody.css b/mail/themes/shared/mail/m
 + * Clicking an image with [overflowing] toggles its [shrinktofit] attribute,
 + * cycling between states 2 and 3. Window resize re-evaluates overflow.
 + */
- img {
++img.moz-message-image {
    &[shrinktofit] {
      max-inline-size: 100% !important;
++    block-size: auto !important;
  
      &[overflowing] {
 -      cursor: zoom-in;
+-      /* If we detect we're shrinking the image, force it to keep its aspect
+-       * ratio, since it possibly had hard-coded sizings. */
+-      block-size: auto !important;
 +      cursor: zoom-in !important;
-       /* If we detect we're shrinking the image, force it to keep its aspect
-        * ratio, since it possibly had hard-coded sizings. */
-       block-size: auto !important;
      }
    }
  
