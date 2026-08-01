@@ -1,7 +1,7 @@
 # HG changeset patch
 # User welpy-cw <h.w.forms@arcor.de>
-# Date 1784933294 -7200
-# Parent  75e09a4507da24a13806f98289e9e8574dc7a824
+# Date 1785608022 -7200
+# Parent  2d9afd87ffcf68482ea84c7e62df5aad448578d6
 Bug 1883816 - Defer select event during typematic key repeat in TreeListboxMixin.
 
 diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
@@ -29,7 +29,7 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
    "resource://gre/modules/AppConstants.sys.mjs"
  );
  
-@@ -142,23 +155,39 @@ export const TreeListboxMixin = Base =>
+@@ -142,23 +155,37 @@ export const TreeListboxMixin = Base =>
        }
  
        this.addEventListener("click", this);
@@ -60,16 +60,14 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
            this._onKeyDown(event);
            break;
 +        case "keyup":
-+          this._onKeyUp(event);
-+          break;
 +        case "blur":
-+          this._onBlur(event);
++          this._onKeyUpOrBlur();
 +          break;
          case "contextmenu":
            this._onContextMenu(event);
            break;
        }
-@@ -198,8 +227,20 @@ export const TreeListboxMixin = Base =>
+@@ -198,8 +225,18 @@ export const TreeListboxMixin = Base =>
        if (event.altKey) {
          return;
        }
@@ -80,9 +78,7 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
 +      // called on every repeated keydown, which causes the UI to freeze and
 +      // then jump to an unpredictable position when the key is released.
 +      // Visual updates (highlighting, scrolling) still happen on every repeat.
-+      const suppressEvent = NAVIGATION_KEYS.has(event.key) && event.repeat;
-+
-+      if (suppressEvent) {
++      if (NAVIGATION_KEYS.has(event.key) && event.repeat) {
 +        this.#selectEventDeferred = true;
 +      }
 +
@@ -90,28 +86,16 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
          case "ArrowUp":
            this.updateSelection(
              this.getRowAtIndex(this._clampIndex(this.selectedIndex - 1)),
-@@ -317,8 +358,32 @@ export const TreeListboxMixin = Base =>
+@@ -317,8 +354,20 @@ export const TreeListboxMixin = Base =>
        event.preventDefault();
      }
  
      /**
-+     * Handle keyup events. If we deferred a "select" event due to typematic
-+     * key repeat, dispatch it now so that downstream handlers (e.g. folder
-+     * loading) execute once, on the final position.
++     * Handle keyup and blur events. If we deferred a "select" event due to
++     * typematic key repeat, dispatch it now so that downstream handlers
++     * (e.g. folder loading) execute once, on the final position.
 +     */
-+    _onKeyUp(_event) {
-+      if (this.#selectEventDeferred) {
-+        this.#selectEventDeferred = false;
-+        this.dispatchEvent(new CustomEvent("select"));
-+      }
-+    }
-+
-+    /**
-+     * Handle blur events. If the widget loses focus while a deferred "select"
-+     * event is pending, dispatch it now to ensure downstream handlers are
-+     * notified of the final selection.
-+     */
-+    _onBlur(_event) {
++    _onKeyUpOrBlur() {
 +      if (this.#selectEventDeferred) {
 +        this.#selectEventDeferred = false;
 +        this.dispatchEvent(new CustomEvent("select"));
@@ -123,7 +107,7 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
       *
       * @param {DOMEvent} event
       */
-@@ -668,9 +733,9 @@ export const TreeListboxMixin = Base =>
+@@ -668,9 +717,9 @@ export const TreeListboxMixin = Base =>
  
      /**
       * Update the classes of the listbox to visually reflect the current state
@@ -134,7 +118,7 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
      updateRowClasses() {
        this.classList.toggle("multi-selected", this.#selection.size > 1);
  
-@@ -680,9 +745,11 @@ export const TreeListboxMixin = Base =>
+@@ -680,9 +729,11 @@ export const TreeListboxMixin = Base =>
        }
  
        if (!this.#selection.size) {
@@ -147,7 +131,7 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
        }
  
        // If the currently active row is no longer part of the selection,
-@@ -710,9 +777,11 @@ export const TreeListboxMixin = Base =>
+@@ -710,9 +761,11 @@ export const TreeListboxMixin = Base =>
            }
          }
        });
@@ -160,3 +144,114 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
  
      /**
       * Collapses the row at `index` if it can be collapsed. If the selected
+diff --git a/mail/base/test/browser/widgets/browser_treeListbox.js b/mail/base/test/browser/widgets/browser_treeListbox.js
+--- a/mail/base/test/browser/widgets/browser_treeListbox.js
++++ b/mail/base/test/browser/widgets/browser_treeListbox.js
+@@ -43,8 +43,11 @@ add_task(async function testSelectOnRemo
+ });
+ add_task(async function testUnselectable() {
+   await withTab(subtestUnselectable);
+ });
++add_task(async function testDeferredSelectOnRepeat() {
++  await withTab(subtestDeferredSelectOnRepeat);
++});
+ 
+ /**
+  * Tests keyboard navigation up and down the list for single and multiselection.
+  */
+@@ -1574,4 +1577,95 @@ async function subtestUnselectable() {
+   checkSelected(2, "uRow-3-1");
+   EventUtils.synthesizeKey("KEY_ArrowLeft", {}, content); // Try to move to 3.
+   checkSelected(2, "uRow-3-1");
+ }
++
++/**
++ * Tests that "select" events are deferred during typematic key repeat for
++ * navigation keys (ArrowUp/Down, Home, End, PageUp/Down), and only fire
++ * once on keyup with the final position.
++ */
++async function subtestDeferredSelectOnRepeat() {
++  const doc = content.document;
++  const list = doc.querySelector(`ul[is="tree-listbox"]`);
++  Assert.ok(!!list, "the list exists");
++
++  // Reset to a known position.
++  list.focus();
++  EventUtils.synthesizeKey("KEY_Home", {}, content);
++  Assert.equal(list.selectedIndex, 0, "starting at row 0");
++
++  let selectCount = 0;
++  let lastSelectedIndex = null;
++  function onSelect() {
++    selectCount++;
++    lastSelectedIndex = list.selectedIndex;
++  }
++  list.addEventListener("select", onSelect);
++
++  // A single ArrowDown (no repeat) fires one select event immediately.
++  selectCount = 0;
++  EventUtils.synthesizeKey("KEY_ArrowDown", {}, content);
++  Assert.equal(selectCount, 1, "single ArrowDown should fire one select event");
++  Assert.equal(list.selectedIndex, 1);
++
++  // With repeat, select fires on the first keydown and on keyup only,
++  // not for each repeated keydown in between.
++  selectCount = 0;
++  EventUtils.synthesizeKey("KEY_ArrowDown", { repeat: 3 }, content);
++  Assert.equal(
++    selectCount,
++    2,
++    "repeated ArrowDown should fire select only on first press and keyup"
++  );
++  Assert.equal(
++    list.selectedIndex,
++    4,
++    "final position should be after all repeated movements"
++  );
++  Assert.equal(
++    lastSelectedIndex,
++    4,
++    "last select event should have the final index"
++  );
++
++  // Same for ArrowUp with repeat.
++  selectCount = 0;
++  EventUtils.synthesizeKey("KEY_ArrowUp", { repeat: 2 }, content);
++  Assert.equal(
++    selectCount,
++    2,
++    "repeated ArrowUp should fire select only on first press and keyup"
++  );
++  Assert.equal(
++    list.selectedIndex,
++    2,
++    "final position should be after all repeated movements"
++  );
++
++  // Navigate to the end and test Home with repeat.
++  EventUtils.synthesizeKey("KEY_End", {}, content);
++  Assert.notEqual(list.selectedIndex, 0, "moved away from row 0");
++
++  selectCount = 0;
++  EventUtils.synthesizeKey("KEY_Home", { repeat: 2 }, content);
++  // Home only changes selection once, so the first keydown fires select
++  // (it changed position) and keyup also fires select.
++  Assert.equal(list.selectedIndex, 0, "Home lands on first row");
++  Assert.greaterOrEqual(
++    selectCount,
++    1,
++    "select event should fire at least once for repeated Home"
++  );
++
++  // Navigate away and test End with repeat.
++  selectCount = 0;
++  EventUtils.synthesizeKey("KEY_End", { repeat: 2 }, content);
++  Assert.equal(list.selectedIndex, list.rowCount - 1, "End lands on last row");
++  Assert.greaterOrEqual(
++    selectCount,
++    1,
++    "select event should fire at least once for repeated End"
++  );
++
++  list.removeEventListener("select", onSelect);
++}

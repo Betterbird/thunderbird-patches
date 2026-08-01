@@ -1,22 +1,51 @@
+
 # HG changeset patch
 # User Max Emig <mozilla@emigm.ax>
-# Date 1784324047 -7200
-# Parent  2ca561c2d03cbb78cea64f88dfea3d533aedc915
-Bug 1121151 - Prevent failed account setup from leaving incoming servers behind.
+# Date 1785579279 0
+# Node ID 19a135db2dd6471465b9c7e72f9869e419ef78c6
+# Parent  c91a24e5b9dd7adac054c6bc37beaf53c03a25fa
+Bug 1121151 - Prevent failed account setup from leaving incoming servers behind. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D312675
+
 
 diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsgAccountManager.cpp
 --- a/mailnews/base/src/nsMsgAccountManager.cpp
 +++ b/mailnews/base/src/nsMsgAccountManager.cpp
-@@ -521,15 +521,27 @@ nsMsgAccountManager::RemoveIncomingServe
+@@ -31,16 +31,17 @@
+ #include "nsIPrefService.h"
+ #include "nsIPrefBranch.h"
+ #include "nsIMsgOutgoingServerService.h"
+ #include "nsIMsgBiffManager.h"
+ #include "nsIMsgPurgeService.h"
+ #include "nsIObserverService.h"
+ #include "nsINoIncomingServer.h"
+ #include "nsIMsgMailSession.h"
++#include "nsIScriptError.h"
+ #include "nsIDirectoryService.h"
+ #include "nsAppDirectoryServiceDefs.h"
+ #include "nsMailDirServiceDefs.h"
+ #include "nsMsgFolderFlags.h"
+ #include "nsIMsgFolderNotificationService.h"
+ #include "nsIImapIncomingServer.h"
+ #include "nsIImapUrl.h"
+ #include "nsIURIMutator.h"
+@@ -517,23 +518,38 @@ nsMsgAccountManager::RemoveIncomingServe
+   nsresult rv = aServer->GetKey(serverKey);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // Close cached connections and forget session password.
    LogoutOfServer(aServer);
  
    nsCOMPtr<nsIMsgFolder> rootFolder;
    rv = aServer->GetRootFolder(getter_AddRefs(rootFolder));
 -  NS_ENSURE_SUCCESS(rv, rv);
 +  if (NS_FAILED(rv)) {
-+    NS_WARNING(nsPrintfCString("failed to get root folder for server %s: %s",
-+                               serverKey.get(), mozilla::GetStaticErrorName(rv))
-+                   .get());
++    MsgLogToConsole4(NS_ConvertUTF8toUTF16(nsPrintfCString(
++                         "failed to get root folder for server %s: %s",
++                         serverKey.get(), mozilla::GetStaticErrorName(rv))),
++                     nsDependentCString(__FILE__), __LINE__,
++                     nsIScriptError::warningFlag);
 +  }
  
    nsTArray<RefPtr<nsIMsgFolder>> allDescendants;
@@ -27,10 +56,11 @@ diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsg
 +  if (rootFolder) {
 +    rv = rootFolder->GetDescendants(allDescendants);
 +    if (NS_FAILED(rv)) {
-+      NS_WARNING(nsPrintfCString("failed to get descendants for server %s: %s",
-+                                 serverKey.get(),
-+                                 mozilla::GetStaticErrorName(rv))
-+                     .get());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(nsPrintfCString(
++                           "failed to get descendants for server %s: %s",
++                           serverKey.get(), mozilla::GetStaticErrorName(rv))),
++                       nsDependentCString(__FILE__), __LINE__,
++                       nsIScriptError::warningFlag);
 +      allDescendants.Clear();
 +    }
 +  }
@@ -40,7 +70,15 @@ diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsg
      for (const auto& folder : allDescendants) {
        nsresult cacherv = RemoveFolderFromCache(folder);
        if (NS_FAILED(cacherv)) {
-@@ -556,10 +568,17 @@ nsMsgAccountManager::RemoveIncomingServe
+         // Some tests don't use on-disk storage for folders, in which case we'll
+         // fail to remove them from the folder cache because we can't resolve
+         // their path. In all other case, this should be considered an error,
+         // but returning an error would fail said tests, so we log the error
+@@ -552,18 +568,27 @@ nsMsgAccountManager::RemoveIncomingServe
+       NS_WARNING(nsPrintfCString("failed to remove root folder from cache: %s",
+                                  mozilla::GetStaticErrorName(cacherv))
+                      .get());
+     }
  
      // Update the on-disk copy of the cache, so we don't end up with unneeded
      // folders if e.g. Thunderbird crashes or gets SIGKILL'd later on.
@@ -52,15 +90,25 @@ diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsg
 +      cacherv = folderCache->Flush();
 +    }
 +    if (NS_FAILED(cacherv)) {
-+      NS_WARNING(nsPrintfCString("failed to flush folder cache: %s",
-+                                 mozilla::GetStaticErrorName(cacherv))
-+                     .get());
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(nsPrintfCString(
++                           "failed to flush folder cache: %s",
++                           mozilla::GetStaticErrorName(cacherv))),
++                       nsDependentCString(__FILE__), __LINE__,
++                       nsIScriptError::warningFlag);
 +    }
    }
    // Invalidate the `FindServer()` cache entry for this server. We need to do
    // this after the folders have been removed from the folder cache, because the
    // folders might end up querying the account manager to get a reference on
-@@ -589,15 +608,22 @@ nsMsgAccountManager::RemoveIncomingServe
+   // their server (to help them compute their path on disk, which we use as
+   // their cache key). But we also need to do this before we notify other
+   // components about the folders' removal, because some observers will behave
+   // differently if the deletion is happening in the context of deleting an
+@@ -585,36 +610,46 @@ nsMsgAccountManager::RemoveIncomingServe
+   for (const auto& folder : allDescendants) {
+     folder->ForceDBClosed();
+ 
+     notifier->NotifyFolderDeleted(folder);
      nsCOMPtr<nsIMsgFolder> parentFolder;
      folder->GetParent(getter_AddRefs(parentFolder));
      mailSession->OnFolderRemoved(parentFolder, folder);
@@ -78,16 +126,19 @@ diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsg
 -    NS_ENSURE_SUCCESS(rv, rv);
 +    nsresult filerv = aServer->RemoveFiles();
 +    if (NS_FAILED(filerv)) {
-+      NS_WARNING(nsPrintfCString("failed to remove files for server %s: %s",
-+                                 serverKey.get(),
-+                                 mozilla::GetStaticErrorName(filerv))
-+                     .get());
++      MsgLogToConsole4(
++          NS_ConvertUTF8toUTF16(nsPrintfCString(
++              "failed to remove files for server %s: %s", serverKey.get(),
++              mozilla::GetStaticErrorName(filerv))),
++          nsDependentCString(__FILE__), __LINE__, nsIScriptError::warningFlag);
 +    }
    }
  
    nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
    if (obs) {
-@@ -607,10 +633,12 @@ nsMsgAccountManager::RemoveIncomingServe
+     obs->NotifyObservers(aServer, "message-server-removed",
+                          NS_ConvertUTF8toUTF16(serverKey).get());
+   }
  
    // now clear out the server once and for all.
    // watch out! could be scary
@@ -102,6 +153,10 @@ diff --git a/mailnews/base/src/nsMsgAccountManager.cpp b/mailnews/base/src/nsMsg
  
  nsresult nsMsgAccountManager::RemoveFolderFromCache(nsIMsgFolder* aFolder) {
    MOZ_ASSERT(!mozilla::StaticPrefs::mail_panorama_enabled_AtStartup());
+   if (mozilla::StaticPrefs::mail_panorama_enabled_AtStartup()) {
+     MOZ_ASSERT(!m_msgFolderCache);
+     return NS_ERROR_NOT_IMPLEMENTED;
+   }
 diff --git a/mailnews/base/test/unit/test_accountMgrRemoveIncomingServer.js b/mailnews/base/test/unit/test_accountMgrRemoveIncomingServer.js
 new file mode 100644
 --- /dev/null
@@ -180,7 +235,11 @@ new file mode 100644
 diff --git a/mailnews/base/test/unit/xpcshell.toml b/mailnews/base/test/unit/xpcshell.toml
 --- a/mailnews/base/test/unit/xpcshell.toml
 +++ b/mailnews/base/test/unit/xpcshell.toml
-@@ -28,8 +28,10 @@ support-files = [
+@@ -24,16 +24,18 @@ support-files = [
+ ["test_accountMgr2.js"]
+ 
+ ["test_accountMgrCustomTypes.js"]
+ 
  ["test_accountMgrMovedLocalFolders.js"]
  
  ["test_accountMgrRemoveDefault.js"]
@@ -191,3 +250,8 @@ diff --git a/mailnews/base/test/unit/xpcshell.toml b/mailnews/base/test/unit/xpc
  
  ["test_acctRepair.js"]
  
+ ["test_bccInDatabase.js"]
+ 
+ ["test_bug428427.js"]
+ tags = ["virtualfolders"]
+
