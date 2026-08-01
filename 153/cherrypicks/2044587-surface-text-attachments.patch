@@ -1,0 +1,316 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784716596 0
+# Node ID 1d43bfc77aed4b7b2a40601fa9c4428cb4926695
+# Parent  b0325224fd96411c464e2065416b7e05fdf1ae87
+Bug 2044587 - Surface named text/* attachments even if referenced by CID in multipart/related. r=thunderbird-back-end-reviewers,babolivier
+
+Differential Revision: https://phabricator.services.mozilla.com/D304389
+
+
+diff --git a/mail/test/browser/attachment/browser_unreferencedRelatedPart.js b/mail/test/browser/attachment/browser_unreferencedRelatedPart.js
+--- a/mail/test/browser/attachment/browser_unreferencedRelatedPart.js
++++ b/mail/test/browser/attachment/browser_unreferencedRelatedPart.js
+@@ -86,8 +86,41 @@ add_task(async function test_unreference
+     attachment.size,
+     67,
+     "attachment size should match the decoded PNG size"
+   );
+   Assert.ok(!(await attachment.isEmpty()), "attachment should not be empty");
+ 
+   await BrowserTestUtils.closeWindow(msgc);
+ });
++
++add_task(async function test_referenced_related_attachments_visible() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/apple_mail_related_attachments.eml")
++  );
++  const msgc = await open_message_from_file(file);
++  const aboutMessage = get_about_message(msgc);
++
++  EventUtils.synthesizeMouseAtCenter(
++    aboutMessage.document.getElementById("attachmentToggle"),
++    {},
++    aboutMessage
++  );
++
++  const attachmentList = aboutMessage.document.getElementById("attachmentList");
++  Assert.equal(
++    attachmentList.itemCount,
++    3,
++    "all referenced Content-Disposition: attachment parts should be visible"
++  );
++
++  const expectedNames = ["example.md", "example.sh", "example.py"];
++
++  for (const [i, expectedName] of expectedNames.entries()) {
++    Assert.equal(
++      attachmentList.getItemAtIndex(i).attachment.name,
++      expectedName,
++      `attachment ${i + 1} should be ${expectedName}`
++    );
++  }
++
++  await BrowserTestUtils.closeWindow(msgc);
++});
+diff --git a/mail/test/browser/attachment/data/apple_mail_related_attachments.eml b/mail/test/browser/attachment/data/apple_mail_related_attachments.eml
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/attachment/data/apple_mail_related_attachments.eml
+@@ -0,0 +1,56 @@
++Subject: Apple Mail referenced related attachments
++From: sender@example.invalid
++To: recipient@example.invalid
++Date: Mon, 01 Jun 2026 00:00:00 +0000
++Message-ID: <apple-mail-related-attachments@example.invalid>
++MIME-Version: 1.0
++Content-Type: multipart/alternative;
++ boundary="Apple-Mail=_alternative_boundary"
++
++--Apple-Mail=_alternative_boundary
++Content-Type: text/plain; charset=us-ascii
++Content-Transfer-Encoding: 7bit
++
++
++--Apple-Mail=_alternative_boundary
++Content-Type: multipart/related;
++ boundary="Apple-Mail=_related_boundary"
++
++--Apple-Mail=_related_boundary
++Content-Type: text/html; charset=us-ascii
++Content-Transfer-Encoding: 7bit
++
++<html><body>
++<object type="application/x-apple-msg-attachment" data="cid:example-md"></object>
++<object type="application/x-apple-msg-attachment" data="cid:example-sh"></object>
++<object type="application/x-apple-msg-attachment" data="cid:example-py"></object>
++</body></html>
++
++--Apple-Mail=_related_boundary
++Content-Type: text/markdown
++Content-Disposition: attachment; filename="example.md"
++Content-ID: <example-md>
++Content-Transfer-Encoding: 7bit
++
++- Hello World
++
++--Apple-Mail=_related_boundary
++Content-Type: application/octet-stream
++Content-Disposition: attachment; filename="example.sh"
++Content-ID: <example-sh>
++Content-Transfer-Encoding: 7bit
++
++#!/bin/sh
++echo "Hello World"
++
++--Apple-Mail=_related_boundary
++Content-Type: text/x-python-script
++Content-Disposition: attachment; filename="example.py"
++Content-ID: <example-py>
++Content-Transfer-Encoding: 7bit
++
++print("Hello World")
++
++--Apple-Mail=_related_boundary--
++
++--Apple-Mail=_alternative_boundary--
+diff --git a/mail/test/browser/composition/browser3.toml b/mail/test/browser/composition/browser3.toml
+--- a/mail/test/browser/composition/browser3.toml
++++ b/mail/test/browser/composition/browser3.toml
+@@ -42,16 +42,17 @@ prefs = [
+   "mail.spotlight.firstRunDone=true",
+   "mail.winsearch.firstRunDone=true",
+   "mailnews.start_page.override_url=about:blank",
+   "mailnews.start_page.url=about:blank",
+ ]
+ subsuite = "thunderbird"
+ support-files = [
+   "data/**",
++  "../attachment/data/apple_mail_related_attachments.eml",
+   "../openpgp/data/**",
+   "html/linkpreview.html",
+ ]
+ 
+ # Tests in this folder are split across multiple manifests. When adding a test,
+ # please put it in the manifest with its (alphabetical) neighbours.
+ 
+ ["browser_forwardContentExchange.js"]
+diff --git a/mail/test/browser/composition/browser_inlineRelatedAttachmentDraft.js b/mail/test/browser/composition/browser_inlineRelatedAttachmentDraft.js
+--- a/mail/test/browser/composition/browser_inlineRelatedAttachmentDraft.js
++++ b/mail/test/browser/composition/browser_inlineRelatedAttachmentDraft.js
+@@ -17,16 +17,29 @@ var {
+   select_click_row,
+ } = ChromeUtils.importESModule(
+   "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
+ );
+ var { wait_for_notification_to_show } = ChromeUtils.importESModule(
+   "resource://testing-common/mail/NotificationBoxHelpers.sys.mjs"
+ );
+ 
++async function selectDraftBySubject(subject) {
++  const about3Pane = document.getElementById("tabmail").currentAbout3Pane;
++  const folder = about3Pane.gDBView.msgFolder;
++  const enumerator = folder.messages;
++  while (enumerator.hasMoreElements()) {
++    const hdr = enumerator.getNext().QueryInterface(Ci.nsIMsgDBHdr);
++    if (hdr.subject == subject) {
++      return select_click_row(about3Pane.gDBView.findIndexOfMsgHdr(hdr, false));
++    }
++  }
++  throw new Error(`Could not find draft with subject: ${subject}`);
++}
++
+ add_task(async function test_edit_draft_keeps_related_inline_pdf_attachment() {
+   const draftsFolder = await get_special_folder(
+     Ci.nsMsgFolderFlags.Drafts,
+     true
+   );
+   const file = new FileUtils.File(
+     getTestFilePath("data/related-inline-pdf-draft.eml")
+   );
+@@ -52,8 +65,51 @@ add_task(async function test_edit_draft_
+   Assert.equal(
+     bucket.itemChildren[0].attachment.name,
+     "pdf-sample_0.pdf",
+     "The draft should restore the related PDF attachment"
+   );
+ 
+   await close_compose_window(cwc);
+ });
++
++add_task(async function test_edit_draft_keeps_referenced_related_attachments() {
++  const draftsFolder = await get_special_folder(
++    Ci.nsMsgFolderFlags.Drafts,
++    true
++  );
++  const file = new FileUtils.File(
++    getTestFilePath("../attachment/data/apple_mail_related_attachments.eml")
++  );
++  const source = await IOUtils.readUTF8(file.path);
++
++  draftsFolder.QueryInterface(Ci.nsIMsgLocalMailFolder).addMessage(source);
++
++  await be_in_folder(draftsFolder);
++  await make_display_unthreaded();
++
++  const draftMsg = await selectDraftBySubject(
++    "Apple Mail referenced related attachments"
++  );
++  await assert_selected_and_displayed(window, draftMsg);
++  await wait_for_notification_to_show(
++    get_about_message(),
++    "mail-notification-top",
++    "draftMsgContent"
++  );
++
++  const cwc = await open_compose_from_draft();
++  const bucket = cwc.document.getElementById("attachmentBucket");
++
++  Assert.equal(bucket.itemCount, 3, "The draft should restore all attachments");
++
++  const expectedNames = ["example.md", "example.sh", "example.py"];
++
++  for (const [i, expectedName] of expectedNames.entries()) {
++    Assert.equal(
++      bucket.itemChildren[i].attachment.name,
++      expectedName,
++      `attachment ${i + 1} should be ${expectedName}`
++    );
++  }
++
++  await close_compose_window(cwc);
++});
+diff --git a/mailnews/mime/src/mimemrel.cpp b/mailnews/mime/src/mimemrel.cpp
+--- a/mailnews/mime/src/mimemrel.cpp
++++ b/mailnews/mime/src/mimemrel.cpp
+@@ -108,17 +108,16 @@
+ #include "plstr.h"
+ #include "mimemoz2.h"
+ #include "nsString.h"
+ #include "msgCore.h"
+ #include "nsMimeStringResources.h"
+ #include "nsMimeTypes.h"
+ #include "nsMsgUtils.h"
+ #include "nsMsgCompUtils.h"
+-#include <ctype.h>
+ 
+ #define MIME_SUPERCLASS mimeMultipartClass
+ MimeDefClass(MimeMultipartRelated, MimeMultipartRelatedClass,
+              mimeMultipartRelatedClass, &MIME_SUPERCLASS);
+ 
+ class MimeHashValue {
+  public:
+   MimeHashValue(MimeObject* obj, char* url) {
+@@ -827,16 +826,32 @@ static bool accept_related_part(MimeMult
+     return true;
+ 
+   /* ...but we always accept it if it's referenced by an anchor */
+   return (relobj->curtag && relobj->curtag_length >= 3 &&
+           (relobj->curtag[1] == 'A' || relobj->curtag[1] == 'a') &&
+           IS_SPACE(relobj->curtag[2]));
+ }
+ 
++static bool hide_related_part_p(MimeMultipartRelated* relobj,
++                                MimeObject* part_obj) {
++  if (!relobj || !part_obj || relobj->is_part_in_hidden_alternative) {
++    return false;
++  }
++
++  // Surface named text/* parts as attachments even when CID-referenced;
++  // they are files the user needs, not inline body content.
++  char* name = MimeHeaders_get_name(part_obj->headers, part_obj->options);
++  bool hasName = name != nullptr;
++  PR_FREEIF(name);
++
++  return !(hasName && part_obj->content_type &&
++           !PL_strncasecmp(part_obj->content_type, "text/", 5));
++}
++
+ static int flush_tag(MimeMultipartRelated* relobj) {
+   int length = relobj->curtag_length;
+   char* buf;
+   int status;
+ 
+   if (relobj->curtag == NULL || length == 0) return 0;
+ 
+   status = push_tag(relobj, "", 1); /* Push on a trailing NULL. */
+@@ -916,17 +931,17 @@ static int flush_tag(MimeMultipartRelate
+         }
+ 
+         /*If we found a mailbox part URL, write that out instead.*/
+         if (part_url && accept_related_part(relobj, value->m_obj)) {
+           status = real_write(relobj, part_url, strlen(part_url));
+           if (status < 0) return status;
+           buf = ptr2; /* skip over the cid: URL we substituted */
+ 
+-          if (!relobj->is_part_in_hidden_alternative && value->m_obj)
++          if (hide_related_part_p(relobj, value->m_obj))
+             value->m_obj->dontShowAsAttachment = true;
+         }
+ 
+         /* Restore the character that we nulled. */
+         *ptr2 = c;
+       }
+       /* rhp - if we get here, we should still check against the hash table! */
+       else {
+@@ -950,17 +965,17 @@ static int flush_tag(MimeMultipartRelate
+         *ptr2 = holder;
+         PR_FREEIF(absolute);
+ 
+         if (realout && accept_related_part(relobj, value->m_obj)) {
+           status = real_write(relobj, realout, strlen(realout));
+           if (status < 0) return status;
+           buf = ptr2; /* skip over the cid: URL we substituted */
+ 
+-          if (!relobj->is_part_in_hidden_alternative && value->m_obj)
++          if (hide_related_part_p(relobj, value->m_obj))
+             value->m_obj->dontShowAsAttachment = true;
+         }
+       }
+       /* rhp - if we get here, we should still check against the hash table! */
+ 
+       /* Advance to the beginning of the next word, or to
+          the end of the value string. */
+       while ((ptr2 < ptr) && (IS_SPACE(*ptr2))) ptr2++;
+

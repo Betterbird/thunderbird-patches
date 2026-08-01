@@ -1,0 +1,125 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1784888022 0
+# Node ID 95026b32f3b89b7c2322f78696886b43da9cc6a1
+# Parent  118eb3a1db01347f07b12132d4e141ba9e648234
+Bug 2057048 - Never override Content-Type application/octet-stream with an empty string. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D313651
+
+
+diff --git a/mailnews/mime/src/mimei.cpp b/mailnews/mime/src/mimei.cpp
+--- a/mailnews/mime/src/mimei.cpp
++++ b/mailnews/mime/src/mimei.cpp
+@@ -880,58 +880,68 @@ MimeObject* mime_create(const char* cont
+   if (partDepth > kMaxAcceptedMimePartDepth) {
+     // Over-depth parts must still drain parser input, but must not create more
+     // MIME containers or recursively decode nested content.
+     NS_WARNING("MIME part depth exceeds the maximum allowed depth");
+     clazz = (MimeObjectClass*)&mimeExternalObjectClass;
+     goto CREATE;
+   }
+ 
+-  /* There are some clients send out all attachments with a content-type
+-   of application/octet-stream.  So, if we have an octet-stream attachment,
+-   try to guess what type it really is based on the file extension.  I HATE
+-   that we have to do this...
++  /* Let's reconstruct the real content type from the filename extension
++   via native handlers, because some clients unfortunately declare
++   every attachment as application/octet-stream.
++   Keep in mind that these may return different results based on platform
++   and installed software.
+   */
+   if (hdrs && opts && opts->file_type_fn &&
+ 
+       /* ### mwelch - don't override AppleSingle */
+       (content_type ? PL_strcasecmp(content_type, APPLICATION_APPLEFILE)
+                     : true) &&
+       /* ## davidm Apple double shouldn't use this #$%& either. */
+       (content_type ? PL_strcasecmp(content_type, MULTIPART_APPLEDOUBLE)
+                     : true) &&
+       (!content_type ||
+        !PL_strcasecmp(content_type, APPLICATION_OCTET_STREAM) ||
+        !PL_strcasecmp(content_type, UNKNOWN_CONTENT_TYPE))) {
+     char* name = MimeHeaders_get_name(hdrs, opts);
+     if (name) {
+       override_content_type = opts->file_type_fn(name, opts->stream_closure);
++      // We ignore unknown or invalid lookup results here to ensure that
++      // the pre-existing type survives.
++      if (!override_content_type || !*override_content_type ||
++          !PL_strcasecmp(override_content_type, UNKNOWN_CONTENT_TYPE)) {
++        PR_FREEIF(override_content_type);
++      }
++
+       // appledouble isn't a valid override content type, and makes
+       // attachments invisible.
+-      if (!PL_strcasecmp(override_content_type, MULTIPART_APPLEDOUBLE))
+-        override_content_type = nullptr;
++      if (override_content_type &&
++          !PL_strcasecmp(override_content_type, MULTIPART_APPLEDOUBLE)) {
++        PR_FREEIF(override_content_type);
++      }
+       PR_FREEIF(name);
+ 
+       // Workaround for saving '.eml" file encoded with base64.
+       // Do not override with message/rfc822 whenever Transfer-Encoding is
+       // base64 since base64 encoding of message/rfc822 is invalid.
+       // Our MimeMessageClass has no capability to decode it.
+-      if (!PL_strcasecmp(override_content_type, MESSAGE_RFC822)) {
++      if (override_content_type &&
++          !PL_strcasecmp(override_content_type, MESSAGE_RFC822)) {
+         nsCString encoding;
+         encoding.Adopt(MimeHeaders_get(hdrs, HEADER_CONTENT_TRANSFER_ENCODING,
+                                        true, false));
+-        if (encoding.LowerCaseEqualsLiteral(ENCODING_BASE64))
+-          override_content_type = nullptr;
++        if (encoding.LowerCaseEqualsLiteral(ENCODING_BASE64)) {
++          PR_FREEIF(override_content_type);
++        }
+       }
+ 
+-      // If we get here and it is not the unknown content type from the
+-      // file name, let's do some better checking not to inline something bad
+-      if (override_content_type && *override_content_type &&
+-          (PL_strcasecmp(override_content_type, UNKNOWN_CONTENT_TYPE)))
+-        content_type = override_content_type;
++      // Override the pre-existing content type of a body part
++      // only if we have a valid replacement.
++      if (override_content_type) content_type = override_content_type;
+     }
+   }
+ 
+   clazz = mime_find_class(content_type, hdrs, opts, false, smimeParentObj);
+ 
+   NS_ASSERTION(clazz, "1.1 <rhp@netscape.com> 19 Mar 1999 12:00");
+   if (!clazz) goto FAIL;
+ 
+diff --git a/mailnews/mime/src/mimemoz2.cpp b/mailnews/mime/src/mimemoz2.cpp
+--- a/mailnews/mime/src/mimemoz2.cpp
++++ b/mailnews/mime/src/mimemoz2.cpp
+@@ -740,18 +740,21 @@ static char* mime_file_type(const char* 
+ 
+   ext = PL_strrchr(filename, '.');
+   if (ext) {
+     ext++;
+     nsCOMPtr<nsIMIMEService> mimeFinder(
+         do_GetService(NS_MIMESERVICE_CONTRACTID, &rv));
+     if (mimeFinder) {
+       nsAutoCString type;
+-      mimeFinder->GetTypeFromExtension(nsDependentCString(ext), type);
+-      retType = ToNewCString(type);
++      rv = mimeFinder->GetTypeFromExtension(nsDependentCString(ext), type);
++      // Never return an empty MIME type.
++      if (NS_SUCCEEDED(rv) && !type.IsEmpty()) {
++        retType = ToNewCString(type);
++      }
+     }
+   }
+ 
+   return retType;
+ }
+ 
+ int ConvertToUTF8(const char* stringToUse, int32_t inLength,
+                   const char* input_charset, nsACString& outString) {
+

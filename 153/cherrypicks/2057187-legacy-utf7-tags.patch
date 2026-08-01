@@ -1,0 +1,229 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1785579280 0
+# Node ID 79bc15a37c33da46adab11895fd16de066f89a71
+# Parent  0d066b64925360d401dca88033cc82be22f87709
+Bug 2057187 - Allow legacy modified UTF-7 tag keys in IMAP keyword sanitization. r=welpy-cw,tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D313930
+
+
+diff --git a/mailnews/imap/public/nsIImapService.idl b/mailnews/imap/public/nsIImapService.idl
+--- a/mailnews/imap/public/nsIImapService.idl
++++ b/mailnews/imap/public/nsIImapService.idl
+@@ -238,18 +238,19 @@ interface nsIImapService : nsISupports
+    * Note: While '[' and '}' are technically valid atom-chars under RFC 3501,
+    * they are strictly filtered here to prevent UX confusion and to defend
+    * against poorly written IMAP server parsers that trip on unescaped brackets.
+    * 4. Internal URI Delimiters: < > ;
+    * Restricted because Thunderbird uses nsIURI to route IMAP commands internally.
+    * '<' and '>' are Unsafe URI characters (RFC 3986), and '>' specifically
+    * breaks Thunderbird's hardcoded IMAP URL parser. The ';' is restricted as it
+    * is the reserved delimiter for internal URL parameters (e.g., ;SECTION=TEXT).
+-   * 5. The '&' character: Restricted because its role as the MUTF-7 shift
+-   * character causes parsing crashes on certain strict IMAP servers.
++   *
++   * Ampersands are allowed because they are valid IMAP atom characters and
++   * occur in legacy tag keys encoded as modified UTF-7.
+    *
+    * @param aMailFolder            The IMAP folder containing the messages.
+    * @param aMsgWindow             The message window for status/error reporting.
+    * @param flagsToAdd             Space-separated string of keywords to add.
+    * @param flagsToSubtract        Space-separated string of keywords to remove.
+    * @param aMessageIdentifierList Comma-separated list of message UIDs.
+    *
+    * @return nsIURI                The internal IMAP URL generated for this command.
+diff --git a/mailnews/imap/src/nsImapService.cpp b/mailnews/imap/src/nsImapService.cpp
+--- a/mailnews/imap/src/nsImapService.cpp
++++ b/mailnews/imap/src/nsImapService.cpp
+@@ -2597,26 +2597,25 @@ static void SanitizeKeywords(const nsACS
+   while (tokenizer.hasMoreTokens()) {
+     const nsACString& token = tokenizer.nextToken();
+     if (token.IsEmpty()) {
+       continue;
+     }
+ 
+     bool isValid = true;
+ 
+-    // Check for specific invalid symbols as defined in RFC 3501 atom-specials,
+-    // and also for symbols that break Thunderbird's internal URL parser.
+-    // We also exclude the ampersand since it is used in MUTF-7 encoding and
+-    // seems to confuse some IMAP servers when used in keywords.
++    // Check for RFC 3501 atom-specials and symbols that break Thunderbird's
++    // internal URL parser. Ampersands are valid atom characters and occur in
++    // legacy tag keys encoded as modified UTF-7.
+     for (uint32_t i = 0; i < token.Length(); i++) {
+       unsigned char c = token.CharAt(i);
+       if (mozilla::IsAsciiAlphanumeric(c)) {
+         continue;
+       }
+-      if (c <= 0x20 || c >= 0x7F || strchr("()[]{}%*\"\\<>;&", c)) {
++      if (c <= 0x20 || c >= 0x7F || strchr("()[]{}%*\"\\<>;", c)) {
+         isValid = false;
+         break;
+       }
+     }
+ 
+     if (isValid) {
+       if (!first) {
+         aSafeKeywords.Append(' ');
+diff --git a/mailnews/imap/test/unit/test_storeCustomKeywords.js b/mailnews/imap/test/unit/test_storeCustomKeywords.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_storeCustomKeywords.js
+@@ -0,0 +1,134 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++var { MessageGenerator } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++);
++var { PromiseTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
++);
++
++const VALID_TAG_KEY = "validtag";
++const MALFORMED_TAG_KEY = "invalid)";
++// Thunderbird formerly derived non-ASCII tag keys using modified UTF-7 and
++// lowercased the result.
++const LEGACY_TAG_KEY = "&aok-";
++// The fake server normalizes keyword capitalization before storing it.
++const NORMALIZED_VALID_TAG_KEY = "Validtag";
++const NORMALIZED_LEGACY_TAG_KEY = "&Aok-";
++
++var gServerMessageForMixedKeywords;
++var gServerMessageForKeywordAdd;
++var gServerMessageForKeywordRemove;
++var gSynthMessageForMixedKeywords;
++var gSynthMessageForKeywordAdd;
++var gSynthMessageForKeywordRemove;
++
++add_setup(async function () {
++  Services.prefs.setBoolPref(
++    "mail.server.default.autosync_offline_stores",
++    false
++  );
++
++  setupIMAPPump();
++
++  const messageGenerator = new MessageGenerator();
++  gSynthMessageForMixedKeywords = messageGenerator.makeMessage();
++  gSynthMessageForKeywordAdd = messageGenerator.makeMessage();
++  gSynthMessageForKeywordRemove = messageGenerator.makeMessage();
++
++  gServerMessageForMixedKeywords = addMessageToServer(
++    gSynthMessageForMixedKeywords,
++    []
++  );
++  gServerMessageForKeywordAdd = addMessageToServer(
++    gSynthMessageForKeywordAdd,
++    []
++  );
++  gServerMessageForKeywordRemove = addMessageToServer(
++    gSynthMessageForKeywordRemove,
++    []
++  );
++
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  IMAPPump.inbox.updateFolderWithListener(null, listener);
++  await listener.promise;
++});
++
++add_task(async function testStoreValidKeywordAlongsideMalformedKeyword() {
++  const header = IMAPPump.inbox.msgDatabase.getMsgHdrForMessageID(
++    gSynthMessageForMixedKeywords.messageId
++  );
++
++  try {
++    await storeCustomKeywords(
++      header,
++      `${VALID_TAG_KEY} ${MALFORMED_TAG_KEY}`,
++      ""
++    );
++  } catch {
++    // Check the server state even if it rejected the malformed batch.
++  }
++
++  Assert.ok(
++    gServerMessageForMixedKeywords.flags.includes(NORMALIZED_VALID_TAG_KEY),
++    "A valid keyword should be stored when another keyword is malformed"
++  );
++});
++
++add_task(async function testStoreLegacyCustomKeyword() {
++  const addHeader = IMAPPump.inbox.msgDatabase.getMsgHdrForMessageID(
++    gSynthMessageForKeywordAdd.messageId
++  );
++  const removeHeader = IMAPPump.inbox.msgDatabase.getMsgHdrForMessageID(
++    gSynthMessageForKeywordRemove.messageId
++  );
++
++  await storeCustomKeywords(addHeader, LEGACY_TAG_KEY, "");
++  gServerMessageForKeywordRemove.setFlag(NORMALIZED_LEGACY_TAG_KEY);
++  await storeCustomKeywords(removeHeader, "", LEGACY_TAG_KEY);
++
++  Assert.deepEqual(
++    {
++      added: gServerMessageForKeywordAdd.flags.includes(
++        NORMALIZED_LEGACY_TAG_KEY
++      ),
++      removed: !gServerMessageForKeywordRemove.flags.includes(
++        NORMALIZED_LEGACY_TAG_KEY
++      ),
++    },
++    { added: true, removed: true },
++    "A legacy modified UTF-7 keyword should be added and removed"
++  );
++});
++
++add_task(function endTest() {
++  teardownIMAPPump();
++});
++
++function addMessageToServer(synthMessage, flags) {
++  const msgURI = Services.io.newURI(
++    "data:text/plain;base64," + btoa(synthMessage.toMessageString())
++  );
++  const message = new ImapMessage(
++    msgURI.spec,
++    IMAPPump.mailbox.uidnext++,
++    flags
++  );
++  IMAPPump.mailbox.addMessage(message);
++  return message;
++}
++
++async function storeCustomKeywords(header, flagsToAdd, flagsToRemove) {
++  const uri = IMAPPump.inbox.storeCustomKeywords(
++    null,
++    flagsToAdd,
++    flagsToRemove,
++    [header.messageKey]
++  );
++  uri.QueryInterface(Ci.nsIMsgMailNewsUrl);
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  uri.RegisterListener(listener);
++  await listener.promise;
++}
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -142,13 +142,15 @@ tags = ["compact"]
+ ["test_saveImapDraft.js"]
+ 
+ ["test_saveTemplate.js"]
+ 
+ ["test_starttlsFailure.js"]
+ 
+ ["test_stopMovingToLocalFolder.js"]
+ 
++["test_storeCustomKeywords.js"]
++
+ ["test_subfolderLocation.js"]
+ 
+ ["test_syncChanges.js"]
+ 
+ ["test_trustSpamAssassin.js"]
+
