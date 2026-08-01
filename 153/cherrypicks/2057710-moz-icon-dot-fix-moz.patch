@@ -1,0 +1,162 @@
+
+# HG changeset patch
+# User Timothy Nikkel <tnikkel@gmail.com>
+# Date 1785299121 0
+# Node ID ea5acc63a0f94bd8523ea6f0b7f40ed55f24342a
+# Parent  413a3c1025f975e9e71b816d6464e08337eecd84
+Bug 2057710. In moz icon protocal code, strip the placeholder file name's leading period before sending it to other code that does not expect it. r=gfx-reviewers,maxe,lsalzman
+
+nsIMozIconURI::fileExtension is a placeholder file name rather than a bare
+extension: it keeps the leading period so callers can use it directly as a
+stand-in for a file that may not exist. The Windows backend depends on this,
+handing the value to SHGetFileInfo as a fake file name, and a lone "." is a
+legitimate value meaning the name has no extension.
+
+Two consumers passed that value straight to nsIMIMEService, which expects a bare
+extension. On Windows, getPrimaryExtension() with "." stripped the period and
+then called nsMIMEInfoBase::AppendExtension() with an empty string, tripping its
+assertion. On Linux, getTypeFromExtension() could never match the dotless tables
+it consults first, so extension lookups only succeeded by way of
+nsGIOService::GetMimeTypeFromExtension() building "file." + ".html".
+
+Convert at both boundaries, and document the convention along with the
+conversion it requires on the attribute itself.
+
+Differential Revision: https://phabricator.services.mozilla.com/D314600
+
+
+diff --git a/image/decoders/icon/gtk/nsIconChannel.cpp b/image/decoders/icon/gtk/nsIconChannel.cpp
+--- a/image/decoders/icon/gtk/nsIconChannel.cpp
++++ b/image/decoders/icon/gtk/nsIconChannel.cpp
+@@ -200,17 +200,22 @@ static nsresult GetIconWithGIO(nsIMozIco
+     nsAutoCString type;
+     aIconURI->GetContentType(type);
+     // Try to get MIME type from file extension by using nsIMIMEService
+     if (type.IsEmpty()) {
+       nsCOMPtr<nsIMIMEService> ms(do_GetService("@mozilla.org/mime;1"));
+       if (ms) {
+         nsAutoCString fileExt;
+         aIconURI->GetFileExtension(fileExt);
+-        ms->GetTypeFromExtension(fileExt, type);
++        // fileExt is a placeholder file name such as ".html", so a lone "."
++        // means there is no extension at all. The mime service wants a bare
++        // extension.
++        const uint32_t dotlessIndex =
++            !fileExt.IsEmpty() && fileExt.First() == '.' ? 1 : 0;
++        ms->GetTypeFromExtension(Substring(fileExt, dotlessIndex), type);
+       }
+     }
+     mozilla::GUniquePtr<gchar> ctype;
+     if (!type.IsEmpty()) {
+       ctype.reset(g_content_type_from_mime_type(type.get()));
+     }
+     if (ctype) {
+       icon = dont_AddRef(g_content_type_get_icon(ctype.get()));
+diff --git a/image/decoders/icon/win/nsIconChannel.cpp b/image/decoders/icon/win/nsIconChannel.cpp
+--- a/image/decoders/icon/win/nsIconChannel.cpp
++++ b/image/decoders/icon/win/nsIconChannel.cpp
+@@ -150,18 +150,24 @@ static nsresult ExtractIconPathInfoFromU
+ 
+   // if we have a content type... then use it! but for existing files,
+   // we want to show their real icon.
+   if (!fileExists && !contentType.IsEmpty()) {
+     nsCOMPtr<nsIMIMEService> mimeService(
+         do_GetService(NS_MIMESERVICE_CONTRACTID, &rv));
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
++    // fileExt is a placeholder file name such as ".html", so a lone "." means
++    // there is no extension at all. The mime service wants a bare extension.
++    const uint32_t dotlessIndex =
++        !fileExt.IsEmpty() && fileExt.First() == '.' ? 1 : 0;
++
+     nsAutoCString defFileExt;
+-    mimeService->GetPrimaryExtension(contentType, fileExt, defFileExt);
++    mimeService->GetPrimaryExtension(
++        contentType, Substring(fileExt, dotlessIndex), defFileExt);
+     // If the mime service does not know about this mime type, we show
+     // the generic icon.
+     // In any case, we need to insert a '.' before the extension.
+     filePath = u"."_ns + NS_ConvertUTF8toUTF16(defFileExt);
+   }
+ 
+   if (!localFile && !fileExists &&
+       ((filePath.Length() == 1 && filePath.Last() == '.') ||
+diff --git a/image/nsIIconURI.idl b/image/nsIIconURI.idl
+--- a/image/nsIIconURI.idl
++++ b/image/nsIIconURI.idl
+@@ -61,17 +61,32 @@ interface nsIMozIconURI : nsIURI
+   readonly attribute boolean imageDark;
+ 
+   /// stockIcon: The stock icon name requested from the OS.
+   readonly attribute ACString stockIcon;
+ 
+   /// contentType: A valid mime type, or the empty string.
+   readonly attribute ACString contentType;
+ 
+-  /// fileExtension: The file extension of the file which we are looking up.
++  /// fileExtension: The extension of the file we are looking up, prefixed with
++  /// a period, so that it is a placeholder file name rather than a bare
++  /// extension ("dummy.html" yields ".html"). A lone "." means the name ends in
++  /// a period and so has no extension; the empty string means there is no
++  /// extension to report.
++  ///
++  /// The period is deliberate: callers typically want an icon for a file that
++  /// does not exist, and the OS APIs that produce the icon take a file name
++  /// rather than an extension, so this value is meant to be usable directly as
++  /// a stand-in for one.
++  ///
++  /// Beware that this is not the convention used elsewhere in the tree.
++  /// nsIURL.fileExtension and the nsIMIMEService extension lookups all expect
++  /// a bare extension with no period, so the period has to be stripped when
++  /// handing this value to them. Forgetting to is easy to miss, because a
++  /// period-prefixed extension usually just quietly fails to match.
+   readonly attribute ACString fileExtension;
+ };
+ 
+ %{C++
+ #define NS_MOZICONURIMUTATOR_CID                     \
+ {                                                    \
+     0x1460df3b,                                      \
+     0x774c,                                          \
+diff --git a/image/test/unit/test_moz_icon_uri.js b/image/test/unit/test_moz_icon_uri.js
+--- a/image/test/unit/test_moz_icon_uri.js
++++ b/image/test/unit/test_moz_icon_uri.js
+@@ -32,16 +32,37 @@ function run_test() {
+   Assert.equal(exception, false);
+   exception = false; // reset exception value
+ 
+   iconURI = uri.QueryInterface(Ci.nsIMozIconURI);
+   Assert.equal(iconURI.imageSize, 16);
+   Assert.equal(iconURI.contentType, "bar");
+   Assert.equal(iconURI.fileExtension, ".html");
+ 
++  // A file name ending in a period has no extension, but we still report the
++  // period, because the value is a placeholder file name rather than a bare
++  // extension. Consumers handing it to an API that wants a bare extension have
++  // to strip the period, and are left with the empty string here.
++  currentSpec = "moz-icon://foo.?size=16";
++  uri = ioService.newURI(currentSpec);
++  iconURI = uri.QueryInterface(Ci.nsIMozIconURI);
++  Assert.equal(iconURI.fileExtension, ".");
++
++  // The file name is allowed to be nothing but a period.
++  currentSpec = "moz-icon://.?size=16";
++  uri = ioService.newURI(currentSpec);
++  iconURI = uri.QueryInterface(Ci.nsIMozIconURI);
++  Assert.equal(iconURI.fileExtension, ".");
++
++  // With no period at all there is no extension to report.
++  currentSpec = "moz-icon://foo?size=16";
++  uri = ioService.newURI(currentSpec);
++  iconURI = uri.QueryInterface(Ci.nsIMozIconURI);
++  Assert.equal(iconURI.fileExtension, "");
++
+   // Make sure a valid file name icon URI can be created with a numeric size,
+   // and make sure the numeric size is handled properly
+   currentSpec = "moz-icon://foo.html?size=3";
+   try {
+     uri = ioService.newURI(currentSpec);
+   } catch (e) {
+     exception = true;
+   }
+
