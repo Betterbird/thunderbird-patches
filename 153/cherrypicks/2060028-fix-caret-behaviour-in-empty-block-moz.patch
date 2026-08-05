@@ -1,27 +1,47 @@
+
 # HG changeset patch
 # User Max Emig <mozilla@emigm.ax>
-# Date 1785746337 -7200
-# Parent  edfbb1a2c80381a820eb51ae72adab0112dc13f5
-Bug 2060028 - Restore correct caret behaviour: put the caret after content inserted into an empty block.
+# Date 1785904644 0
+# Node ID 944f566d2f1418cf2c93aa2e286d519a3454d5a2
+# Parent  dc53177a8fc4df71f9de53ea4d83f7855ae66c15
+Bug 2060028 - Fix the caret position regression when inserting content into an empty block. r=masayuki
+
+Differential Revision: https://phabricator.services.mozilla.com/D315934
+
 
 diff --git a/editor/libeditor/HTMLEditorDataTransfer.cpp b/editor/libeditor/HTMLEditorDataTransfer.cpp
 --- a/editor/libeditor/HTMLEditorDataTransfer.cpp
 +++ b/editor/libeditor/HTMLEditorDataTransfer.cpp
-@@ -396,8 +396,13 @@ class MOZ_STACK_CLASS HTMLEditor::HTMLWi
-   /**
-    * Insert nodes in aArrayOfTopMostChildContents or their children to
-    * aPointToInsert (if the container is not a proper parent of inserting node,
-    * this splits the ancestors).
-+   *
-+   * @return                    The last inserted content.  This does not
-+   *                            suggest a caret point because the caller needs
-+   *                            to compute it after deleting the unnecessary
-+   *                            line break which follows the content.
-    */
-   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<CreateContentResult, nsresult>
-   InsertContents(
-       const EditorDOMPoint& aPointToInsert,
-@@ -952,17 +957,26 @@ Result<EditActionResult, nsresult> HTMLE
+@@ -931,64 +931,70 @@ Result<EditActionResult, nsresult> HTMLE
+ 
+   CreateContentResult insertNodeResult = insertNodeResultOrError.unwrap();
+   if (MOZ_UNLIKELY(!insertNodeResult.Handled())) {
+     // Even if we haven't inserted new content nodes, we "handled" to insert
+     // them so that return "handled" state.
+     return EditActionResult::HandledResult();
+   }
+ 
++  MOZ_ASSERT(insertNodeResult.HasCaretPointSuggestion());
++  EditorDOMPoint pointToPutCaret = insertNodeResult.UnwrapCaretPoint();
++
+   if (MOZ_LIKELY(insertNodeResult.GetNewNode()->IsInComposedDoc())) {
+     const auto afterLastInsertedContent =
+         EditorRawDOMPoint(insertNodeResult.GetNewNode())
+             .NextPointOrAfterContainer<EditorDOMPoint>();
+     if (MOZ_LIKELY(afterLastInsertedContent.IsInContentNode())) {
++      AutoTrackDOMPoint trackPointToPutCaret(mHTMLEditor.RangeUpdaterRef(),
++                                             &pointToPutCaret);
+       nsresult rv = mHTMLEditor.EnsureNoFollowingUnnecessaryLineBreak(
+           afterLastInsertedContent,
+           // When user inserting content, the web app may expect that nothing
+           // extant content will be deleted. Therefore, we should preserve
+           // preformatted linefeed at least.
+           PreservePreformattedLineBreak::Yes, PaddingForEmptyBlock::Significant,
+           mEditingHost);
+       if (NS_FAILED(rv)) {
+         NS_WARNING(
+             "HTMLEditor::EnsureNoFollowingUnnecessaryLineBreak() failed");
+         return Err(rv);
        }
      }
    }
@@ -35,16 +55,9 @@ diff --git a/editor/libeditor/HTMLEditorDataTransfer.cpp b/editor/libeditor/HTML
 -  }
 -  NS_WARNING_ASSERTION(rv != NS_SUCCESS_EDITOR_BUT_IGNORED_TRIVIAL_ERROR,
 -                       "CaretPoint::SuggestCaretPointTo() failed, but ignored");
-+  if (NS_WARN_IF(!insertNodeResult.GetNewNode()->IsInComposedDoc())) {
-+    return EditActionResult::HandledResult();
++  if (NS_WARN_IF(!pointToPutCaret.IsSetAndValidInComposedDoc())) {
++    return Err(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
 +  }
-+  // We need to compute the caret point after
-+  // EnsureNoFollowingUnnecessaryLineBreak() because it may delete the line
-+  // break which follows the last inserted content.  A caret point computed
-+  // before that would refer to the deleted line break, and collapsing
-+  // Selection to it would put the caret before the inserted content.
-+  const EditorDOMPoint pointToPutCaret = GetNewCaretPointAfterInsertingHTML(
-+      EditorDOMPoint(insertNodeResult.GetNewNode()));
 +  rv = mHTMLEditor.CollapseSelectionTo(pointToPutCaret);
 +  if (MOZ_UNLIKELY(rv == NS_ERROR_EDITOR_DESTROYED)) {
 +    NS_WARNING(
@@ -57,39 +70,40 @@ diff --git a/editor/libeditor/HTMLEditorDataTransfer.cpp b/editor/libeditor/HTML
    // If we didn't start from an `<a href>` element, we should not keep
    // caret in the link to make users type something outside the link.
    if (insertionPointWasInLink) {
-@@ -974,10 +988,9 @@ Result<EditActionResult, nsresult> HTMLE
+     return EditActionResult::HandledResult();
+   }
+   if (Element* const parentElement =
+           insertNodeResult.GetNewNode()->GetParentElement()) {
+     const RefPtr<Element> linkElement = GetLinkElement(parentElement);
      if (MOZ_LIKELY(!linkElement)) {
        return EditActionResult::HandledResult();
      }
  
--    nsresult rv =
--        MoveCaretOutsideOfLink(*linkElement, insertNodeResult.CaretPointRef());
-+    nsresult rv = MoveCaretOutsideOfLink(*linkElement, pointToPutCaret);
-     if (NS_FAILED(rv)) {
-       NS_WARNING(
-           "HTMLEditor::HTMLWithContextInserter::MoveCaretOutsideOfLink() "
-           "failed");
-@@ -1376,12 +1389,12 @@ HTMLEditor::HTMLWithContextInserter::Ins
- 
-   if (!lastInsertedContent) {
-     return CreateContentResult::NotHandled();
+     // Note that the caret point may be outside the found link. So, let's check
+     // it before trying to split the link.
+-    if (linkElement->IsInclusiveDescendantOf(
+-            insertNodeResult.CaretPointRef().GetContainer())) [[likely]] {
+-      nsresult rv = MoveCaretOutsideOfLink(*linkElement,
+-                                           insertNodeResult.CaretPointRef());
++    if (linkElement->IsInclusiveDescendantOf(pointToPutCaret.GetContainer()))
++        [[likely]] {
++      nsresult rv = MoveCaretOutsideOfLink(*linkElement, pointToPutCaret);
+       if (NS_FAILED(rv)) {
+         NS_WARNING(
+             "HTMLEditor::HTMLWithContextInserter::MoveCaretOutsideOfLink() "
+             "failed");
+         return Err(rv);
+       }
+     }
    }
--  EditorDOMPoint pointToPutCaret =
--      GetNewCaretPointAfterInsertingHTML(EditorDOMPoint(lastInsertedContent));
--  return CreateContentResult(std::move(lastInsertedContent),
--                             std::move(pointToPutCaret));
-+  // Note that the caller computes the caret point after deleting the
-+  // unnecessary line break which follows the last inserted content because the
-+  // caret point would refer to the deleted line break.
-+  return CreateContentResult(std::move(lastInsertedContent));
- }
- 
- nsresult HTMLEditor::HTMLWithContextInserter::MoveCaretOutsideOfLink(
-     Element& aLinkElement, const EditorDOMPoint& aPointToPutCaret) {
 diff --git a/editor/libeditor/tests/mochitest.toml b/editor/libeditor/tests/mochitest.toml
 --- a/editor/libeditor/tests/mochitest.toml
 +++ b/editor/libeditor/tests/mochitest.toml
-@@ -502,8 +502,10 @@ skip-if = [
+@@ -501,16 +501,18 @@ skip-if = [
+ ["test_htmleditor_toggle_text_direction.html"]
+ 
+ ["test_initial_selection_and_caret_of_designMode.html"]
+ 
  ["test_inlineTableEditing.html"]
  
  ["test_inline_style_cache.html"]
@@ -99,6 +113,10 @@ diff --git a/editor/libeditor/tests/mochitest.toml b/editor/libeditor/tests/moch
  ["test_insertHTML_starting_with_multiple_comment_nodes.html"]
  
  ["test_insertParagraph_in_h2_and_li.html"]
+ 
+ ["test_insertParagraph_in_inline_editing_host.html"]
+ 
+ ["test_insertText_around_text_node_in_plaintext_mode.html"]
  
 diff --git a/editor/libeditor/tests/test_insertHTML_caret_position_after_replaced_element.html b/editor/libeditor/tests/test_insertHTML_caret_position_after_replaced_element.html
 new file mode 100644
@@ -201,3 +219,4 @@ new file mode 100644
 +</script>
 +</body>
 +</html>
+

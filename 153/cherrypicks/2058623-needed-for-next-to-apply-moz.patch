@@ -1,0 +1,101 @@
+
+# HG changeset patch
+# User Masayuki Nakano <masayuki@d-toybox.com>
+# Date 1785736500 0
+# Node ID 38fabd2e22ca6f3332f7260d5f50ed7cb8ecf9fe
+# Parent  62f45fdc2f797480ea0a1089a1525a4944d42cbe
+Bug 2058623 - Make `HTMLWithContextInserter::Run` ensure the new caret is in the found link before trying to split it r=m_kato
+
+And also `HTMLWithContextInserter::MoveCaretOutsideOfLink` should not
+refer the result if it's error.
+
+Differential Revision: https://phabricator.services.mozilla.com/D315135
+
+
+diff --git a/editor/libeditor/HTMLEditorDataTransfer.cpp b/editor/libeditor/HTMLEditorDataTransfer.cpp
+--- a/editor/libeditor/HTMLEditorDataTransfer.cpp
++++ b/editor/libeditor/HTMLEditorDataTransfer.cpp
+@@ -973,23 +973,28 @@ Result<EditActionResult, nsresult> HTMLE
+   }
+   if (Element* const parentElement =
+           insertNodeResult.GetNewNode()->GetParentElement()) {
+     const RefPtr<Element> linkElement = GetLinkElement(parentElement);
+     if (MOZ_LIKELY(!linkElement)) {
+       return EditActionResult::HandledResult();
+     }
+ 
+-    nsresult rv =
+-        MoveCaretOutsideOfLink(*linkElement, insertNodeResult.CaretPointRef());
+-    if (NS_FAILED(rv)) {
+-      NS_WARNING(
+-          "HTMLEditor::HTMLWithContextInserter::MoveCaretOutsideOfLink() "
+-          "failed");
+-      return Err(rv);
++    // Note that the caret point may be outside the found link. So, let's check
++    // it before trying to split the link.
++    if (linkElement->IsInclusiveDescendantOf(
++            insertNodeResult.CaretPointRef().GetContainer())) [[likely]] {
++      nsresult rv = MoveCaretOutsideOfLink(*linkElement,
++                                           insertNodeResult.CaretPointRef());
++      if (NS_FAILED(rv)) {
++        NS_WARNING(
++            "HTMLEditor::HTMLWithContextInserter::MoveCaretOutsideOfLink() "
++            "failed");
++        return Err(rv);
++      }
+     }
+   }
+ 
+   return EditActionResult::HandledResult();
+ }
+ 
+ Result<CreateContentResult, nsresult>
+ HTMLEditor::HTMLWithContextInserter::InsertContents(
+@@ -1246,19 +1251,16 @@ HTMLEditor::HTMLWithContextInserter::Ins
+             NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                                  "EditorBase::DeleteNodeWithTransaction() "
+                                  "failed, but ignored");
+             pointToInsert =
+                 nextSibling ? EditorDOMPoint(std::move(nextSibling))
+                             : EditorDOMPoint::AtEndOf(std::move(parentNode));
+             MOZ_ASSERT(pointToInsert.IsSetAndValidInComposedDoc());
+           }
+-          NS_WARNING(nsPrintfCString("%s into %s", ToString(*child).c_str(),
+-                                     ToString(pointToInsert).c_str())
+-                         .get());
+           Result<CreateContentResult, nsresult> moveChildResult =
+               mHTMLEditor
+                   .InsertNodeIntoProperAncestorWithTransaction<nsIContent>(
+                       *child, pointToInsert,
+                       SplitAtEdges::eDoNotCreateEmptyContainer);
+           if (MOZ_UNLIKELY(moveChildResult.isErr())) {
+             // If we got unexpected DOM tree, let's abort.
+             if (NS_WARN_IF(moveChildResult.inspectErr() ==
+@@ -1394,23 +1396,19 @@ nsresult HTMLEditor::HTMLWithContextInse
+   // link might have ended in an invisible `<br>` element.  If so, the code
+   // above just placed selection inside that.  So we need to split it instead.
+   // XXX Sounds like that it's not really expensive comparing with the reason
+   //     to use SplitNodeDeepWithTransaction() here.
+   Result<SplitNodeResult, nsresult> splitLinkResult =
+       mHTMLEditor.SplitNodeDeepWithTransaction(
+           aLinkElement, aPointToPutCaret,
+           SplitAtEdges::eDoNotCreateEmptyContainer);
+-  if (MOZ_UNLIKELY(splitLinkResult.isErr())) {
+-    if (splitLinkResult.inspectErr() == NS_ERROR_EDITOR_DESTROYED) {
+-      NS_WARNING("HTMLEditor::SplitNodeDeepWithTransaction() failed");
+-      return NS_ERROR_EDITOR_DESTROYED;
+-    }
+-    NS_WARNING(
+-        "HTMLEditor::SplitNodeDeepWithTransaction() failed, but ignored");
++  if (splitLinkResult.isErr()) [[unlikely]] {
++    NS_WARNING("HTMLEditor::SplitNodeDeepWithTransaction() failed");
++    return splitLinkResult.unwrapErr();
+   }
+ 
+   if (nsIContent* previousContentOfSplitPoint =
+           splitLinkResult.inspect().GetPreviousContent()) {
+     splitLinkResult.inspect().IgnoreCaretPointSuggestion();
+     nsresult rv = mHTMLEditor.CollapseSelectionTo(
+         EditorRawDOMPoint::After(*previousContentOfSplitPoint));
+     if (NS_WARN_IF(rv == NS_ERROR_EDITOR_DESTROYED)) {
+

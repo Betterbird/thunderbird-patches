@@ -1,13 +1,33 @@
+
 # HG changeset patch
 # User welpy-cw <h.w.forms@arcor.de>
-# Date 1785608022 -7200
-# Parent  2d9afd87ffcf68482ea84c7e62df5aad448578d6
-Bug 1883816 - Defer select event during typematic key repeat in TreeListboxMixin.
+# Date 1785623118 0
+# Node ID 7f08a8595d5f7b49c4a72799b2b73c24e9b3745c
+# Parent  1ad71b12733cbe1a3654b08d70846aa8528b6541
+Bug 1883816 - Defer select event during typematic key repeat in TreeListboxMixin. r=aleca
+
+Holding ArrowUp/ArrowDown in the folder pane caused the UI to freeze and
+then jump to an unpredictable position on key release. This happened
+because every typematic keydown dispatched a "select" event, which
+triggered expensive folder-loading work (closing/opening DBViewWrappers)
+that couldn't keep up at key-repeat rates.
+
+Now the visual selection (highlighting and scrolling) still updates on
+every repeated keystroke for smooth feedback, while the "select" event
+is deferred until keyup/blur, so the folder loads only once on the
+final position.
+
+Differential Revision: https://phabricator.services.mozilla.com/D313308
+
 
 diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
 --- a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
 +++ b/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs
-@@ -6,8 +6,21 @@
+@@ -2,16 +2,29 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ // Animation variables for expanding and collapsing child lists.
  const ANIMATION_EASING = "ease";
  export const ANIMATION_DURATION_MS = 200;
  export const reducedMotionMedia = matchMedia("(prefers-reduced-motion)");
@@ -29,7 +49,15 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
    "resource://gre/modules/AppConstants.sys.mjs"
  );
  
-@@ -142,23 +155,37 @@ export const TreeListboxMixin = Base =>
+ /**
+  * Provides keyboard and mouse interaction to a (possibly nested) list.
+  * It is intended for lists with a small number (up to 1000?) of items.
+  * Only one item can be selected at a time. Maintenance of the items in the
+@@ -138,31 +151,45 @@ export const TreeListboxMixin = Base =>
+       this._initRows();
+       if (!this.selectedRow && this.rows.length) {
+         // TODO: This should only really happen on "focus".
+         this.updateSelection(this.getRowAtIndex(0));
        }
  
        this.addEventListener("click", this);
@@ -67,7 +95,15 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
            this._onContextMenu(event);
            break;
        }
-@@ -198,8 +225,18 @@ export const TreeListboxMixin = Base =>
+     }
+ 
+     _onClick(event) {
+       if (event.button !== 0) {
+@@ -194,16 +221,26 @@ export const TreeListboxMixin = Base =>
+       }
+     }
+ 
+     _onKeyDown(event) {
        if (event.altKey) {
          return;
        }
@@ -86,7 +122,15 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
          case "ArrowUp":
            this.updateSelection(
              this.getRowAtIndex(this._clampIndex(this.selectedIndex - 1)),
-@@ -317,8 +354,20 @@ export const TreeListboxMixin = Base =>
+             event
+           );
+           break;
+         case "ArrowDown":
+@@ -313,16 +350,28 @@ export const TreeListboxMixin = Base =>
+         default:
+           return;
+       }
+ 
        event.preventDefault();
      }
  
@@ -107,7 +151,15 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
       *
       * @param {DOMEvent} event
       */
-@@ -668,9 +717,9 @@ export const TreeListboxMixin = Base =>
+     _onContextMenu(event) {
+       const row = event.target.closest("li:not(.unselectable)");
+       if (!row) {
+         return;
+@@ -664,29 +713,31 @@ export const TreeListboxMixin = Base =>
+       this.selectedRow = rows.at(-1);
+       this.updateRowClasses();
+       this.focus();
+     }
  
      /**
       * Update the classes of the listbox to visually reflect the current state
@@ -118,7 +170,9 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
      updateRowClasses() {
        this.classList.toggle("multi-selected", this.#selection.size > 1);
  
-@@ -680,9 +729,11 @@ export const TreeListboxMixin = Base =>
+       for (const row of this.querySelectorAll("li.selected")) {
+         row.classList.remove("selected", "current");
+         row.ariaSelected = "false";
        }
  
        if (!this.#selection.size) {
@@ -131,7 +185,15 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
        }
  
        // If the currently active row is no longer part of the selection,
-@@ -710,9 +761,11 @@ export const TreeListboxMixin = Base =>
+       // promote the last item in the selection set to be the new active row.
+       if (!this.selectedRow || !this.#selection.has(this.selectedRow)) {
+         this.selectedRow = [...this.#selection].at(-1) ?? null;
+       }
+@@ -706,17 +757,19 @@ export const TreeListboxMixin = Base =>
+             row.firstElementChild.scrollIntoView({ block: "nearest" });
+           } else {
+             // Not a tree item, scroll the whole item into view.
+             row.scrollIntoView({ block: "nearest" });
            }
          }
        });
@@ -144,10 +206,18 @@ diff --git a/mail/base/content/widgets/listbox/tree-listbox-mixin.mjs b/mail/bas
  
      /**
       * Collapses the row at `index` if it can be collapsed. If the selected
+      * row is a descendant of the collapsing row, selection is moved to the
+      * collapsing row.
+      *
+      * @param {integer} index
 diff --git a/mail/base/test/browser/widgets/browser_treeListbox.js b/mail/base/test/browser/widgets/browser_treeListbox.js
 --- a/mail/base/test/browser/widgets/browser_treeListbox.js
 +++ b/mail/base/test/browser/widgets/browser_treeListbox.js
-@@ -43,8 +43,11 @@ add_task(async function testSelectOnRemo
+@@ -39,16 +39,19 @@ add_task(async function testSelectOnRemo
+   await withTab(subtestSelectOnRemoval2);
+ });
+ add_task(async function testSelectOnRemoval3() {
+   await withTab(subtestSelectOnRemoval3);
  });
  add_task(async function testUnselectable() {
    await withTab(subtestUnselectable);
@@ -159,7 +229,15 @@ diff --git a/mail/base/test/browser/widgets/browser_treeListbox.js b/mail/base/t
  /**
   * Tests keyboard navigation up and down the list for single and multiselection.
   */
-@@ -1574,4 +1577,95 @@ async function subtestUnselectable() {
+ async function subtestKeyboard() {
+   const doc = content.document;
+ 
+   const list = doc.querySelector(`ul[is="tree-listbox"]`);
+@@ -1570,8 +1573,99 @@ async function subtestUnselectable() {
+ 
+   EventUtils.synthesizeKey("KEY_ArrowLeft", {}, content); // Move up to 3-1.
+   checkSelected(2, "uRow-3-1");
+   EventUtils.synthesizeKey("KEY_ArrowLeft", {}, content); // Collapse.
    checkSelected(2, "uRow-3-1");
    EventUtils.synthesizeKey("KEY_ArrowLeft", {}, content); // Try to move to 3.
    checkSelected(2, "uRow-3-1");
@@ -255,3 +333,4 @@ diff --git a/mail/base/test/browser/widgets/browser_treeListbox.js b/mail/base/t
 +
 +  list.removeEventListener("select", onSelect);
 +}
+
