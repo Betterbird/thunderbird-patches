@@ -1,0 +1,117 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1785957720 -7200
+# Node ID c4a3e6f101da2a2cb06c414c2a1898621ab8c679
+# Parent  148efd46217eeb051fe587bfda1dd6e592e8b091
+Bug 2060181 - Drop mix-blend-mode from message content when adapting for dark mode. r=aleca
+
+Differential Revision: https://phabricator.services.mozilla.com/D315999
+
+diff --git a/mail/base/content/modules/DarkReader.mjs b/mail/base/content/modules/DarkReader.mjs
+--- a/mail/base/content/modules/DarkReader.mjs
++++ b/mail/base/content/modules/DarkReader.mjs
+@@ -74,8 +74,15 @@ export const isTransparent = color => {
+  *
+  * @param {CSSStyleDeclaration} style - The style to sanitize.
+  */
+ function sanitizeStyle(style) {
++  // A blend mode is written for the backdrop the sender had in mind. Against a
++  // dark one it may blend the content away, and we cannot inspect what it will
++  // end up blending with, so drop it.
++  if (style.mixBlendMode && style.mixBlendMode !== "normal") {
++    style.removeProperty("mix-blend-mode");
++  }
++
+   if (
+     !style.color &&
+     !style.background &&
+     !style.backgroundColor &&
+@@ -200,9 +207,9 @@ export function adaptMessageForDarkMode(
+ 
+   // Loop through all child elements that have inline style that might break in
+   // dark mode and check if the contrast is not enough for readability.
+   for (const node of browserDocument.querySelectorAll(
+-    `:not(button):is([style*="color"],[style*="background"],[bgcolor],[color])`
++    `:not(button):is([style*="color"],[style*="background"],[style*="blend"],[bgcolor],[color])`
+   )) {
+     // Clear inline attributes, usually in tables.
+     node.removeAttribute("bgcolor");
+     node.removeAttribute("color");
+diff --git a/mail/test/browser/message-reader/browser_darkReader.js b/mail/test/browser/message-reader/browser_darkReader.js
+--- a/mail/test/browser/message-reader/browser_darkReader.js
++++ b/mail/test/browser/message-reader/browser_darkReader.js
+@@ -342,8 +342,46 @@ add_task(async function test_background_
+     await BrowserTestUtils.closeWindow(backgroundMsgc);
+   }
+ });
+ 
++add_task(async function test_blend_mode_removed() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/dark_mode_blend_mode.eml")
++  );
++  const blendMsgc = await open_message_from_file(file);
++  const previousAboutMessage = aboutMessage;
++  aboutMessage = get_about_message(blendMsgc);
++
++  try {
++    if (!darkTheme.isActive) {
++      await toggle_theme(darkTheme, true);
++    }
++    if (Services.prefs.getBoolPref("mail.dark-reader.enabled", false)) {
++      await toggle_dark_reader(false);
++    }
++    await toggle_dark_reader(true);
++
++    const msgDoc =
++      aboutMessage.document.getElementById("messagepane").contentDocument;
++
++    Assert.equal(
++      msgDoc.defaultView.getComputedStyle(msgDoc.querySelector("#blended"))
++        .mixBlendMode,
++      "normal",
++      "The blend mode coming from an embedded rule should be removed"
++    );
++    Assert.ok(
++      !msgDoc
++        .querySelector("#inlineBlended")
++        .style.getPropertyValue("mix-blend-mode"),
++      "The blend mode coming from an inline style should be removed"
++    );
++  } finally {
++    aboutMessage = previousAboutMessage;
++    await BrowserTestUtils.closeWindow(blendMsgc);
++  }
++});
++
+ async function assert_light_style() {
+   await new Promise(resolve => aboutMessage.requestAnimationFrame(resolve));
+   if (AppConstants.DEBUG || AppConstants.ASAN || AppConstants.TSAN) {
+     await new Promise(resolve => aboutMessage.requestIdleCallback(resolve));
+diff --git a/mail/test/browser/message-reader/data/dark_mode_blend_mode.eml b/mail/test/browser/message-reader/data/dark_mode_blend_mode.eml
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/message-reader/data/dark_mode_blend_mode.eml
+@@ -0,0 +1,22 @@
++Message-ID: <dark-mode-blend-mode@example.invalid>
++Date: Wed, 4 Mar 2020 09:15:00 -0700
++To: recipient@example.invalid
++From: Dark Mode <sender@example.invalid>
++Subject: Message blending content against a light backdrop
++Content-Type: text/html; charset=UTF-8
++Content-Transfer-Encoding: 7bit
++
++<!DOCTYPE html>
++<html>
++  <head>
++    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++    <title>Message blending content against a light backdrop</title>
++  </head>
++  <body>
++    <style>#blended{mix-blend-mode:multiply;background-color:#ffffff;}</style>
++    <div id="blended">Blended by an embedded rule.</div>
++    <div id="inlineBlended" style="mix-blend-mode: multiply;">
++      Blended by an inline style.
++    </div>
++  </body>
++</html>

@@ -1,0 +1,201 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1785709649 0
+# Node ID a7254e792af1dac6cb7530c6bd96c479f47350df
+# Parent  9546d08295089361a136325e31eafab281bb9ed9
+Bug 2052807 - Do not re-add items of a hidden or removed calendar to the view when an in-flight read completes. r=darktrojan
+
+`CalendarFilteredViewMixin` reads a calendar's items asynchronously in `#refreshCalendar` and checks the calendar's visibility only before the read starts. When the calendar is hidden or removed while the read is in flight, its items are cleaned from the view, but the read still completes afterwards and adds them back.
+
+Enabling the offline support triggers this: `changeCalendarCache` removes the calendar and re-creates it under a new id. A refresh of the old calendar that is still in flight then re-adds its items, colorless because the calendar's style rules are gone, and nothing removes them again.
+
+This is not specific to ICS calendars; any cached calendar (for example CalDAV) shows it, so the fix belongs in the shared view layer rather than in a provider.
+
+Re-check the calendar's visibility after the read completes, before adding its items.
+
+Add a browser test that subscribes an ICS calendar, enables its offline support and asserts that no item of the old calendar id lingers in the view.
+
+Differential Revision: https://phabricator.services.mozilla.com/D310600
+
+
+diff --git a/calendar/base/content/widgets/calendar-filter.js b/calendar/base/content/widgets/calendar-filter.js
+--- a/calendar/base/content/widgets/calendar-filter.js
++++ b/calendar/base/content/widgets/calendar-filter.js
+@@ -1312,17 +1312,20 @@ let CalendarFilteredViewMixin = Base =>
+       const iterator = cal.iterate.streamValues(this.#filter.getItems(calendar));
+       this.#iterators.add(iterator);
+       const items = await Array.fromAsync(iterator);
+       if (!this.#iterators.has(iterator)) {
+         // #invalidate() cancelled this refresh while we were awaiting results.
+         // Don't add stale items to the (now cleared) view of a newer refresh.
+         return;
+       }
+-      this.addItems(items.flat());
++      // Skip if the calendar was hidden or removed while the read was in flight.
++      if (this.#isCalendarVisible(calendar)) {
++        this.addItems(items.flat());
++      }
+       this.#iterators.delete(iterator);
+     }
+ 
+     /**
+      * Implement this method to remove all items from the UI.
+      */
+     clearItems() {}
+ 
+diff --git a/calendar/test/CalendarTestUtils.sys.mjs b/calendar/test/CalendarTestUtils.sys.mjs
+--- a/calendar/test/CalendarTestUtils.sys.mjs
++++ b/calendar/test/CalendarTestUtils.sys.mjs
+@@ -517,16 +517,31 @@ class CalendarMonthViewTestUtils {
+       throw new Error(`Invalid parameters to getItemAt(): expected index>=1, got index=${index}.`);
+     }
+ 
+     const dayBox = this.getDayBox(win, week, day);
+     return dayBox.querySelector(`li:nth-of-type(${index}) calendar-month-day-box-item`);
+   }
+ 
+   /**
++   * Get all calendar-month-day-box-item elements in the specified day box.
++   *
++   * @param {Window} win - The window the calendar is displayed in.
++   * @param {number} week - Must be between 1-6.
++   * @param {number} day - Must be between 1-7.
++   *
++   * @throws If the day or week parameters are out of range.
++   * @returns {MozCalendarMonthDayBoxItem[]}
++   */
++  getItemsAt(win, week, day) {
++    const dayBox = this.getDayBox(win, week, day);
++    return [...dayBox.querySelectorAll("calendar-month-day-box-item")];
++  }
++
++  /**
+    * Waits for the calendar-month-day-box-item at "index", located in the
+    * specified week,day combination to appear.
+    *
+    * @param {Window} win - The window the calendar is displayed in.
+    * @param {number} week - Must be between 1-6.
+    * @param {number} day - Must be between 1-7.
+    * @param {number} index - Indicates which item to select.
+    *
+diff --git a/calendar/test/browser/browser.toml b/calendar/test/browser/browser.toml
+--- a/calendar/test/browser/browser.toml
++++ b/calendar/test/browser/browser.toml
+@@ -46,16 +46,18 @@ run-if = [
+ ["browser_eventDisplay_dayView.js"]
+ 
+ ["browser_eventDisplay_multiWeekView.js"]
+ 
+ ["browser_eventDisplay_weekView.js"]
+ 
+ ["browser_eventUndoRedo.js"]
+ 
++["browser_icsCacheToggleGhost.js"]
++
+ ["browser_ics_discovery.js"]
+ 
+ ["browser_import.js"]
+ tags = ["import"]
+ 
+ ["browser_itemNotification.js"]
+ tags = ["notifications"]
+ 
+diff --git a/calendar/test/browser/browser_icsCacheToggleGhost.js b/calendar/test/browser/browser_icsCacheToggleGhost.js
+new file mode 100644
+--- /dev/null
++++ b/calendar/test/browser/browser_icsCacheToggleGhost.js
+@@ -0,0 +1,92 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that enabling the offline support (cache) on an already subscribed
++ * ICS calendar does not leave ghost copies of its events in the view. The
++ * toggle re-creates the calendar under a new id; the events of the old
++ * instance must disappear from the view together with it.
++ */
++
++var { cal } = ChromeUtils.importESModule("resource:///modules/calendar/calUtils.sys.mjs");
++
++const calendarName = "toggleGhost-" + Date.now();
++var calendarFile = Services.dirsvc.get("TmpD", Ci.nsIFile);
++calendarFile.append(calendarName + ".ics");
++
++async function writeIcsFile() {
++  const ics = [
++    "BEGIN:VCALENDAR",
++    "VERSION:2.0",
++    "PRODID:-//Test//Test//EN",
++    "BEGIN:VEVENT",
++    "UID:toggle-ghost-event",
++    "SUMMARY:Toggle Ghost",
++    "DTSTART:20260708T120000Z",
++    "DTEND:20260708T130000Z",
++    "DTSTAMP:20260701T080000Z",
++    "END:VEVENT",
++    "END:VCALENDAR",
++  ].join("\r\n");
++  await IOUtils.write(calendarFile.path, new TextEncoder().encode(ics));
++}
++
++add_task(async function testCacheToggleLeavesNoGhost() {
++  await writeIcsFile();
++
++  // Subscribe without offline support, like the calendar creation dialog does.
++  let calendar = cal.manager.createCalendar("ics", Services.io.newFileURI(calendarFile));
++  calendar.name = calendarName;
++  cal.manager.registerCalendar(calendar);
++  calendar = cal.manager.getCalendarById(calendar.id);
++  const oldId = calendar.id;
++
++  registerCleanupFunction(async () => {
++    for (const cur of cal.manager.getCalendars()) {
++      if (cur.name == calendarName) {
++        cal.manager.unregisterCalendar(cur);
++      }
++    }
++    await IOUtils.remove(calendarFile.path, { ignoreAbsence: true });
++  });
++
++  await CalendarTestUtils.setCalendarView(window, "month");
++  await CalendarTestUtils.goToDate(window, 2026, 7, 8);
++
++  // 2026-07-08 is the Wednesday of the second displayed week.
++  const item = await CalendarTestUtils.monthView.waitForItemAt(window, 2, 4, 1);
++  Assert.equal(item.item.title, "Toggle Ghost", "the event is shown");
++
++  // Enable the offline support, as the calendar properties dialog does on
++  // accept: it first writes the other dialog fields - including "disabled" -
++  // and sets "cache.enabled" last. The cache toggle makes the manager remove
++  // the calendar and register a re-created, cached one under a new id.
++  calendar.setProperty("disabled", false);
++  calendar.setProperty("cache.enabled", true);
++
++  const newCalendar = await TestUtils.waitForCondition(
++    () => cal.manager.getCalendars().find(c => c.name == calendarName && c.id != oldId),
++    "the calendar was re-created under a new id"
++  );
++  Assert.ok(newCalendar.getProperty("cache.enabled"), "the new calendar is cached");
++
++  const idsAtCell = () =>
++    CalendarTestUtils.monthView.getItemsAt(window, 2, 4).map(el => el.item.calendar.id);
++
++  // The re-created calendar loads asynchronously; wait for its event.
++  await TestUtils.waitForCondition(
++    () => idsAtCell().includes(newCalendar.id),
++    "the event of the re-created calendar is shown"
++  );
++
++  // Give a late re-add of the old calendar's items time to appear, then assert
++  // only the new calendar's event remains.
++  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++  await new Promise(resolve => setTimeout(resolve, 1000));
++  Assert.deepEqual(
++    idsAtCell(),
++    [newCalendar.id],
++    `only the new calendar's event remains (old id was ${oldId})`
++  );
++});
+
