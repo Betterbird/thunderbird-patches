@@ -1,11 +1,139 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
-# Date 1785847252 -7200
+# Date 1785925883 -7200
 # Parent  4aa3afe11227ddd187b36d787cb668d1bf9d8578
 Feature: Show most recent child in collapsed thread root, fix integration of newly arrived message.
 
-Also fix intial view in XF views by fixing the thread roots in nsMsgXFVirtualFolderDBView::OnSearchDone().
-
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -4470,18 +4470,25 @@ nsresult nsMsgDBView::ExpandByIndex(nsMs
+   nsCOMPtr<nsIMsgThread> pThread;
+   nsresult rv = GetThreadContainingIndex(index, getter_AddRefs(pThread));
+   NS_ENSURE_SUCCESS(rv, rv);
+   if (fixRoot && CollapseToMostRecent()) {
+-    // Restore damaged thead root.
+-    pThread->GetChildKeyAt(0, &m_keys[index]);
+-    pThread->GetChildHdrAt(0, getter_AddRefs(msgHdr));
+-    uint32_t orgFlags;
+-    msgHdr->GetFlags(&orgFlags);
+-    flags = orgFlags |
+-            (flags & (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
+-    m_flags[index] = flags;
+-    m_levels[index] = 0;
+-    SetFolder(index, msgHdr);
++    // Restore the actual thread root. GetRootHdr() returns the message
++    // with no parent in the thread, unlike GetChildKeyAt(0) which may
++    // be ordered differently.
++    nsCOMPtr<nsIMsgDBHdr> rootHdr;
++    pThread->GetRootHdr(getter_AddRefs(rootHdr));
++    if (rootHdr) {
++      nsMsgKey rootKey;
++      rootHdr->GetMessageKey(&rootKey);
++      m_keys[index] = rootKey;
++      uint32_t orgFlags;
++      rootHdr->GetFlags(&orgFlags);
++      flags = orgFlags |
++              (flags & (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
++      m_flags[index] = flags;
++      m_levels[index] = 0;
++      SetFolder(index, rootHdr);
++    }
+   }
+   if (m_viewFlags & nsMsgViewFlagsType::kUnreadOnly) {
+     rv = ListUnreadIdsInThread(pThread, index, &numExpanded);
+   } else {
+diff --git a/mailnews/base/src/nsMsgSearchDBView.cpp b/mailnews/base/src/nsMsgSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgSearchDBView.cpp
+@@ -416,8 +416,14 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+ 
+       thread = viewThread;
+     } else {
+       viewThread = static_cast<nsMsgXFViewThread*>(thread.get());
++      // The XF thread (nsMsgXFViewThread) has its own m_keys / m_folders /
++      // m_levels arrays tracking the internal threading tree.  Position 0 in
++      // those arrays is the nominal root.  GetThreadRootIndex() below uses the
++      // sort key of this header to binary-search the view's arrays.  When
++      // CollapseToMostRecent is active the view root may differ, so we keep
++      // position 0 in sync via UpdateChildAt0() after each root replacement.
+       thread->GetChildHdrAt(0, getter_AddRefs(threadRoot));
+     }
+ 
+     AddMsgToHashTables(msgHdr, thread);
+@@ -444,8 +450,11 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+       NoteChange(insertIndex, 1, nsMsgViewNotificationCode::insertOrDelete);
+     } else {
+       // Get the thread root index before we add the header, because adding
+       // the header can change the sort position.
++      // GetThreadRootIndex binary-searches the view's m_keys array using the
++      // sort key of the passed header.  It relies on the XF-thread position-0
++      // entry matching the view root, which UpdateChildAt0() maintains.
+       nsMsgViewIndex threadIndex = GetThreadRootIndex(threadRoot);
+       viewThread->AddHdr(msgHdr, msgIsReferredTo, posInThread,
+                          getter_AddRefs(parent));
+       if (!IsValidIndex(threadIndex)) {
+@@ -543,17 +552,51 @@ nsresult nsMsgSearchDBView::AddHdrFromFo
+                        nsMsgViewNotificationCode::changed);
+           }
+         }
+       } else if (!parent) {
+-        // New parent came into collapsed thread.
+-        nsCOMPtr<nsIMsgFolder> msgFolder;
+-        msgHdr->GetFolder(getter_AddRefs(msgFolder));
+-        m_keys[threadIndex] = msgKey;
+-        m_folders.ReplaceObjectAt(msgFolder, threadIndex);
+-        m_flags[threadIndex] = msgFlags | MSG_VIEW_FLAG_ISTHREAD |
+-                               nsMsgMessageFlags::Elided |
+-                               MSG_VIEW_FLAG_HASCHILDREN;
+-        NoteChange(threadIndex, 1, nsMsgViewNotificationCode::changed);
++        // New parent came into collapsed thread. With CollapseToMostRecent,
++        // only replace the root if the new parent is the newest.
++        bool replaceRoot = !CollapseToMostRecent();
++        if (!replaceRoot) {
++          uint32_t newestMsgDate = 0, newMsgDate = 0;
++          viewThread->GetNewestMsgDate(&newestMsgDate);
++          msgHdr->GetDateInSeconds(&newMsgDate);
++          replaceRoot = (newMsgDate == newestMsgDate);
++        }
++        if (replaceRoot) {
++          nsCOMPtr<nsIMsgFolder> msgFolder;
++          msgHdr->GetFolder(getter_AddRefs(msgFolder));
++          m_keys[threadIndex] = msgKey;
++          m_folders.ReplaceObjectAt(msgFolder, threadIndex);
++          m_flags[threadIndex] = msgFlags | MSG_VIEW_FLAG_ISTHREAD |
++                                 nsMsgMessageFlags::Elided |
++                                 MSG_VIEW_FLAG_HASCHILDREN;
++          NoteChange(threadIndex, 1, nsMsgViewNotificationCode::changed);
++          // Keep the XF thread's position-0 in sync with the view root
++          // so GetThreadRootIndex() at the top of this block finds the
++          // correct index on subsequent calls.
++          viewThread->UpdateChildAt0(msgKey, msgFolder);
++        }
++      } else if (CollapseToMostRecent()) {
++        uint32_t newestMsgDate = 0, newMsgDate = 0;
++        viewThread->GetNewestMsgDate(&newestMsgDate);
++        msgHdr->GetDateInSeconds(&newMsgDate);
++        if (newMsgDate == newestMsgDate) {
++          uint32_t childFlags;
++          msgHdr->GetFlags(&childFlags);
++          m_keys[threadIndex] = msgKey;
++          nsCOMPtr<nsIMsgFolder> msgFolder;
++          msgHdr->GetFolder(getter_AddRefs(msgFolder));
++          m_folders.ReplaceObjectAt(msgFolder, threadIndex);
++          m_flags[threadIndex] = childFlags | nsMsgMessageFlags::Elided |
++              (m_flags[threadIndex] &
++               (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
++          NoteChange(threadIndex, 1, nsMsgViewNotificationCode::changed);
++          // Keep the XF thread's position-0 in sync with the view root
++          // so GetThreadRootIndex() at the top of this block finds the
++          // correct index on subsequent calls.
++          viewThread->UpdateChildAt0(msgKey, msgFolder);
++        }
+       }
+ 
+       if (moveThread) MoveThreadAt(threadIndex);
+     }
 diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
 --- a/mailnews/base/src/nsMsgThreadedDBView.cpp
 +++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
@@ -71,56 +199,77 @@ diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsg
  
    if (newIndex != nsMsgViewIndex_None) {
      targetIndex = newIndex;
-diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
---- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
-+++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
-@@ -357,8 +357,49 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
-     m_viewFolder->UpdateSummaryTotals(true);
-     virtDatabase->Commit(nsMsgDBCommitType::kLargeCommit);
-   }
+diff --git a/mailnews/base/src/nsMsgXFViewThread.cpp b/mailnews/base/src/nsMsgXFViewThread.cpp
+--- a/mailnews/base/src/nsMsgXFViewThread.cpp
++++ b/mailnews/base/src/nsMsgXFViewThread.cpp
+@@ -124,8 +124,9 @@ nsresult nsMsgXFViewThread::AddHdr(nsIMs
+     m_keys.InsertElementAt(0, newHdrKey);
+     m_levels.InsertElementAt(0, 0);
+     m_folders.InsertObjectAt(newHdrFolder, 0);
+     if (outParent) *outParent = nullptr;
++    m_rootHdr = newHdr;
  
-+  if (CollapseToMostRecent()) {
-+    for (uint32_t i = 0; i < m_flags.Length(); i++) {
-+      if (!(m_flags[i] & nsMsgMessageFlags::Elided)) continue;
-+      if (!(m_flags[i] & MSG_VIEW_FLAG_HASCHILDREN)) continue;
-+
-+      nsCOMPtr<nsIMsgThread> thread;
-+      GetThreadContainingIndex(i, getter_AddRefs(thread));
-+      if (!thread) continue;
-+
-+      uint32_t numChildren;
-+      thread->GetNumChildren(&numChildren);
-+
-+      uint32_t newestDate = 0;
-+      nsMsgKey newestKey = nsMsgKey_None;
-+      nsCOMPtr<nsIMsgDBHdr> newestHdr;
-+      for (uint32_t childIndex = 0; childIndex < numChildren; childIndex++) {
-+        nsCOMPtr<nsIMsgDBHdr> child;
-+        thread->GetChildHdrAt(childIndex, getter_AddRefs(child));
-+        if (!child) continue;
-+        uint32_t msgDate;
-+        child->GetDateInSeconds(&msgDate);
-+        if (msgDate > newestDate) {
-+          newestDate = msgDate;
-+          child->GetMessageKey(&newestKey);
-+          newestHdr = child;
-+        }
-+      }
-+
-+      if (newestKey != nsMsgKey_None && newestKey != m_keys[i]) {
-+        uint32_t childFlags;
-+        newestHdr->GetFlags(&childFlags);
-+        m_keys[i] = newestKey;
-+        nsCOMPtr<nsIMsgFolder> msgFolder;
-+        newestHdr->GetFolder(getter_AddRefs(msgFolder));
-+        m_folders.ReplaceObjectAt(msgFolder, i);
-+        m_flags[i] = childFlags | nsMsgMessageFlags::Elided |
-+            (m_flags[i] & (MSG_VIEW_FLAG_ISTHREAD | MSG_VIEW_FLAG_HASCHILDREN));
-+      }
-+    }
+     whereInserted = 0;
+     return NS_OK;
+   }
+@@ -227,8 +228,9 @@ nsresult nsMsgXFViewThread::AddHdr(nsIMs
+       m_keys.InsertElementAt(0, newHdrKey);
+       m_levels.InsertElementAt(0, 0);
+       m_folders.InsertObjectAt(newHdrFolder, 0);
+       whereInserted = 0;
++      m_rootHdr = newHdr;
+       // Adjust level of old root hdr and its children
+       for (nsMsgViewIndex i = 1; i < m_keys.Length(); i++) {
+         m_levels[i] = m_levels[i] + 1;
+       }
+@@ -321,8 +323,12 @@ nsMsgXFViewThread::RemoveChildHdr(nsIMsg
+ 
+ NS_IMETHODIMP
+ nsMsgXFViewThread::GetRootHdr(nsIMsgDBHdr** aResult) {
+   NS_ENSURE_ARG_POINTER(aResult);
++  if (m_rootHdr) {
++    NS_ADDREF(*aResult = m_rootHdr);
++    return NS_OK;
 +  }
+   return GetChildHdrAt(0, aResult);
+ }
+ 
+ NS_IMETHODIMP
+@@ -350,8 +356,14 @@ int32_t nsMsgXFViewThread::HdrIndex(nsIM
+ 
+   return -1;
+ }
+ 
++void nsMsgXFViewThread::UpdateChildAt0(nsMsgKey key, nsIMsgFolder* folder) {
++  if (m_keys.Length() == 0) return;
++  m_keys[0] = key;
++  m_folders.ReplaceObjectAt(folder, 0);
++}
 +
-   if (!m_sortValid && m_sortType != nsMsgViewSortType::byThread &&
-       !(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay)) {
-     // Sort the results.
-     m_sortValid = false;
+ void nsMsgXFViewThread::ChangeNewChildCount(int32_t delta) {
+   m_numNewChildren += delta;
+ }
+ 
+diff --git a/mailnews/base/src/nsMsgXFViewThread.h b/mailnews/base/src/nsMsgXFViewThread.h
+--- a/mailnews/base/src/nsMsgXFViewThread.h
++++ b/mailnews/base/src/nsMsgXFViewThread.h
+@@ -31,8 +31,9 @@ class nsMsgXFViewThread : public nsIMsgT
+ 
+   nsresult AddHdr(nsIMsgDBHdr* newHdr, bool reparentChildren,
+                   uint32_t& whereInserted, nsIMsgDBHdr** outParent);
+   int32_t HdrIndex(nsIMsgDBHdr* hdr);
++  void UpdateChildAt0(nsMsgKey key, nsIMsgFolder* folder);
+   uint32_t ChildLevelAt(uint32_t msgIndex) { return m_levels[msgIndex]; }
+   uint32_t MsgCount() { return m_numChildren; };
+ 
+  protected:
+@@ -44,8 +45,9 @@ class nsMsgXFViewThread : public nsIMsgT
+   uint32_t m_numChildren;
+   uint32_t m_flags;
+   uint32_t m_newestMsgDate;
+   nsMsgKey m_threadId;
++  nsCOMPtr<nsIMsgDBHdr> m_rootHdr;
+   nsTArray<nsMsgKey> m_keys;
+   nsCOMArray<nsIMsgFolder> m_folders;
+   nsTArray<uint32_t> m_levels;
+ };
