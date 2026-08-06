@@ -1,0 +1,289 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1785971364 0
+# Node ID 0a7c76a9b28702b5ce420b6ccdc760f0e4c7f5bc
+# Parent  5cba7fa256cdf50a71433e7fb318b4b1db9f481a
+Bug 2056286 - Fix disabled Mark and Tag menu bar items in synthetic views. r=tobyp
+
+InitMessageMenu used tab.folder (gFolder) to determine whether markMenu
+and tagMenu should be enabled. For synthetic views (gloda search results,
+conversation tabs) gFolder is not set, so the menus were incorrectly
+disabled even though the displayed messages have real underlying folders.
+
+Fix by using message?.folder (the message's real folder) with a fallback
+to gFolder when no message is selected. This correctly enables mark and
+tag menus for synthetic views while keeping them disabled for truly
+folderless contexts (external messages, server roots). As a side effect,
+markMenu is now also enabled in the standalone message window for
+messages with a real folder, where it was previously always disabled;
+this makes it consistent with the move and tag menus there.
+
+Add synthetic view and message window tests to browser_messageMenu.js,
+matching the existing coverage in browser_mailContext.js.
+
+Differential Revision: https://phabricator.services.mozilla.com/D316116
+
+
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -584,17 +584,17 @@ function InitViewMessagesMenu() {
+ }
+ 
+ function InitMessageMenu() {
+   const tab = document.getElementById("tabmail")?.currentTabInfo;
+   let message, folder;
+   let isDummy;
+   if (["mail3PaneTab", "mailMessageTab"].includes(tab?.mode.name)) {
+     ({ message, folder } = tab);
+-    isDummy = message && !folder;
++    isDummy = !message?.folder && !folder;
+   } else {
+     message = document.getElementById("messageBrowser")?.contentWindow.gMessage;
+     isDummy = !message?.folder;
+   }
+   const aboutMessage =
+     document.getElementById("tabmail")?.currentAboutMessage ||
+     document.getElementById("messageBrowser")?.contentWindow;
+ 
+@@ -660,18 +660,24 @@ function InitMessageMenu() {
+     .children[index].toggleAttribute("checked", true);
+ 
+   const openRssMenu = document.getElementById("openFeedMessage");
+   openRssMenu.hidden = !isFeed;
+   if (winType != "mail:3pane") {
+     openRssMenu.hidden = true;
+   }
+ 
+-  // Disable mark menu when we're not in a folder.
+-  document.getElementById("markMenu").disabled = !folder || folder.isServer;
++  // Disable the mark menu when there's no folder context, or when the
++  // folder is a server root (which has no messages to mark). Use the
++  // message's real folder when one is selected (so the menu works in
++  // synthetic views, which have no gFolder), falling back to gFolder if
++  // no message is selected.
++  const effectiveFolder = message?.folder || folder;
++  document.getElementById("markMenu").disabled =
++    !effectiveFolder || effectiveFolder.isServer;
+ 
+   document.commandDispatcher.updateCommands("create-menu-message");
+ }
+ 
+ /**
+  * Show folder-specific menu items only for messages in special folders, e.g.
+  * show 'cmd_editDraftMsg' in Drafts folder, or
+  * show 'cmd_newMsgFromTemplate' in Templates folder.
+diff --git a/mail/base/test/browser/menus/browser_messageMenu.js b/mail/base/test/browser/menus/browser_messageMenu.js
+--- a/mail/base/test/browser/menus/browser_messageMenu.js
++++ b/mail/base/test/browser/menus/browser_messageMenu.js
+@@ -4,19 +4,25 @@
+ 
+ const GlodaTestHelper = ChromeUtils.importESModule(
+   "resource://testing-common/gloda/GlodaTestHelper.sys.mjs"
+ );
+ const { MessageGenerator } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+ );
+ 
++const { Gloda } = ChromeUtils.importESModule(
++  "resource:///modules/gloda/Gloda.sys.mjs"
++);
+ const { GlodaIndexer } = ChromeUtils.importESModule(
+   "resource:///modules/gloda/GlodaIndexer.sys.mjs"
+ );
++const { GlodaSyntheticView } = ChromeUtils.importESModule(
++  "resource:///modules/gloda/GlodaSyntheticView.sys.mjs"
++);
+ 
+ const nothingSelected = ["rootFolder", "noSelection", "contentTab"];
+ const nothingOrMultiSelected = [...nothingSelected, "multiSelection"];
+ 
+ /** @type {MenuData} */
+ const messageMenuData = {
+   newMsgCmd: {},
+   replyMainMenu: { disabled: nothingSelected },
+@@ -49,38 +55,89 @@ const messageMenuData = {
+   tagMenu: { disabled: [...nothingSelected, "externalMessage"] },
+   "tagMenu-addNewTag": { disabled: nothingSelected },
+   "tagMenu-manageTags": { disabled: nothingSelected },
+   "tagMenu-tagRemoveAll": { disabled: nothingSelected },
+   markMenu: { disabled: ["rootFolder", "externalMessage", "contentTab"] },
+   markReadMenuItem: { disabled: nothingSelected },
+   markUnreadMenuItem: { disabled: true },
+   menu_markThreadAsRead: { disabled: nothingSelected },
+-  menu_markReadByDate: { disabled: ["rootFolder"] },
+-  menu_markAllRead: { disabled: ["rootFolder"] },
++  menu_markReadByDate: { disabled: ["rootFolder", "syntheticView"] },
++  menu_markAllRead: { disabled: ["rootFolder", "syntheticView"] },
+   markFlaggedMenuItem: { disabled: nothingSelected },
+   menu_markAsJunk: { disabled: nothingSelected },
+   menu_markAsNotJunk: { disabled: nothingSelected },
+   menu_recalculateJunkScore: {
+-    disabled: [...nothingSelected, "message"],
++    disabled: [...nothingSelected, "message", "syntheticView"],
+   },
+   archiveMainMenu: { disabled: [...nothingSelected, "externalMessage"] },
+   menu_cancel: { hidden: true },
+   moveMenu: { disabled: [...nothingSelected, "externalMessage"] },
+   copyMenu: { disabled: nothingSelected },
+   moveToFolderAgain: { disabled: true },
+   createFilter: { disabled: [...nothingOrMultiSelected, "externalMessage"] },
+-  killThread: { disabled: [...nothingSelected, "message", "externalMessage"] },
++  killThread: {
++    disabled: [
++      ...nothingSelected,
++      "message",
++      "externalMessage",
++      "syntheticView",
++    ],
++  },
+   killSubthread: {
+-    disabled: [...nothingSelected, "message", "externalMessage"],
++    disabled: [
++      ...nothingSelected,
++      "message",
++      "externalMessage",
++      "syntheticView",
++    ],
+   },
+-  watchThread: { disabled: [...nothingSelected, "externalMessage"] },
++  watchThread: {
++    disabled: [...nothingSelected, "externalMessage", "syntheticView"],
++  },
+ };
+ const helper = new MenuTestHelper("messageMenu", messageMenuData);
+ 
++/** @type {MenuData} */
++const messageWindowMenuData = {
++  ...messageMenuData,
++  // The message window has no "Open in Conversation" item, and the "Open
++  // Message in New Window" item is hidden there. The thread items and
++  // "Recalculate Junk Score" are only handled by the 3-pane command
++  // controller, so they're disabled there too.
++  openMessageWindowMenuitem: { hidden: true },
++  menu_recalculateJunkScore: {
++    disabled: [
++      ...nothingSelected,
++      "message",
++      "syntheticView",
++      "mailMessageWindow",
++    ],
++  },
++  killThread: {
++    disabled: [
++      ...nothingSelected,
++      "message",
++      "externalMessage",
++      "syntheticView",
++      "mailMessageWindow",
++    ],
++  },
++  killSubthread: {
++    disabled: [
++      ...nothingSelected,
++      "message",
++      "externalMessage",
++      "syntheticView",
++      "mailMessageWindow",
++    ],
++  },
++};
++delete messageWindowMenuData.openConversationMenuitem;
++
+ const tabmail = document.getElementById("tabmail");
+ let rootFolder, testFolder, testMessages;
+ let draftsFolder, draftsMessages, templatesFolder, templatesMessages;
+ 
+ add_setup(async function () {
+   Services.prefs.clearUserPref("mail.last_msg_movecopy_target_uri");
+   Services.prefs.setBoolPref("mailnews.mark_message_read.auto", false);
+   document.getElementById("toolbar-menubar").removeAttribute("autohide");
+@@ -358,8 +415,86 @@ add_task(async function testExternalMess
+   tabmail.switchToTab(2);
+   await helper.testAllItems("externalMessage");
+ });
+ 
+ add_task(async function testContentTab() {
+   tabmail.switchToTab(3);
+   await helper.testAllItems("contentTab");
+ });
++
++/**
++ * Tests the message menu bar items for a Gloda synthetic view
++ * (e.g. search results or a conversation tab). In a synthetic view
++ * gFolder is not set, but the displayed messages still have real
++ * underlying folders, so mark, tag, move, and copy should be enabled.
++ */
++add_task(async function testSyntheticView() {
++  const tabPromise = BrowserTestUtils.waitForEvent(
++    window,
++    "aboutMessageLoaded"
++  );
++  const tab = tabmail.openTab("mail3PaneTab", {
++    syntheticView: new GlodaSyntheticView({
++      collection: Gloda.getMessageCollectionForHeaders(
++        testMessages.slice(0, 6)
++      ),
++    }),
++    title: "Test gloda results",
++  });
++  await tabPromise;
++  await SimpleTest.promiseFocus(tab.chromeBrowser);
++
++  const about3Pane = tab.chromeBrowser.contentWindow;
++  const { threadTree, messageBrowser } = about3Pane;
++  const messagePaneBrowser =
++    messageBrowser.contentWindow.getMessagePaneBrowser();
++
++  const gDBView = await TestUtils.waitForCondition(
++    () => about3Pane.gDBView,
++    "waiting for view to load in new tab"
++  );
++
++  // Select a message that hasn't been modified by earlier tests
++  // (testMessages[2] is unread and unflagged) and wait for it to load.
++  await TestUtils.waitForCondition(
++    () => threadTree.getRowAtIndex(2),
++    "waiting for rows to be added"
++  );
++  const loadedPromise = BrowserTestUtils.browserLoaded(
++    messagePaneBrowser,
++    undefined,
++    url => url.endsWith(gDBView.getKeyAt(2))
++  );
++  threadTree.selectedIndex = 2;
++  await loadedPromise;
++
++  await helper.testAllItems("syntheticView");
++
++  tabmail.closeTab(tab);
++});
++
++/**
++ * Tests the message menu bar items in the standalone message window. The
++ * mark, tag, and move menus are enabled because the displayed message has a
++ * real folder (bug 2056286).
++ */
++add_task(async function testMessageWindow() {
++  const winPromise = BrowserTestUtils.domWindowOpenedAndLoaded(
++    undefined,
++    win =>
++      win.document.documentURI ==
++      "chrome://messenger/content/messageWindow.xhtml"
++  );
++  window.MsgOpenNewWindowForMessage(testMessages[0]);
++  const win = await winPromise;
++  await messageLoadedIn(win.messageBrowser);
++  await SimpleTest.promiseFocus(win);
++
++  const windowHelper = new MenuTestHelper(
++    "messageMenu",
++    messageWindowMenuData,
++    win.document
++  );
++  await windowHelper.testAllItems("mailMessageWindow");
++
++  await BrowserTestUtils.closeWindow(win);
++});
+

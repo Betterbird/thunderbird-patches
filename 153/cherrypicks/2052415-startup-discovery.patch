@@ -1,0 +1,225 @@
+
+# HG changeset patch
+# User Stephen A Pohl <spohl@mozilla.com>
+# Date 1785957531 0
+# Node ID 34b168580ad6bef861522acca2b83cc79eca1d67
+# Parent  02580da53b14fc0a6d53c5f0828ab88901e26aeb
+Bug 2052415: Count unread mail across every account's inbox for the macOS badge, not just already-loaded folders. r=arschmitz,edicharry
+
+MailNotificationService computes the dock badge total by iterating nsIMsgFolder.descendants over each account's root folder. descendants only returns subfolders that have already been discovered into memory. At startup the subfolders of accounts other than the one currently shown in the folder pane have not been discovered yet, so their inboxes are skipped, and the counts later load from the folder cache without firing a TotalUnreadMessages change notification that would correct the running total. The result is a permanent, deterministic under-count (typically zero when no account's inbox happens to be loaded) for people with more than one account, which on macOS shows up as a missing dock badge even though unread mail is visible in the folder pane.
+
+Fix this at the source in nsMsgDBFolder::GetDescendants by forcing the message store to discover the folder's children before enumerating them. This is protocol-agnostic (it goes through nsIMsgPluggableStore) and runs at most once per folder. Because the under-count is fixed in descendants itself, every caller that walks descendants sees the complete hierarchy, not just the notification service. Panorama keeps the hierarchy in its own folder database, so it is left alone.
+
+Differential Revision: https://phabricator.services.mozilla.com/D310235
+
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -234,16 +234,17 @@ nsMsgDBFolder::nsMsgDBFolder(void)
+       m_tempMessageStreamBytesWritten(0),
+       mFlags(0),
+       mUserSortOrder(nsIMsgFolder::NO_SORT_VALUE),
+       mNumUnreadMessages(-1),
+       mNumTotalMessages(-1),
+       mNotifyCountChanges(true),
+       mExpungedBytes(0),
+       mInitializedFromCache(false),
++      mDiscoveredSubFolders(false),
+       mSemaphoreHolder(nullptr),
+       mNumPendingUnreadMessages(0),
+       mNumPendingTotalMessages(0),
+       mFolderSize(kSizeUnknown),
+       mNumNewBiffMessages(0),
+       mHaveParsedURI(false),
+       mIsServerIsValid(false),
+       mIsServer(false),
+@@ -4957,16 +4958,50 @@ NS_IMETHODIMP nsMsgDBFolder::GetMessageH
+   NS_ENSURE_SUCCESS(rv, rv);
+   return (database) ? database->GetMsgHdrForKey(msgKey, aMsgHdr)
+                     : NS_ERROR_FAILURE;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetDescendants(
+     nsTArray<RefPtr<nsIMsgFolder>>& aDescendants) {
+   aDescendants.Clear();
++
++  // `mSubFolders` only holds folders that have already been discovered into
++  // memory. At startup the subfolders of accounts other than the one shown in
++  // the folder pane have not been discovered yet, so callers that walk the
++  // descendants (for example the unread-count badge) would miss them. Ask the
++  // message store which children exist on disk and add any that are missing,
++  // so descendant enumeration is complete regardless of what has been loaded
++  // so far. The recursion below walks into each child, which discovers deeper
++  // levels in turn. Panorama keeps the hierarchy in its folder database rather
++  // than the store, so it does not need this.
++  if (!mDiscoveredSubFolders &&
++      !StaticPrefs::mail_panorama_enabled_AtStartup()) {
++    // Set the flag before discovering to guard against re-entrancy while the
++    // store adds the subfolders.
++    mDiscoveredSubFolders = true;
++    nsCOMPtr<nsIMsgPluggableStore> store;
++    if (NS_SUCCEEDED(GetMsgStore(getter_AddRefs(store))) && store) {
++      // Use DiscoverChildFolders (a read-only listing) rather than
++      // DiscoverSubFolders, which as a side effect creates a directory at the
++      // folder path when it does not exist yet and would corrupt folders whose
++      // store file has not been written.
++      nsTArray<nsCString> childNames;
++      if (NS_SUCCEEDED(store->DiscoverChildFolders(this, childNames))) {
++        for (const auto& childName : childNames) {
++          nsCOMPtr<nsIMsgFolder> child;
++          GetChildNamed(childName, getter_AddRefs(child));
++          if (!child) {
++            AddSubfolder(childName, getter_AddRefs(child));
++          }
++        }
++      }
++    }
++  }
++
+   for (nsIMsgFolder* child : mSubFolders) {
+     aDescendants.AppendElement(child);
+     nsTArray<RefPtr<nsIMsgFolder>> grandchildren;
+     child->GetDescendants(grandchildren);
+     aDescendants.AppendElements(grandchildren);
+   }
+   return NS_OK;
+ }
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -248,16 +248,19 @@ class nsMsgDBFolder : public nsSupportsW
+                                  out.) */
+   int32_t mNumTotalMessages;  /* count of existing messages. */
+   bool mNotifyCountChanges;
+   int64_t mExpungedBytes;
+   nsCOMArray<nsIMsgFolder> mSubFolders;
+   nsTObserverArray<nsCOMPtr<nsIFolderListener>> mListeners;
+ 
+   bool mInitializedFromCache;
++  // Whether GetDescendants has already forced this folder's children to be
++  // discovered from the message store, so we only do it once.
++  bool mDiscoveredSubFolders;
+   nsISupports* mSemaphoreHolder;  // set when the folder is being written to
+                                   // Due to ownership issues, this won't be
+                                   // AddRef'd.
+   nsAutoCString mSemaphoreLogText;
+ 
+   nsWeakPtr mServer;
+ 
+   // These values are used for tricking the front end into thinking that we have
+diff --git a/mailnews/base/test/unit/test_notificationCountMultiAccount.js b/mailnews/base/test/unit/test_notificationCountMultiAccount.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/test/unit/test_notificationCountMultiAccount.js
+@@ -0,0 +1,95 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* Regression test for the unread-count badge under-counting with more than one
++ * account. After a restart the subfolders of accounts other than the one shown
++ * in the folder pane have not been discovered into memory yet. The badge walks
++ * nsIMsgFolder.descendants, so descendants must force that discovery from the
++ * message store; otherwise the inboxes of the not-yet-loaded accounts are
++ * missed and the badge under-counts (typically to zero). See bug for the macOS
++ * dock badge showing nothing with multiple inboxes. */
++
++var { MailNotificationService } = ChromeUtils.importESModule(
++  "resource:///modules/MailNotificationService.sys.mjs"
++);
++var { localAccountUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/LocalAccountUtils.sys.mjs"
++);
++var { MessageGenerator } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++);
++
++function addUnread(inbox, count) {
++  const gen = new MessageGenerator();
++  inbox.addMessageBatch(
++    gen.makeMessages({ count }).map(m => m.toMessageString())
++  );
++  inbox.updateFolder(null);
++  inbox.msgDatabase.commit(Ci.nsMsgDBCommitType.kLargeCommit);
++  return inbox.getNumUnread(false);
++}
++
++add_task(async function test_countsAllInboxesAfterRestart() {
++  Services.prefs.setBoolPref("mail.notification.count.inbox_only", true);
++  Services.prefs.setBoolPref("mail.biff.use_new_count_in_badge", false);
++
++  // Two local accounts, each with unread mail in its Inbox.
++  localAccountUtils.loadLocalMailAccount();
++  const inbox1 = localAccountUtils.inboxFolder;
++  inbox1.setFlag(Ci.nsMsgFolderFlags.Inbox);
++  addUnread(inbox1, 3);
++
++  const server2 = MailServices.accounts.createIncomingServer(
++    "user2",
++    "localhost2",
++    "none"
++  );
++  MailServices.accounts.createAccount().incomingServer = server2;
++  const root2 = server2.rootMsgFolder.QueryInterface(Ci.nsIMsgLocalMailFolder);
++  const inbox2 = root2
++    .createLocalSubfolder("Inbox")
++    .QueryInterface(Ci.nsIMsgLocalMailFolder);
++  inbox2.setFlag(Ci.nsMsgFolderFlags.Inbox | Ci.nsMsgFolderFlags.Mail);
++  addUnread(inbox2, 5);
++
++  // Simulate a restart: drop the in-memory folder objects, then reload the
++  // accounts from prefs.
++  Cc["@mozilla.org/messenger/msgFolderCache;1"]
++    .getService(Ci.nsIMsgFolderCache)
++    .flush();
++  MailServices.accounts.unloadAccounts();
++  Assert.equal(
++    MailServices.accounts.allServers.length,
++    2,
++    "accounts should reload"
++  );
++
++  // numSubFolders reads the in-memory list without discovering, so it confirms
++  // the reloaded roots start out with their hierarchies undiscovered.
++  for (const server of MailServices.accounts.allServers) {
++    Assert.equal(
++      server.rootFolder.numSubFolders,
++      0,
++      "subfolders are not discovered right after reload"
++    );
++  }
++
++  // Reading descendants must now force discovery so the inboxes show up.
++  for (const server of MailServices.accounts.allServers) {
++    const inbox = server.rootFolder.descendants.find(
++      f => f.flags & Ci.nsMsgFolderFlags.Inbox
++    );
++    Assert.ok(
++      inbox,
++      `${server.rootFolder.URI} inbox discovered via descendants`
++    );
++  }
++
++  // The service counts both inboxes.
++  let total = 0;
++  for (const server of MailServices.accounts.allServers) {
++    total += MailNotificationService.countUnread(server.rootFolder);
++  }
++  Assert.equal(total, 8, "both accounts' inbox unread should be counted");
++});
+diff --git a/mailnews/base/test/unit/xpcshell.toml b/mailnews/base/test/unit/xpcshell.toml
+--- a/mailnews/base/test/unit/xpcshell.toml
++++ b/mailnews/base/test/unit/xpcshell.toml
+@@ -180,8 +180,10 @@ tags = ["virtualfolders"]
+ ["test_virtualFolders2.js"]
+ tags = ["virtualfolders"]
+ 
+ ["test_virtualFolders3.js"]
+ tags = ["virtualfolders"]
+ 
+ ["test_virtualFolders4.js"]
+ tags = ["virtualfolders"]
++
++["test_notificationCountMultiAccount.js"]
+

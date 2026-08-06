@@ -1,0 +1,100 @@
+
+# HG changeset patch
+# User Stephen A Pohl <spohl@mozilla.com>
+# Date 1785957531 0
+# Node ID 0faaf3bee06821f680cfb832458fbd65bd0376cd
+# Parent  34b168580ad6bef861522acca2b83cc79eca1d67
+Bug 2045506: Initialize the unread-count dock badge at startup on macOS even when no mail window opens. r=arschmitz,edicharry
+
+On macOS the application keeps running with no windows open and can be relaunched (for example to apply an update) without a 3pane mail window being shown. The dock unread-count badge is driven by MailNotificationManager, whose init() is only called from the 3pane window (messenger.js loadPostAccountWizard), so in a windowless startup nothing computes or sets the badge until the user opens a window. This is why the badge disappears after an automatic update and reappears when a window is opened.
+
+Drive MailNotificationManager.init() from MailGlue's window-independent startup path (final-ui-startup) on macOS, and guard init() so it runs only once; the later window-driven call is then a no-op.
+
+Differential Revision: https://phabricator.services.mozilla.com/D310234
+
+
+diff --git a/mail/components/MailGlue.sys.mjs b/mail/components/MailGlue.sys.mjs
+--- a/mail/components/MailGlue.sys.mjs
++++ b/mail/components/MailGlue.sys.mjs
+@@ -37,16 +37,18 @@ ChromeUtils.defineESModuleGetters(lazy, 
+   ExtensionSupport: "resource:///modules/ExtensionSupport.sys.mjs",
+   checkInstalledExtensions: "resource:///modules/ExtensionUtilities.sys.mjs",
+   ExtensionsUI: "resource:///modules/ExtensionsUI.sys.mjs",
+   InAppNotifications:
+     "moz-src:///comm/mail/components/inappnotifications/modules/InAppNotifications.sys.mjs",
+   LightweightThemeConsumer:
+     "resource://gre/modules/LightweightThemeConsumer.sys.mjs",
+   MailMigrator: "resource:///modules/MailMigrator.sys.mjs",
++  MailNotificationManager:
++    "resource:///modules/MailNotificationManager.sys.mjs",
+   MailServices: "resource:///modules/MailServices.sys.mjs",
+   MailUsageTelemetry: "resource:///modules/MailUsageTelemetry.sys.mjs",
+   OAuth2Providers: "resource:///modules/OAuth2Providers.sys.mjs",
+   OsEnvironment: "resource://gre/modules/OsEnvironment.sys.mjs",
+   PdfJs: "resource://pdf.js/PdfJs.sys.mjs",
+   RemoteSecuritySettings:
+     "resource://gre/modules/psm/RemoteSecuritySettings.sys.mjs",
+   TBDistCustomizer: "resource:///modules/TBDistCustomizer.sys.mjs",
+@@ -651,16 +653,33 @@ MailGlue.prototype = {
+     this._setFlatpakOrSnapPref();
+ 
+     const UI_VERSION_PREF = "mail.ui-rdf.version";
+     this._isNewProfile = !Services.prefs.prefHasUserValue(UI_VERSION_PREF);
+ 
+     // handle any migration work that has to happen at profile startup
+     lazy.MailMigrator.migrateAtProfileStartup();
+ 
++    if (
++      AppConstants.platform == "macosx" &&
++      Services.startup.wasSilentlyStarted
++    ) {
++      // A silent start (e.g. relaunching to apply an update) does not open a
++      // mail window, so nothing initializes MailNotificationManager and the
++      // dock unread badge stays blank until the user opens a window. Drive
++      // init() here for that case; it only runs once, so the later
++      // window-driven call from messenger.js is a no-op.
++      //
++      // This is guarded on wasSilentlyStarted (the same flag that keeps the
++      // command line handler from opening a window) rather than run on every
++      // startup, so on a normal windowed startup MailNotificationManager and
++      // the MailNotificationService it pulls in are not loaded here at all.
++      lazy.MailNotificationManager.init();
++    }
++
+     if (!Services.prefs.prefHasUserValue(PREF_PDFJS_ISDEFAULT_CACHE_STATE)) {
+       lazy.PdfJs.checkIsDefault(this._isNewProfile);
+     }
+ 
+     // Inject scripts into some devtools windows.
+     function _setupBrowserConsole(domWindow) {
+       // Browser Console is an XHTML document.
+       domWindow.document.title =
+diff --git a/mailnews/base/src/MailNotificationManager.sys.mjs b/mailnews/base/src/MailNotificationManager.sys.mjs
+--- a/mailnews/base/src/MailNotificationManager.sys.mjs
++++ b/mailnews/base/src/MailNotificationManager.sys.mjs
+@@ -125,16 +125,24 @@ export const MailNotificationManager = n
+     }
+     return availableActions;
+   }
+   get enabledActions() {
+     return lazy.enabledActions;
+   }
+ 
+   init() {
++    if (this._initialized) {
++      // init() is called both from the 3pane window (messenger.js) and, on
++      // macOS, from application startup (MailGlue), so that the dock badge is
++      // populated even when no mail window is open. Only run once.
++      return;
++    }
++    this._initialized = true;
++
+     this._unreadChatCount = 0;
+     this._unreadMailCount = 0;
+     // @type {Map<string, number>} - A map of folder URIs and the date of the
+     //   newest message a notification has been shown for.
+     this._folderNewestNotifiedTime = new Map();
+     // @type {Set<nsIMsgFolder>} - A set of folders to show alert for.
+     this._pendingFolders = new Set();
+ 
+
