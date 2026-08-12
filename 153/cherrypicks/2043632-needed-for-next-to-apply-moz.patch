@@ -1,0 +1,375 @@
+
+# HG changeset patch
+# User Leo Tenenbaum <ltenenbaum@mozilla.com>
+# Date 1786537552 -7200
+# Node ID a566e379a0c1b4dff1e3d7c8f8299bd474b8ec6a
+# Parent  b569d46c4e54d8ed62b51a85d21b59a3b653dac2
+Bug 2043632 - Disable formatting commands for EditContext. r=masayuki
+
+Differential Revision: https://phabricator.services.mozilla.com/D306458
+
+diff --git a/editor/libeditor/HTMLEditor.cpp b/editor/libeditor/HTMLEditor.cpp
+--- a/editor/libeditor/HTMLEditor.cpp
++++ b/editor/libeditor/HTMLEditor.cpp
+@@ -479,19 +479,24 @@ void HTMLEditor::PreDestroy() {
+ 
+   PreDestroyInternal();
+ }
+ 
+-bool HTMLEditor::IsStyleEditable() const {
++bool HTMLEditor::IsStyleEditable(const Element* aEditingHost) const {
+   if (IsInDesignMode()) {
+     return true;
+   }
+   if (IsPlaintextMailComposer()) {
+     return false;
+   }
+-  const Element* const editingHost = ComputeEditingHost(LimitInBodyElement::No);
++  const Element* const editingHost =
++      aEditingHost ? aEditingHost : ComputeEditingHost(LimitInBodyElement::No);
+   // Let's return true if there is no focused editing host for the backward
+   // compatibility.
+-  return !editingHost || !editingHost->IsContentEditablePlainTextOnly();
++  if (!editingHost) {
++    return true;
++  }
++  return !editingHost->IsContentEditablePlainTextOnly() &&
++         !editingHost->HasFlag(ELEMENT_HAS_EDIT_CONTEXT);
+ }
+ 
+ NS_IMETHODIMP HTMLEditor::GetDocumentCharacterSet(nsACString& aCharacterSet) {
+   nsresult rv = GetDocumentCharsetInternal(aCharacterSet);
+@@ -2313,9 +2318,9 @@ nsresult HTMLEditor::FormatBlockAsAction
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -2366,9 +2371,9 @@ nsresult HTMLEditor::SetParagraphStateAs
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -2816,9 +2821,9 @@ nsresult HTMLEditor::MakeOrChangeListAsA
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -3052,9 +3057,9 @@ nsresult HTMLEditor::IndentAsAction(nsIP
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -3084,9 +3089,9 @@ nsresult HTMLEditor::OutdentAsAction(nsI
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -3115,9 +3120,9 @@ nsresult HTMLEditor::AlignAsAction(const
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -3725,10 +3730,9 @@ nsresult HTMLEditor::InsertLinkAroundSel
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   if (SelectionRef().IsCollapsed()) {
+diff --git a/editor/libeditor/HTMLEditor.h b/editor/libeditor/HTMLEditor.h
+--- a/editor/libeditor/HTMLEditor.h
++++ b/editor/libeditor/HTMLEditor.h
+@@ -427,11 +427,14 @@ class HTMLEditor final : public EditorBa
+    */
+   bool IsCSSEnabled() const { return mIsCSSPrefChecked; }
+ 
+   /**
+-   * Return true when editing host is not plaintext-only.
+-   */
+-  [[nodiscard]] bool IsStyleEditable() const;
++   * Return true when editing host is not plaintext-only/EditContext.
++   *
++   * @param aEditingHost Pass editing host to avoid recomputing it.
++   */
++  [[nodiscard]] bool IsStyleEditable(
++      const Element* aEditingHost = nullptr) const;
+ 
+   /**
+    * Enable/disable object resizers for <img> elements, <table> elements,
+    * absolute positioned elements (required absolute position editor enabled).
+diff --git a/editor/libeditor/HTMLEditorCommands.cpp b/editor/libeditor/HTMLEditorCommands.cpp
+--- a/editor/libeditor/HTMLEditorCommands.cpp
++++ b/editor/libeditor/HTMLEditorCommands.cpp
+@@ -1161,9 +1161,9 @@ StaticRefPtr<InsertHTMLCommand> InsertHT
+ 
+ bool InsertHTMLCommand::IsCommandEnabled(Command aCommand,
+                                          EditorBase* aEditorBase) const {
+   HTMLEditor* htmlEditor = HTMLEditor::GetFrom(aEditorBase);
+-  if (!htmlEditor) {
++  if (!htmlEditor || htmlEditor->GetEditContext()) {
+     return false;
+   }
+   return htmlEditor->IsModifiable() && htmlEditor->IsSelectionEditable();
+ }
+@@ -1237,8 +1237,11 @@ nsresult InsertTagCommand::DoCommand(Com
+   HTMLEditor* htmlEditor = aEditorBase.GetAsHTMLEditor();
+   if (NS_WARN_IF(!htmlEditor)) {
+     return NS_ERROR_FAILURE;
+   }
++  if (!htmlEditor->IsStyleEditable()) {
++    return NS_SUCCESS_DOM_NO_OPERATION;
++  }
+ 
+   RefPtr<Element> newElement =
+       MOZ_KnownLive(htmlEditor)
+           ->CreateElementWithDefaults(MOZ_KnownLive(*tagName));
+@@ -1279,8 +1282,11 @@ nsresult InsertTagCommand::DoCommandPara
+   HTMLEditor* htmlEditor = aEditorBase.GetAsHTMLEditor();
+   if (NS_WARN_IF(!htmlEditor)) {
+     return NS_ERROR_FAILURE;
+   }
++  if (!htmlEditor->IsStyleEditable()) {
++    return NS_SUCCESS_DOM_NO_OPERATION;
++  }
+ 
+   // filter out tags we don't know how to insert
+   nsAtom* attribute = nullptr;
+   if (tagName == nsGkAtoms::a) {
+diff --git a/editor/libeditor/HTMLEditorDataTransfer.cpp b/editor/libeditor/HTMLEditorDataTransfer.cpp
+--- a/editor/libeditor/HTMLEditorDataTransfer.cpp
++++ b/editor/libeditor/HTMLEditorDataTransfer.cpp
+@@ -281,8 +281,11 @@ nsresult HTMLEditor::InsertHTMLAsAction(
+   // nsIHTMLEditor::InsertHTML.
+   if (IsReadonly()) {
+     return NS_OK;
+   }
++  if (GetEditContext()) {
++    return NS_SUCCESS_DOM_NO_OPERATION;
++  }
+ 
+   AutoEditActionDataSetter editActionData(*this, EditAction::eInsertHTML,
+                                           aPrincipal);
+   nsresult rv = editActionData.CanHandleAndMaybeDispatchBeforeInputEvent();
+@@ -4015,10 +4018,10 @@ bool HTMLEditor::HTMLWithContextInserter
+ 
+   return false;
+ }
+ 
+-class MOZ_STACK_CLASS HTMLEditor::HTMLWithContextInserter::FragmentParser
+-    final {
++class MOZ_STACK_CLASS
++HTMLEditor::HTMLWithContextInserter::FragmentParser final {
+  public:
+   FragmentParser(const Document& aDocument, SafeToInsertData aSafeToInsertData);
+ 
+   [[nodiscard]] nsresult ParseContext(const nsAString& aContextString,
+diff --git a/editor/libeditor/HTMLStyleEditor.cpp b/editor/libeditor/HTMLStyleEditor.cpp
+--- a/editor/libeditor/HTMLStyleEditor.cpp
++++ b/editor/libeditor/HTMLStyleEditor.cpp
+@@ -101,10 +101,9 @@ nsresult HTMLEditor::SetInlinePropertyAs
+       ComputeEditingHost(LimitInBodyElement::No);
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   switch (editActionData.GetEditAction()) {
+@@ -225,10 +224,9 @@ NS_IMETHODIMP HTMLEditor::SetInlinePrope
+       ComputeEditingHost(LimitInBodyElement::No);
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   switch (editActionData.GetEditAction()) {
+@@ -3245,9 +3243,9 @@ nsresult HTMLEditor::RemoveAllInlineProp
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   nsresult rv = editActionData.MaybeDispatchBeforeInputEvent();
+@@ -3292,9 +3290,9 @@ nsresult HTMLEditor::RemoveInlinePropert
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   switch (editActionData.GetEditAction()) {
+@@ -3340,9 +3338,9 @@ NS_IMETHODIMP HTMLEditor::RemoveInlinePr
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+-  if (!editingHost || editingHost->IsContentEditablePlainTextOnly()) {
++  if (!editingHost || !IsStyleEditable(editingHost)) {
+     return NS_SUCCESS_DOM_NO_OPERATION;
+   }
+ 
+   switch (editActionData.GetEditAction()) {
+diff --git a/editor/libeditor/tests/edit-context/test_editcontext_format_commands.html b/editor/libeditor/tests/edit-context/test_editcontext_format_commands.html
+new file mode 100644
+--- /dev/null
++++ b/editor/libeditor/tests/edit-context/test_editcontext_format_commands.html
+@@ -0,0 +1,77 @@
++<!DOCTYPE HTML>
++<html>
++<head>
++  <meta charset="utf-8">
++  <title>Test that formatting commands are rejected for EditContext editor</title>
++  <script src="/tests/SimpleTest/SimpleTest.js"></script>
++  <link rel="stylesheet" href="/tests/SimpleTest/test.css"/>
++</head>
++<body>
++<div></div>
++<script>
++'use strict';
++
++const host = document.querySelector('div');
++const editContext = new EditContext({text: host.textContent});
++host.editContext = editContext;
++function reset() {
++  host.textContent = 'foo';
++  host.focus();
++  getSelection().selectAllChildren(host);
++}
++let firedEvent;
++editContext.addEventListener('textupdate', () => {
++  firedEvent = 'textupdate';
++});
++host.addEventListener('beforeinput', () => {
++  firedEvent = 'beforeinput';
++});
++document.addEventListener('selectionchange', () => {
++  firedEvent = 'selectionchange';
++});
++function checkCommand(command, arg) {
++  reset();
++  firedEvent = undefined;
++  SpecialPowers.doCommand(window, command, arg);
++  is(firedEvent, undefined, `No events should be fired by ${command} command`);
++  is(host.innerHTML, 'foo', `DOM should not be affected by ${command} command`);
++}
++add_task(() => {
++  const COMMANDS = [
++    'cmd_bold',
++    ['cmd_fontColor', '#ff00ff'],
++    ['cmd_fontFace', 'serif'],
++    ['cmd_fontSize', '20'],
++    ['cmd_formatBlock', '<div>'],
++    ['cmd_highlight', '#ff00ff'],
++    'cmd_indent',
++    'cmd_insertHR',
++    ['cmd_insertHTML', 'abc'],
++    ['cmd_insertImageNoUI', 'https://example.com/example.png'],
++    ['cmd_insertLinkNoUI', 'https://example.com'],
++    'cmd_italic',
++    ['cmd_align', 'right'],
++    'cmd_ol',
++    'cmd_outdent',
++    'cmd_removeLinks',
++    'cmd_removeStyles',
++    'cmd_redo',
++    'cmd_strikethrough',
++    'cmd_subscript',
++    'cmd_superscript',
++    'cmd_ul',
++    'cmd_underline',
++    'cmd_undo',
++  ];
++  for (let command of COMMANDS) {
++    if (typeof command === 'string') {
++      checkCommand(command);
++    } else {
++      checkCommand(command[0], command[1]);
++    }
++  }
++});
++
++</script>
++</body>
++</html>
+diff --git a/testing/specialpowers/content/SpecialPowersChild.sys.mjs b/testing/specialpowers/content/SpecialPowersChild.sys.mjs
+--- a/testing/specialpowers/content/SpecialPowersChild.sys.mjs
++++ b/testing/specialpowers/content/SpecialPowersChild.sys.mjs
+@@ -2137,16 +2137,23 @@ export class SpecialPowersChild extends 
+       case "cmd_backgroundColor":
+       case "cmd_fontColor":
+       case "cmd_fontFace":
+       case "cmd_fontSize":
++      case "cmd_formatBlock":
+       case "cmd_highlight":
+       case "cmd_insertImageNoUI":
+       case "cmd_insertLinkNoUI":
+       case "cmd_paragraphState": {
+         const params = Cu.createCommandParams();
+         params.setStringValue("state_attribute", param);
+         return window.docShell.doCommandWithParams(cmd, params);
+       }
++      case "cmd_insertHTML":
++      case "cmd_insertText": {
++        const params = Cu.createCommandParams();
++        params.setStringValue("state_data", param);
++        return window.docShell.doCommandWithParams(cmd, params);
++      }
+       case "cmd_pasteTransferable": {
+         const params = Cu.createCommandParams();
+         params.setISupportsValue("transferable", param);
+         return window.docShell.doCommandWithParams(cmd, params);

@@ -1,0 +1,262 @@
+
+# HG changeset patch
+# User Leo Tenenbaum <ltenenbaum@mozilla.com>
+# Date 1784640582 0
+# Node ID f52de1be15ef9f25ececb7f420617dc34a949862
+# Parent  c4c52051e37348c9bd516d90925294eb249ed897
+Bug 2055644 - Treat EditContext as plaintext editor in HTMLEditorDataTransfer.cpp. r=masayuki
+
+Differential Revision: https://phabricator.services.mozilla.com/D312762
+
+
+diff --git a/editor/libeditor/HTMLEditorDataTransfer.cpp b/editor/libeditor/HTMLEditorDataTransfer.cpp
+--- a/editor/libeditor/HTMLEditorDataTransfer.cpp
++++ b/editor/libeditor/HTMLEditorDataTransfer.cpp
+@@ -296,17 +296,17 @@ nsresult HTMLEditor::InsertHTMLAsAction(
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+-  if (editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsPlaintextMailComposer() && !IsStyleEditable(editingHost)) {
+     nsAutoString plaintextString;
+     nsresult rv = nsContentUtils::ConvertToPlainText(
+         aInString, plaintextString, nsIDocumentEncoder::OutputLFLineBreak,
+         0u /* never wrap lines*/);
+     if (NS_FAILED(rv)) {
+       NS_WARNING("nsContentUtils::ConvertToPlainText() failed");
+       return EditorBase::ToGenericNSResult(rv);
+     }
+@@ -1552,18 +1552,17 @@ nsresult HTMLEditor::HTMLTransferablePre
+ 
+ void HTMLEditor::HTMLTransferablePreparer::AddDataFlavorsInBestOrder(
+     nsITransferable& aTransferable) const {
+   // Create the desired DataFlavor for the type of data
+   // we want to get out of the transferable
+   // This should only happen in html editors, not plaintext
+   // Note that if you add more flavors here you will need to add them
+   // to DataTransfer::GetExternalClipboardFormats as well.
+-  if (!mHTMLEditor.IsPlaintextMailComposer() &&
+-      !(mEditingHost && mEditingHost->IsContentEditablePlainTextOnly())) {
++  if (mHTMLEditor.IsStyleEditable(mEditingHost)) {
+     DebugOnly<nsresult> rvIgnored =
+         aTransferable.AddDataFlavor(kNativeHTMLMime);
+     NS_WARNING_ASSERTION(
+         NS_SUCCEEDED(rvIgnored),
+         "nsITransferable::AddDataFlavor(kNativeHTMLMime) failed, but ignored");
+     rvIgnored = aTransferable.AddDataFlavor(kHTMLMime);
+     NS_WARNING_ASSERTION(
+         NS_SUCCEEDED(rvIgnored),
+@@ -2151,19 +2150,17 @@ nsresult HTMLEditor::InsertFromTransfera
+       NS_SUCCEEDED(rv),
+       "nsITransferable::GetAnyTransferData() failed, but ignored");
+   if (NS_SUCCEEDED(rv)) {
+     AutoTransactionsConserveSelection dontChangeMySelection(*this);
+     nsAutoString flavor;
+     CopyASCIItoUTF16(bestFlavor, flavor);
+     const SafeToInsertData safeToInsertData = IsSafeToInsertData(nullptr);
+ 
+-    const bool isPlaintextEditor =
+-        IsPlaintextMailComposer() ||
+-        aEditingHost.IsContentEditablePlainTextOnly();
++    const bool isPlaintextEditor = !IsStyleEditable(&aEditingHost);
+ 
+     if (bestFlavor.EqualsLiteral(kFileMime) ||
+         bestFlavor.EqualsLiteral(kJPEGImageMime) ||
+         bestFlavor.EqualsLiteral(kJPGImageMime) ||
+         bestFlavor.EqualsLiteral(kPNGImageMime) ||
+         bestFlavor.EqualsLiteral(kGIFImageMime)) {
+       nsresult rv = InsertObject(bestFlavor, genericDataObj, safeToInsertData,
+                                  EditorDOMPoint(), DeleteSelectedContent::Yes,
+@@ -2317,18 +2314,17 @@ nsresult HTMLEditor::InsertFromDataTrans
+   if (error.Failed()) {
+     NS_WARNING("DataTransfer::MozTypesAt() failed");
+     return error.StealNSResult();
+   }
+ 
+   const bool hasPrivateHTMLFlavor =
+       types->Contains(NS_LITERAL_STRING_FROM_CSTRING(kHTMLContext));
+ 
+-  const bool isPlaintextEditor = IsPlaintextMailComposer() ||
+-                                 aEditingHost.IsContentEditablePlainTextOnly();
++  const bool isPlaintextEditor = !IsStyleEditable(&aEditingHost);
+   const SafeToInsertData safeToInsertData =
+       IsSafeToInsertData(aSourcePrincipal);
+ 
+   uint32_t length = types->Length();
+   for (uint32_t i = 0; i < length; i++) {
+     nsAutoString type;
+     types->Item(i, type);
+ 
+@@ -2881,18 +2877,17 @@ bool HTMLEditor::CanPaste(nsIClipboard::
+   nsCOMPtr<nsIClipboard> clipboard(
+       do_GetService("@mozilla.org/widget/clipboard;1", &rv));
+   if (NS_FAILED(rv)) {
+     NS_WARNING("Failed to get nsIClipboard service");
+     return false;
+   }
+ 
+   // Use the flavors depending on the current editor mask
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     AutoTArray<nsCString, std::size(textEditorFlavors)> flavors;
+     flavors.AppendElements<const char*>(Span<const char*>(textEditorFlavors));
+     bool haveFlavors;
+     nsresult rv = clipboard->HasDataMatchingFlavors(flavors, aClipboardType,
+                                                     &haveFlavors);
+     NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                          "nsIClipboard::HasDataMatchingFlavors() failed");
+     return NS_SUCCEEDED(rv) && haveFlavors;
+@@ -2924,23 +2919,22 @@ bool HTMLEditor::CanPasteTransferable(ns
+     return true;
+   }
+ 
+   // Peek in |aTransferable| to see if it contains a supported MIME type.
+ 
+   // Use the flavors depending on the current editor mask
+   const char** flavors;
+   size_t length;
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (IsStyleEditable(editingHost)) {
++    flavors = textHtmlEditorFlavors;
++    length = std::size(textHtmlEditorFlavors);
++  } else {
+     flavors = textEditorFlavors;
+     length = std::size(textEditorFlavors);
+-  } else {
+-    flavors = textHtmlEditorFlavors;
+-    length = std::size(textHtmlEditorFlavors);
+   }
+ 
+   for (size_t i = 0; i < length; i++, flavors++) {
+     nsCOMPtr<nsISupports> data;
+     nsresult rv =
+         aTransferable->GetTransferData(*flavors, getter_AddRefs(data));
+     if (NS_SUCCEEDED(rv) && data) {
+       return true;
+@@ -2969,18 +2963,17 @@ nsresult HTMLEditor::HandlePasteAsQuotat
+   }
+ 
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     nsresult rv =
+         PasteAsPlaintextQuotation(aClipboardType, aDataTransfer, *editingHost);
+     NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                          "HTMLEditor::PasteAsPlaintextQuotation() failed");
+     return rv;
+   }
+ 
+   // If it's not in plain text edit mode, paste text into new
+@@ -3359,18 +3352,17 @@ nsresult HTMLEditor::InsertTextWithQuota
+ nsresult HTMLEditor::InsertAsQuotation(const nsAString& aQuotedText,
+                                        nsINode** aNodeInserted) {
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     AutoEditActionDataSetter editActionData(*this, EditAction::eInsertText);
+     MOZ_ASSERT(!aQuotedText.IsVoid());
+     editActionData.SetData(aQuotedText);
+     nsresult rv = editActionData.CanHandleAndMaybeDispatchBeforeInputEvent();
+     if (NS_FAILED(rv)) {
+       NS_WARNING_ASSERTION(
+           rv == NS_ERROR_EDITOR_ACTION_CANCELED,
+           "CanHandleAndMaybeDispatchBeforeInputEvent(), failed");
+@@ -3464,17 +3456,17 @@ nsresult HTMLEditor::InsertAsPlaintextQu
+       }
+       NS_WARNING_ASSERTION(
+           NS_SUCCEEDED(rv),
+           "HTMLEditor::PrepareInlineStylesForCaret() failed, but ignored");
+     }
+   }
+ 
+   RefPtr<Element> containerSpanElement;
+-  if (!aEditingHost.IsContentEditablePlainTextOnly()) {
++  if (IsPlaintextMailComposer() || IsStyleEditable(&aEditingHost)) {
+     // Wrap the inserted quote in a <span> so we can distinguish it. If we're
+     // inserting into the <body>, we use a <span> which is displayed as a block
+     // and sized to the screen using 98 viewport width units.
+     // We could use 100vw, but 98vw avoids a horizontal scroll bar where
+     // possible. All this is done to wrap overlong lines to the screen and not
+     // to the container element, the width-restricted body.
+     // XXX I think that we don't need to do this in the web.  This should be
+     // done only for Thunderbird.
+@@ -3676,18 +3668,17 @@ NS_IMETHODIMP HTMLEditor::InsertAsCitedQ
+                                                  nsINode** aNodeInserted) {
+   const RefPtr<Element> editingHost =
+       ComputeEditingHost(LimitInBodyElement::No);
+   if (NS_WARN_IF(!editingHost)) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+   // Don't let anyone insert HTML when we're in plaintext mode.
+-  if (IsPlaintextMailComposer() ||
+-      editingHost->IsContentEditablePlainTextOnly()) {
++  if (!IsStyleEditable(editingHost)) {
+     NS_ASSERTION(
+         !aInsertHTML,
+         "InsertAsCitedQuotation: trying to insert html into plaintext editor");
+ 
+     AutoEditActionDataSetter editActionData(*this, EditAction::eInsertText);
+     MOZ_ASSERT(!aQuotedText.IsVoid());
+     editActionData.SetData(aQuotedText);
+     nsresult rv = editActionData.CanHandleAndMaybeDispatchBeforeInputEvent();
+diff --git a/testing/web-platform/tests/editing/edit-context/edit-context-paste-html.tentative.html b/testing/web-platform/tests/editing/edit-context/edit-context-paste-html.tentative.html
+new file mode 100644
+--- /dev/null
++++ b/testing/web-platform/tests/editing/edit-context/edit-context-paste-html.tentative.html
+@@ -0,0 +1,35 @@
++<!DOCTYPE html>
++<meta charset="utf-8">
++<title>Test that HTML is pasted into EditContext as plain text</title>
++<script src="/resources/testharness.js"></script>
++<script src="/resources/testharnessreport.js"></script>
++<script src="/resources/testdriver.js"></script>
++<script src="/resources/testdriver-actions.js"></script>
++<script src="/resources/testdriver-vendor.js"></script>
++<script src="../include/editor-test-utils.js"></script>
++<div id=host></div>
++<div id=copyFrom contenteditable>Co<b>pie</b>d <i>text</i></div>
++<script>
++'use strict';
++const host = document.getElementById('host');
++const editContext = new EditContext();
++host.editContext = editContext;
++const copyFrom = document.getElementById('copyFrom');
++
++promise_test(async () => {
++  copyFrom.focus();
++  getSelection().selectAllChildren(copyFrom);
++  await new EditorTestUtils(copyFrom).sendCopyShortcutKey();
++  host.focus();
++  let textUpdateFired = false;
++  editContext.addEventListener('textupdate', () => {
++    textUpdateFired = true;
++  });
++  await new EditorTestUtils(host).sendPasteShortcutKey();
++  assert_true(textUpdateFired, 'Should fire textupdate.');
++  assert_equals(editContext.text, 'Copied text',
++                'EditContext.text should be updated with plain text.');
++  assert_equals(host.firstChild, null, 'DOM should not be changed.');
++});
++
++</script>
+
