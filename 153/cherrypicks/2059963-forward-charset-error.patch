@@ -1,0 +1,493 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1786527791 0
+# Node ID e34f35bb05f3c8c63d9c2cc5da74bff9cbc67105
+# Parent  c1a02d87beee7511e804d2c82417d4416277fcee
+Bug 2059963 - Decode later text/plain body parts with their own charsets before appending them to the forwarded body. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D317854
+
+
+diff --git a/mailnews/compose/test/unit/test_forwardMergeMixedCharsets.js b/mailnews/compose/test/unit/test_forwardMergeMixedCharsets.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/compose/test/unit/test_forwardMergeMixedCharsets.js
+@@ -0,0 +1,98 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++var { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++const { MimeParser } = ChromeUtils.importESModule(
++  "resource:///modules/mimeParser.sys.mjs"
++);
++
++// U+1B1C7 (Nushu). UTF-8 F0 9B 87 87.
++const UTF8_NUSHU_QP = "=F0=9B=87=87";
++// U+65E5 日 in ISO-2022-JP: ESC $ B F | ESC ( B
++const ISO2022JP_NICHI_QP = "=1B=24=42=46=7C=1B=28=42";
++// U+30BD ソ in Shift_JIS: 83 5C (trail byte is ASCII backslash)
++const SHIFTJIS_SO_QP = "=83=5C";
++
++const MESSAGE = [
++  "From: sender@example.invalid",
++  "To: recipient@example.invalid",
++  "Subject: forward merge mixed charsets",
++  "MIME-Version: 1.0",
++  'Content-Type: multipart/mixed; boundary="B"',
++  "",
++  "--B",
++  "Content-Type: text/plain; charset=UTF-8",
++  "Content-Transfer-Encoding: quoted-printable",
++  "",
++  UTF8_NUSHU_QP,
++  "--B",
++  "Content-Type: text/plain; charset=ISO-2022-JP",
++  "Content-Transfer-Encoding: quoted-printable",
++  "",
++  ISO2022JP_NICHI_QP,
++  "--B",
++  "Content-Type: text/plain; charset=Shift_JIS",
++  "Content-Transfer-Encoding: quoted-printable",
++  "",
++  SHIFTJIS_SO_QP,
++  "--B--",
++  "",
++].join("\r\n");
++
++function getForwardedTextBody(message) {
++  let text = "";
++  MimeParser.parseSync(
++    message,
++    {
++      deliverPartData(_partNum, data) {
++        text += data;
++      },
++    },
++    { bodyformat: "decode", strformat: "unicode" }
++  );
++  return text;
++}
++
++add_task(async function testForwardMergeMixedCharsets() {
++  localAccountUtils.loadLocalMailAccount();
++  const server = setupServerDaemon();
++  server.start();
++  registerCleanupFunction(() => server.stop());
++
++  const identity = getSmtpIdentity(
++    "from@tinderbox.invalid",
++    getBasicSmtpServer(server.port)
++  );
++  identity.composeHtml = false;
++  localAccountUtils.msgAccount.addIdentity(identity);
++  localAccountUtils.msgAccount.defaultIdentity = identity;
++
++  localAccountUtils.inboxFolder
++    .QueryInterface(Ci.nsIMsgLocalMailFolder)
++    .addMessage(MESSAGE);
++
++  MailServices.compose.forwardMessage(
++    "to@local.invalid",
++    mailTestUtils.firstMsgHdr(localAccountUtils.inboxFolder),
++    null,
++    localAccountUtils.incomingServer,
++    Ci.nsIMsgComposeService.kForwardInline
++  );
++
++  await TestUtils.waitForCondition(
++    () => server._daemon.post,
++    "waiting for forwarded message"
++  );
++
++  // Purposefully hostile including but not limited to overlapping byte
++  // sequences so this cannot decode correctly by chance under reasonable settings.
++  const expectedBody = "\u{1B1C7}\r\n\r\n\u65E5\r\n\r\n\u30BD";
++  const body = getForwardedTextBody(server._daemon.post);
++  Assert.ok(
++    body.includes(expectedBody),
++    "forwarded body must decode each merged part with its own charset"
++  );
++});
+diff --git a/mailnews/compose/test/unit/xpcshell.toml b/mailnews/compose/test/unit/xpcshell.toml
+--- a/mailnews/compose/test/unit/xpcshell.toml
++++ b/mailnews/compose/test/unit/xpcshell.toml
+@@ -26,16 +26,18 @@ skip-if = [
+ ["test_detectAttachmentCharset.js"]
+ 
+ ["test_expandMailingLists.js"]
+ 
+ ["test_fcc2.js"]
+ 
+ ["test_fccReply.js"]
+ 
++["test_forwardMergeMixedCharsets.js"]
++
+ ["test_forwardInlineAllHeaders.js"]
+ 
+ ["test_forwardInlineMalformedAttachment.js"]
+ 
+ ["test_longLines.js"]
+ 
+ ["test_mailTelemetry.js"]
+ 
+diff --git a/mailnews/mime/src/mimedrft.cpp b/mailnews/mime/src/mimedrft.cpp
+--- a/mailnews/mime/src/mimedrft.cpp
++++ b/mailnews/mime/src/mimedrft.cpp
+@@ -439,16 +439,79 @@ static void mime_free_attachments(nsTArr
+     if (attachments[i]->m_tmpFile) {
+       attachments[i]->m_tmpFile->Remove(false);
+       attachments[i]->m_tmpFile = nullptr;
+     }
+     delete attachments[i];
+   }
+ }
+ 
++// Read a body part temp file and return UTF-8 text using the part charset.
++static char* mime_draft_read_body_piece(nsIFile* file,
++                                        const nsACString& contentType,
++                                        const char* mailcharset,
++                                        bool charsetOverride) {
++  if (!file) return nullptr;
++
++  int64_t fileSize;
++  if (NS_FAILED(file->GetFileSize(&fileSize))) return nullptr;
++
++  if (fileSize < 0 || fileSize >= UINT32_MAX) return nullptr;
++  uint32_t bodyLen = fileSize;
++
++  char* body = (char*)PR_MALLOC(bodyLen + 1);
++  if (!body) return nullptr;
++  memset(body, 0, bodyLen + 1);
++
++  uint32_t bytesRead;
++  nsCOMPtr<nsIInputStream> inputStream;
++  nsresult rv = NS_NewLocalFileInputStream(getter_AddRefs(inputStream), file);
++  if (NS_FAILED(rv)) {
++    PR_Free(body);
++    return nullptr;
++  }
++
++  inputStream->Read(body, bodyLen, &bytesRead);
++  inputStream->Close();
++
++  char* mimeCharset = nullptr;
++  if (!charsetOverride)
++    mimeCharset = MimeHeaders_get_parameter(
++        PromiseFlatCString(contentType).get(), "charset", nullptr, nullptr);
++  nsAutoCString bodyCharset;
++  if (mimeCharset) {
++    bodyCharset.Adopt(mimeCharset);
++  } else if (mailcharset) {
++    bodyCharset.Assign(mailcharset);
++  }
++  if (bodyCharset.IsEmpty()) {
++    nsAutoCString detectedCharset;
++    rv = MIME_detect_charset(body, bodyLen, detectedCharset);
++    if (NS_SUCCEEDED(rv) && !detectedCharset.IsEmpty()) {
++      bodyCharset = detectedCharset;
++    }
++  }
++  if (!bodyCharset.IsEmpty()) {
++    nsAutoString tmpUnicodeBody;
++    rv = nsMsgI18NConvertToUnicode(bodyCharset, nsDependentCString(body),
++                                   tmpUnicodeBody);
++    if (NS_FAILED(rv))
++      // Fall back to treating the part as ASCII/ISO-8859-1 if the stated
++      // charset fails to decode.
++      CopyASCIItoUTF16(nsDependentCString(body), tmpUnicodeBody);
++
++    char* newBody = ToNewUTF8String(tmpUnicodeBody);
++    if (newBody) {
++      PR_Free(body);
++      body = newBody;
++    }
++  }
++  return body;
++}
++
+ static nsMsgAttachmentData* mime_draft_process_attachments(
+     mime_draft_data* mdd) {
+   if (!mdd) return nullptr;
+ 
+   nsMsgAttachmentData *attachData = NULL, *tmp = NULL;
+   nsMsgAttachedFile* tmpFile = NULL;
+ 
+   // It's possible we must treat the message body as attachment!
+@@ -1344,82 +1407,27 @@ static void mime_parse_stream_complete(n
+           // move it as attachment
+           bodyAsAttachment = true;
+       } else
+         composeFormat = nsIMsgCompFormat::PlainText;
+ 
+       char* body = nullptr;
+ 
+       if (!bodyAsAttachment && mdd->messageBody->m_tmpFile) {
+-        int64_t fileSize;
+-        nsCOMPtr<nsIFile> tempFileCopy;
+-        mdd->messageBody->m_tmpFile->Clone(getter_AddRefs(tempFileCopy));
+-        mdd->messageBody->m_tmpFile = tempFileCopy;
+-        tempFileCopy = nullptr;
+-        mdd->messageBody->m_tmpFile->GetFileSize(&fileSize);
+-        uint32_t bodyLen = 0;
+-
+-        // The stream interface can only read up to 4GB (32bit uint).
+-        // It is highly unlikely to encounter a body lager than that limit,
+-        // so we just skip it instead of reading it in chunks.
+-        if (fileSize < UINT32_MAX) {
+-          bodyLen = fileSize;
+-          body = (char*)PR_MALLOC(bodyLen + 1);
+-        }
+-        if (body) {
+-          memset(body, 0, bodyLen + 1);
+-
+-          uint32_t bytesRead;
+-          nsCOMPtr<nsIInputStream> inputStream;
+-
+-          nsresult rv = NS_NewLocalFileInputStream(getter_AddRefs(inputStream),
+-                                                   mdd->messageBody->m_tmpFile);
+-          if (NS_FAILED(rv)) {
+-            delete[] newAttachData;
+-            PR_Free(body);
+-            return;
+-          }
+-
+-          inputStream->Read(body, bodyLen, &bytesRead);
+-
+-          inputStream->Close();
+-
+-          // Convert the body to UTF-8
+-          char* mimeCharset = nullptr;
+-          // Get a charset from the header if no override is set.
+-          if (!charsetOverride)
+-            mimeCharset = MimeHeaders_get_parameter(
+-                mdd->messageBody->m_type.get(), "charset", nullptr, nullptr);
+-          // If no charset is specified in the header then use the default.
+-          nsAutoCString bodyCharset;
+-          if (mimeCharset) {
+-            bodyCharset.Adopt(mimeCharset);
+-          } else if (mdd->mailcharset) {
+-            bodyCharset.Assign(mdd->mailcharset);
+-          }
+-          if (bodyCharset.IsEmpty()) {
+-            nsAutoCString detectedCharset;
+-            // We need to detect it.
+-            rv = MIME_detect_charset(body, bodyLen, detectedCharset);
+-            if (NS_SUCCEEDED(rv) && !detectedCharset.IsEmpty()) {
+-              bodyCharset = detectedCharset;
+-            }
+-          }
+-          if (!bodyCharset.IsEmpty()) {
+-            nsAutoString tmpUnicodeBody;
+-            rv = nsMsgI18NConvertToUnicode(
+-                bodyCharset, nsDependentCString(body), tmpUnicodeBody);
+-            if (NS_FAILED(rv))  // Tough luck, ASCII/ISO-8859-1 then...
+-              CopyASCIItoUTF16(nsDependentCString(body), tmpUnicodeBody);
+-
+-            char* newBody = ToNewUTF8String(tmpUnicodeBody);
+-            if (newBody) {
+-              PR_Free(body);
+-              body = newBody;
+-            }
++        body = mime_draft_read_body_piece(mdd->messageBody->m_tmpFile,
++                                          mdd->messageBody->m_type,
++                                          mdd->mailcharset, charsetOverride);
++        // Decode each part with its own charset, then join as UTF-8 text.
++        for (nsMsgAttachedFile* part : mdd->appendedParts) {
++          char* piece = mime_draft_read_body_piece(
++              part->m_tmpFile, part->m_type, mdd->mailcharset, charsetOverride);
++          if (piece) {
++            if (body) NS_MsgSACat(&body, MSG_LINEBREAK);
++            NS_MsgSACat(&body, piece);
++            PR_Free(piece);
+           }
+         }
+       }
+ 
+       bool convertToPlainText = false;
+       if (forward_inline) {
+         if (mdd->identity) {
+           bool identityComposeHTML;
+@@ -1613,16 +1621,18 @@ static void mime_parse_stream_complete(n
+   //
+   if (bodyAsAttachment)
+     mdd->messageBody->m_tmpFile = nullptr;
+   else if (mdd->messageBody && mdd->messageBody->m_tmpFile)
+     mdd->messageBody->m_tmpFile->Remove(false);
+ 
+   delete mdd->messageBody;
+ 
++  mime_free_attachments(mdd->appendedParts);
++
+   for (uint32_t i = 0; i < mdd->attachments.Length(); i++)
+     mdd->attachments[i]->m_tmpFile = nullptr;
+ 
+   PR_FREEIF(mdd->mailcharset);
+ 
+   mdd->identity = nullptr;
+   PR_Free(mdd->url_name);
+   mdd->origMsgHdr = nullptr;
+@@ -1679,16 +1689,17 @@ static void mime_parse_stream_abort(nsMI
+       PR_Free(mdd->stream);
+       mdd->stream = 0;
+     }
+   }
+ 
+   if (mdd->headers) MimeHeaders_free(mdd->headers);
+ 
+   mime_free_attachments(mdd->attachments);
++  mime_free_attachments(mdd->appendedParts);
+ 
+   PR_FREEIF(mdd->mailcharset);
+ 
+   PR_Free(mdd);
+ }
+ 
+ static int make_mime_headers_copy(MimeClosure closure, MimeHeaders* headers) {
+   NS_ASSERTION(closure && headers, "null mime draft data and/or headers");
+@@ -1754,35 +1765,28 @@ int mime_decompose_file_init_fn(MimeClos
+   if (mdd->messageBody && !isAttachmentDisposition &&
+       !mime_type_is_message_body(mdd->messageBody->m_type) &&
+       mime_type_can_replace_message_body(contentType)) {
+     mdd->attachments.AppendElement(mdd->messageBody);
+     mdd->messageBody = nullptr;
+     nAttachments = mdd->attachments.Length();
+   }
+ 
+-  // A later text part following an existing plain-text messageBody continues
+-  // the body rather than being an attachment: Apple Mail splits a plain-text
+-  // compose into separate text/plain parts around an inline image. HTML compose
+-  // uses a single body part, so this only matters for plain text. We keep the
+-  // messageBody branch's !isAttachmentDisposition guard and also require no
+-  // name, since a named text part is a real attachment, not a continuation.
++  // Displaying multiple text/plain body parts has long been standard behaviour.
++  // We want to merge them to preserve them for forwarding even if other body
++  // parts are sandwiched between them as commonly produced by Apple Mail.
+   bool appendToMessageBody =
+       mdd->messageBody && !isAttachmentDisposition && partName.IsEmpty() &&
+       mime_type_is_message_body(mdd->messageBody->m_type) &&
+       mime_type_is_message_body(contentType) &&
+       mdd->messageBody->m_type.LowerCaseFindASCII("text/html") == kNotFound &&
+       contentType.LowerCaseFindASCII("text/html") == kNotFound;
+ 
+-  if (appendToMessageBody) {
+-    newAttachment = mdd->messageBody;
+-    creatingMsgBody = true;
+-  } else if (!mdd->messageBody && !isAttachmentDisposition &&
+-             (!nAttachments ||
+-              mime_type_can_replace_message_body(contentType))) {
++  if (!appendToMessageBody && !mdd->messageBody && !isAttachmentDisposition &&
++      (!nAttachments || mime_type_can_replace_message_body(contentType))) {
+     // if we've been told to use an override charset then do so....otherwise use
+     // the charset inside the message header...
+     if (mdd->options->override_charset) {
+       if (mdd->options->default_charset)
+         mdd->mailcharset = strdup(mdd->options->default_charset);
+       else {
+         mdd->mailcharset = strdup("");
+         mdd->autodetectCharset = true;
+@@ -1800,17 +1804,21 @@ int mime_decompose_file_init_fn(MimeClos
+     mdd->messageBody = new nsMsgAttachedFile;
+     if (!mdd->messageBody) return MIME_OUT_OF_MEMORY;
+     newAttachment = mdd->messageBody;
+     creatingMsgBody = true;
+   } else {
+     /* always allocate one more extra; don't ask me why */
+     newAttachment = new nsMsgAttachedFile;
+     if (!newAttachment) return MIME_OUT_OF_MEMORY;
+-    mdd->attachments.AppendElement(newAttachment);
++    if (appendToMessageBody) {
++      mdd->appendedParts.AppendElement(newAttachment);
++    } else {
++      mdd->attachments.AppendElement(newAttachment);
++    }
+   }
+ 
+   char* workURLSpec = nullptr;
+   char* contLoc = nullptr;
+ 
+   newAttachment->m_realName.Assign(partName);
+   contLoc = MimeHeaders_get(headers, HEADER_CONTENT_LOCATION, false, false);
+   if (!contLoc)
+@@ -1853,20 +1861,17 @@ int mime_decompose_file_init_fn(MimeClos
+     newAttachment->m_description = workURLSpec;
+ 
+   PR_FREEIF(workURLSpec);  // resource leak otherwise
+ 
+   newAttachment->m_cloudPartInfo.Adopt(
+       MimeHeaders_get(headers, HEADER_X_MOZILLA_CLOUD_PART, false, false));
+ 
+   nsCOMPtr<nsIFile> tmpFile = nullptr;
+-  if (appendToMessageBody) {
+-    // Reuse the body part's existing temp file; the new text is appended below.
+-    tmpFile = mdd->messageBody->m_tmpFile;
+-  } else {
++  {
+     // Let's build a temp file with an extension based on the content-type:
+     // nsmail.<extension>
+ 
+     nsAutoCString newAttachName("nsmail");
+     nsAutoCString fileExtension;
+     // the content type may contain a charset. i.e. text/html; ISO-2022-JP...we
+     // want to strip off the charset before we ask the mime service for a mime
+     // info for this content type.
+@@ -1919,28 +1924,21 @@ int mime_decompose_file_init_fn(MimeClos
+   }
+ 
+   if (!tmpFile) return MIME_OUT_OF_MEMORY;
+ 
+   mdd->tmpFile = tmpFile;
+ 
+   newAttachment->m_tmpFile = mdd->tmpFile;
+ 
+-  rv = MsgNewBufferedFileOutputStream(
+-      getter_AddRefs(mdd->tmpFileStream), tmpFile,
+-      appendToMessageBody ? PR_WRONLY | PR_APPEND : PR_WRONLY | PR_CREATE_FILE,
+-      00600);
++  rv = MsgNewBufferedFileOutputStream(getter_AddRefs(mdd->tmpFileStream),
++                                      tmpFile, PR_WRONLY | PR_CREATE_FILE,
++                                      00600);
+   if (NS_FAILED(rv)) return MIME_UNABLE_TO_OPEN_TMP_FILE;
+ 
+-  // Separate the appended text from the body text already in the file.
+-  if (appendToMessageBody) {
+-    uint32_t separatorBytes;
+-    mdd->tmpFileStream->Write(MSG_LINEBREAK, MSG_LINEBREAK_LEN, &separatorBytes);
+-  }
+-
+   // For now, we are always going to decode all of the attachments
+   // for the message. This way, we have native data
+   if (creatingMsgBody) {
+     MimeDecoderData* (*fn)(MimeConverterOutputCallback, MimeClosure) = 0;
+ 
+     //
+     // Initialize a decoder if necessary.
+     //
+diff --git a/mailnews/mime/src/mimemoz2.h b/mailnews/mime/src/mimemoz2.h
+--- a/mailnews/mime/src/mimemoz2.h
++++ b/mailnews/mime/src/mimemoz2.h
+@@ -101,17 +101,19 @@ class mime_draft_data {
+   nsMimeOutputType
+       format_out;         // intended output format; should be FO_OPEN_DRAFT */
+   nsMIMESession* stream;  // not used for now
+   MimeObject* obj;        // The root
+   MimeDisplayOptions* options;  // data for communicating with libmime
+   MimeHeaders* headers;         // Copy of outer most mime header
+   nsTArray<nsMsgAttachedFile*> attachments;  // attachments
+   nsMsgAttachedFile* messageBody;            // message body
+-  nsMsgAttachedFile* curAttachment;          // temp
++  nsTArray<nsMsgAttachedFile*>
++      appendedParts;                 // plain-text parts merged into body
++  nsMsgAttachedFile* curAttachment;  // temp
+ 
+   nsCOMPtr<nsIFile> tmpFile;
+   nsCOMPtr<nsIOutputStream> tmpFileStream;  // output file handle
+ 
+   MimeDecoderData* decoder_data;
+   char* mailcharset;  // get it from CHARSET of Content-Type
+   bool forwardInline;
+   bool forwardInlineFilter;
+
