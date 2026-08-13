@@ -1,13 +1,61 @@
+
 # HG changeset patch
 # User welpy-cw <h.w.forms@arcor.de>
-# Date 1785608015 -7200
-# Parent  d0386b3c1ac8aaf860fc64942917b74d6b289fd1
-Bug 2056063 - Fix spurious "Running Filters" prompt after running filters on newsgroups.
+# Date 1786570175 0
+# Node ID a6a6e050abae1916a478700365fc151daec5ad2b
+# Parent  5bc8e74bb30f8019bb5e3ae2b1c7027bc5eca956
+Bug 2056063 - Fix spurious "Running Filters" prompt after running filters on newsgroups. r=tobyp
+
+Bug 2049194 moved gRunningFilters state management out of the global
+meteor message handler and into runSelectedFilters(), so the flag is
+now always set when filters run. However the only mechanism to clear
+it was the "stop-meteors" handler, which depends on URL lifecycle
+events from nsMsgMailNewsUrl::SetUrlState(). For newsgroup/offline
+filter execution, nsMsgSearchSession uses SearchWOUrls() which never
+creates URLs, so no "stop-meteors" is ever sent and gRunningFilters
+stays true permanently.
+
+Fix this by passing an nsIMsgOperationListener callback to
+applyFiltersToFolders(). The filter executor calls OnStopOperation()
+from OnEndExecution() when ALL filter processing is truly complete,
+regardless of whether URLs were involved.
+
+If the window is still open when the callback fires, also clean up
+any leftover progress bar and status text as a failsafe against stray
+meteor messages (to be removed when bug 2002774 lands).
+
+Also fix the "Run Now" button being enabled while the folder picker
+still shows "Choose folder…". The button was unconditionally enabled
+in setFilterFolder() before a target folder was actually selected.
+Move the enable logic entirely into updateButtons() where it is gated
+on three conditions: filters are selected, a run folder is set, and
+the server supports after-the-fact filtering. Store the last condition
+in a gCanFilterAfterTheFact global so updateButtons() can read it
+independently of the mutable disabled state. In the OnStopOperation
+callback, call updateButtons() to re-evaluate all enable conditions
+rather than unconditionally re-enabling the button — this handles
+state changes that may have occurred during filter execution.
+
+When selectFolder() returns false (folder not found in the menu),
+clear _folder so the button stays disabled and the picker consistently
+shows "Choose folder…". Also ensure updateButtons() runs after the
+last filter is deleted by adding a clearSelection + updateButtons path.
+
+Add browser test covering the button enable/disable lifecycle:
+disabled on open → enabled after creating a filter → disabled after
+deleting the last filter, tested against a newsgroup server.
+
+Differential Revision: https://phabricator.services.mozilla.com/D313257
+
 
 diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterListDialog.js
 --- a/mail/base/content/FilterListDialog.js
 +++ b/mail/base/content/FilterListDialog.js
-@@ -46,8 +46,9 @@ var msgMoveMotion = {
+@@ -42,16 +42,17 @@ var gRunFiltersButton = null;
+ var msgMoveMotion = {
+   Up: 0,
+   Down: 1,
+   Top: 2,
    Bottom: 3,
  };
  
@@ -17,7 +65,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
  window.addEventListener("message", event => {
    if (!gRunningFilters) {
      return;
-@@ -66,18 +67,14 @@ window.addEventListener("message", event
+   }
+ 
+   if (event.data.statusMessage) {
+     document
+@@ -62,26 +63,22 @@ window.addEventListener("message", event
+     if (!this.progressMeterVisible) {
+       document
+         .getElementById("statusbar-progresspanel")
+         .removeAttribute("collapsed");
        this.progressMeterVisible = true;
      }
      document.getElementById("statusbar-icon").removeAttribute("value");
@@ -41,7 +97,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
    }
  });
  
-@@ -237,11 +234,9 @@ function setFilterFolder(msgFolder) {
+ var filterEditorQuitObserver = {
+   observe(aSubject, aTopic) {
+     // Check whether or not we want to veto the quit request (unless another
+     // observer already did.
+@@ -233,19 +230,17 @@ function setFilterFolder(msgFolder) {
+   }
+ 
+   // Save the current filters to disk before switching because
+   // the dialog may be closed and we'll lose current filters.
    if (gCurrentFilterList) {
      gCurrentFilterList.saveToDefaultFile();
    }
@@ -53,7 +117,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
  
    // Calling getEditableFilterList will detect any errors in msgFilterRules.dat,
    // backup the file, and alert the user.
-@@ -268,9 +263,13 @@ function setFilterFolder(msgFolder) {
+   gCurrentFilterList = msgFolder.getEditableFilterList(gFilterListMsgWindow);
+   rebuildFilterList();
+ 
+   // Select the first item in the list, if there is one.
+@@ -264,17 +259,21 @@ function setFilterFolder(msgFolder) {
+   // root the folder picker to this server
+   const runMenu = gRunFiltersFolder.menupopup;
+   runMenu._teardown();
+   runMenu._parentFolder = msgFolder;
    runMenu._ensureInitialized();
  
    const canFilterAfterTheFact = CanRunFiltersAfterTheFact(msgFolder.server);
@@ -68,7 +140,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
      !canFilterAfterTheFact;
  
    if (canFilterAfterTheFact) {
-@@ -322,12 +321,18 @@ function setFilterFolder(msgFolder) {
+     let wantedFolder = null;
+     // For a given server folder, get the default run target folder or show
+     // "Choose Folder".
+     if (!msgFolder.isServer) {
+@@ -318,20 +317,26 @@ function setFilterFolder(msgFolder) {
+ }
+ 
+ /**
+  * Select a folder on which filters are to be run.
   *
   * @param {nsIMsgFolder} aFolder - nsIMsgFolder folder to select.
   */
@@ -90,7 +170,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
  }
  
  /**
-@@ -552,8 +557,11 @@ function onDeleteFilter() {
+  * Toggle enabled state of a filter, in both the filter properties and the UI.
+  *
+  * @param {Element} aFilterItem - An item (row) of the filter list to be toggled.
+  * @param {boolean} [aSetForEvent] - Enabled status.
+@@ -548,16 +553,19 @@ function onDeleteFilter() {
+ 
+   // Select filter above previously selected if one existed, otherwise the first one.
+   if (newSelectionIndex == -1 && gFilterListbox.itemCount > 0) {
+     newSelectionIndex = 0;
    }
    if (newSelectionIndex > -1) {
      gFilterListbox.selectedIndex = newSelectionIndex;
@@ -102,7 +190,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
  }
  
  /**
-@@ -742,9 +750,31 @@ function runSelectedFilters() {
+  * Move filter one step up in visible list.
+  */
+ function onUp() {
+   moveFilter(msgMoveMotion.Up);
+@@ -738,17 +746,39 @@ function runSelectedFilters() {
+   }
+ 
+   gRunFiltersButton.disabled = true;
+   gRunningFilters = true;
  
    MailServices.filters.applyFiltersToFolders(
      filterList,
@@ -135,7 +231,15 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
  }
  
  function moveCurrentFilter(motion) {
-@@ -922,13 +952,17 @@ function updateButtons() {
+   const filter = currentFilter();
+   if (!filter) {
+     return;
+   }
+@@ -918,21 +948,25 @@ function updateButtons() {
+ 
+   // "copy" is the same as "edit"
+   gCopyToNewButton.disabled = disabled;
+ 
    // "delete" only disabled when no filters are selected
    gDeleteButton.disabled = !numFiltersSelected;
  
@@ -157,10 +261,18 @@ diff --git a/mail/base/content/FilterListDialog.js b/mail/base/content/FilterLis
    // don't use gFilterListbox.currentIndex here, it's buggy when we've just changed the
    // children in the list (via rebuildFilterList)
    disabled = !(
+     oneFilterSelected &&
+     gFilterListbox.getSelectedItem(0) != gFilterListbox.getItemAtIndex(0)
+   );
+   gUpButton.disabled = disabled;
 diff --git a/mail/test/browser/folder-widget/browser_messageFilters.js b/mail/test/browser/folder-widget/browser_messageFilters.js
 --- a/mail/test/browser/folder-widget/browser_messageFilters.js
 +++ b/mail/test/browser/folder-widget/browser_messageFilters.js
-@@ -30,18 +30,19 @@ var { MailServices } = ChromeUtils.impor
+@@ -26,26 +26,27 @@ var { click_menus_in_sequence, promise_n
+     "resource://testing-common/mail/WindowHelpers.sys.mjs"
+   );
+ 
+ var { MailServices } = ChromeUtils.importESModule(
    "resource:///modules/MailServices.sys.mjs"
  );
  
@@ -182,7 +294,15 @@ diff --git a/mail/test/browser/folder-widget/browser_messageFilters.js b/mail/te
    registerCleanupFunction(() => {
      folderA.deleteSelf(null);
      // For some peculiar reason, removing won't work in --verify mode
-@@ -520,4 +521,169 @@ add_task(async function test_can_quit_on
+     // if we remove the account here.
+     //  MailServices.accounts.removeAccount(NNTPAccount);
+     // Some tests that open new windows don't return focus to the main window
+     // in a way that satisfies mochitest, and the test times out.
+@@ -516,8 +517,173 @@ add_task(async function test_can_quit_on
+   Assert.equal(
+     filterWin.document.getElementById("filterList").itemCount,
+     0,
+     "Previously created filter should have been deleted."
    );
  
    await BrowserTestUtils.closeWindow(filterWin);
@@ -352,3 +472,4 @@ diff --git a/mail/test/browser/folder-widget/browser_messageFilters.js b/mail/te
 +
 +  await BrowserTestUtils.closeWindow(filterWin);
 +});
+
