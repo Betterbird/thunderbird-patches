@@ -1,0 +1,585 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1786096350 0
+# Node ID b812c0911f469acab9d2d905930698171892bc01
+# Parent  18a7a45dcefad89a737a6de3b44d09ca29a112fd
+Bug 2052714 - Play back changes made to a cached ICS calendar while offline instead of silently discarding them. r=darktrojan
+
+Providers without a changelog (ICS) synchronize through the full sync in `calCachedCalendar._doSynchronize`: collect the offline changes from the cache, wipe and refill the cache from the server, restore the offline changes into it and play them back to the server. The restore step never ran: `cal.iterate.forEach` iterates a plain object as `Object.entries`, so its callback received `[hashId, item]` pairs instead of items, `item.hashId` was undefined, the switch over the offline flags never matched and every offline change was silently dropped - the next synchronization reverted the calendar to the server state without any error.
+
+Behind that, two more defects in the same pipeline:
+
+- Once the loop runs at all, the restore operations were still not awaited, so the playback queried the offline flags before they were written back and found nothing.
+- The playback modified the uncached calendar with the played-back item as its own base version (`modifyItem(item, item)`). A provider that checks the base version against its stored copy rejects that - the ICS calendar's internal memory calendar fails with "old item mismatch" and its operation queue stays locked. Pass null instead, which `calICalendar.modifyItem` documents as "overwrite whatever is stored", the correct semantics for a playback.
+
+Rewrite the restore as a sequential awaited loop over `Object.values` and guard each restored item so one failure cannot stop the others. Collect the refill of the cache and wait for all of it before the batch ends, so a single item the cache refuses no longer aborts the refill and takes the restore of the offline changes with it.
+
+`CalICSCalendar` also never cleared the injected `_cachedModifyItemCallback` after taking it, so the playback ran the previous operation's callback and corrupted the cache, the same defect bug 1713625 fixes for the CalDAV calendar. Clear `_cachedAdoptItemCallback` the same way: `calCachedCalendar` still resets that one for both providers today, but bug 1713625 removes that reset in favour of the providers doing it themselves.
+
+Add a test that covers the playback of an offline modification, creation and deletion against the mock ICS server, including an event modified online just before going offline, whose leftover callback must not corrupt the cache, and an event added on the server behind the client's back that the synchronization has to merge with the played-back changes.
+
+Differential Revision: https://phabricator.services.mozilla.com/D310564
+
+
+diff --git a/calendar/base/src/CalCachedCalendar.sys.mjs b/calendar/base/src/CalCachedCalendar.sys.mjs
+--- a/calendar/base/src/CalCachedCalendar.sys.mjs
++++ b/calendar/base/src/CalCachedCalendar.sys.mjs
+@@ -334,102 +334,113 @@ calCachedCalendar.prototype = {
+     await this.getOfflineDeletedItems();
+ 
+     // TODO instead of deleting the calendar and creating a new
+     // one, maybe we want to do a "real" sync between the
+     // existing local calendar and the remote calendar.
+     this.setupCachedCalendar();
+ 
+     const modifiedTimes = {};
++    const pendingAdditions = [];
+     this.mCachedCalendar.startBatch();
+     try {
+       for await (const items of cal.iterate.streamValues(
+         this.mUncachedCalendar.getItems(Ci.calICalendar.ITEM_FILTER_ALL_ITEMS, 0, null, null)
+       )) {
+         for (const item of items) {
+           // Adding items recd from the Memory Calendar
+           // These may be different than what the cache has
+           modifiedTimes[item.id] = item.lastModifiedTime;
+-          await this.mCachedCalendar.addItem(item);
++          pendingAdditions.push(this.mCachedCalendar.addItem(item));
++        }
++      }
++      // One item the cache refuses must not cost us the whole refill. Awaited
++      // before endBatch, so nothing is added outside the batch.
++      for (const result of await Promise.allSettled(pendingAdditions)) {
++        if (result.status == "rejected") {
++          lazy.log.warn(
++            "[calCachedCalendar] Could not add a server item to the cache: " + result.reason
++          );
+         }
+       }
+       this.mCachedCalendar.endBatch();
+     } catch (e) {
+       this.mCachedCalendar.endBatch();
+       await this.playbackOfflineItems();
+       this.mCachedObserver.onLoad(this.mCachedCalendar);
+       clearPending();
+       throw e; // Do not swallow this error.
+     }
+ 
+-    await new Promise(resolve => {
+-      cal.iterate.forEach(
+-        this.offlineCachedItems,
+-        item => {
+-          switch (this.offlineCachedItemFlags[item.hashId]) {
+-            case Ci.calIChangeLog.OFFLINE_FLAG_CREATED_RECORD:
+-              // Created items are not present on the server, so its safe to adopt them
+-              this.adoptOfflineItem(item.clone());
+-              break;
+-            case Ci.calIChangeLog.OFFLINE_FLAG_MODIFIED_RECORD:
+-              // Two Cases Here:
+-              if (item.id in modifiedTimes) {
+-                // The item is still on the server, we just retrieved it in the listener above.
+-                if (item.lastModifiedTime.compare(modifiedTimes[item.id]) < 0) {
+-                  // The item on the server has been modified, ask to overwrite
+-                  lazy.log.warn(
+-                    "[calCachedCalendar] Item '" +
+-                      item.title +
+-                      "' at the server seems to be modified recently."
+-                  );
+-                  this.promptOverwrite("modify", item, null);
+-                } else {
+-                  // Our item is newer, just modify the item
+-                  this.modifyOfflineItem(item, null);
+-                }
+-              } else {
+-                // The item has been deleted from the server, ask if it should be added again
++    // Restore the offline changes into the recreated cache before the playback
++    // sends them to the server. One failing item must not stop the others.
++    for (const item of Object.values(this.offlineCachedItems)) {
++      try {
++        switch (this.offlineCachedItemFlags[item.hashId]) {
++          case Ci.calIChangeLog.OFFLINE_FLAG_CREATED_RECORD:
++            // Created items are not present on the server, so its safe to adopt them
++            await this.adoptOfflineItem(item.clone());
++            break;
++          case Ci.calIChangeLog.OFFLINE_FLAG_MODIFIED_RECORD:
++            // Two Cases Here:
++            if (item.id in modifiedTimes) {
++              // The item is still on the server, we just retrieved it in the listener above.
++              if (item.lastModifiedTime.compare(modifiedTimes[item.id]) < 0) {
++                // The item on the server has been modified, ask to overwrite
+                 lazy.log.warn(
+-                  "[calCachedCalendar] Item '" + item.title + "' has been deleted from the server"
++                  "[calCachedCalendar] Item '" +
++                    item.title +
++                    "' at the server seems to be modified recently."
+                 );
+-                if (cal.provider.promptOverwrite("modify", item, null)) {
+-                  this.adoptOfflineItem(item.clone());
+-                }
++                await this.promptOverwrite("modify", item, null);
++              } else {
++                // Our item is newer, just modify the item
++                await this.modifyOfflineItem(item, null);
++              }
++            } else {
++              // The item has been deleted from the server, ask if it should be added again
++              lazy.log.warn(
++                "[calCachedCalendar] Item '" + item.title + "' has been deleted from the server"
++              );
++              if (cal.provider.promptOverwrite("modify", item, null)) {
++                await this.adoptOfflineItem(item.clone());
+               }
+-              break;
+-            case Ci.calIChangeLog.OFFLINE_FLAG_DELETED_RECORD:
+-              if (item.id in modifiedTimes) {
+-                // The item seems to exist on the server...
+-                if (item.lastModifiedTime.compare(modifiedTimes[item.id]) < 0) {
+-                  // ...and has been modified on the server. Ask to overwrite
+-                  lazy.log.warn(
+-                    "[calCachedCalendar] Item '" +
+-                      item.title +
+-                      "' at the server seems to be modified recently."
+-                  );
+-                  this.promptOverwrite("delete", item, null);
+-                } else {
+-                  // ...and has not been modified. Delete it now.
+-                  this.deleteOfflineItem(item);
+-                }
++            }
++            break;
++          case Ci.calIChangeLog.OFFLINE_FLAG_DELETED_RECORD:
++            if (item.id in modifiedTimes) {
++              // The item seems to exist on the server...
++              if (item.lastModifiedTime.compare(modifiedTimes[item.id]) < 0) {
++                // ...and has been modified on the server. Ask to overwrite
++                lazy.log.warn(
++                  "[calCachedCalendar] Item '" +
++                    item.title +
++                    "' at the server seems to be modified recently."
++                );
++                await this.promptOverwrite("delete", item, null);
+               } else {
+-                // Item has already been deleted from the server, no need to change anything.
++                // ...and has not been modified. Delete it now.
++                await this.deleteOfflineItem(item);
+               }
+-              break;
+-          }
+-        },
+-        async () => {
+-          this.offlineCachedItems = {};
+-          this.offlineCachedItemFlags = {};
+-          await this.playbackOfflineItems();
+-          clearPending();
+-          resolve();
++            } else {
++              // Item has already been deleted from the server, no need to change anything.
++            }
++            break;
+         }
+-      );
+-    });
++      } catch (e) {
++        lazy.log.error(
++          "[calCachedCalendar] Applying the offline change of " + item.id + " failed: " + e
++        );
++      }
++    }
++
++    this.offlineCachedItems = {};
++    this.offlineCachedItemFlags = {};
++    await this.playbackOfflineItems();
++    clearPending();
+   },
+ 
+   onOfflineStatusChanged(aNewState) {
+     if (aNewState) {
+       // Going offline: (XXX get items before going offline?) => we may ask the user to stay online a bit longer
+     } else if (!this.getProperty("disabled") && this.getProperty("refreshInterval") != "0") {
+       // Going online (start replaying changes to the remote calendar).
+       // Don't do this if the calendar is disabled or set to manual updates only.
+@@ -480,17 +491,20 @@ calCachedCalendar.prototype = {
+         filter = Ci.calICalendar.ITEM_FILTER_OFFLINE_CREATED;
+         break;
+       case Ci.calIChangeLog.OFFLINE_FLAG_MODIFIED_RECORD:
+         debugOp = "modify";
+         nextCallback = this.playbackOfflineItems.bind(
+           this,
+           Ci.calIChangeLog.OFFLINE_FLAG_DELETED_RECORD
+         );
+-        uncachedOp = item => this.mUncachedCalendar.modifyItem(item, item);
++        // Pass null as the base version, documented as "overwrite whatever is
++        // stored" - the item as its own base version gets rejected by providers
++        // that compare it against their stored copy.
++        uncachedOp = item => this.mUncachedCalendar.modifyItem(item, null);
+         filter = Ci.calICalendar.ITEM_FILTER_OFFLINE_MODIFIED;
+         break;
+       case Ci.calIChangeLog.OFFLINE_FLAG_DELETED_RECORD:
+         debugOp = "delete";
+         uncachedOp = item => this.mUncachedCalendar.deleteItem(item);
+         filter = Ci.calICalendar.ITEM_FILTER_OFFLINE_DELETED;
+         break;
+       default:
+diff --git a/calendar/providers/ics/CalICSCalendar.sys.mjs b/calendar/providers/ics/CalICSCalendar.sys.mjs
+--- a/calendar/providers/ics/CalICSCalendar.sys.mjs
++++ b/calendar/providers/ics/CalICSCalendar.sys.mjs
+@@ -145,17 +145,19 @@ export class CalICSCalendar extends cal.
+   // it returns.
+   _cachedAdoptItemCallback = null;
+ 
+   async adoptItem(aItem) {
+     if (this.readOnly) {
+       throw new Components.Exception("Calendar is not writable", Ci.calIErrors.CAL_IS_READONLY);
+     }
+ 
++    // Take and clear the callback so it cannot carry over to the next operation.
+     const adoptCallback = this._cachedAdoptItemCallback;
++    this._cachedAdoptItemCallback = null;
+ 
+     const item = await new Promise(resolve => {
+       this.startBatch();
+       this._queue.push({
+         action: "add",
+         item: aItem,
+         listener: resolve,
+       });
+@@ -176,17 +178,19 @@ export class CalICSCalendar extends cal.
+   // it returns.
+   _cachedModifyItemCallback = null;
+ 
+   async modifyItem(newItem, oldItem) {
+     if (this.readOnly) {
+       throw new Components.Exception("Calendar is not writable", Ci.calIErrors.CAL_IS_READONLY);
+     }
+ 
++    // Take and clear the callback so it cannot carry over to the next operation.
+     const modifyCallback = this._cachedModifyItemCallback;
++    this._cachedModifyItemCallback = null;
+     const item = await new Promise(resolve => {
+       this.startBatch();
+       this._queue.push({
+         action: "modify",
+         newItem,
+         oldItem,
+         listener: resolve,
+       });
+diff --git a/calendar/test/unit/test_ics_offline_playback.js b/calendar/test/unit/test_ics_offline_playback.js
+new file mode 100644
+--- /dev/null
++++ b/calendar/test/unit/test_ics_offline_playback.js
+@@ -0,0 +1,291 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that changes made to a cached ICS calendar while offline are played
++ * back to the server by the next synchronization instead of being silently
++ * discarded (bug 2052714), and that the playback does not corrupt other
++ * events in the cache.
++ */
++
++var { ICSServer } = ChromeUtils.importESModule(
++  "resource://testing-common/calendar/ICSServer.sys.mjs"
++);
++var { CalEvent } = ChromeUtils.importESModule("resource:///modules/CalEvent.sys.mjs");
++var { TestUtils } = ChromeUtils.importESModule("resource://testing-common/TestUtils.sys.mjs");
++
++// The synchronization chain can take a moment, so poll longer than the default.
++const WAIT_INTERVAL = 200;
++const WAIT_TRIES = 100;
++
++const UID_A = "event-a";
++const UID_B = "event-b";
++const UID_C = "event-c";
++
++// LAST-MODIFIED is deliberately in the past, so an offline edit is always the
++// newer copy and the synchronization takes the plain modify path. The overwrite
++// prompt on the other path is modal and would hang xpcshell (bug 2059370).
++function buildVEvent(uid, summary, day) {
++  return [
++    "BEGIN:VEVENT",
++    "UID:" + uid,
++    "SUMMARY:" + summary,
++    "LAST-MODIFIED:20220316T100000Z",
++    "DTSTART:202203" + day + "T120000Z",
++    "DTEND:202203" + day + "T130000Z",
++    "DTSTAMP:20220316T100000Z",
++    "END:VEVENT",
++  ].join("\r\n");
++}
++
++function buildIcs(...events) {
++  return (
++    ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Test//Test//EN"].join("\r\n") +
++    "\r\n" +
++    events.join("\r\n") +
++    "\r\nEND:VCALENDAR"
++  );
++}
++
++function registerTestCalendar() {
++  const calendar = cal.manager.createCalendar("ics", Services.io.newURI(ICSServer.url));
++  calendar.name = "offlinePlayback";
++  calendar.id = cal.getUUID();
++  calendar.setProperty("cache.enabled", true);
++  cal.manager.registerCalendar(calendar);
++  const registered = cal.manager.getCalendarById(calendar.id);
++  // Unregister the calendar if the task failed before doing it itself.
++  registerCleanupFunction(() => {
++    if (cal.manager.getCalendarById(registered.id)) {
++      cal.manager.unregisterCalendar(registered);
++    }
++  });
++  return new Promise(resolve => {
++    const observer = {
++      QueryInterface: ChromeUtils.generateQI(["calIObserver"]),
++      onStartBatch() {},
++      onEndBatch() {},
++      onAddItem() {},
++      onModifyItem() {},
++      onDeleteItem() {},
++      onError() {},
++      onPropertyChanged() {},
++      onPropertyDeleting() {},
++      onLoad() {
++        registered.removeObserver(observer);
++        registered.setProperty("refreshInterval", "0");
++        resolve(registered);
++      },
++    };
++    registered.addObserver(observer);
++  });
++}
++
++/**
++ * Runs body() with the offline mode switched on.
++ *
++ * @param {Function} body - The asynchronous function to run while offline.
++ */
++async function whileOffline(body) {
++  const wasManaged = Services.io.manageOfflineStatus;
++  Services.io.manageOfflineStatus = false;
++  Services.io.offline = true;
++  try {
++    await body();
++  } finally {
++    Services.io.offline = false;
++    Services.io.manageOfflineStatus = wasManaged;
++  }
++}
++
++/** Adds event C on the server, the way another client would. */
++async function addEventCOnServer() {
++  await ICSServer.putICSInternal(
++    ICSServer.ics.replace("END:VCALENDAR", buildVEvent(UID_C, "C", "20") + "\r\nEND:VCALENDAR")
++  );
++}
++
++/**
++ * Asserts that event C survived the synchronization on both sides.
++ *
++ * @param {calICalendar} calendar - The registered cached calendar.
++ */
++async function assertEventCSurvived(calendar) {
++  Assert.ok(ICSServer.ics.includes("UID:" + UID_C), "event C is still on the server");
++  Assert.ok(await calendar.getItem(UID_C), "event C arrived in the cache");
++}
++
++/**
++ * Waits until no synchronization is running, so the next step cannot interleave
++ * with it. There is no public signal for this, hence the two guards: they fail
++ * the test loudly if either member is ever renamed.
++ *
++ * @param {calICalendar} calendar - The registered cached calendar.
++ */
++function waitForSyncSettled(calendar) {
++  const cached = calendar.wrappedJSObject;
++  const uncached = cached.mUncachedCalendar.wrappedJSObject;
++  Assert.ok("mPendingSync" in cached, "the cached calendar exposes mPendingSync");
++  Assert.equal(typeof uncached._isLocked, "boolean", "the ICS calendar exposes _isLocked");
++  return TestUtils.waitForCondition(
++    () => !cached.mPendingSync && !uncached._isLocked,
++    "waiting for the synchronization to settle",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++}
++
++add_setup(async function () {
++  do_get_profile();
++  ICSServer.open();
++  registerCleanupFunction(() => ICSServer.close());
++});
++
++/**
++ * An offline modification reaches the server, and the event modified online
++ * just before survives the playback - its cache callback must not leak into it.
++ */
++add_task(async function testOfflineModify() {
++  // Put events A and B on the server and subscribe to the calendar.
++  await ICSServer.putICSInternal(
++    buildIcs(buildVEvent(UID_A, "A", "17"), buildVEvent(UID_B, "B", "18"))
++  );
++  const calendar = await registerTestCalendar();
++  const a = await calendar.getItem(UID_A);
++  Assert.ok(a && (await calendar.getItem(UID_B)), "both events were synced");
++
++  // Modify A while online.
++  const aChanged = a.clone();
++  aChanged.title = "A modified";
++  await calendar.modifyItem(aChanged, a);
++  await TestUtils.waitForCondition(
++    () => ICSServer.ics.includes("A modified"),
++    "waiting for the online modification of A to reach the server",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++  await waitForSyncSettled(calendar);
++
++  // Modify the offline copy of B.
++  await whileOffline(async () => {
++    // Read B again, the synchronization above recreated the cache.
++    const bCached = await calendar.getItem(UID_B);
++    const bChanged = bCached.clone();
++    bChanged.title = "B modified";
++    await calendar.modifyItem(bChanged, bCached);
++  });
++
++  // Add an event to the server, so that a refresh is necessary, and perform the refresh.
++  await addEventCOnServer();
++  await calendar.refresh();
++
++  // Check the events are correct on the server and in the cache.
++  await TestUtils.waitForCondition(
++    () => ICSServer.ics.includes("B modified"),
++    "waiting for the offline modification of B to reach the server",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++  await TestUtils.waitForCondition(
++    async () => (await calendar.getItem(UID_B))?.title == "B modified",
++    "waiting for the cache to keep the offline modification of B",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++
++  // Check A survived the playback of B and nothing was duplicated.
++  const aAfter = await calendar.getItem(UID_A);
++  Assert.ok(aAfter, "event A still exists after the playback of B");
++  Assert.equal(aAfter?.title, "A modified", "event A kept its modification");
++  const all = await calendar.getItemsAsArray(Ci.calICalendar.ITEM_FILTER_ALL_ITEMS, 0, null, null);
++  Assert.equal(all.filter(item => item.id == UID_A).length, 1, "exactly one copy of A");
++  Assert.equal(all.filter(item => item.id == UID_B).length, 1, "exactly one copy of B");
++  Assert.ok(ICSServer.ics.includes("A modified"), "A's modification is still on the server");
++  await assertEventCSurvived(calendar);
++
++  cal.manager.unregisterCalendar(calendar);
++});
++
++/** An event created while offline reaches the server. */
++add_task(async function testOfflineCreate() {
++  // Put event A on the server and subscribe to the calendar.
++  await ICSServer.putICSInternal(buildIcs(buildVEvent(UID_A, "A", "17")));
++  const calendar = await registerTestCalendar();
++  Assert.ok(await calendar.getItem(UID_A), "the existing event was synced");
++
++  // Create an event while offline.
++  await whileOffline(async () => {
++    const event = new CalEvent(buildIcs(buildVEvent("event-new", "N", "19")));
++    await calendar.addItem(event);
++  });
++
++  // Add an event to the server, so that a refresh is necessary, and perform the refresh.
++  await addEventCOnServer();
++  await calendar.refresh();
++
++  // Check the events are correct on the server and in the cache.
++  await TestUtils.waitForCondition(
++    () => ICSServer.ics.includes("UID:event-new"),
++    "waiting for the offline created event to reach the server",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++
++  Assert.ok(await calendar.getItem("event-new"), "the created event is in the cache");
++  Assert.ok(await calendar.getItem(UID_A), "the existing event survived");
++  const all = await calendar.getItemsAsArray(Ci.calICalendar.ITEM_FILTER_ALL_ITEMS, 0, null, null);
++  Assert.equal(
++    all.filter(item => item.id == "event-new").length,
++    1,
++    "exactly one copy of the new event"
++  );
++  Assert.equal(
++    all.filter(item => item.id == UID_A).length,
++    1,
++    "exactly one copy of the existing event"
++  );
++  await assertEventCSurvived(calendar);
++
++  cal.manager.unregisterCalendar(calendar);
++});
++
++/** An event deleted while offline is deleted from the server. */
++add_task(async function testOfflineDelete() {
++  // Put events A and B on the server and subscribe to the calendar.
++  await ICSServer.putICSInternal(
++    buildIcs(buildVEvent(UID_A, "A", "17"), buildVEvent(UID_B, "B", "18"))
++  );
++  const calendar = await registerTestCalendar();
++  const b = await calendar.getItem(UID_B);
++  Assert.ok(b, "the event to delete was synced");
++
++  // Delete B while offline.
++  await whileOffline(async () => {
++    await calendar.deleteItem(b);
++  });
++
++  // Add an event to the server, so that a refresh is necessary, and perform the refresh.
++  await addEventCOnServer();
++  await calendar.refresh();
++
++  // Check the events are correct on the server and in the cache.
++  await TestUtils.waitForCondition(
++    () => !ICSServer.ics.includes("UID:" + UID_B),
++    "waiting for the offline deletion of B to reach the server",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++
++  // The playback removes B from the cache after the server confirmed, so poll.
++  await TestUtils.waitForCondition(
++    async () => !(await calendar.getItem(UID_B)),
++    "waiting for B to stay deleted in the cache",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++  Assert.ok(await calendar.getItem(UID_A), "the other event survived");
++  await assertEventCSurvived(calendar);
++
++  cal.manager.unregisterCalendar(calendar);
++});
+diff --git a/calendar/test/unit/xpcshell.toml b/calendar/test/unit/xpcshell.toml
+--- a/calendar/test/unit/xpcshell.toml
++++ b/calendar/test/unit/xpcshell.toml
+@@ -95,16 +95,18 @@ tags = ["caldav", "oauth"]
+ ["test_filter_tree_view.js"]
+ 
+ ["test_freebusy.js"]
+ 
+ ["test_freebusy_service.js"]
+ 
+ ["test_ics.js"]
+ 
++["test_ics_offline_playback.js"]
++
+ ["test_ics_parser.js"]
+ 
+ ["test_ics_service.js"]
+ 
+ ["test_imip.js"]
+ 
+ ["test_invitationutils.js"]
+ 
+

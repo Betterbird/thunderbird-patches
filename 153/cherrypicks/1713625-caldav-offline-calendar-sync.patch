@@ -1,0 +1,347 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1786270088 0
+# Node ID 71a46731d0abcbe9c23476d92dbd376f3cd0ebd3
+# Parent  d56b745fc12eebbc3b6314a943a945040064b960
+Bug 1713625 - Clear the injected cache callback when the CalDAV calendar takes it, so an offline playback cannot run a previous operation's callback and delete the wrong event from the cache. r=darktrojan
+
+`calCachedCalendar` hands the callback that updates its cache to the CalDAV calendar through the `_cachedModifyItemCallback` member, set immediately before it calls `modifyItem` on the uncached calendar. The callback was never cleared afterwards, so the next direct `modifyItem` call on the uncached calendar - in practice the playback of an offline modification - picked up the callback of the previous operation. That callback then paired the freshly played-back item with the previous operation's old item and wrote the pair into the cache: the previous event's row was deleted and the played-back event duplicated. Events silently vanish from the calendar until the cache is rebuilt, while the server stays correct the whole time. This is likely also the cause of bug 1694709 and bug 947138.
+
+Take and clear the callback in one step in `adoptItem` and `modifyItem`. Remove the now redundant reset in `calCachedCalendar`, together with the `_injectedCallbacks` list that was never read.
+
+`CalICSCalendar` receives the callbacks the same way and has the same problem; bug 2052714 fixes it there.
+
+Add a test that modifies one event online and another one offline; without the fix, playing back the offline modification deletes the first event from the cache.
+
+Differential Revision: https://phabricator.services.mozilla.com/D310485
+
+
+diff --git a/calendar/base/src/CalCachedCalendar.sys.mjs b/calendar/base/src/CalCachedCalendar.sys.mjs
+--- a/calendar/base/src/CalCachedCalendar.sys.mjs
++++ b/calendar/base/src/CalCachedCalendar.sys.mjs
+@@ -691,25 +691,16 @@ calCachedCalendar.prototype = {
+    * @param {calICalendar} calendar
+    * @param {number} status
+    * @param {number} operationType
+    * @param {string} id
+    * @param {calIItem|Error} detail
+    */
+ 
+   /**
+-   * Keeps track of pending callbacks injected into the uncached calendar during
+-   * adopt or modify operations. This is done to ensure we remove the correct
+-   * callback when multiple operations occur at once.
+-   *
+-   * @type {OnOperationComplateHandler[]}
+-   */
+-  _injectedCallbacks: [],
+-
+-  /**
+    * Executes the actual addition of the item using either the cached or uncached
+    * calendar depending on offline state. A separate method is used here to
+    * preserve the order of the "onAddItem" event.
+    *
+    * @param {calIItem} item
+    * @param {OnOperationCompleteHandler} listener
+    */
+   doAdoptItem(item, listener) {
+@@ -758,23 +749,18 @@ calCachedCalendar.prototype = {
+         } else if (Components.isSuccessCode(status)) {
+           // On success, add the item to the cache.
+           await this.mCachedCalendar.addItem(detail).then(onSuccess, onError);
+         } else {
+           // Either an error occurred or this is a successful add
+           // to a cached calendar. Forward the call to the listener
+           listener(this, status, opType, id, detail);
+         }
+-        this.mUncachedCalendar.wrappedJSObject._cachedAdoptItemCallback = null;
+-        this._injectedCallbacks = this._injectedCallbacks.filter(cb => cb != adoptItemCallback);
+       };
+ 
+-      // Store the callback so we can remove the correct one later.
+-      this._injectedCallbacks.push(adoptItemCallback);
+-
+       this.mUncachedCalendar.wrappedJSObject._cachedAdoptItemCallback = adoptItemCallback;
+       this.mUncachedCalendar.adoptItem(item).catch(e => {
+         adoptItemCallback(
+           item.calendar,
+           e.result || Cr.NS_ERROR_FAILURE,
+           Ci.calIOperationListener.ADD,
+           item.id,
+           e
+@@ -856,17 +842,16 @@ calCachedCalendar.prototype = {
+         await this.modifyOfflineItem(newItem, oldItem).then(onSuccess, onError);
+       } else if (Components.isSuccessCode(status)) {
+         // On success, modify the item in the cache
+         await this.mCachedCalendar.modifyItem(detail, oldItem).then(onSuccess, onError);
+       } else {
+         // This happens on error, forward the error through the listener
+         listener(this, status, opType, id, detail);
+       }
+-      this._injectedCallbacks = this._injectedCallbacks.filter(cb => cb != modifyItemCallback);
+     };
+ 
+     // First of all, we should find out if the item to modify is
+     // already an offline item or not.
+     if (this.offline) {
+       // If we are offline, don't even try to modify the item
+       this.modifyOfflineItem(newItem, oldItem).then(onSuccess, onError);
+     } else {
+@@ -881,19 +866,16 @@ calCachedCalendar.prototype = {
+         } else {
+           // Not an offline item, attempt to modify using provider
+ 
+           // This is a needed hack to keep the cached calendar's "onModifyItem" event
+           // firing before the endBatch() call of the uncached calendar. It is called
+           // in mUncachedCalendar's modifyItem() method.
+           this.mUncachedCalendar.wrappedJSObject._cachedModifyItemCallback = modifyItemCallback;
+ 
+-          // Store the callback so we can remove the correct one later.
+-          this._injectedCallbacks.push(modifyItemCallback);
+-
+           this.mUncachedCalendar.modifyItem(newItem, oldItem).catch(e => {
+             modifyItemCallback(
+               oldItem.calendar,
+               e.result || Cr.NS_ERROR_FAILURE,
+               Ci.calIOperationListener.MODIFY,
+               oldItem.id,
+               e
+             );
+diff --git a/calendar/providers/caldav/CalDavCalendar.sys.mjs b/calendar/providers/caldav/CalDavCalendar.sys.mjs
+--- a/calendar/providers/caldav/CalDavCalendar.sys.mjs
++++ b/calendar/providers/caldav/CalDavCalendar.sys.mjs
+@@ -557,17 +557,20 @@ CalDavCalendar.prototype = {
+ 
+   /**
+    * adoptItem()
+    * we actually use doAdoptItem()
+    *
+    * @param {calIItemBase} aItem - Item to check.
+    */
+   async adoptItem(aItem) {
++    // Take and clear the injected callback so it does not carry over to the
++    // next operation.
+     const adoptCallback = this._cachedAdoptItemCallback;
++    this._cachedAdoptItemCallback = null;
+     return new Promise((resolve, reject) => {
+       this.doAdoptItem(aItem.clone(), {
+         get wrappedJSObject() {
+           return this;
+         },
+         async onOperationComplete(calendar, status, opType, id, detail) {
+           if (adoptCallback) {
+             await adoptCallback(calendar, status, opType, id, detail);
+@@ -680,17 +683,20 @@ CalDavCalendar.prototype = {
+   /**
+    * modifyItem(); required by calICalendar.idl
+    * we actually use doModifyItem()
+    *
+    * @param {calIItemBase} aNewItem - New item.
+    * @param {calIItemBase} aOldItem - Old item.
+    */
+   async modifyItem(aNewItem, aOldItem) {
++    // Take and clear the injected callback so it does not carry over to the
++    // next operation.
+     const modifyCallback = this._cachedModifyItemCallback;
++    this._cachedModifyItemCallback = null;
+     return new Promise((resolve, reject) => {
+       this.doModifyItem(
+         aNewItem,
+         aOldItem,
+         {
+           get wrappedJSObject() {
+             return this;
+           },
+diff --git a/calendar/test/unit/test_caldav_offline_modify_playback.js b/calendar/test/unit/test_caldav_offline_modify_playback.js
+new file mode 100644
+--- /dev/null
++++ b/calendar/test/unit/test_caldav_offline_modify_playback.js
+@@ -0,0 +1,163 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that playing back an offline modification does not corrupt other
++ * events in the cache. The cached calendar hands its cache-update callback to
++ * the CalDAV calendar through a member field; when that field outlives its
++ * operation, the next direct modification - the offline playback - runs the
++ * leftover callback and writes its own item paired with the previous
++ * operation's old item, deleting that event from the cache.
++ */
++
++var { CalDAVServer } = ChromeUtils.importESModule(
++  "resource://testing-common/calendar/CalDAVServer.sys.mjs"
++);
++var { TestUtils } = ChromeUtils.importESModule("resource://testing-common/TestUtils.sys.mjs");
++
++// The playback chain (refresh, playback, cache update) can take a moment, so
++// poll longer than the TestUtils default.
++const WAIT_INTERVAL = 200;
++const WAIT_TRIES = 100;
++
++const UID_A = "event-a";
++const UID_B = "event-b";
++const PATH_A = "/calendars/alice/test/event-a.ics";
++const PATH_B = "/calendars/alice/test/event-b.ics";
++
++function buildIcs(uid, summary) {
++  return [
++    "BEGIN:VCALENDAR",
++    "VERSION:2.0",
++    "PRODID:-//Test//Test//EN",
++    "BEGIN:VEVENT",
++    "UID:" + uid,
++    "SUMMARY:" + summary,
++    "DTSTART:20220317T120000Z",
++    "DTEND:20220317T130000Z",
++    "DTSTAMP:20220317T100000Z",
++    "END:VEVENT",
++    "END:VCALENDAR",
++  ].join("\r\n");
++}
++
++function registerTestCalendar() {
++  const calendar = cal.manager.createCalendar(
++    "caldav",
++    Services.io.newURI(`${CalDAVServer.origin}/calendars/alice/test/`)
++  );
++  calendar.name = "offlinePlayback";
++  calendar.id = cal.getUUID();
++  calendar.setProperty("cache.enabled", true);
++  calendar.setProperty("username", "alice");
++  cal.manager.registerCalendar(calendar);
++  const registered = cal.manager.getCalendarById(calendar.id);
++  return new Promise(resolve => {
++    const observer = {
++      QueryInterface: ChromeUtils.generateQI(["calIObserver"]),
++      onStartBatch() {},
++      onEndBatch() {},
++      onAddItem() {},
++      onModifyItem() {},
++      onDeleteItem() {},
++      onError() {},
++      onPropertyChanged() {},
++      onPropertyDeleting() {},
++      onLoad() {
++        registered.removeObserver(observer);
++        registered.setProperty("refreshInterval", "0");
++        resolve(registered);
++      },
++    };
++    registered.addObserver(observer);
++  });
++}
++
++/**
++ * Waits until the playback of the offline modification has completed: the
++ * server holds the modification and the item's offline flag has been reset,
++ * which happens after the cache-update callback - the one that must not leak -
++ * has already run.
++ *
++ * @param {calICalendar} calendar - The registered cached calendar.
++ * @param {string} path - The item's path on the CalDAVServer.
++ * @param {string} uid - The item's UID.
++ * @param {string} needle - Text the item on the server must contain.
++ */
++async function waitForPlayback(calendar, path, uid, needle) {
++  await TestUtils.waitForCondition(
++    () => CalDAVServer.items.get(path)?.ics.includes(needle),
++    "waiting for the offline modification to reach the server",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++  const storage = calendar.wrappedJSObject.mCachedCalendar;
++  await TestUtils.waitForCondition(
++    async () => {
++      const item = await storage.getItem(uid);
++      return item && !(await storage.getItemOfflineFlag(item));
++    },
++    "waiting for the offline flag to be reset after the playback",
++    WAIT_INTERVAL,
++    WAIT_TRIES
++  );
++}
++
++add_setup(async function () {
++  do_get_profile();
++  CalDAVServer.open("alice", "alice");
++  const loginInfo = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(Ci.nsILoginInfo);
++  loginInfo.init(CalDAVServer.origin, null, "test", "alice", "alice", "", "");
++  await Services.logins.addLoginAsync(loginInfo);
++  registerCleanupFunction(() => {
++    CalDAVServer.close();
++  });
++});
++
++add_task(async function testOfflineModifyPlaybackKeepsOtherEvents() {
++  // The server starts out with events A and B.
++  await CalDAVServer.putItemInternal(PATH_A, buildIcs(UID_A, "A"));
++  await CalDAVServer.putItemInternal(PATH_B, buildIcs(UID_B, "B"));
++
++  // Subscribing to the calendar syncs both events into the cache.
++  const calendar = await registerTestCalendar();
++  const a = await calendar.getItem(UID_A);
++  Assert.ok(a && (await calendar.getItem(UID_B)), "both events were synced");
++
++  // Modify A while online. This is the operation whose cache callback must not
++  // survive into the playback further down.
++  const aChanged = a.clone();
++  aChanged.title = "A modified";
++  await calendar.modifyItem(aChanged, a);
++
++  // Modify B while offline. The change only reaches the cache and is flagged
++  // there for the next synchronization.
++  const wasManaged = Services.io.manageOfflineStatus;
++  Services.io.manageOfflineStatus = false;
++  Services.io.offline = true;
++  try {
++    const bCached = await calendar.getItem(UID_B);
++    const bChanged = bCached.clone();
++    bChanged.title = "B modified";
++    await calendar.modifyItem(bChanged, bCached);
++  } finally {
++    Services.io.offline = false;
++    Services.io.manageOfflineStatus = wasManaged;
++  }
++
++  // Back online, the refresh plays B's offline modification back to the server.
++  await calendar.refresh();
++  await waitForPlayback(calendar, PATH_B, UID_B, "B modified");
++
++  // A must be untouched by that playback - it is the event a leaked callback
++  // would delete - and each event must exist exactly once.
++  const aAfter = await calendar.getItem(UID_A);
++  Assert.ok(aAfter, "event A still exists after the playback of B");
++  Assert.equal(aAfter?.title, "A modified", "event A kept its modification");
++  const all = await calendar.getItemsAsArray(Ci.calICalendar.ITEM_FILTER_ALL_ITEMS, 0, null, null);
++  Assert.equal(all.filter(item => item.id == UID_A).length, 1, "exactly one copy of A");
++  Assert.equal(all.filter(item => item.id == UID_B).length, 1, "exactly one copy of B");
++
++  cal.manager.unregisterCalendar(calendar);
++});
+diff --git a/calendar/test/unit/xpcshell.toml b/calendar/test/unit/xpcshell.toml
+--- a/calendar/test/unit/xpcshell.toml
++++ b/calendar/test/unit/xpcshell.toml
+@@ -58,16 +58,19 @@ tags = ["import"]
+ ["test_calIteratorUtils.js"]
+ 
+ ["test_calProviderUtils.js"]
+ 
+ ["test_calStorageHelpers.js"]
+ 
+ ["test_caldav_identity_preference.js"]
+ 
++["test_caldav_offline_modify_playback.js"]
++tags = ["caldav"]
++
+ ["test_caldav_requests.js"]
+ tags = ["caldav", "oauth"]
+ 
+ ["test_calmgr.js"]
+ 
+ ["test_calreadablestreamfactory.js"]
+ 
+ ["test_data_bags.js"]
+

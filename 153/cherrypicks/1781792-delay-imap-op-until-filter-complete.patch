@@ -1,0 +1,993 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1786706669 -7200
+# Node ID 1e0842020f18001117bbade7b4aa1b1f06d4499a
+# Parent  10472c0c69a011fda8863d203c27570e7db4b7e5
+Bug 1781792 - Preserve incoming IMAP messages from any move or delete until filter copies have completed. r=#thunderbird-back-end-reviewers
+
+Differential Revision: https://phabricator.services.mozilla.com/D312892
+
+diff --git a/mailnews/base/src/nsImapMoveCoalescer.cpp b/mailnews/base/src/nsImapMoveCoalescer.cpp
+--- a/mailnews/base/src/nsImapMoveCoalescer.cpp
++++ b/mailnews/base/src/nsImapMoveCoalescer.cpp
+@@ -44,8 +44,16 @@ nsresult nsImapMoveCoalescer::AddMove(ns
+ 
+   return NS_OK;
+ }
+ 
++void nsImapMoveCoalescer::RemoveMove(nsMsgKey key) {
++  m_hasPendingMoves = false;
++  for (auto& keys : m_sourceKeyArrays) {
++    keys.RemoveElement(key);
++    m_hasPendingMoves |= !keys.IsEmpty();
++  }
++}
++
+ nsresult nsImapMoveCoalescer::PlaybackMoves(
+     bool doNewMailNotification /* = false */) {
+   int32_t numFolders = m_destFolders.Count();
+   // Nothing to do, so don't change the member variables.
+diff --git a/mailnews/base/src/nsImapMoveCoalescer.h b/mailnews/base/src/nsImapMoveCoalescer.h
+--- a/mailnews/base/src/nsImapMoveCoalescer.h
++++ b/mailnews/base/src/nsImapMoveCoalescer.h
+@@ -28,8 +28,9 @@ class nsImapMoveCoalescer : public nsIUr
+ 
+   nsImapMoveCoalescer(nsIMsgFolder* sourceFolder, nsIMsgWindow* msgWindow);
+ 
+   nsresult AddMove(nsIMsgFolder* folder, nsMsgKey key);
++  void RemoveMove(nsMsgKey key);
+   nsresult PlaybackMoves(bool doNewMailNotification = false);
+   // this lets the caller store keys in an arbitrary number of buckets. If the
+   // bucket for the passed in index doesn't exist, it will get created.
+   nsTArray<nsMsgKey>* GetKeyBucket(uint32_t keyArrayIndex);
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -3,8 +3,10 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "nsImapMailFolder.h"
+ 
++#include <algorithm>
++
+ #include "ImapTypes.h"
+ #include "msgCore.h"
+ #include "CopyMessageStreamListener.h"
+ #include "nsIAutoSyncManager.h"
+@@ -188,8 +190,21 @@ NS_IMETHODIMP nsMsgQuota::SetLimit(uint6
+   mLimit = aLimit;
+   return NS_OK;
+ }
+ 
++struct nsImapMailFolder::FilterCopyState {
++  struct DeferredDelete {
++    RefPtr<nsIMsgDBHdr> mHeader;
++    bool mMessageWasNew;
++  };
++
++  nsTArray<RefPtr<nsIMsgDBHdr>> mHeaders;
++  nsTArray<nsMsgKey> mFailedKeys;
++  nsTArray<DeferredDelete> mDeferredDeletes;
++  uint32_t mPendingCopies = 0;
++  bool mPlaybackRequested = false;
++};
++
+ //
+ //  nsImapMailFolder
+ //
+ nsImapMailFolder::nsImapMailFolder()
+@@ -2879,8 +2894,43 @@ nsresult nsImapMailFolder::ParseAdoptedH
+   }
+   return NS_OK;
+ }
+ 
++// Adds an IMAP header to the database and notifies listeners. We call this
++// both for newly parsed headers and when restoring a header whose destructive
++// filter action was dropped. It does nothing if the header is already present.
++nsresult nsImapMailFolder::AddNewImapHeaderToDB(nsIMsgDBHdr* aHeader) {
++  nsresult rv = GetDatabase();
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsMsgKey key;
++  rv = aHeader->GetMessageKey(&key);
++  NS_ENSURE_SUCCESS(rv, rv);
++  bool containsKey = false;
++  if (NS_SUCCEEDED(mDatabase->ContainsKey(key, &containsKey)) && containsKey) {
++    return NS_OK;
++  }
++
++  nsCOMPtr<nsIMsgFolderNotificationService> notifier =
++      mozilla::components::FolderNotification::Service();
++  // Check if this header corresponds to a pseudo header from a
++  // pseudo-offline move. If so, notify listeners that its key changed.
++  nsCString messageId;
++  aHeader->GetMessageId(messageId);
++  nsMsgKey pseudoKey = m_pseudoHdrs.MaybeGet(messageId).valueOr(nsMsgKey_None);
++  if (pseudoKey != nsMsgKey_None) {
++    notifier->NotifyMsgKeyChanged(pseudoKey, aHeader);
++    m_pseudoHdrs.Remove(messageId);
++  }
++
++  rv = mDatabase->AddNewHdrToDB(aHeader, true);
++  NS_ENSURE_SUCCESS(rv, rv);
++  notifier->NotifyMsgAdded(aHeader);
++  // Mark the header as not yet reported classified.
++  OrProcessingFlags(key, nsMsgProcessingFlags::NotReportedClassified);
++  return NS_OK;
++}
++
+ // Helper for ParseMsgHdrs().
+ nsresult nsImapMailFolder::NormalEndHeaderParseStream(
+     nsIImapProtocol* aProtocol, nsIImapUrl* imapUrl) {
+   nsCOMPtr<nsIMsgDBHdr> newMsgHdr;
+@@ -3045,27 +3095,9 @@ nsresult nsImapMailFolder::NormalEndHead
+     }
+   }
+   // here we need to tweak flags from uid state..
+   if (mDatabase && (!m_msgMovedByFilter || ShowDeletedMessages())) {
+-    nsCOMPtr<nsIMsgFolderNotificationService> notifier =
+-        mozilla::components::FolderNotification::Service();
+-    // Check if this header corresponds to a pseudo header
+-    // we have from doing a pseudo-offline move and then downloading
+-    // the real header from the server. In that case, we notify
+-    // db/folder listeners that the pseudo-header has become the new
+-    // header, i.e., the key has changed.
+-    nsCString newMessageId;
+-    newMsgHdr->GetMessageId(newMessageId);
+-    nsMsgKey pseudoKey =
+-        m_pseudoHdrs.MaybeGet(newMessageId).valueOr(nsMsgKey_None);
+-    if (pseudoKey != nsMsgKey_None) {
+-      notifier->NotifyMsgKeyChanged(pseudoKey, newMsgHdr);
+-      m_pseudoHdrs.Remove(newMessageId);
+-    }
+-    mDatabase->AddNewHdrToDB(newMsgHdr, true);
+-    notifier->NotifyMsgAdded(newMsgHdr);
+-    // mark the header as not yet reported classified
+-    OrProcessingFlags(m_curMsgUid, nsMsgProcessingFlags::NotReportedClassified);
++    (void)AddNewImapHeaderToDB(newMsgHdr);
+   }
+ 
+   if (m_isGmailServer) {
+     nsCOMPtr<nsIImapFlagAndUidState> flagState;
+@@ -3364,8 +3396,18 @@ NS_IMETHODIMP nsImapMailFolder::ApplyFil
+             }
+             // msgHdr->OrFlags(nsMsgMessageFlags::Read, &newFlags);  // mark
+             // read in trash.
+           } else {
++            if (HasFilterCopy(msgKey)) {
++              // The copy process for this message is still in flight. Defer the
++              // actual deletion until every copy has completed, but suppress
++              // the header and stop filtering now, as a delete would.
++              m_filterCopyState->mDeferredDeletes.AppendElement(
++                  FilterCopyState::DeferredDelete{msgHdr.get(), msgIsNew});
++              m_msgMovedByFilter = true;
++              *applyMore = false;
++              break;
++            }
+             mDatabase->MarkRead(msgKey, true, nullptr);
+             mDatabase->MarkImapDeleted(msgKey, true, nullptr);
+             rv = StoreImapFlags(kImapMsgSeenFlag | kImapMsgDeletedFlag, true,
+                                 {msgKey}, nullptr);
+@@ -3418,22 +3460,47 @@ NS_IMETHODIMP nsImapMailFolder::ApplyFil
+               mDatabase->MarkMDNNeeded(msgKey, false, nullptr);
+               mDatabase->MarkMDNSent(msgKey, true, nullptr);
+             }
+ 
++            // We register the copy before resolving the target folder so a
++            // failure is recorded and still holds back a later move or delete.
++            FilterCopyStarted(msgHdr);
++            RefPtr<CopyServiceListener> copyListener =
++                new CopyServiceListener();
++            // Renamed in Bug 2059604 - Correct comments and names for CopyServiceListener utility class.
++            // copyListener->mStopCopyFn = [self = RefPtr(this), header = msgHdr,
++            copyListener->mStopFn = [self = RefPtr(this), header = msgHdr,
++                                         filter = nsCOMPtr(filter),
++                                         filterAction, msgKey, loggingEnabled,
++                                         completed =
++                                             false](nsresult status) mutable {
++              // CopyMessages() can report a synchronous failure after the
++              // copy service has already called OnStopCopy().
++              if (completed) {
++                return NS_OK;
++              }
++              completed = true;
++              if (NS_FAILED(status) && loggingEnabled) {
++                (void)filter->LogRuleHitFail(filterAction, header, status,
++                                             "filter-failure-copy-failed"_ns);
++              }
++              self->FilterCopyCompleted(msgKey, status);
++              return NS_OK;
++            };
+             nsCOMPtr<nsIMsgFolder> dstFolder;
+             rv = GetExistingFolder(actionTargetFolderUri,
+                                    getter_AddRefs(dstFolder));
+-            if (NS_FAILED(rv)) break;
++            if (NS_FAILED(rv)) {
++              (void)copyListener->OnStopCopy(rv);
++              break;
++            }
+ 
+             nsCOMPtr<nsIMsgCopyService> copyService =
+                 mozilla::components::Copy::Service();
+             rv = copyService->CopyMessages(this, {&*msgHdr}, dstFolder, false,
+-                                           nullptr, msgWindow, false);
++                                           copyListener, msgWindow, false);
+             if (NS_FAILED(rv)) {
+-              if (loggingEnabled) {
+-                (void)filter->LogRuleHitFail(filterAction, msgHdr, rv,
+-                                             "filter-failure-copy-failed"_ns);
+-              }
++              (void)copyListener->OnStopCopy(rv);
+             }
+           }
+         } break;
+         case nsMsgFilterAction::MarkRead: {
+@@ -8306,9 +8373,135 @@ NS_IMETHODIMP nsImapMailFolder::NotifyIf
+ bool nsImapMailFolder::ShowPreviewText() {
+   return Preferences::GetBool("mail.biff.alert.show_preview");
+ }
+ 
++void nsImapMailFolder::FilterCopyStarted(nsIMsgDBHdr* aHeader) {
++  if (!m_filterCopyState) {
++    m_filterCopyState = mozilla::MakeUnique<FilterCopyState>();
++  }
++  nsMsgKey key;
++  aHeader->GetMessageKey(&key);
++  if (!HasFilterCopy(key)) {
++    m_filterCopyState->mHeaders.AppendElement(aHeader);
++  }
++  ++m_filterCopyState->mPendingCopies;
++}
++
++void nsImapMailFolder::FilterCopyCompleted(nsMsgKey aKey, nsresult aStatus) {
++  MOZ_ASSERT(m_filterCopyState);
++  if (!m_filterCopyState) {
++    return;
++  }
++  MOZ_ASSERT(m_filterCopyState->mPendingCopies > 0);
++  if (NS_FAILED(aStatus) && !m_filterCopyState->mFailedKeys.Contains(aKey)) {
++    m_filterCopyState->mFailedKeys.AppendElement(aKey);
++  }
++  --m_filterCopyState->mPendingCopies;
++  if (m_filterCopyState->mPendingCopies == 0 &&
++      m_filterCopyState->mPlaybackRequested) {
++    if (NS_FAILED(PlaybackCoalescedOperations())) {
++      NS_WARNING("Deferred filter action playback failed");
++    }
++  }
++}
++
++bool nsImapMailFolder::HasFilterCopy(nsMsgKey aKey) const {
++  if (!m_filterCopyState) {
++    return false;
++  }
++  for (const auto& header : m_filterCopyState->mHeaders) {
++    nsMsgKey key;
++    header->GetMessageKey(&key);
++    if (key == aKey) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// Runs destructive filter actions after all copies finish. We drop moves and
++// deletes for failed copies, batch the remaining deletes, and restore headers
++// for messages that remain.
++nsresult nsImapMailFolder::ProcessDeferredFilterActions() {
++  auto state = std::move(m_filterCopyState);
++  if (!state) {
++    return NS_OK;
++  }
++  nsresult finalResult = NS_OK;
++  nsTArray<nsMsgKey> keysToDelete;
++  uint32_t newMessagesToDelete = 0;
++
++  if (m_moveCoalescer) {
++    for (nsMsgKey key : state->mFailedKeys) {
++      m_moveCoalescer->RemoveMove(key);
++    }
++  }
++
++  for (const auto& deferredDelete : state->mDeferredDeletes) {
++    nsMsgKey key;
++    deferredDelete.mHeader->GetMessageKey(&key);
++    if (state->mFailedKeys.Contains(key)) {
++      continue;
++    }
++
++    keysToDelete.AppendElement(key);
++    if (deferredDelete.mMessageWasNew) {
++      ++newMessagesToDelete;
++    }
++  }
++
++  if (!keysToDelete.IsEmpty()) {
++    nsresult rv = StoreImapFlags(kImapMsgSeenFlag | kImapMsgDeletedFlag, true,
++                                 keysToDelete, nullptr);
++    if (NS_FAILED(rv)) {
++      // Treat the messages like failed copies so their headers reappear.
++      finalResult = rv;
++      for (nsMsgKey key : keysToDelete) {
++        if (!state->mFailedKeys.Contains(key)) {
++          state->mFailedKeys.AppendElement(key);
++        }
++      }
++    } else {
++      for (nsMsgKey key : keysToDelete) {
++        mDatabase->MarkRead(key, true, nullptr);
++        mDatabase->MarkImapDeleted(key, true, nullptr);
++        mDatabase->MarkNotNew(key, nullptr);
++      }
++      if (!m_filterListRequiresBody && newMessagesToDelete > 0) {
++        int32_t numNewMessages;
++        GetNumNewMessages(false, &numNewMessages);
++        SetNumNewMessages(std::max(
++            0, numNewMessages - static_cast<int32_t>(newMessagesToDelete)));
++      }
++    }
++  }
++
++  for (const auto& header : state->mHeaders) {
++    nsMsgKey key;
++    header->GetMessageKey(&key);
++    if (state->mFailedKeys.Contains(key)) {
++      nsresult rv = AddNewImapHeaderToDB(header);
++      if (NS_FAILED(rv)) {
++        finalResult = rv;
++      }
++    }
++  }
++
++  return finalResult;
++}
++
+ nsresult nsImapMailFolder::PlaybackCoalescedOperations() {
++  if (m_filterCopyState && m_filterCopyState->mPendingCopies > 0) {
++    // We must not move or delete source messages while filter copies are
++    // still reading them. The last copy completion resumes playback.
++    m_filterCopyState->mPlaybackRequested = true;
++    return NS_OK;
++  }
++  if (m_filterCopyState) {
++    m_filterCopyState->mPlaybackRequested = false;
++  }
++  nsresult deferredResult = ProcessDeferredFilterActions();
++
+   if (m_moveCoalescer) {
+     nsTArray<nsMsgKey>* junkKeysToClassify = m_moveCoalescer->GetKeyBucket(0);
+     if (junkKeysToClassify && !junkKeysToClassify->IsEmpty()) {
+       StoreCustomKeywords(m_moveCoalescer->GetMsgWindow(), "Junk"_ns,
+@@ -8321,11 +8514,12 @@ nsresult nsImapMailFolder::PlaybackCoale
+       StoreCustomKeywords(m_moveCoalescer->GetMsgWindow(), "NonJunk"_ns,
+                           EmptyCString(), *nonJunkKeysToClassify, nullptr);
+       nonJunkKeysToClassify->Clear();
+     }
+-    return m_moveCoalescer->PlaybackMoves(ShowPreviewText());
+-  }
+-  return NS_OK;  // must not be any coalesced operations
++    nsresult playbackResult = m_moveCoalescer->PlaybackMoves(ShowPreviewText());
++    return NS_FAILED(playbackResult) ? playbackResult : deferredResult;
++  }
++  return deferredResult;  // must not be any coalesced operations
+ }
+ 
+ NS_IMETHODIMP
+ nsImapMailFolder::SetJunkScoreForMessages(
+diff --git a/mailnews/imap/src/nsImapMailFolder.h b/mailnews/imap/src/nsImapMailFolder.h
+--- a/mailnews/imap/src/nsImapMailFolder.h
++++ b/mailnews/imap/src/nsImapMailFolder.h
+@@ -5,8 +5,9 @@
+ #ifndef COMM_MAILNEWS_IMAP_SRC_NSIMAPMAILFOLDER_H_
+ #define COMM_MAILNEWS_IMAP_SRC_NSIMAPMAILFOLDER_H_
+ 
+ #include "mozilla/Attributes.h"
++#include "mozilla/UniquePtr.h"
+ #include "nsIMsgDBView.h"
+ #include "nsMsgDBFolder.h"
+ #include "nsIImapMailFolderSink.h"
+ #include "nsIImapMessageSink.h"
+@@ -205,8 +206,10 @@ class nsImapMailFolder : public nsMsgDBF
+                          public nsIImapMailFolderSink,
+                          public nsIImapMessageSink,
+                          public nsICopyMessageListener,
+                          public nsIMsgFilterHitNotify {
++  struct FilterCopyState;
++
+   static const uint32_t PLAYBACK_TIMER_INTERVAL_IN_MS = 500;
+ 
+  public:
+   nsImapMailFolder();
+@@ -447,8 +450,13 @@ class nsImapMailFolder : public nsMsgDBF
+                          nsIMsgCopyServiceListener* listener,
+                          nsIMsgWindow* msgWindow, bool allowUndo);
+   nsresult GetMoveCoalescer();
+   nsresult PlaybackCoalescedOperations();
++  nsresult AddNewImapHeaderToDB(nsIMsgDBHdr* aHeader);
++  void FilterCopyStarted(nsIMsgDBHdr* aHeader);
++  void FilterCopyCompleted(nsMsgKey aKey, nsresult aStatus);
++  bool HasFilterCopy(nsMsgKey aKey) const;
++  nsresult ProcessDeferredFilterActions();
+   virtual nsresult CreateBaseMessageURI(const nsACString& aURI) override;
+   // offline-ish methods
+   nsresult GetClearedOriginalOp(nsIMsgOfflineImapOperation* op,
+                                 nsIMsgOfflineImapOperation** originalOp,
+@@ -482,8 +490,11 @@ class nsImapMailFolder : public nsMsgDBF
+   // playback moves
+   bool m_msgMovedByFilter;
+   RefPtr<nsImapMoveCoalescer>
+       m_moveCoalescer;  // strictly owned by the nsImapMailFolder
++  // Filter copies may stream source bodies asynchronously. We keep destructive
++  // actions pending until every copy has either succeeded or failed.
++  mozilla::UniquePtr<FilterCopyState> m_filterCopyState;
+   nsTArray<RefPtr<nsIMsgDBHdr>> m_junkMessagesToMarkAsRead;
+   /// list of keys to be moved to the junk folder
+   nsTArray<nsMsgKey> mSpamKeysToMove;
+   /// the junk destination folder
+diff --git a/mailnews/imap/test/unit/test_imapFilterCopyFailure.js b/mailnews/imap/test/unit/test_imapFilterCopyFailure.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_imapFilterCopyFailure.js
+@@ -0,0 +1,215 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test that a failed incoming IMAP filter copy keeps the source message and
++ * prevents the later destructive move.
++ */
++
++var { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++const MESSAGE_ID = "copy-failure@example.invalid";
++const SUCCESS_MESSAGE_ID = "copy-success@example.invalid";
++const SUCCESS_BODY = "The successful cross-account copy must be complete.";
++
++let copyDaemon;
++let copyServer;
++let copyIncomingServer;
++let copyFolder;
++let moveFolder;
++
++function getImapCommands(server) {
++  const transaction = server.playTransaction();
++  return (Array.isArray(transaction) ? transaction : [transaction])
++    .flatMap(item => item.them)
++    .map(command => command.toUpperCase());
++}
++
++function addIncomingMessage(messageId, subject, body) {
++  const generator = new MessageGenerator();
++  const message = generator.makeMessage({
++    subject,
++    body: {
++      body,
++      contentType: "text/plain",
++    },
++  });
++  message.messageId = messageId;
++  const dataUri = Services.io.newURI(
++    "data:text/plain;base64," + btoa(message.toMessageString())
++  );
++  IMAPPump.mailbox.addMessage(
++    new ImapMessage(dataUri.spec, IMAPPump.mailbox.uidnext++, [])
++  );
++}
++
++add_setup(async function () {
++  setupIMAPPump("MOVE,RFC4315");
++  Services.prefs.setBoolPref(
++    "mail.server.default.autosync_offline_stores",
++    false
++  );
++
++  const moveFolderAdded = PromiseTestUtils.promiseFolderAdded("Moved");
++  IMAPPump.incomingServer.rootFolder.createSubfolder("Moved", null);
++  await moveFolderAdded;
++  moveFolder = IMAPPump.incomingServer.rootFolder
++    .getChildNamed("Moved")
++    .QueryInterface(Ci.nsIMsgImapMailFolder);
++
++  copyDaemon = new ImapDaemon();
++  copyServer = makeServer(copyDaemon, "RFC4315");
++  copyIncomingServer = createLocalIMAPServer(copyServer.port, "127.0.0.1");
++  copyIncomingServer.maximumConnectionsNumber = 1;
++
++  const copyFolderAdded = PromiseTestUtils.promiseFolderAdded("Copies");
++  copyIncomingServer.rootFolder.createSubfolder("Copies", null);
++  await copyFolderAdded;
++  copyFolder = copyIncomingServer.rootFolder
++    .getChildNamed("Copies")
++    .QueryInterface(Ci.nsIMsgImapMailFolder);
++
++  const filterList = IMAPPump.incomingServer.getFilterList(null);
++  const filter = filterList.createFilter("copy failure preserves source");
++  const term = filter.createTerm();
++  term.matchAll = true;
++  filter.appendTerm(term);
++
++  const copyAction = filter.createAction();
++  copyAction.type = Ci.nsMsgFilterAction.CopyToFolder;
++  copyAction.targetFolderUri = copyFolder.URI;
++  filter.appendAction(copyAction);
++
++  const moveAction = filter.createAction();
++  moveAction.type = Ci.nsMsgFilterAction.MoveToFolder;
++  moveAction.targetFolderUri = moveFolder.URI;
++  filter.appendAction(moveAction);
++
++  filter.enabled = true;
++  filterList.insertFilterAt(0, filter);
++
++  registerCleanupFunction(() => {
++    Services.prefs.clearUserPref("mail.server.default.autosync_offline_stores");
++    copyIncomingServer.closeCachedConnections();
++    MailServices.accounts.removeIncomingServer(copyIncomingServer, false);
++    copyServer.stop();
++    teardownIMAPPump();
++  });
++});
++
++add_task(async function testFailedCopyPreventsMove() {
++  addIncomingMessage(
++    MESSAGE_ID,
++    "Filtered copy failure",
++    "Source body must remain available."
++  );
++
++  copyDaemon.commandToFail = "APPEND";
++  const updateListener = new PromiseTestUtils.PromiseUrlListener();
++  IMAPPump.inbox.updateFolderWithListener(null, updateListener);
++  await updateListener.promise;
++
++  await TestUtils.waitForCondition(() => {
++    const copyStarted = getImapCommands(copyServer).some(command =>
++      command.includes("APPEND")
++    );
++    const moveStarted = getImapCommands(IMAPPump.server).some(command =>
++      command.includes("UID MOVE")
++    );
++    return copyStarted || moveStarted;
++  }, "the copy or the later move should start");
++  Assert.ok(
++    !getImapCommands(IMAPPump.server).some(command =>
++      command.includes("UID MOVE")
++    ),
++    "a pending or failed copy should prevent the destructive move"
++  );
++  Assert.ok(
++    getImapCommands(copyServer).some(command => command.includes("APPEND")),
++    "the cross-account copy should attempt an APPEND"
++  );
++  await TestUtils.waitForCondition(
++    () => IMAPPump.inbox.getTotalMessages(false) == 1,
++    "the source header should remain after the copy fails"
++  );
++
++  Assert.equal(
++    copyFolder.getTotalMessages(false),
++    0,
++    "the failed destination should contain no message"
++  );
++  Assert.equal(
++    moveFolder.getTotalMessages(false),
++    0,
++    "the move destination should contain no message"
++  );
++  Assert.notEqual(
++    IMAPPump.inbox.msgDatabase.getMsgHdrForMessageID(MESSAGE_ID),
++    null,
++    "the failed copy's source header should remain in the Inbox"
++  );
++});
++
++add_task(async function testSuccessfulCopyAllowsMove() {
++  copyDaemon.commandToFail = "";
++  addIncomingMessage(SUCCESS_MESSAGE_ID, "Filtered copy success", SUCCESS_BODY);
++
++  const updateListener = new PromiseTestUtils.PromiseUrlListener();
++  IMAPPump.inbox.updateFolderWithListener(null, updateListener);
++  await updateListener.promise;
++
++  await TestUtils.waitForCondition(() => {
++    const appendCount = getImapCommands(copyServer).filter(command =>
++      command.includes("APPEND")
++    ).length;
++    const moveStarted = getImapCommands(IMAPPump.server).some(command =>
++      command.includes("UID MOVE")
++    );
++    return appendCount == 2 && moveStarted;
++  }, "the successful copy should finish before the move starts");
++
++  const copyUpdateListener = new PromiseTestUtils.PromiseUrlListener();
++  copyFolder.updateFolderWithListener(null, copyUpdateListener);
++  await copyUpdateListener.promise;
++  const moveUpdateListener = new PromiseTestUtils.PromiseUrlListener();
++  moveFolder.updateFolderWithListener(null, moveUpdateListener);
++  await moveUpdateListener.promise;
++
++  const copiedHeader =
++    copyFolder.msgDatabase.getMsgHdrForMessageID(SUCCESS_MESSAGE_ID);
++  Assert.notEqual(
++    copiedHeader,
++    null,
++    "the successful cross-account copy should reach its destination"
++  );
++  const copiedMessageUri = copyFolder.getUriForMsg(copiedHeader);
++  const streamListener = new PromiseTestUtils.PromiseStreamListener();
++  MailServices.messageServiceFromURI(copiedMessageUri).streamMessage(
++    copiedMessageUri,
++    streamListener,
++    null,
++    null,
++    false,
++    "",
++    false
++  );
++  const copiedMessage = await streamListener.promise;
++  Assert.stringContains(
++    copiedMessage,
++    SUCCESS_BODY,
++    "the successful cross-account copy should retain its complete body"
++  );
++  Assert.notEqual(
++    moveFolder.msgDatabase.getMsgHdrForMessageID(SUCCESS_MESSAGE_ID),
++    null,
++    "the source message should move after the successful copy"
++  );
++  Assert.notEqual(
++    IMAPPump.inbox.msgDatabase.getMsgHdrForMessageID(MESSAGE_ID),
++    null,
++    "the earlier failed copy's source message should remain"
++  );
++});
+diff --git a/mailnews/imap/test/unit/test_imapFilterCopyThenDelete.js b/mailnews/imap/test/unit/test_imapFilterCopyThenDelete.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_imapFilterCopyThenDelete.js
+@@ -0,0 +1,142 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test that incoming IMAP filters finish copying every message before
++ * marking any source message deleted.
++ */
++
++var { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++const MESSAGE_COUNT = 3;
++const MESSAGE_IDS = Array.from(
++  { length: MESSAGE_COUNT },
++  (_, index) => `copy-before-delete-${index + 1}@example.invalid`
++);
++const BODY_SENTINELS = Array.from(
++  { length: MESSAGE_COUNT },
++  (_, index) => `Complete body before filtered delete ${index + 1}.`
++);
++
++let copyFolder;
++
++function getImapCommands() {
++  const transaction = IMAPPump.server.playTransaction();
++  return (Array.isArray(transaction) ? transaction : [transaction])
++    .flatMap(item => item.them)
++    .map(command => command.toUpperCase());
++}
++
++add_setup(async function () {
++  setupIMAPPump();
++  Services.prefs.setBoolPref(
++    "mail.server.default.autosync_offline_stores",
++    false
++  );
++  IMAPPump.incomingServer.deleteModel = Ci.nsMsgImapDeleteModels.IMAPDelete;
++
++  const copyFolderAdded =
++    PromiseTestUtils.promiseFolderAdded("Filtered copies");
++  copyFolder =
++    localAccountUtils.rootFolder.createLocalSubfolder("Filtered copies");
++  await copyFolderAdded;
++
++  const filterList = IMAPPump.incomingServer.getFilterList(null);
++  const filter = filterList.createFilter("copy before delete");
++  const term = filter.createTerm();
++  term.matchAll = true;
++  filter.appendTerm(term);
++
++  const copyAction = filter.createAction();
++  copyAction.type = Ci.nsMsgFilterAction.CopyToFolder;
++  copyAction.targetFolderUri = copyFolder.URI;
++  filter.appendAction(copyAction);
++
++  const deleteAction = filter.createAction();
++  deleteAction.type = Ci.nsMsgFilterAction.Delete;
++  filter.appendAction(deleteAction);
++
++  filter.enabled = true;
++  filterList.insertFilterAt(0, filter);
++
++  registerCleanupFunction(() => {
++    Services.prefs.clearUserPref("mail.server.default.autosync_offline_stores");
++    teardownIMAPPump();
++  });
++});
++
++add_task(async function testCopyFinishesBeforeDelete() {
++  const generator = new MessageGenerator();
++  for (let index = 0; index < MESSAGE_COUNT; index++) {
++    const message = generator.makeMessage({
++      subject: `Filtered delete ${index + 1}`,
++      body: {
++        body: BODY_SENTINELS[index],
++        contentType: "text/plain",
++      },
++    });
++    message.messageId = MESSAGE_IDS[index];
++    const dataUri = Services.io.newURI(
++      "data:text/plain;base64," + btoa(message.toMessageString())
++    );
++    IMAPPump.mailbox.addMessage(
++      new ImapMessage(dataUri.spec, IMAPPump.mailbox.uidnext++, [])
++    );
++  }
++
++  const updateListener = new PromiseTestUtils.PromiseUrlListener();
++  IMAPPump.inbox.updateFolderWithListener(null, updateListener);
++  await updateListener.promise;
++
++  await TestUtils.waitForCondition(() => {
++    const commands = getImapCommands();
++    const bodyFetchCount = commands
++      .filter(command => command.includes("UID FETCH"))
++      .filter(command => command.includes("BODY.PEEK[]")).length;
++    const hasDelete = commands.some(
++      command => command.includes("UID STORE") && command.includes("\\DELETED")
++    );
++    return bodyFetchCount == MESSAGE_COUNT && hasDelete;
++  }, "all body fetches and the filtered delete should run");
++
++  const commands = getImapCommands();
++  const bodyFetchIndexes = commands
++    .map((command, index) => [command, index])
++    .filter(([command]) => command.includes("UID FETCH"))
++    .filter(([command]) => command.includes("BODY.PEEK[]"))
++    .map(([, index]) => index);
++  const firstDeleteIndex = commands.findIndex(
++    command => command.includes("UID STORE") && command.includes("\\DELETED")
++  );
++
++  Assert.equal(
++    bodyFetchIndexes.length,
++    MESSAGE_COUNT,
++    "each message should have one full-body fetch"
++  );
++  Assert.greater(
++    firstDeleteIndex,
++    bodyFetchIndexes.at(-1),
++    "the destructive delete should follow every body fetch"
++  );
++
++  await TestUtils.waitForCondition(
++    () => copyFolder.getTotalMessages(false) == MESSAGE_COUNT,
++    "all filtered copies should finish"
++  );
++  for (let index = 0; index < MESSAGE_COUNT; index++) {
++    const header = copyFolder.msgDatabase.getMsgHdrForMessageID(
++      MESSAGE_IDS[index]
++    );
++    Assert.notEqual(header, null, `${MESSAGE_IDS[index]} should be copied`);
++    const copiedMessage = mailTestUtils.loadMessageToString(copyFolder, header);
++    Assert.stringContains(
++      copiedMessage,
++      BODY_SENTINELS[index],
++      `${MESSAGE_IDS[index]} should retain its complete body`
++    );
++  }
++});
+diff --git a/mailnews/imap/test/unit/test_imapFilterCopyThenMove.js b/mailnews/imap/test/unit/test_imapFilterCopyThenMove.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_imapFilterCopyThenMove.js
+@@ -0,0 +1,176 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test that incoming IMAP filters finish copying every message before a
++ * destructive move of the source messages begins.
++ */
++
++var { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++const MESSAGE_COUNT = 3;
++const MESSAGE_IDS = Array.from(
++  { length: MESSAGE_COUNT },
++  (_, index) => `copy-before-move-${index + 1}@example.invalid`
++);
++const BODY_SENTINELS = Array.from(
++  { length: MESSAGE_COUNT },
++  (_, index) => `Complete body for filtered message ${index + 1}.`
++);
++
++let copyFolder;
++let moveFolder;
++
++function getImapCommands() {
++  const transaction = IMAPPump.server.playTransaction();
++  return (Array.isArray(transaction) ? transaction : [transaction])
++    .flatMap(item => item.them)
++    .map(command => command.toUpperCase());
++}
++
++add_setup(async function () {
++  setupIMAPPump("MOVE,RFC4315");
++  Services.prefs.setBoolPref(
++    "mail.server.default.autosync_offline_stores",
++    false
++  );
++
++  const copyFolderAdded =
++    PromiseTestUtils.promiseFolderAdded("Filtered copies");
++  copyFolder =
++    localAccountUtils.rootFolder.createLocalSubfolder("Filtered copies");
++  await copyFolderAdded;
++
++  IMAPPump.inbox.hierarchyDelimiter = "/";
++  IMAPPump.inbox.verifiedAsOnlineFolder = true;
++  const moveFolderAdded = PromiseTestUtils.promiseFolderAdded("Moved");
++  IMAPPump.incomingServer.rootFolder.createSubfolder("Moved", null);
++  await moveFolderAdded;
++  moveFolder = IMAPPump.incomingServer.rootFolder
++    .getChildNamed("Moved")
++    .QueryInterface(Ci.nsIMsgImapMailFolder);
++
++  const filterList = IMAPPump.incomingServer.getFilterList(null);
++  const filter = filterList.createFilter("copy before move");
++  const term = filter.createTerm();
++  term.matchAll = true;
++  filter.appendTerm(term);
++
++  const copyAction = filter.createAction();
++  copyAction.type = Ci.nsMsgFilterAction.CopyToFolder;
++  copyAction.targetFolderUri = copyFolder.URI;
++  filter.appendAction(copyAction);
++
++  const moveAction = filter.createAction();
++  moveAction.type = Ci.nsMsgFilterAction.MoveToFolder;
++  moveAction.targetFolderUri = moveFolder.URI;
++  filter.appendAction(moveAction);
++
++  filter.enabled = true;
++  filterList.insertFilterAt(0, filter);
++
++  registerCleanupFunction(() => {
++    Services.prefs.clearUserPref("mail.server.default.autosync_offline_stores");
++    teardownIMAPPump();
++  });
++});
++
++add_task(async function testCopyFinishesBeforeMove() {
++  const generator = new MessageGenerator();
++  for (let index = 0; index < MESSAGE_COUNT; index++) {
++    const message = generator.makeMessage({
++      subject: `Filtered message ${index + 1}`,
++      body: {
++        body: BODY_SENTINELS[index],
++        contentType: "text/plain",
++      },
++    });
++    message.messageId = MESSAGE_IDS[index];
++    const dataUri = Services.io.newURI(
++      "data:text/plain;base64," + btoa(message.toMessageString())
++    );
++    IMAPPump.mailbox.addMessage(
++      new ImapMessage(dataUri.spec, IMAPPump.mailbox.uidnext++, [])
++    );
++  }
++
++  const updateListener = new PromiseTestUtils.PromiseUrlListener();
++  IMAPPump.inbox.updateFolderWithListener(null, updateListener);
++  await updateListener.promise;
++
++  await TestUtils.waitForCondition(() => {
++    const commands = getImapCommands();
++    const bodyFetchCount = commands
++      .filter(command => command.includes("UID FETCH"))
++      .filter(command => command.includes("BODY.PEEK[]")).length;
++    const hasMove = commands.some(command => command.includes("UID MOVE"));
++    return bodyFetchCount == MESSAGE_COUNT && hasMove;
++  }, "all body fetches and the filtered move should run");
++  const commands = getImapCommands();
++  const bodyFetchIndexes = commands
++    .map((command, index) => [command, index])
++    .filter(([command]) => command.includes("UID FETCH"))
++    .filter(([command]) => command.includes("BODY.PEEK[]"))
++    .map(([, index]) => index);
++  const firstMoveIndex = commands.findIndex(command =>
++    command.includes("UID MOVE")
++  );
++
++  Assert.equal(
++    bodyFetchIndexes.length,
++    MESSAGE_COUNT,
++    "each message should have one full-body fetch"
++  );
++  Assert.greater(
++    firstMoveIndex,
++    bodyFetchIndexes.at(-1),
++    "the destructive move should follow every body fetch"
++  );
++
++  await TestUtils.waitForCondition(
++    () => copyFolder.getTotalMessages(false) == MESSAGE_COUNT,
++    "all filtered copies should finish"
++  );
++
++  for (let index = 0; index < MESSAGE_COUNT; index++) {
++    const header = copyFolder.msgDatabase.getMsgHdrForMessageID(
++      MESSAGE_IDS[index]
++    );
++    Assert.notEqual(header, null, `${MESSAGE_IDS[index]} should be copied`);
++    const copiedMessage = mailTestUtils.loadMessageToString(copyFolder, header);
++    Assert.stringContains(
++      copiedMessage,
++      BODY_SENTINELS[index],
++      `${MESSAGE_IDS[index]} should retain its complete body`
++    );
++  }
++
++  await TestUtils.waitForCondition(
++    () => IMAPPump.inbox.getTotalMessages(false) == 0,
++    "the filtered move should finish"
++  );
++  const moveUpdateListener = new PromiseTestUtils.PromiseUrlListener();
++  moveFolder.updateFolderWithListener(null, moveUpdateListener);
++  await moveUpdateListener.promise;
++
++  Assert.equal(
++    IMAPPump.inbox.getTotalMessages(false),
++    0,
++    "the source Inbox should be empty after the copies finish"
++  );
++  Assert.equal(
++    moveFolder.getTotalMessages(false),
++    MESSAGE_COUNT,
++    "every source message should reach the move destination"
++  );
++  for (const messageId of MESSAGE_IDS) {
++    Assert.notEqual(
++      moveFolder.msgDatabase.getMsgHdrForMessageID(messageId),
++      null,
++      `${messageId} should be moved`
++    );
++  }
++});
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -64,8 +64,14 @@ tags = ["foldernames"]
+ ["test_imapFilterActions.js"]
+ 
+ ["test_imapFilterActionsPostplugin.js"]
+ 
++["test_imapFilterCopyFailure.js"]
++
++["test_imapFilterCopyThenDelete.js"]
++
++["test_imapFilterCopyThenMove.js"]
++
+ ["test_imapFlagChange.js"]
+ 
+ ["test_imapFolderCopy.js"]
+ 

@@ -1,0 +1,174 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1786684111 0
+# Node ID 0518d8672162404900f722633c48013a707890a9
+# Parent  f582b42e83e54e294df46d8a0d669d7aa0db0e61
+Bug 2060763 - Fix lost IMAP subfolder subscriptions during subscribe/unsubscribe. r=mkmelin
+
+The subscribe/unsubscribe URL only holds weak references to the folder's
+sinks, and SubscribeCleanup() can release the folder (e.g. a not-yet-
+subscribed subfolder that isn't part of the folder tree) before its URL runs
+on the IMAP thread. SetupSinkProxy() then fails to obtain a folder sink and
+the SUBSCRIBE is silently dropped, so subscribing a folder together with one
+of its subfolders only subscribed the folder.
+
+Keep the folder alive for the lifetime of the URL by passing a keep-alive
+nsIUrlListener that holds a strong reference to it. Also fail explicitly with
+NS_MSG_ERROR_FOLDER_MISSING if the folder can't be resolved, instead of
+passing null down into the URL creation.
+
+Add a regression test that subscribes a folder and one of its subfolders in a
+single operation and verifies both end up subscribed.
+
+Differential Revision: https://phabricator.services.mozilla.com/D316653
+
+
+diff --git a/mailnews/imap/src/nsImapIncomingServer.cpp b/mailnews/imap/src/nsImapIncomingServer.cpp
+--- a/mailnews/imap/src/nsImapIncomingServer.cpp
++++ b/mailnews/imap/src/nsImapIncomingServer.cpp
+@@ -27,16 +27,17 @@
+ #include "nsMsgI18N.h"
+ #include "nsIImapMockChannel.h"
+ // for the memory cache...
+ #include "nsICacheEntry.h"
+ #include "nsImapUrl.h"
+ #include "nsIMsgMailSession.h"
+ #include "nsImapNamespace.h"
+ #include "nsMsgUtils.h"
++#include "UrlListener.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsComponentManagerUtils.h"
+ #include "mozilla/Components.h"
+ #include "nsNetUtil.h"
+ #include "nsIPrompt.h"
+ #include "nsEmbedCID.h"
+ #include "nsIPromptService.h"
+ #include "mozilla/Utf8.h"
+@@ -2349,24 +2350,35 @@ nsImapIncomingServer::SubscribeToFolder(
+ 
+   // Locate the folder so that the correct hierarchical delimiter is used in the
+   // folder pathnames, otherwise root's (ie, '^') is used and this is wrong.
+ 
+   // aName is not a genuine UTF-16 but just a zero-padded MUTF-7.
+   nsCOMPtr<nsIMsgFolder> msgFolder;
+   if (rootMsgFolder && !aName.IsEmpty())
+     rv = rootMsgFolder->FindSubFolder(aName, getter_AddRefs(msgFolder));
+-
+-  nsCOMPtr<nsIThread> thread(do_GetCurrentThread());
+-
+-  if (subscribe)
+-    rv = imapService->SubscribeFolder(msgFolder, aName, nullptr, aUri);
+-  else
+-    rv = imapService->UnsubscribeFolder(msgFolder, aName, nullptr, nullptr);
+-
++  if (!msgFolder) {
++    NS_WARNING("SubscribeToFolder: could not resolve folder");
++    return NS_MSG_ERROR_FOLDER_MISSING;
++  }
++
++  // The subscribe URL holds only weak references to folder sinks. Keep the
++  // folder alive for the URL's lifetime to prevent a premature release.
++  RefPtr<UrlListener> keepAlive = new UrlListener();
++  keepAlive->mStopFn = [folder = RefPtr<nsIMsgFolder>(msgFolder)](
++                           nsIURI* aUrl, nsresult aStatus) -> nsresult {
++    (void)folder;
++    return NS_OK;
++  };
++
++  if (subscribe) {
++    rv = imapService->SubscribeFolder(msgFolder, aName, keepAlive, aUri);
++  } else {
++    rv = imapService->UnsubscribeFolder(msgFolder, aName, keepAlive, nullptr);
++  }
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsImapIncomingServer::SetDoingLsub(bool doingLsub) {
+   mDoingLsub = doingLsub;
+   return NS_OK;
+ }
+diff --git a/mailnews/imap/test/unit/test_subscribeWithSubfolder.js b/mailnews/imap/test/unit/test_subscribeWithSubfolder.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_subscribeWithSubfolder.js
+@@ -0,0 +1,60 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that subscribing a folder and a subfolder together (as the Subscribe
++ * dialog does) correctly subscribes both.
++ */
++
++const { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++add_setup(async function () {
++  setupIMAPPump();
++
++  // Neither the folder nor its subfolder is subscribed initially.
++  IMAPPump.daemon.createMailbox("A");
++  IMAPPump.daemon.createMailbox("A/B");
++
++  // Give the initial discovery time to complete.
++  await PromiseTestUtils.promiseDelay(1000);
++});
++
++add_task(async function testSubscribeFolderAndSubfolderTogether() {
++  const subscribableServer = IMAPPump.incomingServer.QueryInterface(
++    Ci.nsISubscribableServer
++  );
++
++  // Subscribe the folder and its subfolder in a single operation, like the
++  // subscribe dialog does when the user checks both.
++  subscribableServer.subscribe("A");
++  subscribableServer.subscribe("A/B");
++  subscribableServer.commitSubscribeChanges();
++
++  // commitSubscribeChanges() triggers a re-discovery on the IMAP connection,
++  // so wait for both folders to show up in the folder tree.
++  const rootFolder = IMAPPump.incomingServer.rootFolder;
++  await TestUtils.waitForCondition(
++    () => rootFolder.containsChildNamed("A"),
++    "timed out waiting for folder A to appear after subscribing"
++  );
++
++  const folderA = rootFolder.getChildNamed("A");
++  Assert.notEqual(folderA, null, "folder A should be subscribed");
++
++  await TestUtils.waitForCondition(
++    () => folderA.containsChildNamed("B"),
++    "timed out waiting for subfolder A/B to appear after subscribing"
++  );
++  Assert.notEqual(
++    folderA.getChildNamed("B"),
++    null,
++    "subfolder A/B should be subscribed"
++  );
++});
++
++add_task(function endTest() {
++  teardownIMAPPump();
++});
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -156,11 +156,13 @@ tags = ["compact"]
+ ["test_stopMovingToLocalFolder.js"]
+ 
+ ["test_storeCustomKeywords.js"]
+ 
+ ["test_subfolderLocation.js"]
+ 
+ ["test_subscribeNoSummaryFile.js"]
+ 
++["test_subscribeWithSubfolder.js"]
++
+ ["test_syncChanges.js"]
+ 
+ ["test_trustSpamAssassin.js"]
+

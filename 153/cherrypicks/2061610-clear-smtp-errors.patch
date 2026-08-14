@@ -1,0 +1,214 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1786394414 0
+# Node ID d385eba6812b3804d3b5756e349d72ec9eb3a993
+# Parent  1546683166ce704f52dc3cd693cecde1ed883d44
+Bug 2061610 - Prevent SMTP errors from needlessly blocking future sends. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D316994
+
+
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -518,18 +518,16 @@ export class SmtpClient {
+    */
+   _onError = async event => {
+     this.logger.error(`${event.name}: a ${event.message} error occurred`);
+     if (this._freed) {
+       // Ignore socket errors if already freed.
+       return;
+     }
+ 
+-    this._free(true); // true => call quit() before freeing.
+-
+     let nsError = Cr.NS_ERROR_FAILURE;
+     let secInfo = null;
+     if (TCPSocketErrorEvent.isInstance(event)) {
+       nsError = event.errorCode;
+       secInfo =
+         await event.target.transport?.tlsSocketControl?.asyncGetSecurityInfo();
+       if (secInfo) {
+         this.logger.error(`SecurityError info: ${secInfo.errorCodeString}`);
+@@ -540,17 +538,18 @@ export class SmtpClient {
+           this.logger.error(`SecurityError cert chain: ${chain.join(" <- ")}`);
+         }
+         this._server.closeCachedConnections();
+       }
+     }
+ 
+     // Use nsresult to integrate with other parts of sending process, e.g.
+     // MessageSend.sys.mjs will show an error message depending on the nsresult.
+-    this.onerror(nsError, "", secInfo);
++    await this.onerror(nsError, "", secInfo);
++    this._free(true); // true => call quit() before freeing.
+   };
+ 
+   /**
+    * Error handler. Emits an nsresult value.
+    *
+    * @param {string} error - An error code for l10n.
+    * @param {string} errorParam - Param to form the error message.
+    * @param {string} [extra] - Some messages take two arguments to format.
+@@ -572,16 +571,19 @@ export class SmtpClient {
+           this.isRetry = true; // flag that we will retry on new connection
+           this.close(true);
+           this.connect();
+           return; // return without reporting the error yet
+         }
+       }
+     }
+ 
++    // A failed retry run must not suppress retries for later unrelated messages.
++    this.isRetry = false;
++
+     const bundle = Services.strings.createBundle(
+       "chrome://messenger/locale/messengercompose/composeMsgs.properties"
+     );
+     this.onerror(
+       Cr.NS_ERROR_FAILURE,
+       bundle.formatStringFromName(error, [errorParam, extra])
+     );
+     this.close();
+diff --git a/mailnews/compose/test/unit/test_smtpClient.js b/mailnews/compose/test/unit/test_smtpClient.js
+--- a/mailnews/compose/test/unit/test_smtpClient.js
++++ b/mailnews/compose/test/unit/test_smtpClient.js
+@@ -139,8 +139,136 @@ add_task(async function testDeduplicateR
+   do_check_transaction(transaction, [
+     "EHLO test",
+     "MAIL FROM:<from@foo.invalid> BODY=8BITMIME SIZE=159",
+     "RCPT TO:<to1@foo.invalid>",
+     "RCPT TO:<to2@foo.invalid>",
+     "DATA",
+   ]);
+ });
++
++/**
++ * Test that each queued send receives its own terminal status on connection
++ * failure.
++ */
++add_task(async function testQueuedSendErrors() {
++  const failedServer = setupServerDaemon();
++  failedServer.start();
++  registerCleanupFunction(() => failedServer.stop());
++
++  const smtpServer = getBasicSmtpServer(failedServer.port);
++  const identity = getSmtpIdentity("sender@example.invalid", smtpServer);
++
++  // One client makes the second send wait. Limiting each connection to a
++  // single message makes the client QUIT and release its connection as part
++  // of completing the first send, so the later sends deterministically open
++  // fresh connections to the stopped server instead of reusing a pooled
++  // connection or racing a delayed QUIT timer.
++  Services.prefs.setIntPref(
++    "mail.smtpserver.default.max_cached_connections",
++    1
++  );
++  Services.prefs.setIntPref(
++    "mail.smtpserver.default.max_messages_per_connection",
++    1
++  );
++
++  const send = label => {
++    let resolveSendStop;
++    const sendStopPromise = new Promise(resolve => {
++      resolveSendStop = resolve;
++    });
++    const listener = {
++      onSendStart() {},
++      onSendStop(uri, status) {
++        resolveSendStop({ label, status });
++      },
++    };
++    smtpServer.sendMailMessage(
++      do_get_file("data/message1.eml"),
++      MailServices.headerParser.parseEncodedHeaderW(
++        "recipient@example.invalid"
++      ),
++      [],
++      identity,
++      "sender@example.invalid",
++      null,
++      null,
++      false,
++      `<${label}@example.invalid>`,
++      listener
++    );
++    return sendStopPromise;
++  };
++
++  const { status: firstStatus } = await send("first");
++  Assert.equal(firstStatus, Cr.NS_OK, "first send should succeed");
++
++  failedServer.stop();
++
++  const results = await Promise.all([send("second"), send("third")]);
++  Assert.deepEqual(
++    results.map(({ label }) => label).sort(),
++    ["second", "third"],
++    "each queued send should receive a terminal status"
++  );
++  for (const { label, status } of results) {
++    Assert.equal(
++      status,
++      Cr.NS_ERROR_CONNECTION_REFUSED,
++      `${label} send should fail with a connection error`
++    );
++  }
++});
++
++/**
++ * A failed 4xx retry must not disable retry for later messages on the client.
++ */
++add_task(async function testTransientFailureRetryPerMessage() {
++  let mailAttempts = 0;
++  const transientServer = setupServerDaemon(d => {
++    /**
++     *
++     */
++    class Handler extends SMTP_RFC2821_handler {
++      MAIL() {
++        mailAttempts++;
++        return "451 Requested action aborted: local error in processing";
++      }
++    }
++    return new Handler(d);
++  });
++  transientServer.start();
++  registerCleanupFunction(() => transientServer.stop());
++
++  const smtpServer = getBasicSmtpServer(transientServer.port);
++  const identity = getSmtpIdentity("sender@example.invalid", smtpServer);
++
++  const send = () => {
++    const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
++    smtpServer.sendMailMessage(
++      do_get_file("data/message1.eml"),
++      MailServices.headerParser.parseEncodedHeaderW(
++        "recipient@example.invalid"
++      ),
++      [],
++      identity,
++      "sender@example.invalid",
++      null,
++      null,
++      false,
++      `<msg-${mailAttempts}@example.invalid>`,
++      listener
++    );
++    return listener.promise.catch(() => {});
++  };
++
++  await send();
++  const afterFirst = mailAttempts;
++  Assert.equal(afterFirst, 2, "first message is tried twice");
++
++  await send();
++  Assert.equal(
++    mailAttempts - afterFirst,
++    2,
++    "second message gets its own retry"
++  );
++});
+

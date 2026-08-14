@@ -1,0 +1,247 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1786185763 0
+# Node ID b60ce3923d346b37ac49a2669a3408f2d7162c75
+# Parent  5b8ec1eebf1ce326678190d42f74e788428e2fc7
+Bug 2061085 - Tear down SMTP connections still open after QUIT. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D316721
+
+
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -26,16 +26,23 @@
+  */
+ 
+ import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ import { MailStringUtils } from "resource:///modules/MailStringUtils.sys.mjs";
+ import { MsgUtils } from "resource:///modules/MimeMessageUtils.sys.mjs";
+ import { setTimeout, clearTimeout } from "resource://gre/modules/Timer.sys.mjs";
+ import { SmtpAuthenticator } from "resource:///modules/MailAuthenticator.sys.mjs";
+ 
++// How long to wait for the server to close the connection after we send QUIT.
++// Per RFC 5321 the server does the closing, but a server we can no longer reach
++// never will, so we force close it here to avoid keeping a dead socket around for reuse.
++// 5s is above the highest conceivable latency for this on earth, and if this is
++// still exceeded, no harm is done.
++const QUIT_CLOSE_TIMEOUT_MS = 5000;
++
+ export class SmtpClient {
+   /**
+    * Set true only when doing a retry. (Also used in SmtpServer)
+    */
+   isRetry = false;
+ 
+   /**
+    * Creates a connection object to a SMTP server and allows to send mail through it.
+@@ -125,16 +132,19 @@ export class SmtpClient {
+    * send the message. This occurs each time a message is sent.
+    */
+   connect() {
+     // First, clear the QUIT delay timer if it's running.
+     if (this._quitTimer) {
+       clearTimeout(this._quitTimer);
+       this._quitTimer = null;
+     }
++    // A close still pending from an earlier QUIT must not close the socket we
++    // are about to use.
++    this._clearQuitCloseTimer();
+ 
+     const isSocketOpen = this.socket?.readyState == "open";
+     if (isSocketOpen && this._reuseConnection) {
+       this.logger.debug("Reusing a connection");
+       this.onidle();
+     } else {
+       // Socket is not open OR connection is not to be reused. If the connection
+       // is still open, probably because QUIT has not yet caused the connection
+@@ -168,21 +178,33 @@ export class SmtpClient {
+     this._freed = false;
+   }
+ 
+   /**
+    * Sends QUIT.
+    * Ignore the response to QUIT (i.e., "221 <text>") since connection is done.
+    * Also, don't do close() which confuses the server since, per RFC, the
+    * connection close is be initiated by the server after receiving QUIT.
++   * A server we can no longer reach never closes it, so fall back to closing
++   * it here instead of leaving a dead socket for the next message to reuse.
+    */
+   quit() {
+     this._authenticating = false;
+     this._currentAction = null; // Do no action after response to QUIT.
+     this._sendCommand("QUIT");
++    this._clearQuitCloseTimer();
++    this._quitCloseTimer = setTimeout(() => {
++      this._quitCloseTimer = null;
++      this.logger.debug(
++        `Server did not close after QUIT within ${
++          QUIT_CLOSE_TIMEOUT_MS / 1000
++        }s, tearing it down ourselves.`
++      );
++      this.close(true);
++    }, QUIT_CLOSE_TIMEOUT_MS);
+   }
+ 
+   /**
+    * Closes the connection to the server
+    *
+    * @param {boolean} [immediately] - Close the socket without waiting for
+    *   unsent data.
+    */
+@@ -198,16 +220,27 @@ export class SmtpClient {
+         this.socket.close();
+       }
+     } else {
+       this.logger.debug(`Connection to ${this._server.hostname} closed`);
+       this._free();
+     }
+   }
+ 
++  /**
++   * Stop the timer that closes the connection when the server does not close
++   * it after QUIT.
++   */
++  _clearQuitCloseTimer() {
++    if (this._quitCloseTimer) {
++      clearTimeout(this._quitCloseTimer);
++      this._quitCloseTimer = null;
++    }
++  }
++
+   // Mail related methods
+ 
+   /**
+    * Initiates a new message by submitting envelope data, starting with
+    * `MAIL FROM:` command. Use after `onidle` event
+    *
+    * @param {object} envelope - The envelope object.
+    * @param {string} envelope.from - The from address.
+@@ -556,16 +589,17 @@ export class SmtpClient {
+ 
+   /**
+    * Callback from network signaling that the socket is now closed
+    *
+    * @param {boolean} [doFree = true] - Don't call _free when false.
+    */
+   _onClose = (doFree = true) => {
+     this.logger.debug("Socket closed.");
++    this._clearQuitCloseTimer();
+     if (doFree) {
+       this._free();
+     }
+     if (this._authenticating) {
+       // In some cases, socket is closed for invalid username/password.
+       this._onAuthFailed({ data: "Socket closed." });
+     }
+   };
+diff --git a/mailnews/compose/test/unit/test_smtpQuitClose.js b/mailnews/compose/test/unit/test_smtpQuitClose.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/compose/test/unit/test_smtpQuitClose.js
+@@ -0,0 +1,81 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test that we close the connection ourselves when the server answers QUIT but
++ * never closes the connection, which is what a server we can no longer reach
++ * looks like.
++ */
++
++const { PromiseTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
++);
++const { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++/**
++ * Answers QUIT with 221 but leaves the connection open, like a server we can
++ * no longer reach.
++ */
++class SMTP_no_close_on_quit_handler extends SMTP_RFC2821_handler {
++  QUIT() {
++    return "221 done";
++  }
++}
++
++const server = setupServerDaemon(d => new SMTP_no_close_on_quit_handler(d));
++server.start();
++registerCleanupFunction(() => {
++  server.stop();
++});
++
++add_task(async function testCloseAfterUnansweredQuit() {
++  server.resetTest();
++  const smtpServer = getBasicSmtpServer(server.port);
++  const identity = getSmtpIdentity("sender@example.invalid", smtpServer);
++
++  // Send QUIT right after the message instead of keeping the connection for a
++  // second message.
++  Services.prefs.setIntPref(
++    "mail.smtpserver.default.max_messages_per_connection",
++    1
++  );
++
++  const messageId = Cc["@mozilla.org/messengercompose/computils;1"]
++    .createInstance(Ci.nsIMsgCompUtils)
++    .msgGenerateMessageId(identity, null);
++
++  const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
++  const testFile = do_get_file("data/message1.eml");
++  smtpServer.sendMailMessage(
++    testFile,
++    MailServices.headerParser.parseEncodedHeaderW("recipient@example.invalid"),
++    [],
++    identity,
++    "sender@example.invalid",
++    null,
++    null,
++    false,
++    messageId,
++    listener
++  );
++
++  await listener.promise;
++
++  const pool = smtpServer.wrappedJSObject;
++  await TestUtils.waitForCondition(
++    () => pool._freeConnections.length == 1,
++    "the client should be back in the pool after sending"
++  );
++  const client = pool._freeConnections[0];
++
++  // The current timer is 5 seconds, but we are a bit more leniant here.
++  await TestUtils.waitForCondition(
++    () => client.socket.readyState != "open",
++    "the client should close a connection the server left open after QUIT",
++    250,
++    40
++  );
++});
+diff --git a/mailnews/compose/test/unit/xpcshell.toml b/mailnews/compose/test/unit/xpcshell.toml
+--- a/mailnews/compose/test/unit/xpcshell.toml
++++ b/mailnews/compose/test/unit/xpcshell.toml
+@@ -97,16 +97,18 @@ requesttimeoutfactor = 2
+ ["test_smtpPasswordFailure2.js"]
+ 
+ ["test_smtpPasswordFailure3.js"]
+ 
+ ["test_smtpProtocols.js"]
+ 
+ ["test_smtpProxy.js"]
+ 
++["test_smtpQuitClose.js"]
++
+ ["test_smtpServer.js"]
+ 
+ ["test_smtpURL.js"]
+ 
+ ["test_splitRecipients.js"]
+ 
+ ["test_staleTemporaryFileCleanup.js"]
+ 
+

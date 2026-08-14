@@ -1,0 +1,164 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1786700022 -7200
+# Node ID e66d9bf0ee207f1d2ee92e53c2f4235a5e1dcf83
+# Parent  fc49b4c10de4d7acb24a56b8706af76cd54df203
+Bug 2038199 - Fix calIObserver batching. r=darktrojan
+
+
+endBatch fired before adoptItemCallback ran
+_doSynchronize() added items outside any batch
+
+Differential Revision: https://phabricator.services.mozilla.com/D301047
+
+diff --git a/calendar/base/content/widgets/calendar-filter.js b/calendar/base/content/widgets/calendar-filter.js
+--- a/calendar/base/content/widgets/calendar-filter.js
++++ b/calendar/base/content/widgets/calendar-filter.js
+@@ -404,9 +404,8 @@ calFilter.prototype = {
+    * @param {calIItemBase} aItem - The item to check.
+    * @returns {boolean} Returns true if the item matches the filter properties
+    *   currently applied, false otherwise.
+    */
+-
+   propertyFilter(aItem) {
+     let result;
+     const props = this.mFilterProperties;
+     if (!props) {
+diff --git a/calendar/base/src/CalCachedCalendar.sys.mjs b/calendar/base/src/CalCachedCalendar.sys.mjs
+--- a/calendar/base/src/CalCachedCalendar.sys.mjs
++++ b/calendar/base/src/CalCachedCalendar.sys.mjs
+@@ -338,20 +338,23 @@ calCachedCalendar.prototype = {
+     // existing local calendar and the remote calendar.
+     this.setupCachedCalendar();
+ 
+     const modifiedTimes = {};
++    this.mCachedCalendar.startBatch();
+     try {
+       for await (const items of cal.iterate.streamValues(
+         this.mUncachedCalendar.getItems(Ci.calICalendar.ITEM_FILTER_ALL_ITEMS, 0, null, null)
+       )) {
+         for (const item of items) {
+           // Adding items recd from the Memory Calendar
+           // These may be different than what the cache has
+           modifiedTimes[item.id] = item.lastModifiedTime;
+-          this.mCachedCalendar.addItem(item);
++          await this.mCachedCalendar.addItem(item);
+         }
+       }
++      this.mCachedCalendar.endBatch();
+     } catch (e) {
++      this.mCachedCalendar.endBatch();
+       await this.playbackOfflineItems();
+       this.mCachedObserver.onLoad(this.mCachedCalendar);
+       clearPending();
+       throw e; // Do not swallow this error.
+diff --git a/calendar/providers/ics/CalICSCalendar.sys.mjs b/calendar/providers/ics/CalICSCalendar.sys.mjs
+--- a/calendar/providers/ics/CalICSCalendar.sys.mjs
++++ b/calendar/providers/ics/CalICSCalendar.sys.mjs
+@@ -156,18 +156,19 @@ export class CalICSCalendar extends cal.
+       this.startBatch();
+       this._queue.push({
+         action: "add",
+         item: aItem,
+-        listener: adoptedItem => {
+-          this.endBatch();
+-          resolve(adoptedItem);
+-        },
++        listener: resolve,
+       });
+       this.#processQueue();
+     });
+ 
+-    if (adoptCallback) {
+-      await adoptCallback(item.calendar, Cr.NS_OK, Ci.calIOperationListener.ADD, item.id, item);
++    try {
++      if (adoptCallback) {
++        await adoptCallback(item.calendar, Cr.NS_OK, Ci.calIOperationListener.ADD, item.id, item);
++      }
++    } finally {
++      this.endBatch();
+     }
+     return item;
+   }
+ 
+@@ -186,18 +187,25 @@ export class CalICSCalendar extends cal.
+       this._queue.push({
+         action: "modify",
+         newItem,
+         oldItem,
+-        listener: modifiedItem => {
+-          this.endBatch();
+-          resolve(modifiedItem);
+-        },
++        listener: resolve,
+       });
+       this.#processQueue();
+     });
+ 
+-    if (modifyCallback) {
+-      await modifyCallback(item.calendar, Cr.NS_OK, Ci.calIOperationListener.MODIFY, item.id, item);
++    try {
++      if (modifyCallback) {
++        await modifyCallback(
++          item.calendar,
++          Cr.NS_OK,
++          Ci.calIOperationListener.MODIFY,
++          item.id,
++          item
++        );
++      }
++    } finally {
++      this.endBatch();
+     }
+     return item;
+   }
+ 
+diff --git a/calendar/providers/storage/CalStorageCalendar.sys.mjs b/calendar/providers/storage/CalStorageCalendar.sys.mjs
+--- a/calendar/providers/storage/CalStorageCalendar.sys.mjs
++++ b/calendar/providers/storage/CalStorageCalendar.sys.mjs
+@@ -231,10 +231,21 @@ CalStorageCalendar.prototype = {
+     parentItem.makeImmutable();
+ 
+     await this.mItemModel.addItem(parentItem);
+ 
+-    // notify observers
++    // notify observers; when used standalone, wrap in batch and fire onLoad (like ICS/CalDAV do
++    // after their network operations). When used as the cache inside CalCachedCalendar, the outer
++    // calendar's batch and onLoad are responsible for this.
++    const standalone = !this.mSuperCalendar;
++    if (standalone) {
++      this.startBatch();
++    }
+     this.observers.notify("onAddItem", [aItem]);
++    if (standalone) {
++      this.endBatch();
++      this.observers.notify("onLoad", [this.superCalendar]);
++    }
++
+     return aItem;
+   },
+ 
+   // Promise<calIItemBase> modifyItem(in calIItemBase aNewItem, in calIItemBase aOldItem)
+@@ -332,10 +343,20 @@ CalStorageCalendar.prototype = {
+       modifiedItem.id,
+       modifiedItem
+     );
+ 
+-    // notify observers
++    // notify observers; when used standalone, wrap in batch and fire onLoad (like ICS/CalDAV do
++    // after their network operations). When used as the cache inside CalCachedCalendar, the outer
++    // calendar's batch and onLoad are responsible for this.
++    const standalone = !this.mSuperCalendar;
++    if (standalone) {
++      this.startBatch();
++    }
+     this.observers.notify("onModifyItem", [modifiedItem, aOldItem]);
++    if (standalone) {
++      this.endBatch();
++      this.observers.notify("onLoad", [this.superCalendar]);
++    }
+     return modifiedItem;
+   },
+ 
+   // Promise<void> deleteItem(in calIItemBase item)

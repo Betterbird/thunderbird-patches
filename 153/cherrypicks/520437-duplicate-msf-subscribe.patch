@@ -1,0 +1,228 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1786700634 -7200
+# Node ID f582b42e83e54e294df46d8a0d669d7aa0db0e61
+# Parent  4ffa59409972b2b3cf82e144e2700b630c4fdb64
+Bug 520437 - Don't leave a duplicate summary file behind when subscribing to an IMAP folder. r=mkmelin
+
+Subscribing to an IMAP folder that isn't on disk yet used to create an
+empty summary (.msf) file as a side effect. Building the subscribe URL
+reads folder info - the hierarchy delimiter in ChangeFolderSubscription
+and modseq/UID state in SetupWithUrl - and those info reads went through
+ReadDBFolderInfo()/GetDBFolderInfoAndDB(), which open the summary
+database and create it if missing. When discovery later creates the real
+summary file, the premature empty one is renamed with a "-1" suffix
+(leaving a NotOnDisk-1.msf duplicate behind) or ends up orphaned.
+
+The hierarchy delimiter is a folder-cache property (hierDelim), not a
+database property, so GetHierarchyDelimiter() doesn't need the database
+at all. Add a cacheOnly mode to ReadDBFolderInfo() that only reads the
+folder cache and never opens or creates a summary file, and use it in
+GetHierarchyDelimiter(). SetupWithUrl() only needs to peek at existing
+database state, so switch it to OpenFolderDB() instead of
+GetDBFolderInfoAndDB().
+
+Add a regression test that subscribes to a folder that isn't on disk yet
+and verifies that discovery creates exactly one summary file for it,
+without a "-1" duplicate left behind.
+
+Differential Revision: https://phabricator.services.mozilla.com/D317843
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -633,9 +633,9 @@ nsresult nsMsgDBFolder::GetFolderCacheEl
+   }
+   return rv;
+ }
+ 
+-nsresult nsMsgDBFolder::ReadDBFolderInfo(bool force) {
++nsresult nsMsgDBFolder::ReadDBFolderInfo(bool force, bool cacheOnly) {
+   // Since it turns out to be pretty expensive to open and close
+   // the DBs all the time, if we have to open it once, get everything
+   // we might need while we're here
+   nsresult result = NS_OK;
+@@ -658,8 +658,12 @@ nsresult nsMsgDBFolder::ReadDBFolderInfo
+       }
+     }
+   }
+ 
++  if (cacheOnly) {
++    return NS_OK;
++  }
++
+   if (force || !mInitializedFromCache) {
+     nsCOMPtr<nsIDBFolderInfo> folderInfo;
+     nsCOMPtr<nsIMsgDatabase> db;
+     bool weOpenedDB = !mDatabase;
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -135,9 +135,28 @@ class nsMsgDBFolder : public nsSupportsW
+   nsresult SetWarnFilterChanged(bool aVal);
+   nsresult CreateCollationKey(const nsCString& aSource, uint8_t** aKey,
+                               uint32_t* aLength);
+ 
+-  virtual nsresult ReadDBFolderInfo(bool force);
++  /**
++   * Load this folder's info (flags, message counts, sort order, name, ...)
++   * into the folder object.
++   *
++   * The folder cache is consulted first; unless cacheOnly is set, an
++   * existing summary database is then opened (or created, if there is none)
++   * and the info is read from there.
++   *
++   * When cacheOnly is set, the summary database is never opened or created,
++   * so the call is safe for a folder that isn't on disk yet (e.g. an IMAP
++   * folder in the early stages of subscribing to it).
++   *
++   * @param force     Re-read from the database even if the folder was
++   *                  already initialized from the folder cache.
++   * @param cacheOnly Only read from the folder cache; never open or create
++   *                  a summary file.
++   * @return NS_OK on success, or a failure code when the database couldn't
++   *         be opened or read (only possible when cacheOnly is false).
++   */
++  virtual nsresult ReadDBFolderInfo(bool force, bool cacheOnly = false);
+   virtual nsresult FlushToFolderCache();
+   virtual nsresult GetDatabase() = 0;
+   virtual nsresult SendFlagNotifications(nsIMsgDBHdr* item, uint32_t oldFlags,
+                                          uint32_t newFlags);
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -1092,9 +1092,11 @@ NS_IMETHODIMP nsImapMailFolder::GetHiera
+         return rv;
+       }
+     }
+   }
+-  ReadDBFolderInfo(false);  // update cache first.
++  // Avoid creating an empty summary file that is later to be orphaned when
++  // subscribing to a folder.
++  ReadDBFolderInfo(false, /* cacheOnly */ true);  // update cache first.
+   *aHierarchyDelimiter = m_hierarchyDelimiter;
+   return NS_OK;
+ }
+ 
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -836,10 +836,16 @@ nsresult nsImapProtocol::SetupWithUrl(ns
+     m_uidValidity = ImapUid_None;
+     if (folder) {
+       nsCOMPtr<nsIMsgDatabase> folderDB;
+       nsCOMPtr<nsIDBFolderInfo> folderInfo;
+-      folder->GetDBFolderInfoAndDB(getter_AddRefs(folderInfo),
+-                                   getter_AddRefs(folderDB));
++      // Avoid creating an empty summary file that is later to be orphaned when
++      // subscribing to a folder.
++      nsCOMPtr<nsIMsgDBService> dbService =
++          do_GetService("@mozilla.org/msgDatabase/msgDBService;1");
++      if (dbService) {
++        dbService->OpenFolderDB(folder, true, getter_AddRefs(folderDB));
++        if (folderDB) folderDB->GetDBFolderInfo(getter_AddRefs(folderInfo));
++      }
+       if (folderInfo) {
+         nsCString modSeqStr;
+         folderInfo->GetCharProperty(kModSeqPropertyName, modSeqStr);
+         mFolderLastModSeq = ParseUint64Str(modSeqStr.get());
+diff --git a/mailnews/imap/test/unit/test_subscribeNoSummaryFile.js b/mailnews/imap/test/unit/test_subscribeNoSummaryFile.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_subscribeNoSummaryFile.js
+@@ -0,0 +1,81 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that subscribing to an IMAP folder creates exactly one summary
++ * (.msf) file (bug 520437).
++ *
++ * An info read on a folder that isn't on disk yet (e.g. an IMAP folder below
++ * an unsubscribed parent, while subscribing to it) used to create an empty
++ * .msf prematurely. When discovery later created the real summary file, the
++ * empty leftover was renamed with a "-1" suffix, leaving an orphaned
++ * "NotOnDisk-1.msf" duplicate behind.
++ */
++
++const { TestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/TestUtils.sys.mjs"
++);
++
++add_setup(async function () {
++  setupIMAPPump();
++
++  // Create a mailbox on the server that is not subscribed yet, so the folder
++  // doesn't exist on disk.
++  IMAPPump.daemon.createMailbox("NotOnDisk");
++
++  // Give the initial discovery time to complete.
++  await PromiseTestUtils.promiseDelay(1000);
++});
++
++add_task(async function testSubscribeCreatesOnlyOneSummaryFile() {
++  const subscribableServer = IMAPPump.incomingServer.QueryInterface(
++    Ci.nsISubscribableServer
++  );
++
++  subscribableServer.subscribe("NotOnDisk");
++  subscribableServer.commitSubscribeChanges();
++
++  // commitSubscribeChanges() triggers a re-discovery on the IMAP connection,
++  // so wait for the folder to show up in the folder tree.
++  const rootFolder = IMAPPump.incomingServer.rootFolder;
++  await TestUtils.waitForCondition(
++    () => rootFolder.containsChildNamed("NotOnDisk"),
++    "timed out waiting for folder NotOnDisk to appear after subscribing"
++  );
++
++  const folder = rootFolder.getChildNamed("NotOnDisk");
++  Assert.notEqual(folder, null, "folder NotOnDisk should be subscribed");
++
++  // Discovery legitimately creates the folder's summary file once the folder
++  // is on disk.
++  const summaryFile = folder.summaryFile;
++  Assert.ok(
++    summaryFile.exists(),
++    "folder summary file should exist after discovery"
++  );
++
++  // Subscribing must not have created a second (premature) summary file: the
++  // empty leftover would be renamed to "NotOnDisk-1.msf" when discovery
++  // recreates the summary, leaving a duplicate behind.
++  const baseName = summaryFile.leafName.replace(/\.msf$/, "");
++  let summaryCount = 0;
++  for (const entry of IMAPPump.incomingServer.localPath.directoryEntries) {
++    if (
++      entry.isFile &&
++      entry.leafName.endsWith(".msf") &&
++      entry.leafName.startsWith(baseName)
++    ) {
++      summaryCount++;
++    }
++  }
++  Assert.equal(
++    summaryCount,
++    1,
++    "subscribing must create exactly one summary file"
++  );
++});
++
++add_task(function endTest() {
++  teardownIMAPPump();
++});
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -148,7 +148,9 @@ tags = ["compact"]
+ ["test_storeCustomKeywords.js"]
+ 
+ ["test_subfolderLocation.js"]
+ 
++["test_subscribeNoSummaryFile.js"]
++
+ ["test_syncChanges.js"]
+ 
+ ["test_trustSpamAssassin.js"]
