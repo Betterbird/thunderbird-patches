@@ -1,0 +1,202 @@
+
+# HG changeset patch
+# User Christian Grossegger <chr.grossegger@gmail.com>
+# Date 1786642154 0
+# Node ID bfb93fd71bb6582d4eddef55737c39c6ab923b56
+# Parent  66da57562b74ea879909936534cdec0f764b9bce
+Bug 1698140 - Don't claim PDF channels that have no browsing context in PdfStreamConverter. r=Gijs,calixte
+
+When a consumer opens a PDF channel that is not a docshell/document load (e.g.
+opening a PDF attachment from the Thunderbird compose window via nsIURILoader),
+the channel has no targetBrowsingContext. getConvertedType currently still
+rewrites the channel's type to text/html so PDF.js can take over - but PDF.js
+cannot render without a DOM window, and the rewritten text/html type then breaks
+the external-helper-app fallback. Bail out early so the load is handled normally
+as application/pdf and routed to the user's PDF handler.
+
+This implements the targetBrowsingContext check suggested in comment 29.
+
+Differential Revision: https://phabricator.services.mozilla.com/D304451
+
+
+diff --git a/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs b/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
+--- a/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
++++ b/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
+@@ -1099,37 +1099,46 @@ PdfStreamConverter.prototype = {
+   getConvertedType(aFromType, aChannel) {
+     if (aChannel instanceof Ci.nsIMultiPartChannel) {
+       throw new Components.Exception(
+         "PDF.js doesn't support multipart responses.",
+         Cr.NS_ERROR_NOT_IMPLEMENTED
+       );
+     }
+ 
++    // Without a browsing context there's nowhere to render the result, so
++    // PDF.js must not claim the channel and rewrite its type to text/html -
++    // that breaks the external handler for attachments opened from the compose
++    // window (bug 1698140).
++    let browsingContext = aChannel?.loadInfo?.targetBrowsingContext;
++    if (!browsingContext) {
++      throw new Components.Exception(
++        "PDF.js can't be used without a browsing context.",
++        Cr.NS_ERROR_FAILURE
++      );
++    }
++
+     const HTML = "text/html";
+     let channelURI = aChannel?.URI;
+     // We can be invoked for application/octet-stream; check if we want the
+     // channel first:
+     if (aFromType != "application/pdf") {
+       // Check if the filename has a PDF extension.
+       let isPDF = false;
+       try {
+         isPDF = aChannel.contentDispositionFilename.endsWith(".pdf");
+       } catch (ex) {}
+       if (!isPDF) {
+         isPDF =
+           channelURI?.QueryInterface(Ci.nsIURL).fileExtension.toLowerCase() ==
+           "pdf";
+       }
+ 
+-      let browsingContext = aChannel?.loadInfo.targetBrowsingContext;
+       let toplevelOctetStream =
+-        aFromType == "application/octet-stream" &&
+-        browsingContext &&
+-        !browsingContext.parent;
++        aFromType == "application/octet-stream" && !browsingContext.parent;
+       if (
+         !isPDF ||
+         !toplevelOctetStream ||
+         !Services.prefs.getBoolPref("pdfjs.handleOctetStream", false)
+       ) {
+         throw new Components.Exception(
+           "Ignore PDF.js for this download.",
+           Cr.NS_ERROR_FAILURE
+diff --git a/toolkit/components/pdfjs/test/browser.toml b/toolkit/components/pdfjs/test/browser.toml
+--- a/toolkit/components/pdfjs/test/browser.toml
++++ b/toolkit/components/pdfjs/test/browser.toml
+@@ -92,16 +92,18 @@ skip-if = [
+ ["browser_pdfjs_load_telemetry.js"]
+ 
+ ["browser_pdfjs_main.js"]
+ 
+ ["browser_pdfjs_minimum_font_size.js"]
+ 
+ ["browser_pdfjs_navigation.js"]
+ 
++["browser_pdfjs_no_browsing_context.js"]
++
+ ["browser_pdfjs_nonpdf_filename.js"]
+ support-files = ["file_pdf_download_link.html"]
+ 
+ ["browser_pdfjs_not_default.js"]
+ support-files = [
+   "file_pdfjs_object_stream.pdf",
+   "file_pdfjs_object_stream.pdf^headers^",
+ ]
+diff --git a/toolkit/components/pdfjs/test/browser_pdfjs_no_browsing_context.js b/toolkit/components/pdfjs/test/browser_pdfjs_no_browsing_context.js
+new file mode 100644
+--- /dev/null
++++ b/toolkit/components/pdfjs/test/browser_pdfjs_no_browsing_context.js
+@@ -0,0 +1,99 @@
++/* Any copyright is dedicated to the Public Domain.
++ * http://creativecommons.org/publicdomain/zero/1.0/ */
++
++// Bug 1698140: when a PDF is handed to nsIURILoader by something that is not a
++// docshell load - Thunderbird opening a PDF attachment from the compose window -
++// the channel has no targetBrowsingContext. PDF.js must not claim such a
++// channel, because it cannot render without one and the type it rewrites the
++// channel to breaks the external helper app fallback. The load has to reach the
++// helper app instead, which with "always ask" means the unknownContentType
++// dialog.
++//
++// No user gesture in Firefox reaches this branch, so the test drives the load the
++// way that consumer does. The coverage lives here because the code it guards does.
++
++const UNKNOWN_CONTENT_TYPE_URL =
++  "chrome://mozapps/content/downloads/unknownContentType.xhtml";
++
++// Mirrors nsAttachmentOpener in comm-central's MsgComposeCommands.js: the
++// listener offers a window for any UI, but the channel it is given still has no
++// browsing context of its own.
++const gAttachmentOpener = {
++  QueryInterface: ChromeUtils.generateQI([
++    "nsIURIContentListener",
++    "nsIInterfaceRequestor",
++  ]),
++  doContent: () => false,
++  isPreferred: () => false,
++  canHandleContent: () => false,
++  getInterface(iid) {
++    if (iid.equals(Ci.nsIDOMWindow)) {
++      return window;
++    }
++    if (iid.equals(Ci.nsIDocShell)) {
++      return window.docShell;
++    }
++    return this.QueryInterface(iid);
++  },
++  loadCookie: null,
++  parentContentListener: null,
++};
++
++add_task(async function test_pdf_without_browsing_context() {
++  const oldAction = changeMimeHandler(Ci.nsIHandlerInfo.useSystemDefault, true);
++  registerCleanupFunction(() => changeMimeHandler(oldAction[0], oldAction[1]));
++
++  const pdfFile = getChromeDir(getResolvedURI(gTestPath));
++  pdfFile.append("file_pdfjs_test.pdf");
++  const pdfURI = Services.io.newFileURI(pdfFile);
++
++  const channel = Services.io.newChannelFromURI(
++    pdfURI,
++    null,
++    Services.scriptSecurityManager.getSystemPrincipal(),
++    null,
++    Ci.nsILoadInfo.SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
++    Ci.nsIContentPolicy.TYPE_OTHER
++  );
++  is(
++    channel.loadInfo.targetBrowsingContext,
++    null,
++    "The channel has no browsing context."
++  );
++
++  const dialogOpened = BrowserTestUtils.domWindowOpenedAndLoaded(
++    null,
++    win => win.document.documentURI == UNKNOWN_CONTENT_TYPE_URL
++  ).then(dialog => ({ dialog }));
++
++  // Watch for the buggy outcome - PDF.js pulling the file into a tab - with a
++  // listener we remove unconditionally below. BrowserTestUtils.waitForNewTab
++  // cannot be cancelled, so in the (expected) dialog case its listeners would
++  // outlive the task and keep the dialog window alive, which the shutdown leak
++  // checker reports as a leaked window.
++  let onTabOpen;
++  const tabOpened = new Promise(resolve => {
++    onTabOpen = event => resolve({ tab: event.target });
++    gBrowser.tabContainer.addEventListener("TabOpen", onTabOpen);
++  });
++
++  Cc["@mozilla.org/uriloader;1"]
++    .getService(Ci.nsIURILoader)
++    .openURI(channel, true, gAttachmentOpener);
++
++  const outcome = await Promise.race([dialogOpened, tabOpened]);
++  gBrowser.tabContainer.removeEventListener("TabOpen", onTabOpen);
++
++  ok(
++    outcome.dialog,
++    "The PDF reached the external helper app rather than being opened in a tab by PDF.js"
++  );
++
++  if (outcome.tab) {
++    BrowserTestUtils.removeTab(outcome.tab);
++  } else {
++    const closed = BrowserTestUtils.domWindowClosed(outcome.dialog);
++    outcome.dialog.close();
++    await closed;
++  }
++});
+
