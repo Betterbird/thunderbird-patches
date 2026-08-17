@@ -1,8 +1,8 @@
 #!/bin/sh
 MOZILLA_REPO=https://hg.mozilla.org/releases/mozilla-esr153/
-MOZILLA_REV=abd1fe67f4c3b677caecb582d55601a7b1191dc4
+MOZILLA_REV=bdb74c45c2e1e3fe593fbf3c5ca6d2ab2046ef08
 COMM_REPO=https://hg.mozilla.org/releases/comm-esr153/
-COMM_REV=0b6dbdd8c79347fd1b87787dcebb1a12b5f6a7a4
+COMM_REV=be5d2684121838e5f66e43df95dc255b4f1c3e87
 RUST_VER=1.95.0
 MOZ="-moz"
 MOZU="-moz"
