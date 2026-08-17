@@ -1,0 +1,387 @@
+
+# HG changeset patch
+# User Alessandro Castellani <alessandro@thunderbird.net>
+# Date 1786788443 0
+# Node ID 7fab8401dcb580e79e47318a8105c17677b1e8d2
+# Parent  bbcc2efd9c51a836a43692d865cc6d322e592eb3
+Bug 1787958 - Ensure the addresses are pillified before saving or sending a message if no blur or enter event is triggered. r=tobyp,arschmitz
+
+- Type an address in the compose field that gives a suggested autocomplete
+- You should have a test similar to this: aa >> aleca@thundermail.com
+- Without pressing Enter or clicking anywhere else, hit CTRL+S on the the keyboard to save the message.
+- Ensure that the input field is pillified with the proper suggested value of the autocomplete.
+- Repeat the same test within a pill and ensure the same outcome.
+
+Differential Revision: https://phabricator.services.mozilla.com/D318371
+
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -358,17 +358,17 @@ const inputObserver = {
+     if (topic == "autocomplete-did-enter-text") {
+       const input = subject.QueryInterface(
+         Ci.nsIAutoCompleteInput
+       ).wrappedJSObject;
+ 
+       // Interrupt if there's no input proxy, or the input doesn't have an ID,
+       // the latter meaning that the autocomplete event was triggered within an
+       // already existing pill, so we don't want to create a new pill.
+-      if (!input || !input.id) {
++      if (!input?.id) {
+         return;
+       }
+ 
+       // Trigger the pill creation.
+       recipientAddPills(document.getElementById(input.id));
+     }
+   },
+ };
+diff --git a/mail/components/compose/content/addressingWidgetOverlay.js b/mail/components/compose/content/addressingWidgetOverlay.js
+--- a/mail/components/compose/content/addressingWidgetOverlay.js
++++ b/mail/components/compose/content/addressingWidgetOverlay.js
+@@ -765,17 +765,17 @@ function addressInputOnBeforeHandleKeyDo
+       // to prevent interfering with the natural change of focus on Tab.
+       if (input.value.trim()) {
+         // Prevent Tab from firing again on address input after pill creation.
+         event.preventDefault();
+ 
+         // Use the setTimeout only if the input field implements a forced
+         // autocomplete and we don't have any match as we might need to wait for
+         // the autocomplete suggestions to show up.
+-        if (input.forceComplete && input.mController.matchCount == 0) {
++        if (input.forceComplete && input.controller.matchCount == 0) {
+           // Prevent fast user input to become an error pill before
+           // autocompletion kicks in with its default timeout.
+           setTimeout(() => {
+             input.handleEnter(event);
+           }, input.timeout);
+         } else {
+           input.handleEnter(event);
+         }
+@@ -847,16 +847,29 @@ function addressInputOnInput(event, rawI
+  *   was invoked programmatically and should not be considered a change of
+  *   message content.
+  */
+ function recipientAddPills(input, automatic = false) {
+   if (!input.value.trim()) {
+     return;
+   }
+ 
++  // If the input was forced to complete and we have a match, manually handle it
++  // and replace the input value with the first result. We purposefully do not
++  // call input.controller.handleEnter() because that would force us to handle
++  // an early return to prevent an infinite loop, therefore causing some
++  // operations like SaveAsDraft to perform too soon before the addresses have
++  // been pillified.
++  if (input.forceComplete && input.controller.matchCount >= 1) {
++    // Complete to the selected match, using its address value rather than
++    // the text displayed in the autocomplete popup.
++    const selectedIndex = Math.max(input.popup.selectedIndex, 0);
++    input.value = input.controller.getFinalCompleteValueAt(selectedIndex);
++  }
++
+   const addresses = MailServices.headerParser.makeFromDisplayAddress(
+     input.value
+   );
+   const recipientArea = document.getElementById("recipientsContainer");
+ 
+   for (const address of addresses) {
+     recipientArea.createRecipientPill(input, address);
+   }
+@@ -940,21 +953,21 @@ function addressInputOnBlur(input) {
+   if (!address) {
+     // If input is empty or whitespace only, clear input to remove any leftover
+     // whitespace, reset the input size, and return.
+     input.value = "";
+     input.setAttribute("size", 1);
+     return;
+   }
+ 
+-  if (input.forceComplete && input.mController.matchCount >= 1) {
++  if (input.forceComplete && input.controller.matchCount >= 1) {
+     // If input.forceComplete is true and there are autocomplete matches,
+     // we need to call the inbuilt Enter handler to force the input text
+     // to the best autocomplete match because we've set input._dontBlur.
+-    input.mController.handleEnter(true);
++    input.controller.handleEnter(true);
+     return;
+   }
+ 
+   // Otherwise, try to parse the input text as comma-separated recipients and
+   // convert them into recipient pills.
+   const listNames = MimeParser.parseHeaderField(
+     address,
+     MimeParser.HEADER_ADDRESS
+diff --git a/mail/components/compose/content/composeWidgets.mjs b/mail/components/compose/content/composeWidgets.mjs
+--- a/mail/components/compose/content/composeWidgets.mjs
++++ b/mail/components/compose/content/composeWidgets.mjs
+@@ -226,22 +226,22 @@ class MailAddressPill extends MozXULElem
+       // to another window), return to prevent autocompletion and
+       // pillification and let the user continue editing the address later.
+       if (document.activeElement == this.emailInput) {
+         return;
+       }
+ 
+       if (
+         this.emailInput.forceComplete &&
+-        this.emailInput.mController.matchCount >= 1
++        this.emailInput.controller.matchCount >= 1
+       ) {
+         // If input.forceComplete is true and there are autocomplete matches,
+         // we need to call the inbuilt Enter handler to force the input text
+         // to the best autocomplete match because we've set input._dontBlur.
+-        this.emailInput.mController.handleEnter(true);
++        this.emailInput.controller.handleEnter(true);
+         return;
+       }
+ 
+       this.updatePill();
+     });
+   }
+ 
+   /**
+@@ -304,16 +304,30 @@ class MailAddressPill extends MozXULElem
+           this.rowInput.focus();
+           this.remove();
+         }
+         break;
+     }
+   }
+ 
+   async updatePill() {
++    // If this method is called before a blur or enter event that triggers the
++    // inbuilt autocomplete handler, replace the current value with the first
++    // match.
++    if (
++      this.emailInput.forceComplete &&
++      this.emailInput.controller.matchCount >= 1
++    ) {
++      // Complete to the selected match, using its address value rather than
++      // the text displayed in the autocomplete popup.
++      const selectedIndex = Math.max(this.emailInput.popup.selectedIndex, 0);
++      this.emailInput.value =
++        this.emailInput.controller.getFinalCompleteValueAt(selectedIndex);
++    }
++
+     const addresses = MailServices.headerParser.makeFromDisplayAddress(
+       this.emailInput.value
+     );
+     const row = this.closest(".address-row");
+ 
+     if (!addresses[0]) {
+       this.rowInput.focus();
+       this.remove();
+diff --git a/mail/test/browser/composition/browser1.toml b/mail/test/browser/composition/browser1.toml
+--- a/mail/test/browser/composition/browser1.toml
++++ b/mail/test/browser/composition/browser1.toml
+@@ -50,16 +50,18 @@ support-files = [
+   "data/**",
+   "../openpgp/data/**",
+   "html/linkpreview.html",
+ ]
+ 
+ # Tests in this folder are split across multiple manifests. When adding a test,
+ # please put it in the manifest with its (alphabetical) neighbours.
+ 
++["browser_addressPillsAutocomplete.js"]
++
+ ["browser_addressWidgets.js"]
+ 
+ ["browser_attachment.js"]
+ 
+ ["browser_attachmentCloudDraft.js"]
+ 
+ ["browser_attachmentDragDrop.js"]
+ run-if = [
+diff --git a/mail/test/browser/composition/browser_addressPillsAutocomplete.js b/mail/test/browser/composition/browser_addressPillsAutocomplete.js
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/composition/browser_addressPillsAutocomplete.js
+@@ -0,0 +1,104 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test that pills are created correctly when a user doesn't explicitly trigger
++ * the pill creation with Enter or on blur, and that the proper value is used
++ * when an autocomplete match is present.
++ */
++
++"use strict";
++
++var { be_in_folder, get_special_folder } = ChromeUtils.importESModule(
++  "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
++);
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++var { close_compose_window, open_compose_new_mail } =
++  ChromeUtils.importESModule(
++    "resource://testing-common/mail/ComposeHelpers.sys.mjs"
++  );
++
++let addressBook, draftsFolder;
++
++add_setup(async function () {
++  const addressBookName = MailServices.ab.newAddressBook(
++    "Mochitest",
++    null,
++    Ci.nsIAbManager.JS_DIRECTORY_TYPE
++  );
++  addressBook = MailServices.ab.getDirectoryFromId(addressBookName);
++
++  // Add names with identically repeated initials to kick the autocomplete with
++  // multiple suggestions.
++  for (const name of ["Aaron", "Aalexander", "Aaarchie"]) {
++    const card = Cc["@mozilla.org/addressbook/cardproperty;1"].createInstance(
++      Ci.nsIAbCard
++    );
++    card.firstName = name;
++    card.lastName = "Mochitest";
++    card.displayName = `${name} Mochitest`;
++    card.primaryEmail = `${name.toLowerCase()}@example.com`;
++    addressBook.addCard(card);
++  }
++  draftsFolder = await get_special_folder(Ci.nsMsgFolderFlags.Drafts, true);
++
++  registerCleanupFunction(async () => {
++    MailServices.ab.deleteAddressBook(addressBook.URI);
++    draftsFolder.deleteSelf(null);
++  });
++});
++
++add_task(async function test_pill_creation_edge_cases() {
++  await be_in_folder(draftsFolder);
++  const cwc = await open_compose_new_mail();
++
++  // When the compose window is opened, the focus should be on the To field.
++  const toInput = cwc.document.getElementById("toAddrInput");
++  Assert.equal(cwc.document.activeElement, toInput);
++  Assert.equal(toInput.value, "");
++
++  // Type the first 2 letters and a space to trigger the autocomplete with the
++  // double chevron format suggestion.
++  EventUtils.sendString("aa ", cwc);
++  await BrowserTestUtils.waitForPopupEvent(toInput.popup, "shown");
++  // Wait for the autocomplete to resolve.
++  Assert.ok(
++    toInput.value.includes(">>"),
++    "The autocomplete should show the double chevron suggestion."
++  );
++
++  Assert.equal(
++    toInput.controller.matchCount,
++    3,
++    "The autocomplete should have 3 matches for 'aa '"
++  );
++
++  const modifiers =
++    AppConstants.platform == "macosx" ? { accelKey: true } : { ctrlKey: true };
++  // Trigger the save of the message.
++  EventUtils.synthesizeKey("S", modifiers, cwc);
++  await BrowserTestUtils.waitForEvent(cwc, "aftersave");
++
++  // The pill should have been created even without a blur or enter event, and
++  // the correct address should have been picked from the first autocomplete
++  // match.
++  const pills = cwc.document.querySelectorAll(
++    "#toAddrContainer > .address-pill"
++  );
++  Assert.equal(
++    pills.length,
++    1,
++    "The address pill should be created after saving."
++  );
++
++  Assert.equal(
++    pills[0].label,
++    "Aaarchie Mochitest <aaarchie@example.com>",
++    "The address pill should have the correct label."
++  );
++
++  await close_compose_window(cwc);
++});
+diff --git a/mail/test/browser/composition/head.js b/mail/test/browser/composition/head.js
+--- a/mail/test/browser/composition/head.js
++++ b/mail/test/browser/composition/head.js
+@@ -1,45 +1,53 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ var { MailServices } = ChromeUtils.importESModule(
+   "resource:///modules/MailServices.sys.mjs"
+ );
+ 
+-registerCleanupFunction(() => {
+-  for (const book of MailServices.ab.directories) {
+-    if (
+-      ["ldap_2.servers.history", "ldap_2.servers.pab"].includes(book.dirPrefId)
+-    ) {
+-      let cards = book.childCards;
+-      if (cards.length > 0) {
+-        info(`Cleaning up ${cards.length} card(s) from ${book.dirName}`);
+-        for (const card of cards) {
+-          if (card.isMailList) {
+-            MailServices.ab.deleteAddressBook(card.mailListURI);
++// We want to check that everything has been removed/reset, but if we register
++// a cleanup function here, it will run before any other cleanup function has
++// had a chance to run. Instead, when it runs register another cleanup
++// function which will run last.
++registerCleanupFunction(function () {
++  registerCleanupFunction(() => {
++    for (const book of MailServices.ab.directories) {
++      if (
++        ["ldap_2.servers.history", "ldap_2.servers.pab"].includes(
++          book.dirPrefId
++        )
++      ) {
++        let cards = book.childCards;
++        if (cards.length > 0) {
++          info(`Cleaning up ${cards.length} card(s) from ${book.dirName}`);
++          for (const card of cards) {
++            if (card.isMailList) {
++              MailServices.ab.deleteAddressBook(card.mailListURI);
++            }
++          }
++          cards = cards.filter(c => !c.isMailList);
++          if (cards.length > 0) {
++            book.deleteCards(cards);
+           }
+         }
+-        cards = cards.filter(c => !c.isMailList);
+-        if (cards.length > 0) {
+-          book.deleteCards(cards);
+-        }
++        is(book.childCards.length, 0);
++      } else {
++        Assert.report(true, undefined, undefined, "Unexpected address book!");
++        MailServices.ab.deleteAddressBook(book.URI);
+       }
+-      is(book.childCards.length, 0);
+-    } else {
+-      Assert.report(true, undefined, undefined, "Unexpected address book!");
+-      MailServices.ab.deleteAddressBook(book.URI);
+     }
+-  }
+ 
+-  Services.focus.focusedWindow = window;
+-  const mailButton = document.getElementById("mailButton");
+-  mailButton.focus();
+-  mailButton.blur();
++    Services.focus.focusedWindow = window;
++    const mailButton = document.getElementById("mailButton");
++    mailButton.focus();
++    mailButton.blur();
++  });
+ });
+ 
+ /**
+  * Get the body part of an MIME message.
+  *
+  * @param {string} content - The message content.
+  * @returns {string}
+  */
+

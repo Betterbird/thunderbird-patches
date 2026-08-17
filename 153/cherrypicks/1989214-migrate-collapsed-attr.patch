@@ -1,0 +1,256 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1786986737 -7200
+# Parent  41456399cf70b94859dc95083b4732343b9134f7
+Bug 1989214 - Migrate old persisted collapse value to boolean attribute.
+
+diff --git a/mail/modules/MailMigrator.sys.mjs b/mail/modules/MailMigrator.sys.mjs
+--- a/mail/modules/MailMigrator.sys.mjs
++++ b/mail/modules/MailMigrator.sys.mjs
+@@ -28,9 +28,9 @@ export var MailMigrator = {
+    */
+   _migrateUI() {
+     // The code for this was ported from
+     // mozilla/browser/components/nsBrowserGlue.js
+-    const UI_VERSION = 61;
++    const UI_VERSION = 62;
+     const UI_VERSION_PREF = "mail.ui-rdf.version";
+     let currentUIVersion = Services.prefs.getIntPref(UI_VERSION_PREF, 0);
+ 
+     if (currentUIVersion >= UI_VERSION) {
+@@ -465,8 +465,46 @@ export var MailMigrator = {
+           Services.prefs.clearUserPref("mail.minimizeToTray");
+         }
+       }
+ 
++      if (currentUIVersion < 62) {
++        // Thunderbird 9 to 60 stored collapsed="true"/"false" for these
++        // toolbars. The attribute is now boolean, so the presence of any value
++        // collapses the toolbar. Rewrite the legacy values to what the current
++        // code persists: "-moz-missing\n" when visible, "" when collapsed.
++        // Values already in the current form are left alone, so we don't
++        // re-collapse toolbars for users who toggled the setting to work
++        // around this.
++        function updateCollapsedValue(url, id) {
++          if (!Services.xulStore.hasValue(url, id, "collapsed")) {
++            return;
++          }
++          const oldValue = Services.xulStore.getValue(url, id, "collapsed");
++          if (oldValue == "false") {
++            Services.xulStore.setValue(url, id, "collapsed", "-moz-missing\n");
++          } else if (oldValue == "true") {
++            Services.xulStore.setValue(url, id, "collapsed", "");
++          }
++        }
++
++        for (const elementID of [
++          "composeToolbar2",
++          "compose-toolbar-menubar2",
++        ]) {
++          updateCollapsedValue(
++            "chrome://messenger/content/messengercompose/messengercompose.xhtml",
++            elementID
++          );
++        }
++
++        for (const url of [
++          "chrome://messenger/content/messenger.xhtml",
++          "chrome://messenger/content/messageWindow.xhtml",
++        ]) {
++          updateCollapsedValue(url, "mail-bar3");
++        }
++      }
++
+       // Migration tasks that may take a long time are not run immediately, but
+       // added to the MigrationTasks object then run at the end.
+       //
+       // See the documentation on MigrationTask and MigrationTasks for how to
+diff --git a/mail/test/marionette/manifest.toml b/mail/test/marionette/manifest.toml
+--- a/mail/test/marionette/manifest.toml
++++ b/mail/test/marionette/manifest.toml
+@@ -5,8 +5,13 @@ support-files = ["data/**", "scripts/**"
+ run-if = [
+   "os == 'win'",
+ ]
+ 
++["test_collapsed_toolbar_migration.py"]
++run-if = [
++  "os != 'mac'",
++]
++
+ ["test_commandline.py"]
+ 
+ ["test_compose_commandline.py"]
+ 
+diff --git a/mail/test/marionette/test_collapsed_toolbar_migration.py b/mail/test/marionette/test_collapsed_toolbar_migration.py
+new file mode 100644
+--- /dev/null
++++ b/mail/test/marionette/test_collapsed_toolbar_migration.py
+@@ -0,0 +1,167 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, you can obtain one at http://mozilla.org/MPL/2.0/.
++
++import json
++import os.path
++
++from marionette_harness import MarionetteTestCase
++
++here = os.path.dirname(__file__)
++
++COMPOSE_WINDOW = "chrome://messenger/content/messengercompose/messengercompose.xhtml"
++MESSENGER_WINDOW = "chrome://messenger/content/messenger.xhtml"
++MESSAGE_WINDOW = "chrome://messenger/content/messageWindow.xhtml"
++
++# Account prefs, so that a compose window can be opened.
++COMPOSE_PREFS = {
++    "mail.account.account1.identities": "id1",
++    "mail.account.account1.server": "server1",
++    "mail.accountmanager.accounts": "account1",
++    "mail.accountmanager.defaultaccount": "account1",
++    "mail.identity.id1.fullName": "Marionette",
++    "mail.identity.id1.useremail": "marionette@invalid",
++    "mail.identity.id1.valid": True,
++    "mail.server.server1.hostname": "localhost",
++    "mail.server.server1.login_at_startup": False,
++    "mail.server.server1.type": "pop3",
++}
++
++
++class TestCollapsedToolbarMigration(MarionetteTestCase):
++    """
++    Tests that the legacy collapsed="true"/"false" values, as written by
++    Thunderbird 9 to 60, are rewritten to the values the current code persists,
++    since the presence of *any* value for that attribute now collapses the
++    toolbar.
++    """
++
++    get_collapsed_attributes = """
++        return [
++            document.getElementById("composeToolbar2").getAttribute("collapsed"),
++            document.getElementById("compose-toolbar-menubar2").getAttribute("collapsed"),
++        ];
++    """
++
++    get_xulstore_value = """
++        const [url, id] = arguments;
++        if (!Services.xulStore.hasValue(url, id, "collapsed")) {
++            return null;
++        }
++        return Services.xulStore.getValue(url, id, "collapsed");
++    """
++
++    get_pref_value = """
++        return Services.prefs.getIntPref("mail.ui-rdf.version", -1);
++    """
++
++    def test_no_xulstore_update(self):
++        """
++        The XUL store has no value when migration happens. Nothing is written
++        and the toolbars should be visible, because that's the default.
++        """
++        self.subtest(61, None, [None, None], None)
++
++    def test_xulstore_false_no_update(self):
++        """
++        The XUL store value is false and migration doesn't happen. The toolbars
++        should be collapsed, because they have a value for the collapsed
++        attribute, even though that value is "false".
++        """
++        self.subtest(62, "false", ["false", "false"], "false")
++
++    def test_xulstore_false_update(self):
++        """
++        The XUL store value is false when migration happens. It should become
++        "-moz-missing\n" and the toolbars should be visible.
++        """
++        self.subtest(61, "false", [None, None], "-moz-missing\n")
++
++    def test_xulstore_true_update(self):
++        """
++        The XUL store value is true when migration happens. It should be
++        normalized to "" and the toolbars should stay collapsed.
++        """
++        self.subtest(61, "true", ["", ""], "")
++
++    def test_xulstore_missing_update(self):
++        """
++        The XUL store value is already "-moz-missing\n", as written by the
++        current code for a visible toolbar, or by a user working around this bug
++        by toggling the setting. It must be left alone, so the toolbars stay
++        visible.
++        """
++        self.subtest(61, "-moz-missing\n", [None, None], "-moz-missing\n")
++
++    def test_xulstore_empty_update(self):
++        """
++        The XUL store value is already "", as written by the current code for a
++        collapsed toolbar. It must be left alone, so the toolbars stay collapsed.
++        """
++        self.subtest(61, "", ["", ""], "")
++
++    def subtest(
++        self,
++        migration_version,
++        xulstore_value,
++        expected_attribute_values,
++        expected_xulstore_value,
++    ):
++        self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++        self.marionette.set_prefs(COMPOSE_PREFS)
++        self.marionette.quit(in_app=True)
++
++        # Set the migration pref to a number lower than the migration we're
++        # testing, without clobbering the account prefs written on shutdown.
++        prefs_path = os.path.join(self.marionette.profile_path, "prefs.js")
++        with open(prefs_path, "a") as prefs_file:
++            prefs_file.write(f"""user_pref("mail.ui-rdf.version", {migration_version});\n""")
++
++        # Write a xulstore.json file with the collapsed attribute set.
++        xulstore_path = os.path.join(self.marionette.profile_path, "xulstore.json")
++        if xulstore_value is None:
++            xulstore_data = {COMPOSE_WINDOW: {}}
++        else:
++            xulstore_data = {
++                COMPOSE_WINDOW: {
++                    "composeToolbar2": {"collapsed": xulstore_value},
++                    "compose-toolbar-menubar2": {"collapsed": xulstore_value},
++                },
++                MESSENGER_WINDOW: {"mail-bar3": {"collapsed": xulstore_value}},
++                MESSAGE_WINDOW: {"mail-bar3": {"collapsed": xulstore_value}},
++            }
++        with open(xulstore_path, "w") as xulstore_file:
++            json.dump(xulstore_data, xulstore_file)
++
++        # Start the application with a compose window, check the state.
++        self.marionette.instance.app_args = ["mailto:test@invalid"]
++        try:
++            self.marionette.start_session()
++            self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++
++            for url, id in (
++                (COMPOSE_WINDOW, "composeToolbar2"),
++                (COMPOSE_WINDOW, "compose-toolbar-menubar2"),
++                (MESSENGER_WINDOW, "mail-bar3"),
++                (MESSAGE_WINDOW, "mail-bar3"),
++            ):
++                self.assertEqual(
++                    expected_xulstore_value,
++                    self.marionette.execute_script(self.get_xulstore_value, [url, id]),
++                    f"XUL store value for {id} in {url}",
++                )
++            self.assertTrue(self.marionette.execute_script(self.get_pref_value) >= 62)
++
++            handles = self.marionette.chrome_window_handles
++            self.assertEqual(2, len(handles))
++            self.marionette.switch_to_window(handles[1], True)
++            self.assertEqual("msgcompose", self.marionette.get_window_type())
++            self.assertEqual(
++                expected_attribute_values,
++                self.marionette.execute_script(self.get_collapsed_attributes),
++            )
++        finally:
++            for key in COMPOSE_PREFS:
++                self.marionette.clear_pref(key)
++            self.marionette.instance.app_args = []
++            self.marionette.quit(in_app=True)

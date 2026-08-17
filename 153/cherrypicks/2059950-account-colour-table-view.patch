@@ -1,0 +1,364 @@
+
+# HG changeset patch
+# User Alessandro Castellani <alessandro@thunderbird.net>
+# Date 1786790824 0
+# Node ID 9d96c0fcfb60ce96cbe887e765f3d324e196b23b
+# Parent  7fab8401dcb580e79e47318a8105c17677b1e8d2
+Bug 2059950 - Show account color in the account column in table view when viewing a unified folder. r=arschmitz
+
+Differential Revision: https://phabricator.services.mozilla.com/D318255
+
+
+diff --git a/mail/base/content/widgets/treeview/thread-row.mjs b/mail/base/content/widgets/treeview/thread-row.mjs
+--- a/mail/base/content/widgets/treeview/thread-row.mjs
++++ b/mail/base/content/widgets/treeview/thread-row.mjs
+@@ -39,16 +39,21 @@ class ThreadRow extends TreeViewTableRow
+       // No need to update the text of this cell if it's hidden, the selection
+       // column, or a non-custom icon column that doesn't match a specific flag.
+       if (column.hidden || (!column.custom && column.icon) || column.select) {
+         continue;
+       }
+       textColumns.push(column.id);
+     }
+ 
++    // If the user is showing the account column, fetch the server key.
++    if (textColumns.includes("accountCol")) {
++      textColumns.push("serverKeyCol");
++    }
++
+     // XPCOM calls here must be keep to a minimum. Collect all of the
+     // required data in one go.
+     const properties = {};
+     const threadLevel = {};
+     const cellTexts = this.view.cellDataForColumns(
+       this._index,
+       textColumns,
+       properties,
+@@ -241,19 +246,30 @@ class ThreadRow extends TreeViewTableRow
+           image.hidden = !cellIconId.includes(image.dataset.cellIconId);
+         }
+         continue;
+       }
+ 
+       if (textIndex >= 0) {
+         if (isDummyRow) {
+           cell.textContent = "";
++          // Clear any potentially stale account color property for dummy rows.
++          if (column.id == "accountCol") {
++            cell.style.removeProperty("--account-color");
++          }
+           continue;
+         }
+         cell.textContent = cellTexts[textIndex];
++        // If we're showing the account column, set the server color.
++        if (column.id == "accountCol") {
++          cell.style.setProperty(
++            "--account-color",
++            `var(--server-${CSS.escape(cellTexts[textColumns.indexOf("serverKeyCol")])}-color)`
++          );
++        }
+         if (!column.custom) {
+           document.l10n.setAttributes(cell, column.l10n.cell, {
+             title: cellTexts[textIndex],
+           });
+         }
+         ariaLabelPromises.push(cellTexts[textIndex]);
+       }
+     }
+diff --git a/mail/test/browser/account/browser_accountColorsUnifiedFolders.js b/mail/test/browser/account/browser_accountColorsUnifiedFolders.js
+--- a/mail/test/browser/account/browser_accountColorsUnifiedFolders.js
++++ b/mail/test/browser/account/browser_accountColorsUnifiedFolders.js
+@@ -24,16 +24,20 @@ const { expand_folder, get_special_folde
+   "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
+ );
+ 
+ const { add_message_to_folder, create_message, make_message_sets_in_folders } =
+   ChromeUtils.importESModule(
+     "resource://testing-common/mail/MessageInjectionHelpers.sys.mjs"
+   );
+ 
++const { ensure_cards_view, ensure_table_view } = ChromeUtils.importESModule(
++  "resource://testing-common/MailViewHelpers.sys.mjs"
++);
++
+ const tabmail = document.getElementById("tabmail");
+ const about3Pane = tabmail.currentAbout3Pane;
+ // Hardcoded colors from the --color-primary-default Bolt token.
+ const defaultColor = window.matchMedia("(prefers-color-scheme: dark)").matches
+   ? "#58c9ff"
+   : "#1373d9";
+ // Collect all added accounts to be cleaned up at the end.
+ const addedAccounts = [];
+@@ -184,99 +188,207 @@ add_task(async function test_custom_acco
+   let row = await TestUtils.waitForCondition(() =>
+     about3Pane.threadTree.getRowAtIndex(0)
+   );
+   EventUtils.synthesizeMouseAtCenter(row, {}, about3Pane);
+ 
+   info("Test first message without any custom color");
+   let account = addedAccounts.at(0);
+   row = about3Pane.threadTree.getRowAtIndex(2);
+-  subtest_check_message_indicator_variable(account, row, true);
+-  subtest_check_message_indicator_color(account, row, true);
++  subtest_check_message_indicator_variable(account, row, ".account-indicator");
++  subtest_check_message_indicator_color(
++    account,
++    row,
++    ".account-indicator",
++    false,
++    true
++  );
+ 
+   info("Test second message with custom color.");
+   account = addedAccounts.at(1);
+   row = about3Pane.threadTree.getRowAtIndex(1);
+-  subtest_check_message_indicator_variable(account, row);
+-  subtest_check_message_indicator_color(account, row);
++  subtest_check_message_indicator_variable(account, row, ".account-indicator");
++  subtest_check_message_indicator_color(account, row, ".account-indicator");
+ 
+   info("Test third message with custom color.");
+   account = addedAccounts.at(2);
+   row = about3Pane.threadTree.getRowAtIndex(0);
+-  subtest_check_message_indicator_variable(account, row);
+-  subtest_check_message_indicator_color(account, row);
++  subtest_check_message_indicator_variable(account, row, ".account-indicator");
++  subtest_check_message_indicator_color(account, row, ".account-indicator");
++
++  // Switch to table view.
++  await ensure_table_view(document);
++  await new Promise(resolve => about3Pane.requestAnimationFrame(resolve));
++
++  // Enable the account column.
++  const colPicker = about3Pane.document.querySelector(
++    "#threadTree .last-column .button-column-picker"
++  );
++  const colPickerPopup = about3Pane.document.querySelector(
++    "#threadTree .menupopup-column-picker"
++  );
++
++  EventUtils.synthesizeMouseAtCenter(colPicker, {}, about3Pane);
++  await BrowserTestUtils.waitForPopupEvent(colPickerPopup, "shown");
++
++  const menuItem = colPickerPopup.querySelector(`[value="accountCol"]`);
++  const checkedState = menuItem.hasAttribute("checked");
++  const checkedStateChanged = TestUtils.waitForCondition(
++    () => checkedState != menuItem.hasAttribute("checked"),
++    "The checked status changed"
++  );
++  const columnsChangedEvent = BrowserTestUtils.waitForEvent(
++    about3Pane.document,
++    "columns-changed"
++  );
++  colPickerPopup.activateItem(menuItem);
++  await checkedStateChanged;
++  await columnsChangedEvent;
++
++  // The column picker menupopup doesn't close automatically on purpose.
++  EventUtils.synthesizeKey("KEY_Escape", {}, about3Pane);
++  await BrowserTestUtils.waitForPopupEvent(colPickerPopup, "hidden");
++  await new Promise(about3Pane.requestAnimationFrame);
++  await TestUtils.waitForTick();
++
++  // Test account colors in table view.
++  info("Test first message without any custom color");
++  account = addedAccounts.at(0);
++  row = about3Pane.threadTree.getRowAtIndex(2);
++  subtest_check_message_indicator_variable(
++    account,
++    row,
++    "td.accountcol-column"
++  );
++  subtest_check_message_indicator_color(
++    account,
++    row,
++    "td.accountcol-column",
++    true,
++    true
++  );
++
++  info("Test second message with custom color.");
++  account = addedAccounts.at(1);
++  row = about3Pane.threadTree.getRowAtIndex(1);
++  subtest_check_message_indicator_variable(
++    account,
++    row,
++    "td.accountcol-column"
++  );
++  subtest_check_message_indicator_color(
++    account,
++    row,
++    "td.accountcol-column",
++    true
++  );
++
++  info("Test third message with custom color.");
++  account = addedAccounts.at(2);
++  row = about3Pane.threadTree.getRowAtIndex(0);
++  subtest_check_message_indicator_variable(
++    account,
++    row,
++    "td.accountcol-column"
++  );
++  subtest_check_message_indicator_color(
++    account,
++    row,
++    "td.accountcol-column",
++    true
++  );
++
++  await ensure_cards_view(document);
++  await new Promise(resolve => about3Pane.requestAnimationFrame(resolve));
+ });
+ 
+ /**
+  * Check if the account indicator is visible and the variable is correctly set
+  * on the message row item.
+  *
+  * @param {nsIMsgAccount} account
+  * @param {HTMLTableRowElement} message
++ * @param {string} selector
+  */
+-function subtest_check_message_indicator_variable(account, message) {
+-  const indicator = message.querySelector(".account-indicator");
++function subtest_check_message_indicator_variable(account, message, selector) {
++  const indicator = message.querySelector(selector);
+   Assert.ok(
+     BrowserTestUtils.isVisible(indicator),
+     "The account indicator for the message should be visible"
+   );
+   Assert.equal(
+-    message
+-      .querySelector(".account-indicator")
+-      .style.getPropertyValue(`--account-color`),
++    message.querySelector(selector).style.getPropertyValue(`--account-color`),
+     `var(--server-${CSS.escape(account.incomingServer.key)}-color)`,
+     "The account color variable should match the account indicator color variable"
+   );
+   Assert.equal(
+     indicator.title,
+     account.incomingServer.prettyName,
+     "The account name should be used as the indicator title"
+   );
+ }
+ 
+ /**
+  * Check if the account indicator matches the expected color on the message row
+  * item.
+  *
+  * @param {nsIMsgAccount} account
+  * @param {HTMLTableRowElement} message
++ * @param {string} selector
++ * @param {boolean} [isPseudo=false]
+  * @param {boolean} [isEmpty=false]
+  */
+ function subtest_check_message_indicator_color(
+   account,
+   message,
++  selector,
++  isPseudo = false,
+   isEmpty = false
+ ) {
++  const indicator = message.querySelector(selector);
++  const backgroundColor = isPseudo
++    ? getComputedStyle(indicator, "::before").backgroundColor
++    : getComputedStyle(indicator).backgroundColor;
+   if (isEmpty) {
+-    const indicator = message.querySelector(".account-indicator");
+     Assert.equal(
+-      getComputedStyle(indicator).backgroundColor,
++      backgroundColor,
+       hexToRgb(defaultColor),
+       "The account color should match the default for non customized colors"
+     );
+     return;
+   }
+ 
+   const amu = new AccountManagerUtils(account);
+   Assert.equal(
++    backgroundColor,
++    hexToRgb(amu.serverColor),
++    "The account color should match the account indicator color"
++  );
++
++  Assert.equal(
+     about3Pane.document.documentElement.style.getPropertyValue(
+       `--server-${CSS.escape(account.incomingServer.key)}-color`
+     ),
+     amu.serverColor,
+-    "The account color should match the account indicator color"
++    "The account color should match the injected CSS variable"
+   );
+ }
+ 
+ /**
+  * Convert a HEX CSS color to an RGB CSS color.
+  *
+  * @param {string} hexColor - Color in the HEX notation.
+  * @returns {string} RGB notation of the HEX color.
+  */
+ function hexToRgb(hexColor) {
++  // Ensure we always deal with a full 7 chars hex value.
++  // Expand shorthand hex like #f00 to #ff0000.
++  if (hexColor.length == 4) {
++    hexColor = `#${hexColor.at(1)}${hexColor.at(1)}${hexColor.at(2)}${hexColor.at(2)}${hexColor.at(3)}${hexColor.at(3)}`;
++  }
+   const r = Number.parseInt(hexColor.slice(1, 3), 16);
+   const g = Number.parseInt(hexColor.slice(3, 5), 16);
+   const b = Number.parseInt(hexColor.slice(5), 16);
+   return `rgb(${r}, ${g}, ${b})`;
+ }
+ 
+ add_task(async function test_account_indicator_hidden() {
+   info("Test that the account indicator is hidden in regular folder mode");
+diff --git a/mail/themes/shared/mail/about3Pane.css b/mail/themes/shared/mail/about3Pane.css
+--- a/mail/themes/shared/mail/about3Pane.css
++++ b/mail/themes/shared/mail/about3Pane.css
+@@ -666,16 +666,28 @@ conversation-view {
+   margin-inline-end: var(--account-indicator-inline-end);
+ 
+   [data-mode="smart"] & {
+     margin-inline-start: 4px;
+     margin-inline-end: -4px;
+   }
+ }
+ 
++.accountcol-column::before {
++  content: "";
++  display: none;
++  box-sizing: border-box;
++  background-color: var(--account-color, var(--folder-color-inbox));
++  border-radius: 3px;
++  inline-size: 3px;
++  block-size: 1rem;
++  margin-inline-end: 3px;
++  vertical-align: middle;
++}
++
+ [data-mode="smart"]
+   :is(
+     [data-folder-type="inbox"],
+     [data-folder-type="drafts"],
+     [data-folder-type="templates"],
+     [data-folder-type="sent"],
+     [data-folder-type="archive"],
+     [data-folder-type="junk"],
+diff --git a/mail/themes/shared/mail/threadPane.css b/mail/themes/shared/mail/threadPane.css
+--- a/mail/themes/shared/mail/threadPane.css
++++ b/mail/themes/shared/mail/threadPane.css
+@@ -626,8 +626,14 @@ tr[data-properties~="outgoing"].selected
+   margin: 0;
+ }
+ 
+ #threadPaneDisplayButton {
+   background-image: var(--icon-display-options);
+   margin: 0;
+   flex-shrink: 0;
+ }
++
++/* Account indicator */
++
++.is-unified tr:not([data-properties~="dummy"]) .accountcol-column::before {
++  display: inline-flex;
++}
+

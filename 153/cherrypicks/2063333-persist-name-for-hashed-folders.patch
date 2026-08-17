@@ -1,0 +1,180 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1786919802 0
+# Node ID e548e36613d91eb216862b746b75bfce9f6e6b24
+# Parent  7fd5a22e93132a4d07064ca6e79992034ca51e96
+Bug 2063333 - Persist the real name of hashed-name folders in the summary at creation. r=tobyp
+
+A folder whose name contains characters that can't be used in a filename
+is stored on disk under a hashed name (NS_MsgHashIfNecessary), which
+differs from its real name. Its real name was only ever kept in the
+folder cache (via nsMsgLocalMailFolder::WriteToFolderCacheElem), never in
+the folder's summary file: nothing calls SetFolderName() when a folder is
+created since Bug 1960526 removed the SetPrettyName() call from the
+creation flow. So once folderCache.json was missing or invalid (e.g.
+after moving a profile), such a folder was displayed under its ugly
+hashed on-disk name instead of its real name.
+
+Fix this by persisting the folder's real name in the summary when the
+folder is stored under a different (hashed) on-disk name: in both stores'
+CreateFolder(), alongside SetMailboxName() (the on-disk name), also call
+SetFolderName() with the real name. Special and ordinary folders are
+unaffected, since for them the on-disk name equals the real name and the
+folderName property stays empty as before.
+
+Adds a regression test which creates a folder whose name contains an
+illegal character and checks that its summary contains the real name.
+
+Differential Revision: https://phabricator.services.mozilla.com/D318494
+
+
+diff --git a/mailnews/local/src/nsMsgBrkMBoxStore.cpp b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+--- a/mailnews/local/src/nsMsgBrkMBoxStore.cpp
++++ b/mailnews/local/src/nsMsgBrkMBoxStore.cpp
+@@ -214,17 +214,25 @@ NS_IMETHODIMP nsMsgBrkMBoxStore::CreateF
+     if (rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING)
+       rv = msgDBService->CreateNewDB(child, getter_AddRefs(unusedDB));
+ 
+     if ((NS_SUCCEEDED(rv) || rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE) &&
+         unusedDB) {
+       // need to set the folder name
+       nsCOMPtr<nsIDBFolderInfo> folderInfo;
+       rv = unusedDB->GetDBFolderInfo(getter_AddRefs(folderInfo));
+-      if (NS_SUCCEEDED(rv)) folderInfo->SetMailboxName(safeFolderName);
++      if (NS_SUCCEEDED(rv)) {
++        folderInfo->SetMailboxName(safeFolderName);
++        // If the folder is stored under a hashed on-disk name, persist its
++        // real name in the summary so it survives a restart without the
++        // folder cache.
++        if (!safeFolderName.Equals(aFolderName)) {
++          folderInfo->SetFolderName(aFolderName);
++        }
++      }
+ 
+       unusedDB->SetSummaryValid(true);
+       unusedDB->Close(true);
+       aParent->UpdateSummaryTotals(true);
+     } else {
+       aParent->PropagateDelete(child, true);
+       rv = NS_MSG_CANT_CREATE_FOLDER;
+     }
+diff --git a/mailnews/local/src/nsMsgMaildirStore.cpp b/mailnews/local/src/nsMsgMaildirStore.cpp
+--- a/mailnews/local/src/nsMsgMaildirStore.cpp
++++ b/mailnews/local/src/nsMsgMaildirStore.cpp
+@@ -409,17 +409,25 @@ NS_IMETHODIMP nsMsgMaildirStore::CreateF
+     if (rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING)
+       rv = msgDBService->CreateNewDB(child, getter_AddRefs(unusedDB));
+ 
+     if ((NS_SUCCEEDED(rv) || rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE) &&
+         unusedDB) {
+       // need to set the folder name
+       nsCOMPtr<nsIDBFolderInfo> folderInfo;
+       rv = unusedDB->GetDBFolderInfo(getter_AddRefs(folderInfo));
+-      if (NS_SUCCEEDED(rv)) folderInfo->SetMailboxName(safeFolderName);
++      if (NS_SUCCEEDED(rv)) {
++        folderInfo->SetMailboxName(safeFolderName);
++        // If the folder is stored under a hashed on-disk name, persist its
++        // real name in the summary so it survives a restart without the
++        // folder cache.
++        if (!safeFolderName.Equals(aFolderName)) {
++          folderInfo->SetFolderName(aFolderName);
++        }
++      }
+ 
+       unusedDB->SetSummaryValid(true);
+       unusedDB->Close(true);
+       aParent->UpdateSummaryTotals(true);
+     } else {
+       MOZ_LOG(MailDirLog, mozilla::LogLevel::Info,
+               ("CreateFolder - failed creating db for new folder"));
+       path->Remove(true);  // recursive
+diff --git a/mailnews/local/test/unit/test_nsIMsgPluggableStore.js b/mailnews/local/test/unit/test_nsIMsgPluggableStore.js
+--- a/mailnews/local/test/unit/test_nsIMsgPluggableStore.js
++++ b/mailnews/local/test/unit/test_nsIMsgPluggableStore.js
+@@ -288,16 +288,66 @@ async function test_longIllegalNameBound
+     newFolder.filePath.leafName,
+     displayName.slice(0, 47) + msgHash(displayName),
+     "the on-disk name must be capped at 47 chars + the hash"
+   );
+   Assert.equal(newFolder.name, displayName, "the folder keeps its real name");
+ }
+ 
+ /**
++ * The folder's real name must be persisted in its summary file when the
++ * folder is created (bug 2063333). A folder whose name contains characters
++ * that can't be used in a filename is stored on disk under a hashed name;
++ * without the real name in the summary, the folder would only keep its name
++ * through the folder cache and lose it once that cache is gone.
++ */
++async function test_createdFolderPersistsRealName() {
++  const root = create_temporary_directory();
++  const rootFolder = setup_mailbox("none", root);
++
++  // Create a plain folder first so the root folder and its discovery are
++  // initialized. Otherwise creating a hashed-name folder as the very first
++  // folder lets the initial disk scan override its in-memory name with the
++  // hashed on-disk name (the maildir store creates the directory before
++  // AddSubfolder; the same ordering was fixed for mbox only in bug 1889653).
++  const setupFolder = rootFolder.msgStore.createFolder(rootFolder, "setup");
++  Assert.ok(setupFolder, "setup folder should be created");
++
++  const displayName = "strange: name";
++  const newFolder = rootFolder.msgStore.createFolder(rootFolder, displayName);
++  Assert.equal(newFolder.name, displayName, "the folder keeps its real name");
++  Assert.notEqual(
++    newFolder.filePath.leafName,
++    displayName,
++    "the on-disk name should be hashed"
++  );
++
++  // The summary must contain the real name, so a fresh folder object (e.g.
++  // after a restart, without the folder cache) can recover it.
++  const dbService = Cc["@mozilla.org/msgDatabase/msgDBService;1"].getService(
++    Ci.nsIMsgDBService
++  );
++  const db = dbService.openDBFromFile(
++    newFolder.summaryFile,
++    null,
++    false,
++    false
++  );
++  try {
++    Assert.equal(
++      db.dBFolderInfo.folderName,
++      displayName,
++      "the summary must contain the folder's real name"
++    );
++  } finally {
++    db.close(true);
++  }
++}
++
++/**
+  * Load messages into a msgStore and make sure we can read
+  * them back correctly using asyncScan().
+  */
+ async function test_asyncScan() {
+   const msg1 =
+     "To: bob@invalid\r\n" +
+     "From: alice@invalid\r\n" +
+     "Subject: Hello\r\n" +
+@@ -766,16 +816,17 @@ function withStore(store, fn) {
+   };
+ }
+ 
+ for (const store of localAccountUtils.pluggableStores) {
+   add_task(withStore(store, test_discoverChildFolders));
+   add_task(withStore(store, test_discoverSubFolders));
+   add_task(withStore(store, test_createFolder));
+   add_task(withStore(store, test_longIllegalNameBounded));
++  add_task(withStore(store, test_createdFolderPersistsRealName));
+   add_task(withStore(store, test_asyncScan));
+   add_task(withStore(store, test_basicReadWrite));
+   add_task(withStore(store, test_discardWrites));
+   add_task(withStore(store, test_oneWritePerFolder));
+   add_task(withStore(store, test_multiFolderWriting));
+   add_task(withStore(store, test_changeFlags));
+   add_task(withStore(store, test_estimateFolderSize));
+   add_task(withStore(store, test_ensureLocalStore));
+

@@ -1,0 +1,139 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1786987416 -7200
+# Node ID 38173772e9e333e51e23a67c4c448fac97d1be89
+# Parent  b1acc27ab3ab6a259584e3eba50ef3c0e1fff098
+Bug 2029781 - Respect the 55-character limit when hashing names with illegal characters. r=tobyp
+
+NS_MsgHashIfNecessary truncates a folder name that contains an illegal
+character (such as ':') at that character before appending the 8 hex
+digits of the hash. For a name whose illegal character is at or beyond
+the 47-character cap this produced an on-disk name longer than MAX_LEN
+(55) characters, e.g. a 125-character name kept 117 characters plus the
+hash. That is how a folder like 'Effectiveness of an automated
+intervention ... settings: a multicentre randomised controlled trial'
+ended up stored under a 125-character name that itself contained the
+old hash.
+
+Cap the kept length at MAX_LEN - 8 like the plain too-long branch; the
+hash is still computed over the full original name, so the resulting
+on-disk name is the same as for any other 55+ character name. Drop one
+character further when it would otherwise end in the high surrogate of
+a surrogate pair, as the too-long branch already does.
+
+Add a gtest for the new behaviour and an xpcshell test asserting that
+a folder whose illegal character lies past the cap is stored under a
+55-character name.
+
+Differential Revision: https://phabricator.services.mozilla.com/D318580
+
+diff --git a/mailnews/base/src/nsMsgUtils.cpp b/mailnews/base/src/nsMsgUtils.cpp
+--- a/mailnews/base/src/nsMsgUtils.cpp
++++ b/mailnews/base/src/nsMsgUtils.cpp
+@@ -296,12 +296,16 @@ nsString NS_MsgHashIfNecessary(const nsA
+   }
+ 
+   char hashedname[9];
+   int32_t keptLength = -1;
+-  if (illegalCharacterIndex != -1)
+-    keptLength = illegalCharacterIndex;
+-  else if (name.Length() > MAX_LEN) {
++  if (illegalCharacterIndex != -1) {
++    // The name is truncated at the illegal character, but never beyond the
++    // length limit: the hashed name must fit within MAX_LEN like any other.
++    keptLength = std::min(illegalCharacterIndex, (int32_t)MAX_LEN - 8);
++  } else if (name.Length() > MAX_LEN) {
+     keptLength = MAX_LEN - 8;
++  }
++  if (keptLength == (int32_t)MAX_LEN - 8) {
+     // To avoid keeping only the high surrogate of a surrogate pair
+     if (NS_IS_HIGH_SURROGATE(name.CharAt(keptLength - 1))) --keptLength;
+   }
+ 
+diff --git a/mailnews/base/test/gtest/TestHashIfNecessary.cpp b/mailnews/base/test/gtest/TestHashIfNecessary.cpp
+--- a/mailnews/base/test/gtest/TestHashIfNecessary.cpp
++++ b/mailnews/base/test/gtest/TestHashIfNecessary.cpp
+@@ -42,8 +42,15 @@ TEST(HashIfNecessary, Basics)
+   input = u"test TEST test TEST test TEST test TEST test TEST test TEST"_ns;
+   ASSERT_TRUE(NS_MsgHashIfNecessary(input).Equals(
+       u"test TEST test TEST test TEST test TEST test TEa2bbf4d7"_ns));
+ 
++  // The 55-character limit also applies when the name contains an illegal
++  // character further in: the name is truncated to 47 characters (not at the
++  // illegal character) before the hash is appended.
++  input = u"1234567890 1234567890 1234567890 1234567890 1234567890: tail"_ns;
++  ASSERT_TRUE(NS_MsgHashIfNecessary(input).Equals(
++      u"1234567890 1234567890 1234567890 1234567890 123870c44d6"_ns));
++
+   // No hashing necessary with this non-ASCII character. It used to be
+   // different on Windows.
+   input = u"test π"_ns;
+   ASSERT_TRUE(NS_MsgHashIfNecessary(input).Equals(u"test π"_ns));
+diff --git a/mailnews/local/test/unit/test_nsIMsgPluggableStore.js b/mailnews/local/test/unit/test_nsIMsgPluggableStore.js
+--- a/mailnews/local/test/unit/test_nsIMsgPluggableStore.js
++++ b/mailnews/local/test/unit/test_nsIMsgPluggableStore.js
+@@ -246,8 +246,53 @@ async function test_createFolder() {
+     );
+   }
+ }
+ 
++// Replica of StringHash in mailnews/base/src/nsMsgUtils.cpp: h = 1, then for
++// each UTF-16 code unit (as two little-endian bytes):
++// h = 0x63c63cd9 * h + 0x9c39c33d + byte (mod 2^32). The result is the 8 hex
++// digits appended by NS_MsgHashIfNecessary. Math.imul is required for the
++// 32-bit multiplication; a plain "*" loses precision.
++function msgHash(name) {
++  let h = 1;
++  for (let i = 0; i < name.length; i++) {
++    const c = name.charCodeAt(i);
++    for (const b of [c & 0xff, (c >> 8) & 0xff]) {
++      h = (Math.imul(0x63c63cd9, h) + 0x9c39c33d + b) >>> 0;
++    }
++  }
++  return h.toString(16).padStart(8, "0");
++}
++
++/**
++ * A folder name with an illegal character far into it must still be stored
++ * under a name that fits the 55-character limit (bug 2029781): the hash is
++ * appended after 47 characters, not at the illegal character.
++ */
++async function test_longIllegalNameBounded() {
++  const root = create_temporary_directory();
++  const rootFolder = setup_mailbox("none", root);
++  // Initialize the root and its discovery (see test_createdFolderPersistsRealName
++  // for why this matters for maildir).
++  rootFolder.msgStore.createFolder(rootFolder, "setup");
++
++  const displayName =
++    "a very long folder name with an invalid character far in: and some more text";
++  Assert.greater(
++    displayName.indexOf(":"),
++    47,
++    "the illegal char must be past the 47-char cap"
++  );
++
++  const newFolder = rootFolder.msgStore.createFolder(rootFolder, displayName);
++  Assert.equal(
++    newFolder.filePath.leafName,
++    displayName.slice(0, 47) + msgHash(displayName),
++    "the on-disk name must be capped at 47 chars + the hash"
++  );
++  Assert.equal(newFolder.name, displayName, "the folder keeps its real name");
++}
++
+ /**
+  * Load messages into a msgStore and make sure we can read
+  * them back correctly using asyncScan().
+  */
+@@ -724,8 +769,9 @@ function withStore(store, fn) {
+ for (const store of localAccountUtils.pluggableStores) {
+   add_task(withStore(store, test_discoverChildFolders));
+   add_task(withStore(store, test_discoverSubFolders));
+   add_task(withStore(store, test_createFolder));
++  add_task(withStore(store, test_longIllegalNameBounded));
+   add_task(withStore(store, test_asyncScan));
+   add_task(withStore(store, test_basicReadWrite));
+   add_task(withStore(store, test_discardWrites));
+   add_task(withStore(store, test_oneWritePerFolder));
