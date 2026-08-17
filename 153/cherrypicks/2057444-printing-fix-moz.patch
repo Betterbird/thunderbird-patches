@@ -1,0 +1,93 @@
+# HG changeset patch
+# User Emilio Cobos Álvarez <emilio@crisal.io>
+# Date 1786995886 -7200
+# Parent  a7b545615020d2702faffde885aa25f479210265
+Bug 2057444 - Make TryToReplaySurface work on arbitrary DrawTargets.
+
+diff --git a/gfx/2d/2D.h b/gfx/2d/2D.h
+--- a/gfx/2d/2D.h
++++ b/gfx/2d/2D.h
+@@ -1532,8 +1532,15 @@ class DrawTarget : public external::Atom
+     return nullptr;
+   }
+ 
+   /**
++   * Try to replay a source surface into this draw target, returning `true` on
++   * success. Parameter coordinate spaces match DrawSurface().
++   */
++  bool TryToReplaySurface(SourceSurface* aSurface, const Rect& aDest,
++                          const Rect& aSource);
++
++  /**
+    * Draw a surface to the draw target, when the surface will be available
+    * at a later time. This is only valid for recording DrawTargets.
+    *
+    * This is considered fallible, and replaying this without making the surface
+diff --git a/gfx/2d/DrawTargetRecording.cpp b/gfx/2d/DrawTargetRecording.cpp
+--- a/gfx/2d/DrawTargetRecording.cpp
++++ b/gfx/2d/DrawTargetRecording.cpp
+@@ -547,8 +547,64 @@ void DrawTargetRecording::DrawSurface(So
+   RecordEventSelf(
+       RecordedDrawSurface(aSurface, aDest, aSource, aSurfOptions, aOptions));
+ }
+ 
++bool DrawTarget::TryToReplaySurface(SourceSurface* aSurface, const Rect& aDest,
++                                    const Rect& aSource) {
++  if (aSurface->GetType() != SurfaceType::RECORDING) {
++    return false;
++  }
++  auto* recordingSurface = static_cast<SourceSurfaceRecording*>(aSurface);
++  if (!recordingSurface->mRecorder ||
++      recordingSurface->mRecorder->GetRecorderType() != RecorderType::MEMORY) {
++    return false;
++  }
++  if (aSource.IsEmpty() || aDest.IsEmpty()) {
++    return true;
++  }
++
++  auto* memRecorder =
++      static_cast<DrawEventRecorderMemory*>(recordingSurface->mRecorder.get());
++  if (!memRecorder->mOutputStream.mValid || !memRecorder->mOutputStream.mData) {
++    return true;
++  }
++
++  // Map points in the source surface's content space to our current user
++  // space (aSource -> aDest). Pre* methods prepend, so build right-to-left:
++  // first the destination translation, then the scaling, then the source
++  // translation, giving: Translate(-aSource) * Scale * Translate(aDest).
++  Matrix mapping;
++  mapping.PreTranslate(aDest.X(), aDest.Y());
++  mapping.PreScale(aDest.Width() / aSource.Width(),
++                   aDest.Height() / aSource.Height());
++  mapping.PreTranslate(-aSource.X(), -aSource.Y());
++
++  const Matrix savedTransform = GetTransform();
++  const Matrix combined = mapping * savedTransform;
++
++  PushClipRect(aDest);
++
++  // The recording may have filtered out SetTransform calls with the same value
++  // so we need to apply the mapping ourselves to ensure it gets used even if
++  // the recording never emits a SetTransform of its own.
++  // See Translator::DrawDependentSurface.
++  SetTransform(combined);
++
++  InlineTranslator translator(this);
++  // RecordedSetTransform composes its recorded transform with this reference
++  // transform whenever it targets the reference DT (which is |this|), so
++  // every recorded inner SetTransform M ends up effectively as
++  //   M * mapping * savedTransform
++  // on the playback target.
++  translator.SetReferenceDrawTargetTransform(combined);
++  translator.TranslateRecording(memRecorder->mOutputStream.mData,
++                                memRecorder->mOutputStream.mLength);
++
++  PopClip();
++  SetTransform(savedTransform);
++  return true;
++}
++
+ void DrawTargetRecording::DrawSurfaceDescriptor(
+     const layers::SurfaceDescriptor& aDesc,
+     const RefPtr<layers::Image>& aImageOfSurfaceDescriptor, const Rect& aDest,
+     const Rect& aSource, const DrawSurfaceOptions& aSurfOptions,
