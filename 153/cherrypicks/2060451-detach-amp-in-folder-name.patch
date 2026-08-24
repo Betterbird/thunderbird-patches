@@ -1,0 +1,132 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1787049869 0
+# Node ID 27845338fb11b72831b2487b1041adbcbbbddfb2
+# Parent  04d1bc23cbf20e11be7dfa008885cd90a93d6d1a
+Bug 2060451 - detach file failed with & in directory name. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D319128
+
+
+diff --git a/mailnews/base/test/unit/test_detachToFile.js b/mailnews/base/test/unit/test_detachToFile.js
+--- a/mailnews/base/test/unit/test_detachToFile.js
++++ b/mailnews/base/test/unit/test_detachToFile.js
+@@ -74,43 +74,52 @@ add_task(async function startMime() {
+ 
+   await gCallbackObject.promise;
+ });
+ 
+ // detach any found attachments
+ add_task(async function detachAttachments() {
+   let msgHdr = mailTestUtils.firstMsgHdr(localAccountUtils.inboxFolder);
+   const attachment = new AttachmentInfo(gCallbackObject.attachments[0]);
+-  const profileDir = do_get_profile();
+-  await AttachmentInfo.detachAttachments(msgHdr, [attachment], profileDir.path);
++  // A directory name with characters needing escaping in a URL, see bug 2060451.
++  const detachDir = PathUtils.join(do_get_profile().path, "detach & dir");
++  await IOUtils.makeDirectory(detachDir);
++  await AttachmentInfo.detachAttachments(msgHdr, [attachment], detachDir);
+ 
+   // test that the detachment was successful
+ 
+   // The message contained a file "check.pdf" which should
+-  //  now exist in the profile directory.
+-  const checkFile = profileDir.clone();
+-  checkFile.append(attachment.name);
++  //  now exist in the detach directory.
++  const checkFilePath = PathUtils.join(detachDir, attachment.name);
+ 
+-  Assert.ok(checkFile.exists(), `${checkFile.path} should exist`);
+-  const fileInfo = await IOUtils.stat(checkFile.path);
++  Assert.ok(
++    await IOUtils.exists(checkFilePath),
++    `${checkFilePath} should exist`
++  );
++  const fileInfo = await IOUtils.stat(checkFilePath);
+   Assert.equal(fileInfo.type, "regular", `The file type should be correct`);
+   Assert.greater(
+     fileInfo.size,
+     0,
+-    `The file ${checkFile.path} should have size`
++    `The file ${checkFilePath} should have size`
+   );
+ 
+   // The message should now have a detached attachment. Read the message,
+   //  and search for "AttachmentDetached" which is added on detachment.
+ 
+   // Get the message header
+   msgHdr = mailTestUtils.firstMsgHdr(localAccountUtils.inboxFolder);
+ 
+   const messageContent = await getContentFromMessage(msgHdr);
+   Assert.ok(messageContent.includes("AttachmentDetached"));
++  Assert.stringContains(
++    messageContent,
++    `X-Mozilla-External-Attachment-URL: ${PathUtils.toFileURI(checkFilePath)}`,
++    "the link to the detached file should be intact"
++  );
+ });
+ 
+ /**
+  * Get the full message content.
+  *
+  * @param {nsIMsgDBHdr} aMsgHdr - Message whose text body will be read.
+  * @returns {Promise<string>} full message contents.
+  */
+diff --git a/mailnews/mime/src/mimeobj.cpp b/mailnews/mime/src/mimeobj.cpp
+--- a/mailnews/mime/src/mimeobj.cpp
++++ b/mailnews/mime/src/mimeobj.cpp
+@@ -137,29 +137,33 @@ static void MimeObject_finalize(MimeObje
+ 
+   if (obj->options && obj->options->state) {
+     delete obj->options->state;
+     obj->options->state = nullptr;
+   }
+ }
+ 
+ // Extracts all values of a given parameter name from the query string.
++// The query must still be escaped: values are unescaped individually, after
++// splitting, so that escaped separators within a value are preserved.
+ static nsTArray<nsCString> ExtractParams(const nsACString& query,
+                                          const nsACString& paramName) {
+   nsTArray<nsCString> parts;
+   ParseString(query, '&', parts);
+ 
+   nsTArray<nsCString> values;
+   for (const auto& part : parts) {
+     int32_t equals = part.FindChar('=');
+     if (equals > 0) {
+       nsAutoCString name, value;
+       name.Assign(Substring(part, 0, equals));
+-      value.Assign(Substring(part, equals + 1));
++      NS_UnescapeURL(name);
+       if (name.Equals(paramName)) {
++        value.Assign(Substring(part, equals + 1));
++        NS_UnescapeURL(value);
+         values.AppendElement(value);
+       }
+     }
+   }
+   return values;
+ }
+ 
+ static int MimeObject_parse_begin(MimeObject* obj) {
+@@ -179,17 +183,16 @@ static int MimeObject_parse_begin(MimeOb
+     if (PL_strcasestr(obj->options->url, "&del=")) {
+       nsCOMPtr<nsIURI> uri;
+       nsresult rv =
+           NS_NewURI(getter_AddRefs(uri), nsDependentCString(obj->options->url));
+       NS_ENSURE_SUCCESS(rv, -1);
+ 
+       nsAutoCString query;
+       uri->GetQuery(query);
+-      NS_UnescapeURL(query);
+ 
+       obj->options->state->partsToStrip = ExtractParams(query, "del"_ns);
+       obj->options->state->detachToFiles = ExtractParams(query, "detachTo"_ns);
+     }
+   }
+ 
+   /* Decide whether this object should be output or not... */
+   if (!obj->options || obj->options->no_output_p ||
+

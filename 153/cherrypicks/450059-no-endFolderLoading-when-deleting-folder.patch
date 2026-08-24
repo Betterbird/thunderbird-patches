@@ -1,0 +1,397 @@
+
+# HG changeset patch
+# User welpy-cw <h.w.forms@arcor.de>
+# Date 1786995300 -3600
+# Node ID 8cb8001c3dfe02f4396eab24040528954c34965a
+# Parent  8aa33d0b94ad89e7c2eea2a2d8c914e861aefa64
+Bug 450059 - Don't call endFolderLoading on folders being deleted. r=mkmelin
+
+When the folder displayed by a DBViewWrapper is deleted, the wrapper is
+notified via FolderNotificationHelper and calls close(true). The
+folderIsDead flag already existed to avoid calling back into the dying
+folder (onLeavingFolder is skipped for dead folders), but the folder
+loading state was still torn down unconditionally, which called
+endFolderLoading() on the deleted folder.
+
+endFolderLoading() re-registers the folder as a DB change listener and
+runs UpdateSummaryTotals(true), which calls FlushToFolderCache(). For a
+folder that is being deleted this is harmful: RecursiveDelete has just
+removed the folder's entry from the folder cache and its summary file,
+and the stale folder object (still alive via strong references) would
+re-write its entry - including the Virtual flag, which is still set on
+the dying object. When a new folder is later created with the same name,
+it then incorrectly reads the Virtual flag back from the folder cache
+and becomes a saved search with the old scope and terms (bug 450059).
+
+Fix: honor the folderIsDead flag when clearing the folder loading state.
+close(folderIsDead) now passes it through to _setFolderLoading, which
+skips startFolderLoading()/endFolderLoading() for dead folders. Our own
+loading state and the listener are still updated, so the next view open
+starts from a clean state and the UI's loading state stays in sync.
+
+This only affects the dead-folder path; live folders keep the exact
+previous behavior (endFolderLoading still runs from _folderLoaded and
+from a normal mid-load close). Moving a folder to the trash is not
+affected: that goes through folderMoveCopyCompleted -> _folderMoved,
+which never calls close().
+
+As part of this change, the folderLoading getter/setter is converted
+into an isFolderLoading() method and a private _setFolderLoading()
+method so that the "folder being deleted" flag can be passed without a
+side-effectful setter.
+
+A regression test (mail/base/test/unit/test_viewWrapper_virtualFolderDeleted.js)
+opens a virtual folder in a DBViewWrapper, deletes it while it is
+displayed and checks that the folder cache entry is not re-added and
+that a folder created with the same name afterwards does not inherit the
+Virtual flag. Without this fix the test fails: the deleted folder's
+endFolderLoading re-adds its entry (with the Virtual flag) to the folder
+cache.
+
+To make sure a reused folder object behaves correctly after such an
+abandoned load, nsMsgDBFolder::SetParent now resets the database-listener
+state when a parentless folder is re-added to the tree. Without this, a
+non-virtual folder deleted while it was loading would not re-attach its
+database listener after being reused for a new folder with the same name.
+
+Differential Revision: https://phabricator.services.mozilla.com/D315858
+
+
+diff --git a/mail/base/test/unit/test_viewWrapper_virtualFolderDeleted.js b/mail/base/test/unit/test_viewWrapper_virtualFolderDeleted.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/unit/test_viewWrapper_virtualFolderDeleted.js
+@@ -0,0 +1,92 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test bug 450059: a virtual folder (saved search) that is deleted while it is
++ * displayed in a DBViewWrapper must not be resurrected.
++ *
++ * The view wrapper's close() used to call endFolderLoading() even for folders
++ * being deleted, which runs UpdateSummaryTotals() -> FlushToFolderCache() and
++ * re-writes the folder cache entry (including the Virtual flag) for a folder
++ * whose cache entry and summary file were just removed by the deletion. A
++ * subsequent folder created with the same name would then incorrectly read the
++ * Virtual flag back from the cache.
++ */
++
++/* import-globals-from resources/viewWrapperTestUtils.js */
++load("resources/viewWrapperTestUtils.js");
++initViewWrapperTestUtils({ mode: "local" });
++
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++
++/**
++ * Deleting a virtual folder that is displayed in a view wrapper must not
++ * re-add its entry to the folder cache (bug 450059).
++ */
++add_task(async function test_deleted_virtual_folder_not_reflushed_to_cache() {
++  const viewWrapper = make_view_wrapper();
++
++  const [[folderOne]] = await messageInjection.makeFoldersWithSets(1, [{}]);
++  const virtFolder = messageInjection.makeVirtualFolder([folderOne], {});
++  await view_open(viewWrapper, virtFolder);
++  Assert.ok(viewWrapper.isVirtual);
++
++  // For a non-server folder the folder cache key is the persistent descriptor
++  // of its summary file.
++  const cache = MailServices.accounts.folderCache;
++  const cacheKey = virtFolder.summaryFile.persistentDescriptor;
++
++  // The entry exists while the folder exists. getCacheElement throws
++  // NS_ERROR_NOT_AVAILABLE when the key is not present.
++  cache.getCacheElement(cacheKey, false);
++
++  const parent = virtFolder.parent;
++  parent.propagateDelete(virtFolder, true);
++  Assert.equal(virtFolder.parent, null, "deleted virtual folder has no parent");
++  Assert.equal(
++    viewWrapper.displayedFolder,
++    null,
++    "view wrapper should have closed on deletion"
++  );
++  Assert.ok(
++    !viewWrapper.isFolderLoading(),
++    "view wrapper should no longer be loading a folder"
++  );
++
++  // The deletion must not have re-added the folder's entry to the folder
++  // cache (the stale object would carry the Virtual flag).
++  Assert.throws(
++    () => cache.getCacheElement(cacheKey, false),
++    /NS_ERROR_NOT_AVAILABLE/,
++    "deleted folder should not be re-added to the folder cache"
++  );
++});
++
++/**
++ * Recreating a folder with the same name after deleting a displayed virtual
++ * folder must not inherit the Virtual flag (bug 450059).
++ */
++add_task(async function test_recreated_folder_does_not_inherit_virtual() {
++  const viewWrapper = make_view_wrapper();
++
++  const [[folderOne]] = await messageInjection.makeFoldersWithSets(1, [{}]);
++  const virtFolder = messageInjection.makeVirtualFolder([folderOne], {});
++  await view_open(viewWrapper, virtFolder);
++
++  const parent = virtFolder.parent;
++  const name = virtFolder.name;
++  parent.propagateDelete(virtFolder, true);
++
++  const recreated = parent.addSubfolder(name);
++  Assert.notEqual(recreated, virtFolder, "recreated folder should be fresh");
++  Assert.ok(
++    !recreated.getFlag(Ci.nsMsgFolderFlags.Virtual),
++    "recreated folder should not inherit the Virtual flag"
++  );
++
++  // Clean up the recreated folder.
++  recreated.parent.propagateDelete(recreated, true);
++});
+diff --git a/mail/base/test/unit/xpcshell.toml b/mail/base/test/unit/xpcshell.toml
+--- a/mail/base/test/unit/xpcshell.toml
++++ b/mail/base/test/unit/xpcshell.toml
+@@ -20,16 +20,20 @@ tags = ["archive"]
+ ["test_attachmentChecker.js"]
+ 
+ ["test_columns.js"]
+ 
+ ["test_darkReader.js"]
+ 
+ ["test_devtools_url.js"]
+ 
++["test_viewWrapper_virtualFolderDeleted.js"]
++run-sequentially = true  # Avoid bustage.
++tags = ["virtualfolders"]
++
+ ["test_emptyTrash_dbViewWrapper.js"]
+ run-sequentially = true  # Avoid bustage.
+ 
+ ["test_folderSelectionDataAdapter.js"]
+ tags = ["dataadapter"]
+ 
+ ["test_linkHelper.js"]
+ 
+diff --git a/mail/modules/DBViewWrapper.sys.mjs b/mail/modules/DBViewWrapper.sys.mjs
+--- a/mail/modules/DBViewWrapper.sys.mjs
++++ b/mail/modules/DBViewWrapper.sys.mjs
+@@ -780,17 +780,19 @@ DBViewWrapper.prototype = {
+       if (this.isVirtual) {
+         FolderNotificationHelper.removeNotifications(
+           [this.displayedFolder],
+           this
+         );
+         this._releaseFolderDatabase(this.displayedFolder);
+       }
+ 
+-      this.folderLoading = false;
++      // Don't call back into a folder that is being deleted; EndFolderLoading's
++      // UpdateSummaryTotals would reopen/rewrite its storage and cache.
++      this._setFolderLoading(false, folderIsDead);
+       this.displayedFolder = null;
+     }
+ 
+     FolderNotificationHelper.removeNotifications(this._underlyingFolders, this);
+     if (this.isSearch || this.isSynthetic) {
+       // Opposite of FolderNotificationHelper.noteCuriosity(this)
+       FolderNotificationHelper.removeNotifications(null, this);
+     }
+@@ -887,31 +889,34 @@ DBViewWrapper.prototype = {
+       // This will throw an exception if the .msf file is missing,
+       // out of date (e.g., the local folder has changed), or corrupted.
+       msgDatabase = this.displayedFolder.msgDatabase;
+     } catch (e) {}
+     if (msgDatabase) {
+       this._prepareToLoadView(msgDatabase, aFolder);
+     }
+ 
+-    this.folderLoading = true;
++    this._setFolderLoading(true);
+     if (!this.isVirtual) {
+       FolderNotificationHelper.updateFolderAndNotifyOnLoad(
+         this.displayedFolder,
+         this,
+         this.listener.msgWindow
+       );
+     }
+ 
+     // We do this after kicking off the update because this could initiate a
+     // search which could fight our explicit updateFolderAndNotifyOnLoad call
+     // if the search is already outstanding.
+     // If folder loaded directly from the updateFolderAndNotifyOnLoad above
+     // no need to enter it once again now.
+-    if (this.folderLoading && this.shouldShowMessagesForFolderImmediately()) {
++    if (
++      this.isFolderLoading() &&
++      this.shouldShowMessagesForFolderImmediately()
++    ) {
+       this._enterFolder();
+     }
+   },
+ 
+   /**
+    * Open a synthetic view provider as backing our view.
+    */
+   openSynthetic(aSyntheticView) {
+@@ -962,31 +967,47 @@ DBViewWrapper.prototype = {
+       [Ci.nsMsgViewSortType.byNone, Ci.nsMsgViewSortOrder.ascending],
+     ];
+     this.__viewFlags = Ci.nsMsgViewFlagsType.kNone;
+ 
+     FolderNotificationHelper.noteCuriosity(this);
+     this._applyViewChanges();
+   },
+ 
+-  get folderLoading() {
++  /**
++   * Whether the displayed folder is currently being loaded.
++   *
++   * @returns {boolean}
++   */
++  isFolderLoading() {
+     return this._folderLoading;
+   },
+-  set folderLoading(aFolderLoading) {
++
++  /**
++   * @param {boolean} aFolderLoading - True when we start loading the folder.
++   * @param {boolean} [aFolderIsDead=false] - If true, the folder is being
++   *   deleted, so don't call startFolderLoading()/endFolderLoading() on it.
++   *   Our own loading state and the listener are still updated.
++   */
++  _setFolderLoading(aFolderLoading, aFolderIsDead = false) {
+     if (this._folderLoading == aFolderLoading) {
+       return;
+     }
+     this._folderLoading = aFolderLoading;
+-    // tell the folder about what is going on so it can remove its db change
+-    //  listener and restore it, respectively.
+-    if (aFolderLoading) {
+-      this.displayedFolder.startFolderLoading();
+-    } else {
+-      this.displayedFolder.endFolderLoading();
++    if (!aFolderIsDead) {
++      // tell the folder about what is going on so it can remove its db change
++      // listener and restore it, respectively.
++      if (aFolderLoading) {
++        this.displayedFolder.startFolderLoading();
++      } else {
++        this.displayedFolder.endFolderLoading();
++      }
+     }
++    // The listener is still notified even for dead folders, so the UI's
++    // loading state stays in sync with ours (both states are cleared).
+     this.listener.onFolderLoading(aFolderLoading);
+   },
+ 
+   get searching() {
+     return this._searching;
+   },
+   set searching(aSearching) {
+     if (aSearching == this._searching) {
+@@ -1257,17 +1278,17 @@ DBViewWrapper.prototype = {
+ 
+   /**
+    * Callback method invoked by FolderNotificationHelper when our folder is
+    *  loaded.  Assuming we are still interested in the folder, we enter the
+    *  folder via _enterFolder.
+    */
+   _folderLoaded(aFolder) {
+     if (aFolder == this.displayedFolder) {
+-      this.folderLoading = false;
++      this._setFolderLoading(false);
+       // If _underlyingFolders is null, DBViewWrapper_open probably got
+       // an exception trying to open the db, but after reparsing the local
+       // folder, we should have a db, so set up the view based on info
+       // from the db.
+       if (this._underlyingFolders == null) {
+         this._prepareToLoadView(aFolder.msgDatabase, aFolder);
+       }
+       this._enterFolder();
+@@ -1336,17 +1357,17 @@ DBViewWrapper.prototype = {
+     // notification around. This check ensures we don't think we've really
+     // deleted the trash folder in the DBViewWrapper, and that stops nasty
+     // things happening, like forgetting we've got the trash folder selected.
+     if (aFolder.isSpecialFolder(Ci.nsMsgFolderFlags.Trash, false)) {
+       return;
+     }
+ 
+     if (aFolder == this.displayedFolder) {
+-      this.close();
++      this.close(true);
+       return;
+     }
+ 
+     if (!this._underlyingFolders) {
+       // View is closed already.
+       return;
+     }
+ 
+@@ -1550,17 +1571,17 @@ DBViewWrapper.prototype = {
+     // If we are searching, then the search will generate the all messages
+     //  loaded notification.  Although in some cases the search may have
+     //  completed by now, that is not a guarantee.  The search logic is
+     //  time-slicing, which is why this can vary.  (If it uses up its time
+     //  slices, it will re-schedule itself, returning to us before completing.)
+     //  Which is why we always defer to the search if one is active.
+     // If we are loading the folder, the load completion will also notify us,
+     //  so we should not generate all messages loaded right now.
+-    if (!this.searching && !this.folderLoading) {
++    if (!this.searching && !this.isFolderLoading()) {
+       this.listener.onMessagesLoaded(true);
+     } else if (this.dbView.numMsgsInView > 0) {
+       this.listener.onMessagesLoaded(false);
+     }
+   },
+ 
+   get isMailFolder() {
+     return Boolean(
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -2633,27 +2633,38 @@ NS_IMETHODIMP nsMsgDBFolder::AddFolderLi
+ 
+ NS_IMETHODIMP nsMsgDBFolder::RemoveFolderListener(nsIFolderListener* listener) {
+   NS_ENSURE_ARG_POINTER(listener);
+   mListeners.RemoveElement(listener);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetParent(nsIMsgFolder* aParent) {
++  nsCOMPtr<nsIMsgFolder> oldParent = do_QueryReferent(mParent);
+   mParent = do_GetWeakReference(aParent);
+   if (aParent) {
+     nsresult rv;
+     // servers do not have parents, so we must not be a server
+     mIsServer = false;
+     mIsServerIsValid = true;
+ 
+     // also set the server itself while we're here.
+     nsCOMPtr<nsIMsgIncomingServer> server;
+     rv = aParent->GetServer(getter_AddRefs(server));
+     if (NS_SUCCEEDED(rv) && server) mServer = do_GetWeakReference(server);
++
++    if (!oldParent) {
++      // The folder is being (re-)added to the tree. A folder that was
++      // previously removed (e.g. deleted while it was being loaded) can be
++      // re-used for a new folder with the same name. Its loading state may
++      // have been abandoned without the usual EndFolderLoading cleanup, so
++      // make sure the database listener is re-attached when its database is
++      // (re)opened.
++      mAddListener = true;
++    }
+   }
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetParent(nsIMsgFolder** aParent) {
+   NS_ENSURE_ARG_POINTER(aParent);
+   nsCOMPtr<nsIMsgFolder> parent = do_QueryReferent(mParent);
+   parent.forget(aParent);
+

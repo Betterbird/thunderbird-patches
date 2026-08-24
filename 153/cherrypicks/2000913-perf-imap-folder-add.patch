@@ -1,0 +1,181 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1787175545 0
+# Node ID da47c1113e0c364457e0f25cf5a065724c0feb37
+# Parent  87e1625113e014bde53638e3b0e694104b00c042
+Bug 2000913 - Avoid full folder pane refresh after adding folders. r=tobyp,darktrojan
+
+Differential Revision: https://phabricator.services.mozilla.com/D298502
+
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -6305,17 +6305,16 @@ function selectMessage(msgHdr) {
+   threadTree.selectedIndex = index;
+ }
+ 
+ var folderListener = {
+   QueryInterface: ChromeUtils.generateQI(["nsIFolderListener"]),
+   onFolderAdded(parentFolder, childFolder) {
+     folderPane.setSortOrderOnNewFolder(parentFolder, childFolder);
+     folderPane.addFolder(parentFolder, childFolder);
+-    folderPane.updateFolderRowUIElements();
+   },
+   onMessageAdded() {},
+   onFolderRemoved(parentFolder, childFolder) {
+     // Check if the folder is in the selection range before we remove it.
+     const row = folderPane.getRowForFolder(childFolder.URI);
+     const notInRange = !folderTree.selection.has(folderTree.rows.indexOf(row));
+ 
+     folderPane.removeFolder(parentFolder, childFolder);
+diff --git a/mail/base/content/widgets/folder-tree-row.mjs b/mail/base/content/widgets/folder-tree-row.mjs
+--- a/mail/base/content/widgets/folder-tree-row.mjs
++++ b/mail/base/content/widgets/folder-tree-row.mjs
+@@ -181,53 +181,43 @@ class FolderTreeRow extends HTMLLIElemen
+    *
+    * @type {integer}
+    */
+   get totalCount() {
+     return this.#totalCount;
+   }
+ 
+   set totalCount(value) {
+-    if (this.#totalCount == value) {
+-      return;
++    if (this.#totalCount != value) {
++      this.#totalCount = value;
++      this.classList.toggle("total", value > 0);
++      this.#updateTextNode(this.totalCountLabel, value);
+     }
+ 
+-    this.#totalCount = value;
+-    this.classList.toggle("total", value > 0);
+-    this.#updateTextNode(this.totalCountLabel, value);
+-
+-    this.totalCountLabel.hidden = !lazy.XULStoreUtils.isItemVisible(
+-      "messenger",
+-      "totalMsgCount"
++    this.toggleTotalCountBadgeVisibility(
++      !lazy.XULStoreUtils.isItemVisible("messenger", "totalMsgCount")
+     );
+-    this.#scheduleAriaLabelUpdate();
+   }
+ 
+   /**
+    * The folder size as provided by formatFolderSize for this folder.
+    *
+    * @type {string}
+    */
+   get folderSize() {
+     return this.#folderSize;
+   }
+ 
+   set folderSize(value) {
+-    if (this.#folderSize == value) {
+-      return;
++    if (this.#folderSize != value) {
++      this.#folderSize = value;
++      this.#updateTextNode(this.folderSizeLabel, value);
+     }
+ 
+-    this.#folderSize = value;
+-    this.#updateTextNode(this.folderSizeLabel, value);
+-
+-    this.folderSizeLabel.hidden = !lazy.XULStoreUtils.isItemVisible(
+-      "messenger",
+-      "folderPaneFolderSize"
+-    );
+-    this.#scheduleAriaLabelUpdate();
++    this.#updateFolderSizeVisibility();
+   }
+ 
+   /**
+    * Set some common properties based on the URI for this row.
+    * `this.modeName` must be set before calling this function.
+    *
+    * @param {string} uri
+    * @param {boolean} [excludeSubfolders=false] - If true, any existing
+@@ -424,20 +414,31 @@ class FolderTreeRow extends HTMLLIElemen
+   }
+ 
+   /**
+    * Update the visibility of the total count badge.
+    *
+    * @param {boolean} isHidden
+    */
+   toggleTotalCountBadgeVisibility(isHidden) {
++    if (this.totalCountLabel.hidden == isHidden) {
++      return;
++    }
+     this.totalCountLabel.hidden = isHidden;
+     this.#scheduleAriaLabelUpdate();
+   }
+ 
++  #updateFolderSizeVisibility() {
++    this.folderSizeLabel.hidden = !lazy.XULStoreUtils.isItemVisible(
++      "messenger",
++      "folderPaneFolderSize"
++    );
++    this.#scheduleAriaLabelUpdate();
++  }
++
+   /**
+    * Sets the folder type property based on the folder for the row.
+    *
+    * @param {nsIMsgFolder} folder
+    */
+   setFolderTypeFromFolder(folder) {
+     const folderType = lazy.FolderUtils.getSpecialFolderString(folder);
+     if (folderType == "none") {
+diff --git a/mail/test/browser/folder-pane/browser_folderPane.js b/mail/test/browser/folder-pane/browser_folderPane.js
+--- a/mail/test/browser/folder-pane/browser_folderPane.js
++++ b/mail/test/browser/folder-pane/browser_folderPane.js
+@@ -128,8 +128,45 @@ add_task(async function test_all_folders
+ 
+   Assert.report(
+     false,
+     undefined,
+     undefined,
+     "Test ran to completion successfully"
+   );
+ });
++
++/**
++ * Creating a folder should only initialize the new row, not refresh every row in
++ * the folder pane. This keeps large IMAP folder discovery from repeatedly doing
++ * full-tree UI work while folders are added one at a time.
++ */
++add_task(async function test_folder_added_does_not_refresh_all_rows() {
++  const about3Pane = get_about_3pane();
++  const originalUpdateFolderRowUIElements =
++    about3Pane.folderPane.updateFolderRowUIElements;
++  let updateAllRowsCount = 0;
++
++  about3Pane.folderPane.updateFolderRowUIElements = function () {
++    updateAllRowsCount++;
++    return originalUpdateFolderRowUIElements.apply(this, arguments);
++  };
++
++  const folder = await create_folder("FolderPaneNoFullRefresh");
++  try {
++    Assert.ok(
++      about3Pane.folderPane.getRowForFolder(folder),
++      "The new folder row was added"
++    );
++    Assert.equal(
++      updateAllRowsCount,
++      0,
++      "Adding a folder should not refresh UI state on every folder row"
++    );
++  } finally {
++    about3Pane.folderPane.updateFolderRowUIElements =
++      originalUpdateFolderRowUIElements;
++    MailServices.accounts.localFoldersServer.rootFolder.propagateDelete(
++      folder,
++      true
++    );
++  }
++});
+

@@ -1,0 +1,189 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1787609056 -7200
+# Node ID bbbe63fb82df43f9fd4e0c4d1697558c0925663c
+# Parent  fdfb1b293ac15b262f7afe3df3cc5ec5d971908b
+Bug 2063838 - Ensure new-message stars persist when rebuilding the selected folder on start-up. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D319470
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -2866,9 +2866,13 @@ var folderPane = {
+     document.head.querySelector(`link[rel="icon"]`).href =
+       FolderUtils.getFolderIcon(gFolder);
+ 
+     // Clean up any existing view wrapper. This will invalidate the thread tree.
+-    gViewWrapper?.close();
++    // Rebuilding the selected folder is not leaving it, so we skip leave-folder
++    // behaviour.
++    gViewWrapper?.close({
++      leavingFolder: gViewWrapper?.displayedFolder != gFolder,
++    });
+ 
+     if (gFolder.isServer) {
+       document.title = gFolder.server.prettyName;
+       gViewWrapper = gDBView = threadTree.view = null;
+@@ -6872,9 +6876,9 @@ var folderListener = {
+     if (childFolder == gFolder) {
+       // Clean up the display if the deleted folder was being displayed. At this
+       // point, `DBViewWrapper._folderDeleted` has already cleaned up `gDBView`.
+       gFolder = null;
+-      gViewWrapper?.close(true);
++      gViewWrapper?.close({ leavingFolder: false });
+       threadPaneHeader.onFolderSelected();
+       threadPane._onSelect(); // Ensure no message is displayed.
+     }
+ 
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -235,9 +235,9 @@ function displayMessage(uri, viewWrapper
+   if (gViewWrapper && viewWrapper != gViewWrapper) {
+     // Don't clean up gViewWrapper if we're going to reuse it. If we're inside
+     // about:3pane, close the view wrapper, but don't call `onLeavingFolder`,
+     // because about:3pane will do that if we're actually leaving the folder.
+-    gViewWrapper?.close(parent != top);
++    gViewWrapper?.close({ leavingFolder: parent == top });
+     gViewWrapper = null;
+   }
+   gDBView = null;
+ 
+diff --git a/mail/base/test/browser/browser3.toml b/mail/base/test/browser/browser3.toml
+--- a/mail/base/test/browser/browser3.toml
++++ b/mail/base/test/browser/browser3.toml
+@@ -50,5 +50,7 @@ tags = ["virtualfolders"]
+ run-if = [
+   "os == 'win'",
+ ]
+ 
++["browser_startupNewStar.js"]
++
+ ["browser_statusFeedback.js"]
+diff --git a/mail/base/test/browser/browser_startupNewStar.js b/mail/base/test/browser/browser_startupNewStar.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/browser/browser_startupNewStar.js
+@@ -0,0 +1,53 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { MessageGenerator } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++);
++
++add_task(async function test_new_message_star_survives_same_folder_select() {
++  const account = MailServices.accounts.createLocalMailAccount();
++  registerCleanupFunction(() =>
++    MailServices.accounts.removeAccount(account, false)
++  );
++  const root = account.incomingServer.rootFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = root
++    .createLocalSubfolder("arrivals")
++    .QueryInterface(Ci.nsIMsgLocalMailFolder);
++  const message = new MessageGenerator().makeMessage({
++    from: ["Sender", "sender@example.invalid"],
++    to: [["Recipient", "recipient@example.invalid"]],
++  });
++
++  const tabmail = document.getElementById("tabmail");
++  const tab = tabmail.openTab("mail3PaneTab", { folderURI: folder.URI });
++  registerCleanupFunction(() => tabmail.closeTab(tab));
++  await BrowserTestUtils.browserLoaded(tab.chromeBrowser);
++  const about3Pane = tab.chromeBrowser.contentWindow;
++  await about3Pane.hasDOMContentLoaded.promise;
++
++  const hdr = folder.addMessage(message.toMessageString());
++  const newFlag = Ci.nsMsgMessageFlags.New;
++  hdr.orFlags(newFlag);
++  folder.msgDatabase.addToNewList(hdr.messageKey);
++  folder.hasNewMessages = true;
++
++  about3Pane.folderTree.dispatchEvent(new about3Pane.CustomEvent("select"));
++
++  await TestUtils.waitForCondition(
++    () =>
++      about3Pane.threadTree
++        .getRowAtIndex(0)
++        ?.dataset.properties?.includes("new"),
++    "the thread pane should still show the message as new"
++  );
++
++  Assert.ok(hdr.flags & newFlag, "the New flag should be preserved");
++  Assert.ok(
++    folder.hasNewMessages,
++    "the folder's new-message state should be preserved"
++  );
++});
+diff --git a/mail/base/test/unit/test_viewWrapper_realFolder.js b/mail/base/test/unit/test_viewWrapper_realFolder.js
+--- a/mail/base/test/unit/test_viewWrapper_realFolder.js
++++ b/mail/base/test/unit/test_viewWrapper_realFolder.js
+@@ -665,9 +665,9 @@ add_task(async function test_real_folder
+     folder.getNumUnread(false),
+     setOne.synMessages.length,
+     "all messages should have been added as unread"
+   );
+-  viewWrapper.close(false);
++  viewWrapper.close();
+   // verify that closing the view does the expected marking of the messages
+   // as read.
+   assert_equals(
+     folder.getNumUnread(false),
+diff --git a/mail/modules/DBViewWrapper.sys.mjs b/mail/modules/DBViewWrapper.sys.mjs
+--- a/mail/modules/DBViewWrapper.sys.mjs
++++ b/mail/modules/DBViewWrapper.sys.mjs
+@@ -759,18 +759,20 @@ DBViewWrapper.prototype = {
+    *  the resources associated with this view wrapper.  You would not do this
+    *  for UI reasons like the user de-selecting the node in the tree; we should
+    *  always be displaying something when used in a UI context!
+    *
+-   * @param {boolean} folderIsDead - If true, tells us not to try and tidy up
+-   *   on our way out by virtue of the fact that the folder is dead and should
+-   *   not be messed with.
++   * @param {object} [options]
++   * @param {boolean} [options.leavingFolder=true] - Whether to run leave-folder
++   *   behaviour before destroying the view. Pass false when not actually
++   *   leaving the folder, e.g. because the view is being rebuilt in place or
++   *   the folder itself went away; then the folder's start/endFolderLoading
++   *   bookkeeping is skipped too, so dead storage isn't rewritten.
+    */
+-  close(folderIsDead) {
++  close({ leavingFolder = true } = {}) {
+     if (this.displayedFolder != null) {
+       // onLeavingFolder does all the application-level stuff related to leaving
+-      //  the folder (marking as read, etc.)  We only do this when the folder
+-      //  is not dead (for obvious reasons).
+-      if (!folderIsDead) {
++      //  the folder (marking as read, etc.)
++      if (leavingFolder) {
+         // onLeavingFolder must be called before we potentially null out its
+         //  msgDatabase, which we will do in the upcoming underlyingFolders loop
+         this.onLeavingFolder(); // application logic
+         this.listener.onLeavingFolder(); // display logic
+@@ -786,9 +788,9 @@ DBViewWrapper.prototype = {
+       }
+ 
+       // Don't call back into a folder that is being deleted; EndFolderLoading's
+       // UpdateSummaryTotals would reopen/rewrite its storage and cache.
+-      this._setFolderLoading(false, folderIsDead);
++      this._setFolderLoading(false, !leavingFolder);
+       this.displayedFolder = null;
+     }
+ 
+     FolderNotificationHelper.removeNotifications(this._underlyingFolders, this);
+@@ -1361,9 +1363,9 @@ DBViewWrapper.prototype = {
+       return;
+     }
+ 
+     if (aFolder == this.displayedFolder) {
+-      this.close(true);
++      this.close({ leavingFolder: false });
+       return;
+     }
+ 
+     if (!this._underlyingFolders) {
