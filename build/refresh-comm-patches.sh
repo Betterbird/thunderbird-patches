@@ -68,11 +68,13 @@ if [ $QPARENT != ${COMM_REV:0:12} ]; then
   exit 1
 fi
 
-echo
-echo "======================================================="
-echo "Positioning before specified patch $PATCH_NAME on $MOZILLA_DIR/comm"
-hg qgo $PATCH_NAME
-hg qpop
+if [ $PATCH_NAME != "none" ]; then
+  echo
+  echo "======================================================="
+  echo "Positioning before specified patch $PATCH_NAME on $MOZILLA_DIR/comm"
+  hg qgo $PATCH_NAME
+  hg qpop
+fi
 
 echo
 echo "======================================================="
