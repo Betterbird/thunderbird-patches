@@ -1,0 +1,292 @@
+
+# HG changeset patch
+# User poeggi <48416618+poeggi@users.noreply.github.com>
+# Date 1787651715 -7200
+# Node ID 53c4fb8be274b31a5597af8a812825260e0f6ab4
+# Parent  2ba11179d392d6164a05769029c45bba4dd9a487
+Bug 580252 - Add option to open global search results as list view. r=aleca,tobyp
+
+Implements improvements to global search result handling (Bug 580252).
+
+New setting
+
+A new checkbox in Preferences -> General: `Show global search results as a
+list by default''. When enabled, global search results open directly in the
+table list view instead of the faceted search view.
+
+New preferences
+
+gloda.show_as_list_by_default (bool, default: false) - Backing pref for
+the setting above.
+
+Not in this patch
+
+Facet filter sidebar in the list tab
+Button to show the faceted view from within the list tab
+
+Differential Revision: https://phabricator.services.mozilla.com/D302199
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -695,8 +695,13 @@ pref("gloda.facetview.hidetimeline", tru
+ // 2 - default to "relevance", but remember user preference when it is changed
+ // 3 - default to "date", but remember user preference when it is changed
+ pref("gloda.facetview.sortby", 2);
+ 
++// Whether to open global search results as a table list view instead of the
++// faceted search view. Defaults to false (facet view). When true, results open
++// directly in a table list, equivalent to clicking "Show results as list".
++pref("gloda.show_as_list_by_default", false);
++
+ // Enable gloda by default!
+ pref("mailnews.database.global.indexer.enabled", true);
+ // Limit the number of gloda message results
+ pref("mailnews.database.global.search.msg.limit", 1000);
+diff --git a/mail/base/content/glodaListTab.js b/mail/base/content/glodaListTab.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/content/glodaListTab.js
+@@ -0,0 +1,89 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++ChromeUtils.defineESModuleGetters(this, {
++  Gloda: "resource:///modules/gloda/GlodaPublic.sys.mjs",
++  GlodaConstants: "resource:///modules/gloda/GlodaConstants.sys.mjs",
++  GlodaSyntheticView: "resource:///modules/gloda/GlodaSyntheticView.sys.mjs",
++});
++
++/**
++ * Tab type that opens Gloda search results directly as a mail3PaneTab list
++ * view, bypassing the faceted search interface.
++ */
++const glodaTableListTabType = {
++  name: "glodaTableList",
++  perTabPanel: "vbox",
++  lastTabId: 0,
++  strings: Services.strings.createBundle(
++    "chrome://messenger/locale/glodaFacetView.properties"
++  ),
++  modes: {
++    glodaTableList: {
++      type: "glodaSearch",
++    },
++  },
++  openTab(aTab, aArgs) {
++    aTab.panel.setAttribute("id", "glodaListTab" + this.lastTabId);
++    const tabmail = document.getElementById("tabmail");
++
++    // Already-resolved items (e.g. from the facet view's active set button).
++    if ("items" in aArgs) {
++      tabmail.openTab("mail3PaneTab", {
++        folderPaneVisible: false,
++        syntheticView: new GlodaSyntheticView({
++          collection: Gloda.explicitCollection(
++            GlodaConstants.NOUN_MESSAGE,
++            aArgs.items
++          ),
++        }),
++        title:
++          aArgs.title ||
++          this.strings.GetStringFromName("glodaFacetView.tab.query.label"),
++      });
++      this.lastTabId++;
++      tabmail.closeTab(aTab);
++      return;
++    }
++
++    // Async query/searcher: open once the collection finishes loading.
++    let collection, title;
++    if ("query" in aArgs) {
++      collection = aArgs.query.getCollection();
++      title = this.strings.GetStringFromName("glodaFacetView.tab.query.label");
++    } else if ("searcher" in aArgs) {
++      collection = aArgs.searcher.getCollection();
++      title =
++        aArgs.searcher.searchString ||
++        this.strings.GetStringFromName("glodaFacetView.tab.search.label");
++    } else {
++      return;
++    }
++    this.lastTabId++;
++    collection.listener = {
++      onItemsAdded() {},
++      onItemsModified() {},
++      onItemsRemoved() {},
++      onQueryCompleted() {
++        tabmail.openTab("mail3PaneTab", {
++          folderPaneVisible: false,
++          syntheticView: new GlodaSyntheticView({
++            collection: Gloda.explicitCollection(
++              GlodaConstants.NOUN_MESSAGE,
++              collection.items
++            ),
++          }),
++          title,
++        });
++        tabmail.closeTab(aTab);
++      },
++    };
++  },
++  closeTab() {},
++  saveTabState() {},
++  showTab() {},
++  getBrowser() {
++    return null;
++  },
++};
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -8,8 +8,9 @@
+ /* import-globals-from ../../components/addrbook/content/addressBookTab.js */
+ /* import-globals-from ../../components/customizableui/content/panelUI.js */
+ /* import-globals-from ../../components/preferences/preferencesTab.js */
+ /* import-globals-from glodaFacetTab.js */
++/* import-globals-from glodaListTab.js */
+ /* import-globals-from mailCore.js */
+ /* import-globals-from mail-offline.js */
+ /* import-globals-from mailTabs.js */
+ /* import-globals-from mailWindowOverlay.js */
+@@ -207,8 +208,10 @@ var gMailInit = {
+       // mailTabType is defined in mailTabs.js
+       tabmail.registerTabType(mailTabType);
+       // glodaFacetTab* in glodaFacetTab.js
+       tabmail.registerTabType(glodaFacetTabType);
++      // glodaTableListTabType in glodaListTab.js
++      tabmail.registerTabType(glodaTableListTabType);
+       tabmail.registerTabMonitor(GlodaSearchBoxTabMonitor);
+       tabmail.openFirstTab();
+       setupShortcuts();
+     }
+diff --git a/mail/base/content/messenger.xhtml b/mail/base/content/messenger.xhtml
+--- a/mail/base/content/messenger.xhtml
++++ b/mail/base/content/messenger.xhtml
+@@ -143,8 +143,9 @@
+   <script defer="defer" src="chrome://messenger/content/messenger.js"></script>
+   <script defer="defer" src="chrome://messenger/content/specialTabs.js"></script>
+   <script defer="defer" src="chrome://messenger/content/spacesToolbar.js"></script>
+   <script defer="defer" src="chrome://messenger/content/glodaFacetTab.js"></script>
++  <script defer="defer" src="chrome://messenger/content/glodaListTab.js"></script>
+   <script defer="defer" src="chrome://messenger/content/searchBar.js"></script>
+   <script defer="defer" src="chrome://messenger/content/mail3PaneWindowCommands.js"></script>
+   <script defer="defer" src="chrome://global/content/contentAreaUtils.js"></script>
+   <script defer="defer" src="chrome://messenger/content/browserPopups.js"></script>
+diff --git a/mail/base/content/widgets/gloda-autocomplete-input.js b/mail/base/content/widgets/gloda-autocomplete-input.js
+--- a/mail/base/content/widgets/gloda-autocomplete-input.js
++++ b/mail/base/content/widgets/gloda-autocomplete-input.js
+@@ -150,11 +150,19 @@ customElements.whenDefined("autocomplete
+               } else if (row.nounDef.name == "identity") {
+                 theQuery = theQuery.involves(row.item);
+               }
+               theQuery.orderBy("-date");
+-              document.getElementById("tabmail").openTab("glodaFacet", {
+-                query: theQuery,
+-              });
++              document
++                .getElementById("tabmail")
++                .openTab(
++                  Services.prefs.getBoolPref(
++                    "gloda.show_as_list_by_default",
++                    false
++                  )
++                    ? "glodaTableList"
++                    : "glodaFacet",
++                  { query: theQuery }
++                );
+             }
+           }
+         },
+       };
+@@ -209,9 +217,14 @@ customElements.whenDefined("autocomplete
+         };
+         if (Services.prefs.getBoolPref("mail.chat.enabled")) {
+           args.IMSearcher = new lazy.GlodaIMSearcher(null, searchString);
+         }
+-        tabmail.openTab("glodaFacet", args);
++        tabmail.openTab(
++          Services.prefs.getBoolPref("gloda.show_as_list_by_default", false)
++            ? "glodaTableList"
++            : "glodaFacet",
++          args
++        );
+       }
+     }
+ 
+     clearSearch() {
+diff --git a/mail/base/jar.mn b/mail/base/jar.mn
+--- a/mail/base/jar.mn
++++ b/mail/base/jar.mn
+@@ -31,8 +31,9 @@ messenger.jar:
+     content/messenger/FilterListDialog.js           (content/FilterListDialog.js)
+     content/messenger/FilterListDialog.xhtml        (content/FilterListDialog.xhtml)
+     content/messenger/globalOverlay.js              (content/globalOverlay.js)
+     content/messenger/glodaFacetTab.js              (content/glodaFacetTab.js)
++    content/messenger/glodaListTab.js               (content/glodaListTab.js)
+     content/messenger/glodaFacetView.js             (content/glodaFacetView.js)
+     content/messenger/glodaFacetView.xhtml          (content/glodaFacetView.xhtml)
+     content/messenger/glodaFacetViewWrapper.xhtml   (content/glodaFacetViewWrapper.xhtml)
+     content/messenger/glodaFacetVis.js              (content/glodaFacetVis.js)
+diff --git a/mail/components/addrbook/content/aboutAddressBook.js b/mail/components/addrbook/content/aboutAddressBook.js
+--- a/mail/components/addrbook/content/aboutAddressBook.js
++++ b/mail/components/addrbook/content/aboutAddressBook.js
+@@ -3854,11 +3854,14 @@ var detailsPane = {
+       }
+       case "detailsSearchButton":
+         if (this.currentCard.primaryEmail) {
+           const searchString = this.currentCard.emailAddresses.join(" ");
+-          window.browsingContext.topChromeWindow.tabmail.openTab("glodaFacet", {
+-            searcher: new GlodaMsgSearcher(null, searchString, false),
+-          });
++          window.browsingContext.topChromeWindow.tabmail.openTab(
++            Services.prefs.getBoolPref("gloda.show_as_list_by_default", false)
++              ? "glodaTableList"
++              : "glodaFacet",
++            { searcher: new GlodaMsgSearcher(null, searchString, false) }
++          );
+         }
+         break;
+       case "detailsNewListButton":
+         if (selectedContacts.length) {
+diff --git a/mail/components/unifiedtoolbar/content/items/global-search-bar.mjs b/mail/components/unifiedtoolbar/content/items/global-search-bar.mjs
+--- a/mail/components/unifiedtoolbar/content/items/global-search-bar.mjs
++++ b/mail/components/unifiedtoolbar/content/items/global-search-bar.mjs
+@@ -160,9 +160,14 @@ class GlobalSearchBar extends SearchBar 
+       if (Services.prefs.getBoolPref("mail.chat.enabled")) {
+         args.IMSearcher = new lazy.GlodaIMSearcher(null, searchString);
+       }
+     }
+-    tabmail.openTab("glodaFacet", args);
++    tabmail.openTab(
++      Services.prefs.getBoolPref("gloda.show_as_list_by_default", false)
++        ? "glodaTableList"
++        : "glodaFacet",
++      args
++    );
+     this.popup.closePopup();
+     this.controller.matchCount = 0;
+     this.controller.searchString = "";
+   };
+diff --git a/mail/modules/QuickFilterManager.sys.mjs b/mail/modules/QuickFilterManager.sys.mjs
+--- a/mail/modules/QuickFilterManager.sys.mjs
++++ b/mail/modules/QuickFilterManager.sys.mjs
+@@ -1230,11 +1230,14 @@ export var MessageTextFilter = {
+         upsell.hidePopup();
+       }
+       const tabmail =
+         aDocument.documentGlobal.top.document.getElementById("tabmail");
+-      tabmail.openTab("glodaFacet", {
+-        searcher: new lazy.GlodaMsgSearcher(null, aState.text),
+-      });
++      tabmail.openTab(
++        Services.prefs.getBoolPref("gloda.show_as_list_by_default", false)
++          ? "glodaTableList"
++          : "glodaFacet",
++        { searcher: new lazy.GlodaMsgSearcher(null, aState.text) }
++      );
+       aEvent.preventDefault();
+     }
+ 
+     aState.text = text;
