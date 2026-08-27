@@ -157,10 +157,14 @@ registerMIME() {
   if command -v xdg-mime >/dev/null 2>&1; then
     xdg-mime default eu.betterbird.Betterbird.desktop x-scheme-handler/mailto
     echoLog "MIME handler for x-scheme-handler/mailto registered."
-
     # Query the current default application set for handling mailto: links.
     local mimeHandler=$(xdg-mime query default x-scheme-handler/mailto)
     echoLog "Current default MIME handler for mailto: $mimeHandler."
+
+    xdg-mime default eu.betterbird.Betterbird.desktop x-scheme-handler/net.thunderbird
+    echoLog "MIME handler for scheme net.thunderbird registered."
+    local mimeHandler=$(xdg-mime query default x-scheme-handler/net.thunderbird)
+    echoLog "Current default MIME handler for scheme net.thunderbird: $mimeHandler."
   else
     echoLog "xdg-mime not found, skipping MIME registration."
   fi
