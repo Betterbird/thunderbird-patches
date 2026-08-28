@@ -1,0 +1,786 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1787948797 -7200
+# Node ID 996fc522d17a5837327c7980f1890fcc5bf1c017
+# Parent  47ef1b7055e0062382d6adbe050ba59ba61520aa
+Bug 2016999 - Honor the user-selected calendar when accepting an invitation whose event already exists in another subscribed calendar. r=darktrojan
+
+When accepting an iMIP invitation, the accept operation was bound to whichever subscribed calendar already held the event's UID, so the response was written there and the user's choice in the calendar chooser was ignored. The chooser also preselected the default calendar rather than the one holding the event.
+
+The accept now writes to the calendar the user selected: it updates the event in place when that calendar already has it, otherwise adds a copy there. This also applies when the target calendar is determined without showing the chooser, e.g. when only one calendar matches the invited attendee. The chooser preselects the calendar that holds the event, or the current default calendar when it is not found. The default is read from the `calendar-main-default` property instead of the opening window's composite, whose cached default misses later changes to the selected calendar. The invitation lookup prefers the default calendar first and then the calendars' visible order, so the preselection is deterministic.
+
+Differential Revision: https://phabricator.services.mozilla.com/D310021
+
+diff --git a/calendar/base/content/dialogs/chooseCalendarDialog.js b/calendar/base/content/dialogs/chooseCalendarDialog.js
+--- a/calendar/base/content/dialogs/chooseCalendarDialog.js
++++ b/calendar/base/content/dialogs/chooseCalendarDialog.js
+@@ -44,8 +44,17 @@ function loadCalendars() {
+       selectedIndex = i;
+     }
+   }
+ 
++  // Optional caller-requested preselection, overriding the window default.
++  const preselectId = window.arguments[0].preselectId;
++  if (preselectId) {
++    const preselectIndex = calendars.findIndex(calendar => calendar.id == preselectId);
++    if (preselectIndex != -1) {
++      selectedIndex = preselectIndex;
++    }
++  }
++
+   document.getElementById("prompt").textContent = window.arguments[0].promptText;
+   if (window.arguments[0].promptNotify) {
+     document.getElementById("promptNotify").textContent = window.arguments[0].promptNotify;
+   }
+diff --git a/calendar/base/modules/utils/calItipUtils.sys.mjs b/calendar/base/modules/utils/calItipUtils.sys.mjs
+--- a/calendar/base/modules/utils/calItipUtils.sys.mjs
++++ b/calendar/base/modules/utils/calItipUtils.sys.mjs
+@@ -229,8 +229,20 @@ export var itip = {
+     };
+ 
+     const writableCalendars = lazy.cal.manager.getCalendars().filter(isWritableCalendar);
+     if (writableCalendars.length > 0) {
++      // Order the lookup so an existing copy is preferred in the default
++      // calendar first, then in the calendars' visible order.
++      const sortOrder = lazy.cal.view.calendarSortOrder;
++      const rank = calendar => {
++        if (calendar.getProperty("calendar-main-default")) {
++          return -1;
++        }
++        const index = sortOrder.indexOf(calendar.id);
++        return index == -1 ? sortOrder.length : index;
++      };
++      writableCalendars.sort((a, b) => rank(a) - rank(b));
++
+       const compCal = Cc["@mozilla.org/calendar/calendar;1?type=composite"].createInstance(
+         Ci.calICompositeCalendar
+       );
+       writableCalendars.forEach(compCal.addCalendar, compCal);
+@@ -876,9 +888,14 @@ export var itip = {
+         break;
+     }
+ 
+     if (needsCalendar) {
+-      let calendars = lazy.cal.manager.getCalendars().filter(itip.isSchedulingCalendar);
++      let calendars = lazy.cal.manager
++        .getCalendars()
++        .filter(
++          calendar =>
++            itip.isSchedulingCalendar(calendar) && lazy.cal.acl.userCanAddItemsToCalendar(calendar)
++        );
+ 
+       if (aItipItem.receivedMethod == "REQUEST") {
+         // try to further limit down the list to those calendars that
+         // are configured to a matching attendee;
+@@ -899,11 +916,25 @@ export var itip = {
+         // There's only one calendar, so it's silly to ask what calendar
+         // the user wants to import into.
+         targetCalendar = calendars[0];
+       } else {
++        // Preselect the calendar that already holds the item, otherwise the
++        // current default calendar.
++        let preselectId = null;
++        const found = aItipItem.targetCalendar;
++        if (found && found.type != "composite") {
++          preselectId = found.id;
++        } else {
++          const defaultCalendar = calendars.find(calendar =>
++            calendar.getProperty("calendar-main-default")
++          );
++          preselectId = defaultCalendar ? defaultCalendar.id : null;
++        }
++
+         // Ask what calendar to import into
+         const args = {};
+         args.calendars = calendars;
++        args.preselectId = preselectId;
+         args.onOk = aCal => {
+           targetCalendar = aCal;
+         };
+         args.promptText = lazy.l10n.formatValueSync("import-prompt");
+@@ -1844,9 +1875,9 @@ ItipItemFinder.prototype = {
+                       firstFoundItem = firstFoundItem.recurrenceInfo.getOccurrenceFor(rid);
+                     }
+ 
+                     // again, fall back to using configured organizer if not found
+-                    let foundAttendee = firstFoundItem.getAttendeeById(att.id) || att;
++                    const foundAttendee = firstFoundItem.getAttendeeById(att.id) || att;
+ 
+                     // If the user hasn't responded to the invitation yet and the
+                     // SEQUENCE is unchanged, show the accept/decline buttons. We
+                     // intentionally ignore the DTSTAMP here so a reply from another
+@@ -1856,40 +1887,121 @@ ItipItemFinder.prototype = {
+                       (item.calendar.getProperty("itip.disableRevisionChecks") ||
+                         itip.compareSequence(itipItemItem, item) == 0)
+                     ) {
+                       actionMethod = "REQUEST:NEEDS-ACTION";
+-                      operations.push((opListener, partStat, extResponse) => {
+-                        const changedItem = firstFoundItem.clone();
+-                        changedItem.removeAttendee(foundAttendee);
+-                        foundAttendee = foundAttendee.clone();
+-                        if (partStat) {
+-                          foundAttendee.participationStatus = partStat;
+-                        }
+-                        changedItem.addAttendee(foundAttendee);
++                      operations.push(async (opListener, partStat, extResponse) => {
++                        // Nothing awaits this function. Completion is reported
++                        // through the listener, so no exception may escape.
++                        let opType = Ci.calIOperationListener.MODIFY;
++                        let listener = opListener;
++                        try {
++                          const targetCalendar = this.mItipItem.targetCalendar;
++                          let baseItem = firstFoundItem;
++                          let attendee = foundAttendee;
++
++                          if (
++                            !rid &&
++                            targetCalendar &&
++                            targetCalendar.id != firstFoundItem.calendar.id
++                          ) {
++                            // The user picked a calendar other than the one the
++                            // item was found in. Look for a copy there.
++                            let existing = null;
++                            let lookupFailed = false;
++                            try {
++                              existing = await targetCalendar.getItem(this.mSearchId);
++                            } catch (e) {
++                              // Fall back to the found calendar rather than risk
++                              // creating a duplicate.
++                              lookupFailed = true;
++                              lazy.log.warn(
++                                `Lookup on selected calendar ${targetCalendar.id} failed: ${e}`
++                              );
++                            }
++
++                            if (!lookupFailed && !existing) {
++                              // The selected calendar has no copy of the item.
++                              // Add the response there instead of modifying the
++                              // item we found elsewhere.
++                              opType = Ci.calIOperationListener.ADD;
++                              const copyItem = itipItemItem.clone();
++                              setReceivedInfo(copyItem, itipItemItem);
++                              copyItem.parentItem.calendar = targetCalendar;
++                              addScheduleAgentClient(copyItem, targetCalendar);
++                              if (partStat && partStat != "DECLINED") {
++                                lazy.cal.alarms.setDefaultValues(copyItem);
++                              }
++                              const copyAttendee =
++                                itip.getInvitedAttendee(copyItem, targetCalendar) ||
++                                copyItem.getAttendeeById(foundAttendee.id);
++                              if (!copyAttendee && partStat) {
++                                lazy.log.warn(
++                                  `Encountered item without invited attendee! id=${copyItem.id}, method=${method} Exiting...`
++                                );
++                                return;
++                              }
++                              if (copyAttendee && partStat) {
++                                copyAttendee.participationStatus = partStat;
++                              }
+ 
+-                        const listener = new ItipOpListener(
+-                          opListener,
+-                          firstFoundItem,
+-                          extResponse
+-                        );
+-                        return changedItem.calendar.modifyItem(changedItem, firstFoundItem).then(
+-                          modifiedItem =>
+-                            listener.onOperationComplete(
+-                              modifiedItem.calendar,
+-                              Cr.NS_OK,
+-                              Ci.calIOperationListener.MODIFY,
+-                              modifiedItem.id,
+-                              modifiedItem
+-                            ),
+-                          e =>
+-                            listener.onOperationComplete(
+-                              null,
+-                              e.result || Cr.NS_ERROR_FAILURE,
+-                              Ci.calIOperationListener.MODIFY,
+-                              null,
+-                              e
+-                            )
+-                        );
++                              listener = new ItipOpListener(opListener, null, extResponse);
++                              const addedItem = await copyItem.calendar.addItem(copyItem);
++                              listener.onOperationComplete(
++                                addedItem.calendar,
++                                Cr.NS_OK,
++                                opType,
++                                addedItem.id,
++                                addedItem
++                              );
++                              return;
++                            }
++
++                            if (!lookupFailed) {
++                              // The selected calendar has its own copy of the
++                              // item. Modify that one.
++                              baseItem = existing;
++                              attendee =
++                                itip.getInvitedAttendee(existing, targetCalendar) ||
++                                existing.getAttendeeById(foundAttendee.id);
++                              if (!attendee) {
++                                lazy.log.warn(
++                                  `Encountered item without invited attendee! id=${existing.id}, method=${method} Exiting...`
++                                );
++                                return;
++                              }
++                            }
++                          }
++
++                          const changedItem = baseItem.clone();
++                          changedItem.removeAttendee(attendee);
++                          attendee = attendee.clone();
++                          if (partStat) {
++                            attendee.participationStatus = partStat;
++                          }
++                          changedItem.addAttendee(attendee);
++
++                          listener = new ItipOpListener(opListener, baseItem, extResponse);
++                          const modifiedItem = await changedItem.calendar.modifyItem(
++                            changedItem,
++                            baseItem
++                          );
++                          listener.onOperationComplete(
++                            modifiedItem.calendar,
++                            Cr.NS_OK,
++                            opType,
++                            modifiedItem.id,
++                            modifiedItem
++                          );
++                        } catch (e) {
++                          lazy.log.error(e);
++                          listener.onOperationComplete(
++                            null,
++                            e.result || Cr.NS_ERROR_FAILURE,
++                            opType,
++                            null,
++                            e
++                          );
++                        }
+                       });
+                     } else if (
+                       item.calendar.getProperty("itip.disableRevisionChecks") ||
+                       itip.compare(itipItemItem, item) > 0
+diff --git a/calendar/test/unit/test_itip_target_calendar.js b/calendar/test/unit/test_itip_target_calendar.js
+new file mode 100644
+--- /dev/null
++++ b/calendar/test/unit/test_itip_target_calendar.js
+@@ -0,0 +1,502 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that accepting an iMIP invitation honors the user-selected calendar:
++ * the response is written to the chosen calendar, and the calendar chooser is
++ * preselected to the calendar that already holds the event (or the default
++ * calendar when it is not found).
++ */
++
++var { cal } = ChromeUtils.importESModule("resource:///modules/calendar/calUtils.sys.mjs");
++var { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
++
++var { CalendarTestUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/calendar/CalendarTestUtils.sys.mjs"
++);
++var { CalEvent } = ChromeUtils.importESModule("resource:///modules/CalEvent.sys.mjs");
++
++const UID = "wrong-calendar-2016999";
++const RECEIVER = "receiver@example.com";
++const RECEIVER_ID = "mailto:receiver@example.com";
++const STAMP = "20220317T191602Z";
++
++let identity;
++let otherIdentity;
++
++/**
++ * Build a serialized VCALENDAR for the invitation event.
++ *
++ * @param {object} options
++ * @param {string} options.partStat - The receiver's participation status.
++ * @param {boolean} [options.method] - Add METHOD:REQUEST (the incoming item).
++ * @param {boolean} [options.received] - Add X-MOZ-RECEIVED-*, as a stored item
++ *   that was received earlier carries it.
++ * @returns {string} The serialized VCALENDAR.
++ */
++function buildIcs({ partStat, method, received }) {
++  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Test//Test//EN"];
++  if (method) {
++    lines.push("METHOD:REQUEST");
++  }
++  lines.push(
++    "BEGIN:VEVENT",
++    "UID:" + UID,
++    "SUMMARY:Team meeting",
++    "DTSTART:20220317T120000Z",
++    "DTEND:20220317T130000Z",
++    "DTSTAMP:" + STAMP,
++    "SEQUENCE:0"
++  );
++  if (received) {
++    lines.push("X-MOZ-RECEIVED-SEQUENCE:0", "X-MOZ-RECEIVED-DTSTAMP:" + STAMP);
++  }
++  lines.push(
++    "ORGANIZER;CN=Organizer:mailto:organizer@example.com",
++    "ATTENDEE;CN=Receiver;PARTSTAT=" + partStat + ";RSVP=TRUE:" + RECEIVER_ID,
++    "END:VEVENT",
++    "END:VCALENDAR"
++  );
++  return lines.join("\r\n") + "\r\n";
++}
++
++/**
++ * Create a registered, writable scheduling memory calendar for the receiver.
++ *
++ * @param {string} name - The calendar name.
++ * @param {boolean} isDefault - Whether it is the current default calendar.
++ * @param {nsIMsgIdentity} [calIdentity] - The identity to configure; defaults
++ *   to the receiver's identity.
++ * @returns {calICalendar} The calendar.
++ */
++function makeCalendar(name, isDefault, calIdentity = identity) {
++  const calendar = CalendarTestUtils.createCalendar(name, "memory");
++  calendar.setProperty("imip.identity.key", calIdentity.key);
++  if (isDefault) {
++    calendar.setProperty("calendar-main-default", true);
++  } else {
++    calendar.deleteProperty("calendar-main-default");
++  }
++  return calendar;
++}
++
++/**
++ * Seed an event with the invitation UID into a calendar.
++ *
++ * @param {calICalendar} calendar - The calendar to add the event to.
++ * @param {string} partStat - The receiver's participation status.
++ * @returns {Promise<calIItemBase>} The stored event.
++ */
++async function seedItem(calendar, partStat) {
++  return calendar.addItem(new CalEvent(buildIcs({ partStat, received: true })));
++}
++
++/**
++ * Return the receiver's participation status for the stored event, or null.
++ *
++ * @param {calICalendar} calendar - The calendar to read from.
++ * @returns {Promise<?string>} The participation status, or null if absent.
++ */
++async function partStatIn(calendar) {
++  const item = await calendar.getItem(UID);
++  if (!item) {
++    return null;
++  }
++  const attendee = item.getAttendeeById(RECEIVER_ID);
++  return attendee ? attendee.participationStatus : null;
++}
++
++/**
++ * Process the invitation against `searchCalendar` (where the event is looked
++ * up), then simulate the user picking `chosenCalendar` in the chooser and run
++ * the resulting action.
++ *
++ * @param {calICalendar} searchCalendar - The calendar/composite to search.
++ * @param {calICalendar} chosenCalendar - The calendar the user selected.
++ * @returns {Promise<object>} The action method and operation outcome.
++ */
++async function accept(searchCalendar, chosenCalendar) {
++  const itipItem = Cc["@mozilla.org/calendar/itip-item;1"].createInstance(Ci.calIItipItem);
++  itipItem.init(buildIcs({ partStat: "NEEDS-ACTION", method: true }));
++  itipItem.receivedMethod = "REQUEST";
++  itipItem.responseMethod = "REPLY";
++  itipItem.autoResponse = Ci.calIItipItem.NONE;
++  itipItem.targetCalendar = searchCalendar;
++
++  const processed = await new Promise(resolve => {
++    cal.itip.processItipItem(itipItem, (item, rc, actionFunc, foundItems) => {
++      resolve({ rc, actionFunc, foundItems });
++    });
++  });
++  Assert.ok(Components.isSuccessCode(processed.rc), "processItipItem should succeed");
++  Assert.ok(processed.actionFunc, "an action function should be available");
++
++  // Simulate the chooser selecting a calendar, as promptCalendar would.
++  itipItem.targetCalendar = chosenCalendar;
++
++  const opComplete = Promise.withResolvers();
++  const opListener = {
++    QueryInterface: ChromeUtils.generateQI(["calIOperationListener"]),
++    onOperationComplete(_calendar, status, opType) {
++      opComplete.resolve({ status, opType });
++    },
++    onGetResult() {},
++  };
++  processed.actionFunc(opListener, "ACCEPTED", null);
++  const result = await opComplete.promise;
++  return { method: processed.actionFunc.method, ...result };
++}
++
++/**
++ * Run promptCalendar with a stubbed window and return the preselectId that the
++ * chooser dialog would receive.
++ *
++ * @param {calICalendar} targetCalendar - The itip item's target (found single
++ *   calendar, or a composite when not found).
++ * @param {calICalendar} chosen - The calendar the stubbed dialog selects.
++ * @returns {?string} The preselectId passed to the dialog.
++ */
++function promptPreselectId(targetCalendar, chosen) {
++  const itipItem = Cc["@mozilla.org/calendar/itip-item;1"].createInstance(Ci.calIItipItem);
++  itipItem.init(buildIcs({ partStat: "NEEDS-ACTION", method: true }));
++  itipItem.receivedMethod = "REQUEST";
++  itipItem.targetCalendar = targetCalendar;
++
++  let seen = null;
++  const win = {
++    openDialog(url, name, features, args) {
++      seen = args.preselectId;
++      args.onOk(chosen);
++    },
++    alert() {},
++  };
++  cal.itip.promptCalendar("REQUEST:NEEDS-ACTION", itipItem, win);
++  return seen;
++}
++
++function unregister(...calendars) {
++  for (const calendar of calendars) {
++    cal.manager.unregisterCalendar(calendar);
++  }
++}
++
++add_setup(async function () {
++  do_get_profile();
++
++  identity = MailServices.accounts.createIdentity();
++  identity.email = RECEIVER;
++  otherIdentity = MailServices.accounts.createIdentity();
++  otherIdentity.email = "other@example.com";
++  const account = MailServices.accounts.createAccount();
++  account.incomingServer = MailServices.accounts.createIncomingServer(
++    `${account.key}user`,
++    "localhost",
++    "none"
++  );
++  account.addIdentity(identity);
++  account.addIdentity(otherIdentity);
++
++  // Don't send a real iTIP reply when the accept completes.
++  const originalTransport = cal.itip.getImipTransport;
++  cal.itip.getImipTransport = () => ({
++    scheme: "mailto",
++    type: "email",
++    senderAddress: RECEIVER_ID,
++    sendItems: () => true,
++  });
++
++  registerCleanupFunction(() => {
++    cal.itip.getImipTransport = originalTransport;
++    MailServices.accounts.removeIncomingServer(account.incomingServer, false);
++    MailServices.accounts.removeAccount(account);
++  });
++});
++
++/**
++ * Redirecting to a calendar that does not hold the event adds a copy there and
++ * leaves the calendar the event was found in untouched.
++ */
++add_task(async function testRedirectToEmptyAdds() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false);
++  await seedItem(calB, "NEEDS-ACTION");
++
++  const outcome = await accept(calB, calA);
++  Assert.equal(outcome.method, "REQUEST:NEEDS-ACTION", "the accept branch should be chosen");
++  Assert.ok(Components.isSuccessCode(outcome.status), "the accept should succeed");
++  Assert.equal(
++    outcome.opType,
++    Ci.calIOperationListener.ADD,
++    "a copy should be added to the selected calendar"
++  );
++
++  Assert.equal(
++    await partStatIn(calA),
++    "ACCEPTED",
++    "the response should land in the selected calendar"
++  );
++  Assert.equal(
++    await partStatIn(calB),
++    "NEEDS-ACTION",
++    "the calendar the event was found in should be left untouched"
++  );
++
++  unregister(calA, calB);
++});
++
++/**
++ * Selecting the calendar the event was found in updates it in place and does
++ * not create a duplicate elsewhere.
++ */
++add_task(async function testPickFoundModifiesInPlace() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false);
++  await seedItem(calB, "NEEDS-ACTION");
++
++  const outcome = await accept(calB, calB);
++  Assert.ok(Components.isSuccessCode(outcome.status), "the accept should succeed");
++  Assert.equal(
++    outcome.opType,
++    Ci.calIOperationListener.MODIFY,
++    "the event should be modified in place"
++  );
++
++  Assert.equal(
++    await partStatIn(calB),
++    "ACCEPTED",
++    "the calendar the event was found in should be updated"
++  );
++  Assert.equal(
++    await partStatIn(calA),
++    null,
++    "no duplicate should be created in the other calendar"
++  );
++
++  unregister(calA, calB);
++});
++
++/**
++ * Redirecting to a different calendar that also already holds the event updates
++ * that calendar in place rather than creating a duplicate.
++ */
++add_task(async function testRedirectToOtherHolderModifies() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false);
++  await seedItem(calA, "NEEDS-ACTION");
++  await seedItem(calB, "NEEDS-ACTION");
++
++  // Found in calB, user selects calA (which also holds the event).
++  const outcome = await accept(calB, calA);
++  Assert.ok(Components.isSuccessCode(outcome.status), "the accept should succeed");
++  Assert.equal(
++    outcome.opType,
++    Ci.calIOperationListener.MODIFY,
++    "the selected calendar should be modified in place"
++  );
++
++  Assert.equal(await partStatIn(calA), "ACCEPTED", "the selected calendar should be updated");
++  Assert.equal(
++    await partStatIn(calB),
++    "NEEDS-ACTION",
++    "the calendar the event was found in should be left untouched"
++  );
++
++  const items = await calA.getItemsAsArray(Ci.calICalendar.ITEM_FILTER_TYPE_ALL, 0, null, null);
++  Assert.equal(
++    items.filter(i => i.id == UID).length,
++    1,
++    "the selected calendar should hold exactly one copy"
++  );
++
++  unregister(calA, calB);
++});
++
++/**
++ * The lookup runs over a composite of every writable calendar. With the event
++ * sitting in more than one of them, redirecting to a third calendar still has
++ * to add a single copy there and leave the others alone.
++ */
++add_task(async function testCompositeSearchRedirects() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false);
++  const calC = makeCalendar("C", false);
++  await seedItem(calB, "NEEDS-ACTION");
++  await seedItem(calC, "NEEDS-ACTION");
++
++  const composite = Cc["@mozilla.org/calendar/calendar;1?type=composite"].createInstance(
++    Ci.calICompositeCalendar
++  );
++  composite.addCalendar(calA);
++  composite.addCalendar(calB);
++  composite.addCalendar(calC);
++
++  const outcome = await accept(composite, calA);
++  Assert.ok(Components.isSuccessCode(outcome.status), "the accept should succeed");
++  Assert.equal(
++    outcome.opType,
++    Ci.calIOperationListener.ADD,
++    "a copy should be added to the selected calendar"
++  );
++
++  Assert.equal(
++    await partStatIn(calA),
++    "ACCEPTED",
++    "the response should land in the selected calendar"
++  );
++  const items = await calA.getItemsAsArray(Ci.calICalendar.ITEM_FILTER_TYPE_ALL, 0, null, null);
++  Assert.equal(
++    items.filter(item => item.id == UID).length,
++    1,
++    "the selected calendar should hold exactly one copy"
++  );
++  Assert.equal(
++    await partStatIn(calB),
++    "NEEDS-ACTION",
++    "the first calendar holding the event should be left untouched"
++  );
++  Assert.equal(
++    await partStatIn(calC),
++    "NEEDS-ACTION",
++    "the second calendar holding the event should be left untouched"
++  );
++
++  unregister(calA, calB, calC);
++});
++
++/**
++ * A failed lookup on the selected calendar must not create a duplicate: the
++ * accept falls back to updating the found calendar in place.
++ */
++add_task(async function testRedirectLookupFailureFallsBack() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false);
++  await seedItem(calB, "NEEDS-ACTION");
++
++  // targetCalendar re-wraps the calendar through XPCOM, so override the lookup
++  // on the underlying implementation.
++  const impl = calA.wrappedJSObject;
++  const realGetItem = impl.getItem;
++  impl.getItem = () => Promise.reject(new Error("transient lookup failure"));
++
++  const outcome = await accept(calB, calA);
++  impl.getItem = realGetItem;
++
++  Assert.ok(Components.isSuccessCode(outcome.status), "the accept should still succeed");
++  Assert.equal(
++    outcome.opType,
++    Ci.calIOperationListener.MODIFY,
++    "the accept should fall back to modifying in place"
++  );
++  Assert.equal(
++    await partStatIn(calB),
++    "ACCEPTED",
++    "the calendar the event was found in should be updated"
++  );
++  Assert.equal(await partStatIn(calA), null, "no duplicate should be added when the lookup fails");
++
++  unregister(calA, calB);
++});
++
++/**
++ * A write that fails is reported through the operation listener instead of
++ * escaping as an unhandled rejection.
++ */
++add_task(async function testWriteFailureIsReported() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false);
++  await seedItem(calB, "NEEDS-ACTION");
++
++  // Let the add to the selected calendar fail.
++  const impl = calA.wrappedJSObject;
++  const realAddItem = impl.addItem;
++  impl.addItem = () => Promise.reject(Components.Exception("", Cr.NS_ERROR_FAILURE));
++
++  const outcome = await accept(calB, calA);
++  impl.addItem = realAddItem;
++
++  Assert.ok(!Components.isSuccessCode(outcome.status), "the accept should report the failure");
++  Assert.equal(
++    outcome.opType,
++    Ci.calIOperationListener.ADD,
++    "the failure should be reported for the operation that was attempted"
++  );
++  Assert.equal(
++    await partStatIn(calB),
++    "NEEDS-ACTION",
++    "the calendar the event was found in should be left untouched"
++  );
++
++  unregister(calA, calB);
++});
++
++/**
++ * When only one calendar matches the invited attendee, promptCalendar selects
++ * it without showing the chooser, and the accept still lands there rather than
++ * in the (non-matching) calendar the event was found in.
++ */
++add_task(async function testAutoSelectSingleMatchingCalendar() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", false, otherIdentity);
++  await seedItem(calB, "NEEDS-ACTION");
++
++  const itipItem = Cc["@mozilla.org/calendar/itip-item;1"].createInstance(Ci.calIItipItem);
++  itipItem.init(buildIcs({ partStat: "NEEDS-ACTION", method: true }));
++  itipItem.receivedMethod = "REQUEST";
++  itipItem.responseMethod = "REPLY";
++  itipItem.autoResponse = Ci.calIItipItem.NONE;
++  itipItem.targetCalendar = calB; // as pinned by processFoundItems
++
++  const win = {
++    openDialog() {
++      Assert.ok(false, "the chooser should not open for a single matching calendar");
++    },
++    alert() {},
++  };
++  Assert.ok(
++    cal.itip.promptCalendar("REQUEST:NEEDS-ACTION", itipItem, win),
++    "a calendar should be selected without prompting"
++  );
++  Assert.equal(
++    itipItem.targetCalendar.id,
++    calA.id,
++    "the calendar matching the invited attendee should be selected"
++  );
++
++  unregister(calA, calB);
++});
++
++/**
++ * When the event is found, the chooser preselects the calendar that holds it.
++ */
++add_task(async function testPreselectFoundHolder() {
++  const calA = makeCalendar("A", true); // default, but not the holder
++  const calB = makeCalendar("B", false);
++  await seedItem(calB, "NEEDS-ACTION");
++
++  // Simulate processFoundItems having pinned the found calendar.
++  const preselectId = promptPreselectId(calB, calA);
++  Assert.equal(preselectId, calB.id, "the calendar holding the event should be preselected");
++
++  unregister(calA, calB);
++});
++
++/**
++ * When the event is not found, the chooser preselects the current default
++ * calendar (read live), not a stale value.
++ */
++add_task(async function testPreselectDefaultWhenNotFound() {
++  const calA = makeCalendar("A", false);
++  const calB = makeCalendar("B", true); // current default
++
++  const composite = Cc["@mozilla.org/calendar/calendar;1?type=composite"].createInstance(
++    Ci.calICompositeCalendar
++  );
++  composite.addCalendar(calA);
++  composite.addCalendar(calB);
++
++  const preselectId = promptPreselectId(composite, calA);
++  Assert.equal(preselectId, calB.id, "the current default calendar should be preselected");
++
++  unregister(calA, calB);
++});
+diff --git a/calendar/test/unit/xpcshell.toml b/calendar/test/unit/xpcshell.toml
+--- a/calendar/test/unit/xpcshell.toml
++++ b/calendar/test/unit/xpcshell.toml
+@@ -124,8 +124,10 @@ tags = ["caldav", "oauth"]
+ ["test_items.js"]
+ 
+ ["test_itip_message_sender.js"]
+ 
++["test_itip_target_calendar.js"]
++
+ ["test_itip_utils.js"]
+ 
+ ["test_l10n_utils.js"]
+ 

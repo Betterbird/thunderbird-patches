@@ -1,0 +1,191 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1787648733 -3600
+# Node ID 2b6aef332ca2c7439da0f7176f02c98b6df76e1b
+# Parent  e4af977445317b8db8604e475d0ef44c7d644591
+Bug 2007529 - Continue building the mail context menu after command state errors. r=mkmelin
+
+Treat a failed command-state query as disabled so tag rebuilding and
+separator normalization can still complete. This matches the existing
+error handling of goUpdateCommand (globalOverlay.js), which the main
+menubar uses to update its commands one by one.
+
+Add regression coverage for a failing cmd_markThreadAsRead query.
+
+Differential Revision: https://phabricator.services.mozilla.com/D320928
+
+
+diff --git a/mail/base/content/mailContext.js b/mail/base/content/mailContext.js
+--- a/mail/base/content/mailContext.js
++++ b/mail/base/content/mailContext.js
+@@ -309,16 +309,25 @@ var mailContextMenu = {
+ 
+     function checkItem(id, checked) {
+       const item = document.getElementById(id);
+       if (item) {
+         item.toggleAttribute("checked", Boolean(checked));
+       }
+     }
+ 
++    function isCommandEnabled(command) {
++      try {
++        return commandController.isCommandEnabled(command);
++      } catch (error) {
++        console.error(`Error checking whether ${command} is enabled:`, error);
++        return false;
++      }
++    }
++
+     function setSingleSelection(id, show = true) {
+       showItem(id, numSelectedMessages == 1 && show);
+       enableItem(id, numSelectedMessages == 1);
+     }
+ 
+     // Hide things that don't work yet.
+     for (const id of [
+       "mailContext-openInBrowser",
+@@ -333,29 +342,26 @@ var mailContextMenu = {
+       this.context?.onLink ||
+       this.context?.onImage ||
+       this.context?.onAudio ||
+       this.context?.onVideo ||
+       this.context?.onTextInput;
+ 
+     // Ask commandController about the commands it controls.
+     for (const [id, command] of Object.entries(this._commands)) {
+-      showItem(
+-        id,
+-        !onSpecialItem && commandController.isCommandEnabled(command)
+-      );
++      showItem(id, !onSpecialItem && isCommandEnabled(command));
+     }
+     for (const [id, command] of Object.entries(this._alwaysVisibleCommands)) {
+       showItem(id, !onSpecialItem);
+-      enableItem(id, commandController.isCommandEnabled(command));
++      enableItem(id, isCommandEnabled(command));
+     }
+ 
+     showItem(
+       "navContext-delete",
+-      !onSpecialItem && commandController.isCommandEnabled("cmd_deleteMessage")
++      !onSpecialItem && isCommandEnabled("cmd_deleteMessage")
+     );
+     showItem("mailContext-navigation", !onSpecialItem);
+     showItem("mailContext-sep-navigation", !onSpecialItem);
+ 
+     const inAbout3Pane = !!window.threadTree;
+     const inThreadTree = !!this.inThreadTree;
+ 
+     const message =
+@@ -405,17 +411,17 @@ var mailContextMenu = {
+       {
+         count: numSelectedMessages,
+       }
+     );
+     showItem(
+       "mailContext-forwardAsAttachment",
+       !onSpecialItem &&
+         numSelectedMessages &&
+-        commandController.isCommandEnabled("cmd_forwardAttachment")
++        isCommandEnabled("cmd_forwardAttachment")
+     );
+ 
+     if (isDummyMessage || onSpecialItem) {
+       showItem("mailContext-tags", false);
+     } else {
+       showItem("mailContext-tags", true);
+       this._initMessageTags();
+     }
+diff --git a/mail/base/test/browser/menus/browser_mailContext.js b/mail/base/test/browser/menus/browser_mailContext.js
+--- a/mail/base/test/browser/menus/browser_mailContext.js
++++ b/mail/base/test/browser/menus/browser_mailContext.js
+@@ -1029,16 +1029,87 @@ add_task(async function testSyntheticFol
+   // Check that the selection was restored.
+ 
+   Assert.equal(
+     threadTree.selectedIndex,
+     4,
+     "selection should be restored after the menu closes"
+   );
+ 
++  // A command controller failure should only disable the affected command. In
++  // particular, it must not prevent the tags menu from being rebuilt or the
++  // separators from being normalized. See bug 2007529.
++  const tagPopup = about3Pane.document.getElementById("mailContext-tagpopup");
++  while (tagPopup.lastElementChild.localName == "menuitem") {
++    tagPopup.lastElementChild.remove();
++  }
++  for (const separator of mailContext.querySelectorAll(
++    ":scope > menuseparator"
++  )) {
++    separator.hidden = false;
++  }
++
++  const originalIsCommandEnabled =
++    about3Pane.commandController.isCommandEnabled;
++  about3Pane.commandController.isCommandEnabled = function (command) {
++    if (command == "cmd_markThreadAsRead") {
++      throw new Error("Simulated command state failure");
++    }
++    return originalIsCommandEnabled.call(this, command);
++  };
++  const consoleMessage = TestUtils.consoleMessageObserved(message =>
++    message.wrappedJSObject?.arguments?.[0]
++      ?.toString()
++      .includes("Error checking whether cmd_markThreadAsRead is enabled")
++  );
++
++  try {
++    EventUtils.synthesizeMouseAtCenter(
++      row4,
++      { type: "contextmenu" },
++      about3Pane
++    );
++    await BrowserTestUtils.waitForEvent(mailContext, "popupshown");
++    await consoleMessage;
++
++    Assert.ok(
++      about3Pane.document.getElementById("mailContext-markThreadAsRead")
++        .disabled,
++      "the command with a failed state query should be disabled"
++    );
++    Assert.equal(
++      tagPopup.querySelectorAll("menuitem:not([id])").length,
++      MailServices.tags.getAllTags().length,
++      "the dynamic tag items should still be rebuilt"
++    );
++
++    const visibleItems = [...mailContext.children].filter(item => !item.hidden);
++    Assert.notEqual(
++      visibleItems[0].localName,
++      "menuseparator",
++      "the menu should not begin with a separator"
++    );
++    Assert.notEqual(
++      visibleItems.at(-1).localName,
++      "menuseparator",
++      "the menu should not end with a separator"
++    );
++    for (let i = 1; i < visibleItems.length; i++) {
++      Assert.ok(
++        visibleItems[i - 1].localName != "menuseparator" ||
++          visibleItems[i].localName != "menuseparator",
++        "the menu should not contain adjacent separators"
++      );
++    }
++  } finally {
++    about3Pane.commandController.isCommandEnabled = originalIsCommandEnabled;
++    mailContext.hidePopup();
++    await BrowserTestUtils.waitForPopupEvent(mailContext, "hidden");
++  }
++
+   tabmail.closeOtherTabs(0);
+ });
+ 
+ /**
+  * Tests the mailContext menu on the message pane of a message in a tab.
+  */
+ add_task(async function testMessageTab() {
+   const tabPromise = BrowserTestUtils.waitForEvent(
+
