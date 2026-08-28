@@ -1,0 +1,193 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1787955883 -7200
+# Parent  5ce3fec1008ba2b59a21c3e6ea65d93c1e5979db
+Feature: Linux systray. Implement support for Mate desktop.
+
+  The current integrated copy of libayatana-appindicator
+  implements only the StatusNotifierItem (SNI) D-Bus protocol. It
+  registers via org.kde.StatusNotifierWatcher on the session bus (
+  NOTIFICATION_WATCHER_DBUS_ADDR in third_party/appindicator/dbus-shared.h)
+  and only shows an icon if a watcher is present.
+
+  Mate's mate-panel doesn't provide an SNI watcher — it only supports the
+  legacy XEmbed system tray protocol. That's why Xfce (SNI plugin) and
+  KDE (plasma has an SNI watcher) work, but Mate shows nothing:
+  getConnectable() in ayatana-appindicator.c:508 just returns without
+  doing anything when no watcher name owner exists.
+
+  The previous bundled libappindicator (140 version) worked on Mate
+  because it had an XEmbed fallback: when the watcher was absent,
+  fallback_timer_expire() created a GtkStatusIcon (see the GtkStatusIcon/
+  fallback/unfallback code). The Ayatana rewrite dropped that fallback.
+
+  Fix:
+  In nsMessengerUnixIntegration.cpp, detect Mate (via
+  GetDesktopEnvironmentIdentifier()) and create a plain GtkStatusIcon
+  instead of AppIndicator in that case.
+
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -34,8 +34,9 @@ static nsCOMArray<nsIBaseWindow> sHidden
+ static nsTArray<WinDims> sHiddenWindowsDims;
+ static uint32_t sLastUnreadCount;
+ static nsAutoString sLastUnreadTooltip;
+ static AppIndicator *ci = NULL;
++static GtkStatusIcon *trayIcon = NULL;
+ static struct timespec sTimeActivated;
+ static nsCString desktop;
+ static bool useWithTime;
+ static bool useTooltip;
+@@ -52,8 +53,45 @@ NS_INTERFACE_MAP_BEGIN(nsMessengerUnixIn
+   NS_INTERFACE_MAP_ENTRY(nsIMessengerUnixIntegration)
+   NS_INTERFACE_MAP_ENTRY(nsIMessengerOSIntegration)
+ NS_INTERFACE_MAP_END
+ 
++static void traySetStatusActive(bool aActive) {
++  if (trayIcon) {
++    gtk_status_icon_set_visible(trayIcon, aActive);
++  }
++  if (ci) {
++    app_indicator_set_status(ci, aActive ? APP_INDICATOR_STATUS_ACTIVE
++                                         : APP_INDICATOR_STATUS_PASSIVE);
++  }
++}
++
++static void traySetIcon(const char* aPath) {
++  if (trayIcon) {
++    gtk_status_icon_set_from_file(trayIcon, aPath);
++  }
++  if (ci) {
++    app_indicator_set_icon(ci, aPath, NULL);
++  }
++}
++
++static void traySetTitle(const char* aTitle) {
++  if (ci) {
++    app_indicator_set_title(ci, aTitle);
++  }
++}
++
++static void traySetTooltip(const char* aTooltip) {
++  if (!useTooltip) {
++    return;
++  }
++  if (trayIcon) {
++    gtk_status_icon_set_tooltip_text(trayIcon, aTooltip);
++  }
++  if (ci) {
++    app_indicator_set_tooltip(ci, NULL /* icon */, aTooltip /* title */, "");
++  }
++}
++
+ static void activateWindow(mozIDOMWindowProxy* win) {
+   nsCOMPtr<nsPIDOMWindowOuter> domWindow = nsPIDOMWindowOuter::From(win);
+   nsCOMPtr<nsIBaseWindow> baseWindow =
+       do_QueryInterface(domWindow->GetDocShell());
+@@ -127,11 +165,9 @@ static void activated(AppIndicator* self
+   nsresult rv;
+   bool showTrayIcon = mozilla::Preferences::GetBool(SHOW_TRAY_ICON_PREF, false);
+   bool showTrayIconAlways = mozilla::Preferences::GetBool(SHOW_TRAY_ICON_ALWAYS_PREF, false);
+   if ((!showTrayIcon || !sLastUnreadCount) && !showTrayIconAlways) {
+-    if (ci) {
+-      app_indicator_set_status(ci, APP_INDICATOR_STATUS_PASSIVE);
+-    }
++    traySetStatusActive(false);
+   }
+ 
+   // No minimized window, bring the most recent 3pane window to the front.
+   if (sHiddenWindows.Length() == 0) {
+@@ -198,8 +234,12 @@ static void activated(AppIndicator* self
+   // so we ignore that for some milliseconds.
+   clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
+ }
+ 
++static void trayIconActivated(GtkStatusIcon* aIcon, gpointer aData) {
++  activated(NULL, 0, 0, aData);
++}
++
+ NS_IMETHODIMP
+ nsMessengerUnixIntegration::UpdateUnreadCount(uint32_t unreadCount,
+                                               const nsAString& unreadTooltip) {
+   sLastUnreadCount = unreadCount;
+@@ -210,9 +250,9 @@ nsMessengerUnixIntegration::UpdateUnread
+ 
+   static char icon_path0[PATH_MAX + 100];
+   static char icon_pathN[PATH_MAX + 100];
+ 
+-  if (!ci) {
++  if (!ci && !trayIcon) {
+     // Get the desktop.
+     if (desktop.IsEmpty()) {
+       desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
+       if (desktop.IsEmpty()) desktop = "no-DE";
+@@ -245,14 +285,23 @@ nsMessengerUnixIntegration::UpdateUnread
+     strcat(icon_path0, "/chrome/icons/default/default.svg");
+     strcat(icon_pathN, "/chrome/icons/default/newmail.svg");
+ #endif
+ 
+-    ci = app_indicator_new("Betterbird-systray-icon",
+-                           unreadCount > 0 ? icon_pathN : icon_path0,
+-                           APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+-    app_indicator_set_menu(ci, g_menu_new());
+-    app_indicator_set_actions(ci, g_simple_action_group_new());
+-    g_signal_connect(ci, "activate", G_CALLBACK(activated), NULL);
++    // Mate's panel doesn't implement the StatusNotifierItem DBus protocol,
++    // only the legacy XEmbed system tray, so use a GtkStatusIcon there.
++    if (desktop.EqualsLiteral("mate")) {
++      trayIcon =
++          gtk_status_icon_new_from_file(unreadCount > 0 ? icon_pathN : icon_path0);
++      g_signal_connect(G_OBJECT(trayIcon), "activate",
++                       G_CALLBACK(trayIconActivated), NULL);
++    } else {
++      ci = app_indicator_new("Betterbird-systray-icon",
++                             unreadCount > 0 ? icon_pathN : icon_path0,
++                             APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
++      app_indicator_set_menu(ci, g_menu_new());
++      app_indicator_set_actions(ci, g_simple_action_group_new());
++      g_signal_connect(ci, "activate", G_CALLBACK(activated), NULL);
++    }
+ 
+     // Initialise to something non-zero, subtract a second
+     // so it predates any mimizing via "startup minimized".
+     clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
+@@ -262,29 +311,21 @@ nsMessengerUnixIntegration::UpdateUnread
+   if (unreadCount > 0) {
+     const nsCString& tooltip = NS_ConvertUTF16toUTF8(unreadTooltip);
+     // Set both title and tooltip. It appears that some platforms do
+     // one but not the other.
+-    app_indicator_set_title(ci, tooltip.get());
+-    if (useTooltip) {
+-      app_indicator_set_tooltip(ci,
+-        NULL /* icon */, tooltip.get() /* title */, "" /* body */
+-      );
+-    }
+-    app_indicator_set_icon(ci, icon_pathN, NULL);
+-    app_indicator_set_status(ci, APP_INDICATOR_STATUS_ACTIVE);
++    traySetTitle(tooltip.get());
++    traySetTooltip(tooltip.get());
++    traySetIcon(icon_pathN);
++    traySetStatusActive(true);
+   } else {
+     if (mozilla::Preferences::GetBool("mail.biff.show_tray_icon_always", false) ||
+       sHiddenWindows.Length() > 0) {
+-      app_indicator_set_title(ci, "Betterbird");
+-      if (useTooltip) {
+-        app_indicator_set_tooltip(ci,
+-          NULL /* icon */, "Betterbird" /* title */, "" /* body */
+-        );
+-      }
+-      app_indicator_set_icon(ci, icon_path0, NULL);
+-      app_indicator_set_status(ci, APP_INDICATOR_STATUS_ACTIVE);
++      traySetTitle("Betterbird");
++      traySetTooltip("Betterbird");
++      traySetIcon(icon_path0);
++      traySetStatusActive(true);
+     } else {
+-      app_indicator_set_status(ci, APP_INDICATOR_STATUS_PASSIVE);
++      traySetStatusActive(false);
+     }
+   }
+ 
+   return NS_OK;
