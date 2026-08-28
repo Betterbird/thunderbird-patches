@@ -1,0 +1,531 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1787905678 -7200
+# Parent  0dbba9218f04c656a0a756ce7bffd5ecd6b1382a
+Bug 2066371 - Fix template/archives location for IMAP servers which store folders in the INBOX. Fixes location pref value/picker mode.
+
+Based on https://phabricator.services.mozilla.com/D321858.
+Ported to ESR 153 by Betterbird.
+The following enhancements are by Betterbird:
+- Switch picker to "Other" then the pref is fixed.
+- Also fix the pref when saving the template (nsMsgCopy.cpp).
+
+diff --git a/mailnews/base/public/nsIMsgIdentity.idl b/mailnews/base/public/nsIMsgIdentity.idl
+--- a/mailnews/base/public/nsIMsgIdentity.idl
++++ b/mailnews/base/public/nsIMsgIdentity.idl
+@@ -195,22 +195,33 @@ interface nsIMsgIdentity : nsISupports {
+   /**
+    * Get or create folder functions:
+    * If the corresponding URI is set in the preferences, and the folder for
+    * that URI exists, these functions will return that folder.
+-   * If not, they will attempt to get a folder in a sensible place:
+-   * - If the URI is set but the folder doesn't exist, a folder on the same
+-   *   server with the appropriate flag or the appropriate name.
+-   * - Or a folder on the servers associated with the identity.
+-   * - Or a folder on the Local Folders server.
+-   * If no such folder can be found, create one using the first local server
+-   * (synchronous folder creation is required) in the same order as above.
++   *
++   * In account-default picker mode, a URI also selects the authoritative
++   * server. Namespace mappings and folders with the appropriate flag are
++   * resolved only on that server, and a missing folder is created there when
++   * possible. Local Folders is used only if creation on that server fails.
++   * When no server is selected by a URI, the servers associated with the
++   * identity are tried before Local Folders.
++   *
++   * In explicit-folder picker mode, a missing configured folder causes an
++   * error rather than silently selecting or creating another folder.
+    */
+   nsIMsgFolder getOrCreateFccFolder();
+   nsIMsgFolder getOrCreateDraftsFolder();
+   nsIMsgFolder getOrCreateArchivesFolder();
+   nsIMsgFolder getOrCreateTemplatesFolder();
+ 
+   /**
++   * Return the configured Templates folder if it currently exists. When the
++   * account-default picker mode is in use, this also resolves namespace
++   * differences on the configured server and repairs the stored URI.
++   * This method never creates a folder or falls back to another server.
++   */
++  nsIMsgFolder getExistingTemplatesFolder();
++
++  /**
+    * These attributes control whether the special folder pickers for
+    * fcc, drafts, archives, and templates are set to pick between servers
+    * (e.g., Sent on accountName) or to pick any folder on any account.
+    * "0" means choose between servers; "1" means use the full folder picker.
+diff --git a/mailnews/base/src/nsMsgIdentity.cpp b/mailnews/base/src/nsMsgIdentity.cpp
+--- a/mailnews/base/src/nsMsgIdentity.cpp
++++ b/mailnews/base/src/nsMsgIdentity.cpp
+@@ -211,10 +211,10 @@ NS_IMPL_IDPREF_BOOL(SigOnReply, "sig_on_
+ NS_IMPL_IDPREF_INT(SignatureDate, "sig_date")
+ 
+ NS_IMPL_IDPREF_BOOL(DoFcc, "fcc")
+ 
+-NS_IMPL_FOLDERPREF_STR(FccFolder, "fcc_folder", nsMsgFolderFlags::SentMail,
+-                       "Sent"_ns)
++NS_IMPL_FOLDERPREF_STR(FccFolder, "fcc_folder", "fcc_folder_picker_mode",
++                       nsMsgFolderFlags::SentMail, "Sent"_ns)
+ NS_IMPL_IDPREF_STR(FccFolderPickerMode, "fcc_folder_picker_mode")
+ NS_IMPL_IDPREF_BOOL(FccReplyFollowsParent, "fcc_reply_follows_parent")
+ NS_IMPL_IDPREF_STR(DraftsFolderPickerMode, "drafts_folder_picker_mode")
+ NS_IMPL_IDPREF_STR(ArchivesFolderPickerMode, "archives_folder_picker_mode")
+@@ -297,14 +297,17 @@ NS_IMETHODIMP
+ nsMsgIdentity::SetDoBccList(const nsACString& aValue) {
+   return SetCharAttribute("doBccList", aValue);
+ }
+ 
+-NS_IMPL_FOLDERPREF_STR(DraftsFolder, "draft_folder", nsMsgFolderFlags::Drafts,
++NS_IMPL_FOLDERPREF_STR(DraftsFolder, "draft_folder",
++                       "drafts_folder_picker_mode", nsMsgFolderFlags::Drafts,
+                        "Drafts"_ns)
+ NS_IMPL_FOLDERPREF_STR(ArchivesFolder, "archive_folder",
+-                       nsMsgFolderFlags::Archive, "Archives"_ns)
++                       "archives_folder_picker_mode", nsMsgFolderFlags::Archive,
++                       "Archives"_ns)
+ NS_IMPL_FOLDERPREF_STR(TemplatesFolder, "stationery_folder",
+-                       nsMsgFolderFlags::Templates, "Templates"_ns)
++                       "tmpl_folder_picker_mode", nsMsgFolderFlags::Templates,
++                       "Templates"_ns)
+ 
+ NS_IMPL_IDPREF_BOOL(ArchiveEnabled, "archive_enabled")
+ NS_IMPL_IDPREF_INT(ArchiveGranularity, "archive_granularity")
+ NS_IMPL_IDPREF_BOOL(ArchiveKeepFolderStructure, "archive_keep_folder_structure")
+@@ -316,97 +319,238 @@ NS_IMPL_IDPREF_BOOL(OverrideGlobalPref, 
+ NS_IMPL_IDPREF_BOOL(AutocompleteToMyDomain, "autocompleteToMyDomain")
+ 
+ NS_IMPL_IDPREF_BOOL(Valid, "valid")
+ 
+-bool nsMsgIdentity::checkServerForExistingFolder(nsIMsgFolder* rootFolder,
+-                                                 const char* prefName,
+-                                                 uint32_t folderFlag,
+-                                                 const nsACString& folderName,
+-                                                 nsIMsgFolder** retval) {
++static nsresult FindServerForFolderURI(nsIMsgAccountManager* accountManager,
++                                       const nsACString& folderURI,
++                                       nsIMsgIncomingServer** server) {
++  NS_ENSURE_ARG_POINTER(server);
++  *server = nullptr;
++
++  nsCOMPtr<nsIURL> url;
++  nsresult rv = NS_MutateURI(NS_STANDARDURLMUTATOR_CONTRACTID)
++                    .SetSpec(folderURI)
++                    .Finalize(url);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  if (url->SchemeIs("mailbox")) {
++    // Local folders can be backed by several server types, all of which use
++    // mailbox URIs for their folders.
++    if (NS_SUCCEEDED(NS_MutateURI(url).SetScheme("none"_ns).Finalize(url))) {
++      accountManager->FindServerByURI(url, server);
++    }
++    if (!*server &&
++        NS_SUCCEEDED(NS_MutateURI(url).SetScheme("pop3"_ns).Finalize(url))) {
++      accountManager->FindServerByURI(url, server);
++    }
++    if (!*server &&
++        NS_SUCCEEDED(NS_MutateURI(url).SetScheme("rss"_ns).Finalize(url))) {
++      accountManager->FindServerByURI(url, server);
++    }
++  } else {
++    accountManager->FindServerByURI(url, server);
++  }
++
++  return NS_OK;
++}
++
++bool nsMsgIdentity::useAccountDefaultFolder(const char* pickerModePrefName) {
++  nsAutoCString pickerMode;
++  mPrefBranch->GetStringPref(pickerModePrefName, EmptyCString(), 1, pickerMode);
++  // Missing legacy values have always been displayed as account-default.
++  return !pickerMode.EqualsLiteral("1");
++}
++
++nsresult nsMsgIdentity::getExistingSpecialFolder(
++    const char* prefName, const char* pickerModePrefName, uint32_t folderFlag,
++    nsIMsgFolder** existingFolder, nsIMsgIncomingServer** configuredServer) {
++  NS_ENSURE_ARG_POINTER(existingFolder);
++  *existingFolder = nullptr;
++  if (configuredServer) {
++    *configuredServer = nullptr;
++  }
++
++  nsAutoCString prefValue;
++  mPrefBranch->GetStringPref(prefName, EmptyCString(), 1, prefValue);
++  if (prefValue.IsEmpty()) {
++    return NS_OK;
++  }
++
++  nsCOMPtr<nsIMsgAccountManager> accountManager =
++      mozilla::components::AccountManager::Service();
++  nsCOMPtr<nsIMsgIncomingServer> server;
++  FindServerForFolderURI(accountManager, prefValue, getter_AddRefs(server));
++  if (configuredServer && server) {
++    NS_ADDREF(*configuredServer = server);
++  }
++
++  // Only accept folders that are actually in the configured server's tree.
++  // The folder lookup service can also contain detached placeholders for
++  // folders which do not exist yet.
++  nsCOMPtr<nsIMsgFolder> rootFolder;
++  if (server &&
++      NS_SUCCEEDED(server->GetRootMsgFolder(getter_AddRefs(rootFolder))) &&
++      rootFolder) {
++    nsAutoCString rootURI;
++    rootFolder->GetURI(rootURI);
++    if (rootURI.Equals(prefValue)) {
++      rootFolder.forget(existingFolder);
++      return NS_OK;
++    }
++
++    nsCOMPtr<nsIMsgFolder> folder;
++    rootFolder->GetChildWithURI(prefValue, true, true, getter_AddRefs(folder));
++    if (folder) {
++      folder.forget(existingFolder);
++      return NS_OK;
++    }
++  }
++
++  // An explicit "Other" selection is authoritative. If it has disappeared,
++  // do not silently substitute a folder selected by flags or another server.
++  if (!useAccountDefaultFolder(pickerModePrefName) || !server || !rootFolder) {
++    return NS_OK;
++  }
++
++  // Let the configured server account for protocol-specific URI details,
++  // notably IMAP personal namespaces. Pass no detached fallback folder: a
++  // result is only useful if it can then be found in the live folder tree.
++  nsCOMPtr<nsIMsgFolder> mappedFolder;
++  server->GetMsgFolderFromURI(nullptr, prefValue, getter_AddRefs(mappedFolder));
++  if (mappedFolder) {
++    nsAutoCString mappedURI;
++    mappedFolder->GetURI(mappedURI);
++    nsCOMPtr<nsIMsgFolder> treeFolder;
++    rootFolder->GetChildWithURI(mappedURI, true, true,
++                                getter_AddRefs(treeFolder));
++    if (treeFolder) {
++      nsresult rv = setFolderPref(prefName, mappedURI, folderFlag);
++      NS_ENSURE_SUCCESS(rv, rv);
++      // The concrete folder was resolved on the configured server; switch
++      // the picker to the explicit folder mode, like the special folder
++      // checks do after IMAP discovery.
++      SetCharAttribute(pickerModePrefName, "1"_ns);
++      treeFolder.forget(existingFolder);
++      return NS_OK;
++    }
++  }
++
++  // In account-default mode a server-designated folder is also a valid
++  // resolution, but only on the server selected by the preference.
++  nsCOMPtr<nsIMsgFolder> flaggedFolder;
++  rootFolder->GetFolderWithFlags(folderFlag, getter_AddRefs(flaggedFolder));
++  if (flaggedFolder) {
++    nsAutoCString flaggedURI;
++    flaggedFolder->GetURI(flaggedURI);
++    nsresult rv = setFolderPref(prefName, flaggedURI, folderFlag);
++    NS_ENSURE_SUCCESS(rv, rv);
++    SetCharAttribute(pickerModePrefName, "1"_ns);
++    flaggedFolder.forget(existingFolder);
++  }
++  return NS_OK;
++}
++
++NS_IMETHODIMP nsMsgIdentity::GetExistingTemplatesFolder(
++    nsIMsgFolder** existingFolder) {
++  return getExistingSpecialFolder(
++      "stationery_folder", "tmpl_folder_picker_mode",
++      nsMsgFolderFlags::Templates, existingFolder, nullptr);
++}
++
++bool nsMsgIdentity::checkServerForExistingFolder(
++    nsIMsgIncomingServer* server, nsIMsgFolder* rootFolder,
++    const char* prefName, const char* pickerModePrefName, uint32_t folderFlag,
++    const nsACString& folderName, nsIMsgFolder** retval) {
+   // Look for a folder with the flag we want.
+   nsresult rv = rootFolder->GetFolderWithFlags(folderFlag, retval);
+   if (NS_SUCCEEDED(rv) && *retval) {
+     SetCharAttribute(prefName, (*retval)->URI());
++    SetCharAttribute(pickerModePrefName, "1"_ns);
+     return true;
+   }
+ 
+   // Look for a folder with the name we want.
+-  rv = rootFolder->GetChildNamed(folderName, retval);
+-  if (NS_SUCCEEDED(rv) && *retval) {
+-    (*retval)->SetFlag(folderFlag);
+-    SetCharAttribute(prefName, (*retval)->URI());
++  nsCOMPtr<nsIMsgFolder> newFolder;
++  rv = rootFolder->GetChildNamed(folderName, getter_AddRefs(newFolder));
++  if (!newFolder) {
++    // Account for protocol-specific URI details, notably IMAP personal
++    // namespaces.
++    nsAutoCString serverURI;
++    rv = server->GetServerURI(serverURI);
++    if (NS_SUCCEEDED(rv)) {
++      serverURI.Append('/');
++      serverURI.Append(folderName);
++      nsCOMPtr<nsIMsgFolder> mappedFolder;
++      rv = server->GetMsgFolderFromURI(nullptr, serverURI,
++                                       getter_AddRefs(mappedFolder));
++      if (NS_SUCCEEDED(rv) && mappedFolder) {
++        nsAutoCString mappedURI;
++        mappedFolder->GetURI(mappedURI);
++        rv = rootFolder->GetChildWithURI(mappedURI, true, true,
++                                         getter_AddRefs(newFolder));
++      }
++    }
++  }
++  if (NS_SUCCEEDED(rv) && newFolder) {
++    newFolder->SetFlag(folderFlag);
++    SetCharAttribute(prefName, newFolder->URI());
++    SetCharAttribute(pickerModePrefName, "1"_ns);
++    newFolder.forget(retval);
+     return true;
+   }
+   return false;
+ }
+ 
+ nsresult nsMsgIdentity::getOrCreateFolder(const char* prefName,
++                                          const char* pickerModePrefName,
+                                           uint32_t folderFlag,
+                                           const nsACString& folderName,
+                                           nsIMsgFolder** retval) {
+   if (!mPrefBranch) {
+     return NS_ERROR_NOT_INITIALIZED;
+   }
+ 
+-  nsCOMPtr<nsIMsgAccountManager> accountManager =
+-      mozilla::components::AccountManager::Service();
++  nsCOMPtr<nsIMsgFolder> folder;
++  nsCOMPtr<nsIMsgIncomingServer> configuredServer;
++  nsresult rv = getExistingSpecialFolder(prefName, pickerModePrefName,
++                                         folderFlag, getter_AddRefs(folder),
++                                         getter_AddRefs(configuredServer));
++  NS_ENSURE_SUCCESS(rv, rv);
++  if (folder) {
++    folder.forget(retval);
++    return NS_OK;
++  }
++
++  nsAutoCString prefValue;
++  rv = mPrefBranch->GetStringPref(prefName, EmptyCString(), 0, prefValue);
++  if (!prefValue.IsEmpty() && !useAccountDefaultFolder(pickerModePrefName)) {
++    // An explicit folder that no longer exists must not be replaced by an
++    // arbitrary special folder or by Local Folders.
++    return NS_MSG_ERROR_FOLDER_MISSING;
++  }
++
+   nsCOMPtr<nsIMsgFolder> rootFolder;
+   nsCOMPtr<nsIMsgLocalMailFolder> localRootFolder;
+ 
+-  // Look for a folder matching the preference value.
+-  nsAutoCString prefValue;
+-  nsresult rv =
+-      mPrefBranch->GetStringPref(prefName, EmptyCString(), 0, prefValue);
+-  if (NS_SUCCEEDED(rv) && !prefValue.IsEmpty()) {
+-    rv = GetExistingFolder(prefValue, retval);
+-    if (NS_SUCCEEDED(rv) && *retval) {
+-      // Success! Return the folder.
++  // The server selected in the preference is authoritative. Only use the
++  // identity's servers when there is no usable server in the preference.
++  if (configuredServer) {
++    // Do we have an existing folder on this server?
++    rv = configuredServer->GetRootMsgFolder(getter_AddRefs(rootFolder));
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    if (checkServerForExistingFolder(configuredServer, rootFolder, prefName,
++                                     pickerModePrefName, folderFlag, folderName,
++                                     retval)) {
+       return NS_OK;
+     }
+ 
+-    // Can we get a server that matches the preference?
+-    nsCOMPtr<nsIURL> url;
+-    rv = NS_MutateURI(NS_STANDARDURLMUTATOR_CONTRACTID)
+-             .SetSpec(prefValue)
+-             .Finalize(url);
+-    if (NS_SUCCEEDED(rv)) {
+-      nsCOMPtr<nsIMsgIncomingServer> server;
++    // Can we create one?
++    localRootFolder = do_QueryInterface(rootFolder);
++  }
+ 
+-      if (url->SchemeIs("mailbox")) {
+-        // Of course that means looking for the same thing several times,
+-        // because nothing is simple around here.
+-        if (NS_SUCCEEDED(
+-                NS_MutateURI(url).SetScheme("none"_ns).Finalize(url))) {
+-          accountManager->FindServerByURI(url, getter_AddRefs(server));
+-        }
+-        if (!server &&
+-            NS_SUCCEEDED(
+-                NS_MutateURI(url).SetScheme("pop3"_ns).Finalize(url))) {
+-          accountManager->FindServerByURI(url, getter_AddRefs(server));
+-        }
+-        if (!server &&
+-            NS_SUCCEEDED(NS_MutateURI(url).SetScheme("rss"_ns).Finalize(url))) {
+-          accountManager->FindServerByURI(url, getter_AddRefs(server));
+-        }
+-      } else {
+-        accountManager->FindServerByURI(url, getter_AddRefs(server));
+-      }
+-
+-      if (server) {
+-        // Do we have an existing folder on this server?
+-        rv = server->GetRootMsgFolder(getter_AddRefs(rootFolder));
+-        NS_ENSURE_SUCCESS(rv, rv);
+-
+-        if (checkServerForExistingFolder(rootFolder, prefName, folderFlag,
+-                                         folderName, retval)) {
+-          return NS_OK;
+-        }
+-
+-        // Can we create one?
+-        localRootFolder = do_QueryInterface(rootFolder);
+-      }
+-    }
+-  }
++  nsCOMPtr<nsIMsgAccountManager> accountManager =
++      mozilla::components::AccountManager::Service();
+ 
+   if (!localRootFolder) {
+     // Look for a server we could create a folder on, starting with the
+     // identity's servers.
+@@ -425,9 +569,10 @@ nsresult nsMsgIdentity::getOrCreateFolde
+       // Do we have an existing folder on this server?
+       rv = server->GetRootMsgFolder(getter_AddRefs(rootFolder));
+       NS_ENSURE_SUCCESS(rv, rv);
+ 
+-      if (checkServerForExistingFolder(rootFolder, prefName, folderFlag,
++      if (checkServerForExistingFolder(server, rootFolder, prefName,
++                                       pickerModePrefName, folderFlag,
+                                        folderName, retval)) {
+         return NS_OK;
+       }
+ 
+@@ -447,10 +592,11 @@ nsresult nsMsgIdentity::getOrCreateFolde
+     // Do we have an existing folder on this server?
+     rv = server->GetRootMsgFolder(getter_AddRefs(rootFolder));
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+-    if (checkServerForExistingFolder(rootFolder, prefName, folderFlag,
+-                                     folderName, retval)) {
++    if (checkServerForExistingFolder(server, rootFolder, prefName,
++                                     pickerModePrefName, folderFlag, folderName,
++                                     retval)) {
+       return NS_OK;
+     }
+ 
+     localRootFolder = do_QueryInterface(rootFolder);
+diff --git a/mailnews/base/src/nsMsgIdentity.h b/mailnews/base/src/nsMsgIdentity.h
+--- a/mailnews/base/src/nsMsgIdentity.h
++++ b/mailnews/base/src/nsMsgIdentity.h
+@@ -21,15 +21,22 @@ class nsMsgIdentity final : public nsIMs
+   nsCOMPtr<nsIPrefBranch> mPrefBranch;
+   nsCOMPtr<nsIPrefBranch> mDefPrefBranch;
+ 
+  protected:
+-  bool checkServerForExistingFolder(nsIMsgFolder* rootFolder,
+-                                    const char* prefName, uint32_t folderFlag,
+-                                    const nsACString& folderName,
+-                                    nsIMsgFolder** retval);
+-  nsresult getOrCreateFolder(const char* prefName, uint32_t folderFlag,
+-                             const nsACString& folderName,
++  bool checkServerForExistingFolder(
++      nsIMsgIncomingServer* server, nsIMsgFolder* rootFolder,
++      const char* prefName, const char* pickerModePrefName, uint32_t folderFlag,
++      const nsACString& folderName, nsIMsgFolder** retval);
++  nsresult getOrCreateFolder(const char* prefName,
++                             const char* pickerModePrefName,
++                             uint32_t folderFlag, const nsACString& folderName,
+                              nsIMsgFolder** retval);
++  nsresult getExistingSpecialFolder(const char* prefName,
++                                    const char* pickerModePrefName,
++                                    uint32_t folderFlag,
++                                    nsIMsgFolder** existingFolder,
++                                    nsIMsgIncomingServer** configuredServer);
++  bool useAccountDefaultFolder(const char* pickerModePrefName);
+   nsresult setFolderPref(const char* pref, const nsACString& retval,
+                          uint32_t folderFlag);
+ };
+ 
+@@ -72,19 +79,21 @@ class nsMsgIdentity final : public nsIMs
+   nsMsgIdentity::Set##_postfix(int32_t value) {       \
+     return mPrefBranch->SetIntPref(_prefname, value); \
+   }
+ 
+-#define NS_IMPL_FOLDERPREF_STR(_postfix, _prefName, _folderFlag, _folderName) \
+-  NS_IMETHODIMP                                                               \
+-  nsMsgIdentity::Get##_postfix##URI(nsACString& retval) {                     \
+-    return GetCharAttribute(_prefName, retval);                               \
+-  }                                                                           \
+-  NS_IMETHODIMP                                                               \
+-  nsMsgIdentity::Set##_postfix##URI(const nsACString& value) {                \
+-    return setFolderPref(_prefName, value, _folderFlag);                      \
+-  }                                                                           \
+-  NS_IMETHODIMP                                                               \
+-  nsMsgIdentity::GetOrCreate##_postfix(nsIMsgFolder** retval) {               \
+-    return getOrCreateFolder(_prefName, _folderFlag, _folderName, retval);    \
++#define NS_IMPL_FOLDERPREF_STR(_postfix, _prefName, _pickerModePrefName,  \
++                               _folderFlag, _folderName)                  \
++  NS_IMETHODIMP                                                           \
++  nsMsgIdentity::Get##_postfix##URI(nsACString& retval) {                 \
++    return GetCharAttribute(_prefName, retval);                           \
++  }                                                                       \
++  NS_IMETHODIMP                                                           \
++  nsMsgIdentity::Set##_postfix##URI(const nsACString& value) {            \
++    return setFolderPref(_prefName, value, _folderFlag);                  \
++  }                                                                       \
++  NS_IMETHODIMP                                                           \
++  nsMsgIdentity::GetOrCreate##_postfix(nsIMsgFolder** retval) {           \
++    return getOrCreateFolder(_prefName, _pickerModePrefName, _folderFlag, \
++                             _folderName, retval);                        \
+   }
+ 
+ #endif  // COMM_MAILNEWS_BASE_SRC_NSMSGIDENTITY_H_
+diff --git a/mailnews/compose/src/nsMsgCopy.cpp b/mailnews/compose/src/nsMsgCopy.cpp
+--- a/mailnews/compose/src/nsMsgCopy.cpp
++++ b/mailnews/compose/src/nsMsgCopy.cpp
+@@ -291,9 +291,25 @@ nsresult nsMsgCopy::GetTemplatesFolder(n
+                                        nsIMsgFolder** folder,
+                                        bool* waitForUrl) {
+   nsresult ret = LocateMessageFolder(
+       userIdentity, nsIMsgSend::nsMsgSaveAsTemplate, mSavePref, folder);
+-  if (*folder) (*folder)->SetFlag(nsMsgFolderFlags::Templates);
++  if (*folder) {
++    (*folder)->SetFlag(nsMsgFolderFlags::Templates);
++    // The folder may have been resolved to a different URI than the one stored
++    // in the identity, e.g. if the server uses a personal namespace like
++    // "INBOX/". Store the resolved URI so the templates folder can be found
++    // later.
++    nsCString resolvedUri;
++    (*folder)->GetURI(resolvedUri);
++    if (userIdentity && mSavePref && !resolvedUri.Equals(mSavePref)) {
++      nsCString identityPref;
++      userIdentity->GetTemplatesFolderURI(identityPref);
++      if (identityPref.Equals(mSavePref)) {
++        userIdentity->SetTemplatesFolderURI(resolvedUri);
++        userIdentity->SetTemplatesFolderPickerMode("1"_ns);
++      }
++    }
++  }
+   CreateIfMissing(folder, waitForUrl);
+   return ret;
+ }
+ 
+diff --git a/mailnews/search/content/searchWidgets.js b/mailnews/search/content/searchWidgets.js
+--- a/mailnews/search/content/searchWidgets.js
++++ b/mailnews/search/content/searchWidgets.js
+@@ -1480,11 +1480,9 @@
+         const foldersScanned = [];
+ 
+         for (const identity of identities) {
+           let enumerator = null;
+-          const msgFolder = MailUtils.getExistingFolder(
+-            identity.templatesFolderURI
+-          );
++          const msgFolder = identity.getExistingTemplatesFolder();
+           // If we already processed this folder, do not set enumerator
+           // so that we skip this identity.
+           if (msgFolder && !foldersScanned.includes(msgFolder)) {
+             foldersScanned.push(msgFolder);
