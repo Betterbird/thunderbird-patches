@@ -9,7 +9,107 @@ Ported to ESR 153 by Betterbird.
 The following enhancements are by Betterbird:
 - Switch picker to "Other" when the pref is fixed.
 - Also fix the pref when saving the template (nsMsgCopy.cpp).
+- When the archive location pref points to a non-existent folder, create that folder.
+  Not optimal, but consitent with Drafts, Templates and Sent which all create a new folder.
 
+diff --git a/mail/modules/MessageArchiver.sys.mjs b/mail/modules/MessageArchiver.sys.mjs
+--- a/mail/modules/MessageArchiver.sys.mjs
++++ b/mail/modules/MessageArchiver.sys.mjs
+@@ -129,10 +129,19 @@ MessageArchiver.prototype = {
+         if (!enabled) {
+           continue;
+         }
+ 
+-        archiveFolder = lazy.MailUtils.getOrCreateFolder(
+-          msgHdr.folder.server.serverURI + "/Archives"
++        const archiveFolderURI =
++          msgHdr.folder.server.serverURI + "/Archives";
++        archiveFolder = lazy.MailUtils.getOrCreateFolder(archiveFolderURI);
++        if (!archiveFolder) {
++          continue;
++        }
++        // Resolve the folder through the server so it gets created in the
++        // right place, e.g. under INBOX for servers using a namespace.
++        archiveFolder = archiveFolder.server.getMsgFolderFromURI(
++          archiveFolder,
++          archiveFolderURI
+         );
+         archiveGranularity = Services.prefs.getIntPref(
+           "mail.identity.default.archive_granularity"
+         );
+@@ -146,9 +155,34 @@ MessageArchiver.prototype = {
+         if (!identity.archiveEnabled) {
+           continue;
+         }
+ 
+-        archiveFolder = identity.getOrCreateArchivesFolder();
++        // Resolve the configured archives folder through the server, as the
++        // save-as-draft/template code does, so that a missing folder gets
++        // created at the configured location instead of silently
++        // substituting another folder.
++        const archiveFolderURI =
++          identity.archivesFolderURI ||
++          msgHdr.folder.server.serverURI + "/Archives";
++        archiveFolder = lazy.MailUtils.getOrCreateFolder(archiveFolderURI);
++        if (!archiveFolder) {
++          continue;
++        }
++        archiveFolder = archiveFolder.server.getMsgFolderFromURI(
++          archiveFolder,
++          archiveFolderURI
++        );
++        // If the server resolved the folder to a different URI, e.g. because
++        // of a personal namespace, store the resolved URI and switch the
++        // picker to the explicit folder mode.
++        if (
++          identity instanceof Ci.nsIMsgIdentity &&
++          identity.archivesFolderURI &&
++          archiveFolder.URI != identity.archivesFolderURI
++        ) {
++          identity.archivesFolderURI = archiveFolder.URI;
++          identity.archivesFolderPickerMode = "1";
++        }
+         archiveGranularity = identity.archiveGranularity;
+         archiveKeepFolderStructure = identity.archiveKeepFolderStructure;
+         archiveRecreateInbox = identity.archiveRecreateInbox;
+       }
+@@ -389,8 +423,28 @@ MessageArchiver.prototype = {
+       this.processNextBatch(); // for cleanup and exit
+     }
+   },
+ 
++  // Also implements nsIUrlListener for the archive folder creation.
++  OnStartRunningUrl() {},
++  OnStopRunningUrl(aUrl, aExitCode) {
++    if (!Components.isSuccessCode(aExitCode)) {
++      console.error("Archive folder creation failed: " + aExitCode);
++      this._batches = null;
++      this.processNextBatch(); // for cleanup and exit
++      return;
++    }
++    // The archive folder now exists; continue the current batch.
++    const batch = this._currentBatch;
++    if (batch?.archiveFolder?.parent) {
++      this.continueBatch();
++    } else {
++      console.error("Archive folder was not created");
++      this._batches = null;
++      this.processNextBatch(); // for cleanup and exit
++    }
++  },
++
+   // This also implements nsIMsgFolderListener, but we only care about the
+   // folderAdded (createSubfolder callback).
+   // @implements {nsIMsgFolderListener}
+   folderAdded(aFolder) {
+@@ -408,6 +462,7 @@ MessageArchiver.prototype = {
+   QueryInterface: ChromeUtils.generateQI([
+     "nsIMsgCopyServiceListener",
+     "nsIMsgFolderListener",
+     "nsIMsgOperationListener",
++    "nsIUrlListener",
+   ]),
+ };
 diff --git a/mailnews/base/public/nsIMsgIdentity.idl b/mailnews/base/public/nsIMsgIdentity.idl
 --- a/mailnews/base/public/nsIMsgIdentity.idl
 +++ b/mailnews/base/public/nsIMsgIdentity.idl
