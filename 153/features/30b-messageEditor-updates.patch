@@ -1,0 +1,921 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1787991262 -7200
+# Parent  106acac195a6baf5c9f6417ccd9a85faba7cf7a6
+MessageEditor enhancements and tweaks
+1. Support copy only from file.
+2. Header editor and header view dialog css tweaks.
+3. Handle no Subject header message; allow new header insertion internally.
+4. Update for fix in Bug 2008314 - Fix copying file messages into IMAP folders in the front end.
+5. IMAP tags loss on copy not fixed; also ensure flags are retained.
+6. Allow rethreading for no Message-Id header messages.
+7. Refactor to implement grouped logging.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -6100,9 +6100,8 @@ var threadPane = {
+       this.saveStateForMessageReplaceAtIndex(sourceIndex);
+ 
+     const messageEditor = new MessageEditor({
+       messageURI: gDBView.getURIForViewIndex(sourceIndex),
+-      msgWindow: top.msgWindow,
+       successFn,
+       errorFn,
+     });
+ 
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -755,8 +755,11 @@ var messageProgressListener = {
+ 
+     // Reset the blocked hosts so we can populate it again for this message.
+     document.getElementById("remoteContentOptions").value = "";
+ 
++    // Reset the current messageURI for headers popup.
++    document.getElementById("showHeadersPopup")?.removeAttribute("messageURI");
++
+     for (const listener of gMessageListeners) {
+       listener.onStartHeaders();
+     }
+   },
+@@ -4058,9 +4061,9 @@ async function MsgShowCustomHeaders() {
+     dialog.style.top = "0";
+     dialog.style.zIndex = "10";
+     dialog.style.outline = "none";
+     dialog.style.borderWidth = "1px";
+-    dialog.style.borderColor = "var(--arrowpanel-border-color)";
++    dialog.style.borderColor = "var(--panel-border-color)";
+     dialog.style.margin = "28px 14px";
+     dialog.style.padding = "0";
+ 
+     // For contextmenu.
+diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys.mjs
+--- a/mail/modules/MessageEditor.sys.mjs
++++ b/mail/modules/MessageEditor.sys.mjs
+@@ -9,8 +9,9 @@ import { AppConstants } from "resource:/
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   MailServices: "resource:///modules/MailServices.sys.mjs",
+   MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
++  MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   MimeParser: "resource:///modules/mimeParser.sys.mjs",
+ });
+ 
+ /**
+@@ -33,22 +34,23 @@ export class MessageEditor {
+    */
+   #messageURI = null;
+ 
+   /**
++   * Edited message is replaced (original deleted). May be overriden.
++   *
++   * @type {boolean}
++   */
++  #replace = true;
++
++  /**
+    * Backup original in trash (deleteStorage param is false). Controlled by
+    * pref |mail.messageEditor.backupToTrash|.
+    *
+    * @type {boolean}
+    */
+   #backupToTrash = true;
+ 
+   /**
+-   * @type {nsIMsgWindow}
+-   */
+-  #msgWindow = null;
+-  #mainWindow = null;
+-
+-  /**
+    * A function to call upon successful update and copy insertion completion,
+    * so that the view can be updated.
+    *
+    * @function
+@@ -86,17 +88,13 @@ export class MessageEditor {
+    * Create a new MessageEditor object.
+    *
+    * @param {object} options
+    * @param {string} options.messageURI - The to be edited message's URI.
+-   * @param {string} options.msgWindow - The msgWindow, required for imap
+-   *   notification consistency.
+    * @param {Function} [options.successFn] - An optional success callback
+    *   function called to update the view or other.
+    * @param {Function} [options.errorFn] - An optional error callback function.
+    */
+-  constructor({ messageURI, msgWindow, successFn, errorFn }) {
+-    this.#msgWindow = msgWindow;
+-    this.#mainWindow = Services.wm.getMostRecentWindow("mail:3pane");
++  constructor({ messageURI, successFn, errorFn }) {
+     this.#successFn = successFn ?? this.#successFn;
+     this.#errorFn = errorFn ?? this.#errorFn;
+ 
+     this.#backupToTrash = Services.prefs.getBoolPref(
+@@ -112,17 +110,23 @@ export class MessageEditor {
+ 
+     this.#initialize(messageURI);
+   }
+ 
+-  #initialize(messageURI) {
++  async #initialize(messageURI) {
+     this.#messageURI = messageURI;
++    this.#replace = true;
+     this.origMsgHdr = this.#messageService.messageURIToMsgHdr(this.#messageURI);
+     if (!(this.origMsgHdr instanceof Ci.nsIMsgDBHdr)) {
+       throw new Error(
+         `#initialize: could not get msgHdr from messageURI: ${messageURI}`
+       );
+     }
+ 
++    this.#getMessageDeferred.promise = new Promise(resolve => {
++      this.#getMessageDeferred.resolve = resolve;
++    });
++
++    this.log.groupCollapsed(`#initialize: ${this.origMsgHdr.subject}`);
+     this.origMsgHdrFlags = this.origMsgHdr.flags;
+     this.origMsgHdrKeywords = this.origMsgHdr.getStringProperty("keywords");
+     this.log.debug("#initialize: messageURI - " + messageURI);
+     this.log.debug(
+@@ -135,13 +139,11 @@ export class MessageEditor {
+         ":" +
+         this.origMsgHdrKeywords
+     );
+ 
+-    this.#getMessageDeferred.promise = new Promise(resolve => {
+-      this.#getMessageDeferred.resolve = resolve;
+-    });
+-
+-    this.#getMessage();
++    await this.#getMessage();
++    this.log.groupEnd(`#initialize: ${this.origMsgHdr.subject}`);
++    this.#getMessageDeferred.resolve();
+   }
+ 
+   /**
+    * The msgHdr of the edited message.
+@@ -162,9 +164,12 @@ export class MessageEditor {
+    *
+    * @type {string}
+    */
+   origMsgHdrKeywords = "";
++  #X_MOZILLA_KEYS = "X-Mozilla-Keys";
+ 
++  #SUBJECT = "Subject";
++  #FROM = "From";
+   // Backup header name prefix.
+   #ORIGINAL = "X-Original-Header-";
+   #ORIGINAL_HEADER_VALUE_NONE = "<None>";
+   // For rethreading.
+@@ -190,10 +195,8 @@ export class MessageEditor {
+     this.log.debug("#getMessage: original message headers -> " + this.charset);
+     this.log.debug(this.msgHeaders);
+ 
+     this.#initEditableHeaders();
+-
+-    this.#getMessageDeferred.resolve();
+   }
+ 
+   /**
+    * @returns {nsIMsgMessageService} object.
+@@ -220,9 +223,9 @@ export class MessageEditor {
+   // accomodate header names that are not among the common localizable ones.
+   #EDITABLE_HEADERS = [];
+   #initEditableHeaders() {
+     const pref = "mail.messageEditor.editableHeaders";
+-    let headers = ["Subject"];
++    let headers = [this.#SUBJECT];
+     try {
+       headers = JSON.parse(Services.prefs.getCharPref(pref));
+       // Dedupe.
+       headers = Array.from(new Set([...headers]));
+@@ -231,9 +234,9 @@ export class MessageEditor {
+     }
+ 
+     // May contain dupes, caller must handle.
+     if (headers.includes("*")) {
+-      headers = ["*"];
++      headers = [];
+       let headerLines = this.msgHeaders.split(this.headerLinesRE());
+       headerLines = headerLines.filter(
+         line =>
+           line &&
+@@ -244,8 +247,12 @@ export class MessageEditor {
+       for (const headerLine of headerLines) {
+         headers.push(headerLine.split(":")[0]);
+       }
+     }
++    // Always include Subject.
++    if (!headers.includes(this.#SUBJECT)) {
++      headers.splice(0, 0, this.#SUBJECT);
++    }
+     this.#EDITABLE_HEADERS = headers;
+   }
+ 
+   /**
+@@ -412,8 +419,19 @@ export class MessageEditor {
+     this.log.debug(origHeaderLine);
+     if (headerLine) {
+       this.#removeHeaderLine(headerLine);
+     }
++    // Have the #ORIGINAL; if it's <None>, remove it.
++    const origHeaderValue = this.getHeaderValueRaw(
++      origHeaderLine,
++      origHeaderName
++    );
++    this.log.debug("#restoreHeaderValue: origHeaderValue - " + origHeaderValue);
++    if (origHeaderValue == this.#ORIGINAL_HEADER_VALUE_NONE) {
++      // Remove the line. The header didn't exist; remove the backup now too.
++      this.#removeHeaderLine(origHeaderLine);
++      return;
++    }
+     // Restore original case, which should have been preserved.
+     headerName = origHeaderLine.split(this.#ORIGINAL)[1];
+     headerName = origHeaderLineIndexStr
+       ? headerName.split(origHeaderLineIndexStr)[0]
+@@ -453,21 +471,34 @@ export class MessageEditor {
+     }
+ 
+     await this.#getMessageDeferred.promise;
+ 
+-    const headerLine = this.getHeaderLines(headerName)[headerLineIndex];
++    let headerLine = this.getHeaderLines(headerName)[headerLineIndex];
+     if (!headerLine) {
+       this.log.warn(`updateHeaderValue: headerName not found - ${headerName}`);
+-      this.#doUpdate("updatevalue", false);
+-      return;
++      if (headerName.toLowerCase() == this.#SUBJECT.toLowerCase()) {
++        headerName = this.#SUBJECT;
++        if (this.#insertHeader(headerName, this.#FROM)) {
++          headerLine = this.getHeaderLines(headerName)[headerLineIndex];
++        }
++      }
++      if (!headerLine) {
++        this.#doUpdate("updatevalue", false);
++        return;
++      }
+     }
+ 
+     const origHeaderLineIndexStr = headerLineIndex
+       ? "_" + (headerLineIndex + 1)
+       : "";
+     const origHeaderName = this.#ORIGINAL + headerName + origHeaderLineIndexStr;
+     this.log.debug("updateHeaderValue: origHeaderName - " + origHeaderName);
+     const origHeaderLine = this.getHeaderLines(origHeaderName)[0];
++    const origHeaderValue = this.getHeaderValueRaw(
++      origHeaderLine,
++      origHeaderName
++    );
++    this.log.debug("updateHeaderValue: origHeaderValue - " + origHeaderValue);
+     if (!origHeaderLine) {
+       // Get the headerName line and effectively clone it while renaming the
+       // following headerName header. Preserve the orignal header case.
+       // Then, update the original.
+@@ -555,18 +586,89 @@ export class MessageEditor {
+     return true;
+   }
+ 
+   /**
++   * Insert a header - internal. Caller checks for dupes.
++   *
++   * @param {string} headerName - Header to insert.
++   * @param {string} [insertAfterHeaderName] - Insert after header.
++   */
++  #insertHeader(headerName, insertAfterHeaderName) {
++    this.log.debug("insertHeader: headerName - " + headerName);
++    this.log.debug(
++      "insertHeader: insertAfterHeaderName - " + insertAfterHeaderName
++    );
++
++    const currentMsgHeaders = this.msgHeaders;
++    let insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
++    if (!insertAfterHeaderLine) {
++      insertAfterHeaderName = this.#FROM;
++      insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
++    }
++    if (!insertAfterHeaderLine) {
++      this.log.warn(
++        "#insertHeader: origMsgHdr does not have RFC2822 headers; messageKey - " +
++          this.origMsgHdr.messageKey
++      );
++      return false;
++    }
++
++    // Clone a header line for headerName to insert. Caller has already checked
++    // that headerName does not exist .
++    if (
++      !this.#updateHeaderName(
++        insertAfterHeaderLine,
++        insertAfterHeaderName,
++        insertAfterHeaderLine + headerName
++      )
++    ) {
++      this.log.debug("#insertHeader: after #updateHeaderName - no change");
++    }
++
++    // Insert a placeholder for reversion to original state - without the
++    // inserted header.
++    const insertedHeaderLine = this.getHeaderLines(headerName)[0];
++    const origHeaderName = this.#ORIGINAL + headerName;
++    if (
++      !this.#updateHeaderName(
++        insertedHeaderLine,
++        headerName,
++        insertedHeaderLine + origHeaderName
++      )
++    ) {
++      this.log.debug("#insertHeader: after #updateHeaderName - no change");
++    }
++
++    if (
++      !this.#updateHeaderValue(
++        this.getHeaderLines(origHeaderName)[0],
++        origHeaderName,
++        this.#ORIGINAL_HEADER_VALUE_NONE
++      )
++    ) {
++      this.log.debug("#insertHeader: after #updateHeaderValue - no change");
++    }
++
++    if (this.msgHeaders == currentMsgHeaders) {
++      // No change.
++      return false;
++    }
++
++    return true;
++  }
++
++  /**
+    *
+    * @param {string} action - In "rethread", "unthread", "reset".
+    * @param {string} newParentMessageURI - Actually a nsIMsgMailNewsUrl url.
+    */
+   async updateThreading(action, newParentMessageURI) {
++    await this.#getMessageDeferred.promise;
++
++    this.log.groupCollapsed(`updateThreading: ${this.origMsgHdr.subject}`);
+     this.log.debug("updateThreading: drag message url - " + this.#messageURI);
+     this.log.debug("updateThreading: action - " + action);
+ 
+-    await this.#getMessageDeferred.promise;
+-
+     let headersChanged = false;
+     if (action == "rethread") {
+       headersChanged = await this.#reThread(newParentMessageURI);
+     } else if (action == "unthread") {
+@@ -574,20 +676,52 @@ export class MessageEditor {
+     } else if (action == "reset") {
+       headersChanged = this.#resetThreading();
+     }
+ 
+-    this.#doUpdate(action, headersChanged);
++    await this.#doUpdate(action, headersChanged);
++    this.log.groupEnd(`updateThreading: ${this.origMsgHdr.subject}`);
+   }
+ 
+-  #doUpdate(action, headersChanged) {
++  async #doUpdate(action, headersChanged) {
+     if (!headersChanged) {
+       this.log.debug(`#doUpdate: no change, action - ${action}`);
+       this.#onSuccess(false);
+       return;
+     }
+ 
+     this.newMessage = this.msgHeaders + this.msgBody;
+-    this.#replaceChanges();
++    const tmpFile = await this.#replaceChanges();
++    if (!tmpFile) {
++      return;
++    }
++
++    // Replace current message with the new message temp .eml file;
++    // args are for a single message delete/copyFile transaction.
++    const args = {
++      deleteStorage: !this.#backupToTrash,
++      msgWindow: null,
++      folder: this.origMsgHdr.folder,
++      msgHdrToReplace: null,
++      flags: this.origMsgHdrFlags,
++      keywords: this.origMsgHdrKeywords,
++      tmpFile,
++    };
++
++    if (this.#replace) {
++      // Do the delete before the copy. If there is an error here, continue, as
++      // we still want to import the new message from tmpFile. Do not await the
++      // delete; if the promise is not resolved (no onStopyCopy notice), we will
++      // wait forever.
++      this.#deleteMessages(args);
++    }
++
++    await this.#copyFileMessage(args);
++  }
++
++  async updateMessage(replace = true) {
++    this.log.debug(`updateMessage: START, replace ${replace}`);
++    this.#replace = replace;
++    await this.#doUpdate("update", true);
+   }
+ 
+   async #reThread(newParentMessageURI) {
+     const currentMsgHeaders = this.msgHeaders;
+@@ -627,9 +761,9 @@ export class MessageEditor {
+       insertAfterHeaderName = this.#MESSAGEID;
+       insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
+     }
+     if (!insertAfterHeaderLine) {
+-      insertAfterHeaderName = "From";
++      insertAfterHeaderName = this.#FROM;
+       insertAfterHeaderLine = this.getHeaderLines(insertAfterHeaderName)[0];
+     }
+     if (!insertAfterHeaderLine) {
+       insertAfterHeaderName = "Date";
+@@ -707,8 +841,9 @@ export class MessageEditor {
+       // Get the Message-ID line and effectively clone it while renaming the
+       // following Messaged-ID header. Then, update the original.
+       const messageIDLine = this.getHeaderLines(this.#MESSAGEID)[0];
+       if (
++        messageIDLine &&
+         !this.#updateHeaderName(
+           messageIDLine,
+           this.#MESSAGEID,
+           messageIDLine + this.#ORIGINAL_MESSAGEID
+@@ -719,9 +854,9 @@ export class MessageEditor {
+     }
+     // Ensure message is unthreaded from all children, and also ensure that
+     // messages that are not parents that may become parents are able to be
+     // reset without breaking threading in the UI.
+-    if (!this.#resetMessageId()) {
++    if (this.#resetMessageId() === false) {
+       return false;
+     }
+ 
+     headerLine = this.getHeaderLines(this.#ORIGINAL_REFERENCES)[0];
+@@ -908,9 +1043,9 @@ export class MessageEditor {
+     }
+     // Since Message-ID is RFC5322 'should', it doesn't need to be there.
+     // And if not then it's not an issue.
+     this.log.warn("#resetMessageId: no Message-ID header.");
+-    return false;
++    return null;
+   }
+ 
+   async getRawMessage(msgUri) {
+     return new Promise((resolve, reject) => {
+@@ -940,9 +1075,9 @@ export class MessageEditor {
+       };
+ 
+       this.#messageService.streamMessage(
+         msgUri,
+-        consumer, // nsISupports
++        consumer, // nsIStreamListener
+         null, // nsIMsgWindow
+         null, // nsIUrlListener
+         false, // aConvertData
+         "" // aAdditionalHeader
+@@ -962,9 +1097,9 @@ export class MessageEditor {
+     if (folder.locked) {
+       this.#onError(
+         "#replaceChanges: folder is busy, try again later - " + folder.name
+       );
+-      return;
++      return false;
+     }
+ 
+     // Note: Bug 1737203.
+     if (!folder.databaseOpen) {
+@@ -976,18 +1111,18 @@ export class MessageEditor {
+       } catch (ex) {
+         this.#onError(
+           "#replaceChanges: failed to open folder database - " + ex
+         );
+-        return;
++        return false;
+       }
+     }
+ 
+     if (!this.#isMsgEditable) {
+       this.#onError(
+         "#replaceChanges: cannot delete or add messages to this folder - " +
+           folder.name
+       );
+-      return;
++      return false;
+     }
+ 
+     // Write the new message to tmpFile.
+     const tmpFile = await IOUtils.getFile(
+@@ -1011,55 +1146,38 @@ export class MessageEditor {
+         this.log.debug("#replaceChanges: newMessage? - " + this.newMessage);
+       });
+ 
+     if (!success) {
+-      return;
++      return false;
+     }
+ 
+     if (!tmpFile.exists()) {
+       this.#onError("#replaceChanges: cannot find tmpFile - " + tmpFile.path);
+-      return;
++      return false;
+     }
+ 
+-    // Replace current message with the new message temp .eml file;
+-    // args are for a single message delete/copyFile transaction.
+-    const args = {
+-      deleteStorage: !this.#backupToTrash,
+-      msgWindow: this.#msgWindow,
+-      folder,
+-      isIMAP: folder.flags & Ci.nsMsgFolderFlags.ImapBox,
+-      msgHdrToReplace: null,
+-      flags: this.origMsgHdrFlags,
+-      keywords: this.origMsgHdrKeywords,
+-      tmpFile,
+-    };
+-
+-    this.#deleteMessages(args);
++    return tmpFile;
+   }
+ 
+-  #deleteMessages(args) {
++  async #deleteMessages(args) {
+     const log = this.log;
+     log.debug("#deleteMessages: START ");
+-    // Set up delete.
+-    // For non IMAP folders with deleteStorage=true (do not move to trash), or
+-    // maildir folders, there is no onStopCopy notification upon delete.
++    // Set up delete. Updates in Tb have made former workarounds obsolete.
++    //
++    // For non IMAP folders with deleteStorage=true (do not move to trash), the
++    // isMove argument MUST be false for onStopCopy notification upon delete.
++    //
+     // For IMAP folders with deleteStorage=true, the notification is sent.
+-    // For IMAP we no longer implement nsIUrlListener (on[Start|Stop]RunningUrl
+-    // notices) post Bug 1941332.
++    // The msgWindow argument is no longer necessary for IMAP.
+     // IMAP handles deletes per account prefs.
+     // TODO: temporarily change account delete model pref to MoveToTrash
+     // to handle the delete per deleteStorage preference. If MarkDeleted or
+     // RemoveImmediately are selected, results are not correct; there
+     // are longstanding core Bug 399475 and Bug 370509 on delete model
+     // handling. Also Bug 651945 for gmail.
++    // TODO: investigate undo of delete if copy fails (rollback transaction).
+ 
+-    // Note: The comment about maildir above appears to be wrong,
+-    // https://github.com/Betterbird/thunderbird-patches/issues/485
+-    // let doAutoCopy =
+-    //   (args.deleteStorage && !args.isIMAP) ||
+-    //   args.folder.msgStore.storeType == "maildir";
+-    let doAutoCopy = args.deleteStorage && !args.isIMAP;
+-
++    const { promise, resolve } = Promise.withResolvers();
+     const deleteListener = {
+       // @implements {nsIMsgCopyServiceListener}
+       onStartCopy() {
+         log.debug("deleteListener.onStartCopy");
+@@ -1073,48 +1191,38 @@ export class MessageEditor {
+       },
+       onStopCopy(status) {
+         if (status != Cr.NS_OK) {
+           log.warn("deleteListener.onStopCopy: error - " + status);
++          resolve(false);
++        } else {
++          log.debug(`deleteListener.onStopCopy - status ${status}`);
++          resolve(true);
+         }
+-        log.debug(
+-          `deleteListener.onStopCopy - ` +
+-            (args.isIMAP ? "IMAP, " : "") +
+-            `status ${status}`
+-        );
+-        success();
+       },
+       QueryInterface: ChromeUtils.generateQI([Ci.nsIMsgCopyServiceListener]),
+     };
+ 
+-    const success = () => {
+-      this.#copyFileMessage(args);
+-    };
+-
+-    // Do the delete before the copy. If there is an error here, continue, as
+-    // we still want to import the new message from tmpFile.
+     try {
+       args.folder.deleteMessages(
+         [this.origMsgHdr],
+         args.msgWindow,
+         args.deleteStorage,
+-        true, // isMove
++        false, // isMove
+         deleteListener,
+         false // allowUndo
+       );
+     } catch (ex) {
+-      doAutoCopy = true;
+       this.log.warn("#deleteMessages: error - " + ex);
++      resolve(false);
+     }
+ 
+-    if (doAutoCopy) {
+-      log.debug("#deleteMessages: auto #copyFileMessage");
+-      this.#copyFileMessage(args);
+-    }
++    await promise;
+   }
+ 
+-  #copyFileMessage(args) {
++  async #copyFileMessage(args) {
+     const log = this.log;
+     log.debug("#copyFileMessage: START ");
++    const { promise, resolve } = Promise.withResolvers();
+     const copyServiceListener = {
+       newMsgKey: null,
+       // @implements {nsIMsgCopyServiceListener}
+       onStartCopy() {
+@@ -1127,34 +1235,32 @@ export class MessageEditor {
+       },
+       getMessageId(_messageId) {
+         return null;
+       },
+-      onStopCopy(status) {
++      async onStopCopy(status) {
+         if (status != 0) {
+           error("copyServiceListener.onStopCopy: error status - " + status);
+-          return;
++          resolve(false);
++        } else {
++          log.debug(`copyServiceListener.onStopCopy - status ${status}`);
++          await lazy.MailUtils.updateFolderAsync(args.folder).catch(error => {
++            log.warn(
++              "copyServiceListener.onStopCopy: updateFolder error, " + error
++            );
++          });
++          await success(this.newMsgKey);
++          resolve(true);
+         }
+-        log.debug(
+-          `copyServiceListener.onStopCopy - ` +
+-            (args.isIMAP ? "IMAP, " : "") +
+-            `status ${status}`
+-        );
+-        if (args.isIMAP) {
+-          args.folder.updateFolder(args.msgWindow);
+-        }
+-        success(this.newMsgKey);
+       },
+       QueryInterface: ChromeUtils.generateQI([Ci.nsIMsgCopyServiceListener]),
+     };
+ 
+-    const success = newMsgKey => {
+-      this.#onSuccess(newMsgKey);
+-      this.#removeTmpFile(args.tmpFile);
++    const success = async newMsgKey => {
++      await this.#onSuccess(newMsgKey);
+     };
+ 
+     const error = status => {
+       this.#onError(status);
+-      this.#removeTmpFile(args.tmpFile);
+     };
+ 
+     try {
+       lazy.MailServices.copy.copyFileMessage(
+@@ -1168,9 +1274,13 @@ export class MessageEditor {
+         args.msgWindow
+       );
+     } catch (ex) {
+       this.#onError("#copyFileMessage: error - " + ex);
++      resolve(false);
+     }
++
++    await promise;
++    this.#removeTmpFile(args.tmpFile);
+   }
+ 
+   async #removeTmpFile(file) {
+     try {
+@@ -1196,9 +1306,9 @@ export class MessageEditor {
+   #createHeaderEditorDialog(winDoc) {
+     const dialog = winDoc.createElement("dialog");
+     dialog.id = "headerEditorDialog";
+     dialog.style.borderWidth = "1px";
+-    dialog.style.borderColor = "var(--arrowpanel-border-color)";
++    dialog.style.borderColor = "var(--panel-border-color)";
+     dialog.style.paddingBlock = 0;
+ 
+     const title = winDoc.createElement("div");
+     title.id = "dialogTitle";
+@@ -1222,8 +1332,9 @@ export class MessageEditor {
+     select.style.alignSelf = "flex-start";
+     select.style.maxWidth = "120px";
+     select.style.marginBlock = "0";
+     select.style.textOverflow = "ellipsis";
++    select.style.overflowY = "scroll";
+     const onSelect = () => {
+       const selectedOption = select.selectedOptions[0];
+       const origHeaderValue = selectedOption.getAttribute("origHeaderValue");
+       const curHeaderValue = selectedOption.getAttribute("curHeaderValue");
+@@ -1257,8 +1368,9 @@ export class MessageEditor {
+     const buttons = winDoc.createElement("menu");
+     buttons.classList.add("dialog-button-box");
+     buttons.style.display = "flex";
+     buttons.style.justifyContent = "end";
++    buttons.style.marginBlock = "8px";
+ 
+     const cancelButton = winDoc.createElement("button");
+     cancelButton.id = "cancelButton";
+     cancelButton.style.order = AppConstants.platform == "win" ? "2" : "";
+@@ -1285,8 +1397,9 @@ export class MessageEditor {
+     updateButton.id = "updateButton";
+     // "Update"
+     winDoc.l10n.setAttributes(updateButton, "msg-edit-update-button");
+     const onUpdate = () => {
++      this.log.groupCollapsed(`onUpdate: ${this.origMsgHdr.subject}`);
+       const selectedOption = select.selectedOptions[0];
+       const headerName = selectedOption.value;
+       const headerLineIndex = selectedOption.headerLineIndex;
+       this.log.debug(
+@@ -1296,8 +1409,29 @@ export class MessageEditor {
+           headerLineIndex +
+           ":" +
+           textarea.value
+       );
++      // Ensure tags are synced with no dupes.
++      const keysHeaderLines = this.getHeaderLines(this.#X_MOZILLA_KEYS);
++      keysHeaderLines.forEach((keysHeaderLine, index) => {
++        if (index == 0) {
++          const keysHeaderValue = this.getHeaderValue(
++            keysHeaderLine,
++            this.#X_MOZILLA_KEYS
++          );
++          if (keysHeaderValue != this.origMsgHdrKeywords) {
++            // Internal function here.
++            this.#updateHeaderValue(
++              keysHeaderLine,
++              this.#X_MOZILLA_KEYS,
++              this.origMsgHdrKeywords
++            );
++          }
++        } else {
++          this.#removeHeaderLine(keysHeaderLine);
++        }
++      });
++
+       if (
+         textarea.value.replace(/\r/g, "") ==
+         textarea.getAttribute("origHeaderValue").replace(/\r/g, "")
+       ) {
+@@ -1399,26 +1533,24 @@ export class MessageEditor {
+    * update.
+    */
+   #initHeaderEditorDialog() {
+     this.log.debug("initHeaderEditorDialog: START");
+-    const about3Pane = this.#mainWindow.gTabmail?.currentAbout3Pane;
++    const mainWindow = Services.wm.getMostRecentWindow("mail:3pane");
++    const about3Pane = mainWindow.gTabmail?.currentAbout3Pane;
+     if (!about3Pane) {
+       this.log.debug("initHeaderEditorDialog: 3Pane window not found");
+       return null;
+     }
+     const winDoc = about3Pane.document;
+     const headerEditorDialog = this.#createHeaderEditorDialog(winDoc);
+ 
+     const select = headerEditorDialog.querySelector("#headerSelect");
+-    if (this.#EDITABLE_HEADERS.includes("*")) {
+-      this.#EDITABLE_HEADERS.shift();
+-    }
+     this.#initHeadersList(select, winDoc);
+     select.selectedIndex = select.querySelector("[value='subject']")?.index;
+     select.dispatchEvent(new Event("change"));
+ 
+     const textarea = headerEditorDialog.querySelector("#headerValue");
+-    this.#mainWindow.setTimeout(() => textarea.focus(), 50);
++    mainWindow.setTimeout(() => textarea.focus(), 50);
+ 
+     // Override #successFn to close the dialog on update.
+     const successFn = this.#successFn;
+     this.#successFn = newMsgHdr => {
+@@ -1427,16 +1559,18 @@ export class MessageEditor {
+           newMsgHdr.messageKey
+       );
+       this.#headerEditorDialog.close("success");
+       successFn(newMsgHdr);
++      this.log.groupEnd(`onUpdate: ${this.origMsgHdr.subject}`);
+     };
+ 
+     const errorFn = this.#errorFn;
+     this.#errorFn = error => {
+       this.log.debug("updateHeadersWithDialog.errorFn: " + error);
+       // Display an error in the dialog?
+       this.#headerEditorDialog.close("error");
+       errorFn(error);
++      this.log.groupEnd(`onUpdate: ${this.origMsgHdr.subject}`);
+     };
+ 
+     headerEditorDialog.returnValue = "";
+     const onClose = () => {
+@@ -1456,14 +1590,19 @@ export class MessageEditor {
+ 
+   async updateHeadersWithDialog() {
+     await this.#getMessageDeferred.promise;
+ 
++    this.log.groupCollapsed(
++      `updateHeadersWithDialog: ${this.origMsgHdr.subject}`
++    );
+     this.#headerEditorDialog = this.#initHeaderEditorDialog();
+     if (this.#headerEditorDialog) {
+       this.#headerEditorDialog.showModal();
+     } else {
+       this.#onError("updateHeadersWithDialog: failed to initialize dialog");
+     }
++
++    this.log.groupEnd(`updateHeadersWithDialog: ${this.origMsgHdr.subject}`);
+   }
+ 
+   async #onSuccess(newMsgKey) {
+     this.log.debug("#onSuccess: newMsgKey - " + newMsgKey);
+@@ -1477,9 +1616,13 @@ export class MessageEditor {
+     );
+ 
+     if (newMsgKey === false) {
+       // Case of no change.
+-      this.#successFn(false);
++      try {
++        this.#successFn(false);
++      } catch (exception) {
++        this.log.error("#onError: successFn exception - " + exception);
++      }
+       return;
+     }
+ 
+     let newMsgHdr;
+@@ -1505,36 +1648,57 @@ export class MessageEditor {
+     if (
+       this.origMsgHdrKeywords &&
+       this.origMsgHdr.folder.flags & Ci.nsMsgFolderFlags.ImapBox
+     ) {
+-      this.log.debug("#onSuccess: IMAP tags - " + this.origMsgHdrKeywords);
++      this.log.debug(
++        "#onSuccess: restore IMAP tags - " + this.origMsgHdrKeywords
++      );
++      // Remove possible stale X-Mozilla-Keys.
++      this.origMsgHdr.folder.removeKeywordsFromMessages(
++        [newMsgHdr],
++        newMsgHdr.getStringProperty("keywords")
++      );
+       this.origMsgHdr.folder.addKeywordsToMessages(
+         [newMsgHdr],
+         this.origMsgHdrKeywords
+       );
+     }
++    // For imap, copyFileMessage() is a fail for flags, so add them now.
++    if (this.origMsgHdr.folder.flags & Ci.nsMsgFolderFlags.ImapBox) {
++      newMsgHdr.orFlags(this.origMsgHdrFlags);
++      this.log.debug("#onSuccess: restore IMAP flags - " + newMsgHdr.flags);
++    }
+ 
+     const newMessageURI = newMsgHdr.folder.getUriForMsg(newMsgHdr);
+     const oldMessageURI = this.#messageURI;
+ 
+-    // Initialize this object again with the new message. This will allow
+-    // repeated operations on an updated message.
+-    this.#initialize(newMessageURI);
+-    await this.#getMessageDeferred.promise;
+-
+-    this.#successFn(newMsgHdr);
+-
+     this.log.debug("#onSuccess: oldMessageURI - " + oldMessageURI);
+     this.log.debug("#onSuccess: newMessageURI - " + newMessageURI);
+ 
++    try {
++      this.#successFn(newMsgHdr);
++    } catch (exception) {
++      this.log.error("#onError: successFn exception - " + exception);
++    }
++
++    // Initialize this object again with the new message. This will allow
++    // repeated operations on an updated message.
++    await this.#initialize(newMessageURI);
++
+     // And update all other places with the new message.
+-    Services.obs.notifyObservers(
+-      { oldMessageURI, newMessageURI },
+-      "message-replaced"
+-    );
++    if (this.#replace) {
++      Services.obs.notifyObservers(
++        { oldMessageURI, newMessageURI },
++        "message-replaced"
++      );
++    }
+   }
+ 
+   #onError(error) {
+     this.log.error("#onError: error - " + (error ?? "logged to console"));
+-    this.#errorFn(error);
++    try {
++      this.#errorFn(error);
++    } catch (exception) {
++      this.log.error("#onError: errorFn exception - " + exception);
++    }
+   }
+ }
