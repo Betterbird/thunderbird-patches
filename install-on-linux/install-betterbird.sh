@@ -142,7 +142,7 @@ addCustomIcons() {
 
 createDesktopFile() {
   wget -q -O "$desktopFile" "https://raw.githubusercontent.com/Betterbird/thunderbird-patches/main/metadata/eu.betterbird.Betterbird.desktop"
-  sed -i -e 's|Exec=betterbird %u|Exec='"$installDir"'/betterbird/betterbird %u|' "$desktopFile"
+  sed -i -e 's|Exec=betterbird |Exec='"$installDir"'/betterbird/betterbird |' "$desktopFile"
   sed -i -e 's|Icon=eu.betterbird.Betterbird|Icon='"$installDir"'/betterbird/chrome/icons/default/default256.png|' "$desktopFile"
   echoLog "Desktop file created."
 }
