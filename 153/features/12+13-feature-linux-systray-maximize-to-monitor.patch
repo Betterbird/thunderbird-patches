@@ -1,0 +1,224 @@
+# HG changeset patch
+# User: GitHub user alegru and Claude Code
+# Date 1788259835 -7200
+# Parent  777c1998847e30999cdaf1f5f264749cf0247afb
+Feature: Linux systray: Restore maximised window to the correct screen.
+
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -28,8 +28,9 @@ typedef struct {
+   int32_t x;
+   int32_t y;
+   int32_t w;
+   int32_t h;
++  bool maximized;
+ } WinDims;
+ static nsCOMArray<nsIBaseWindow> sHiddenWindows;
+ static nsTArray<WinDims> sHiddenWindowsDims;
+ static uint32_t sLastUnreadCount;
+@@ -91,8 +92,36 @@ static void traySetTooltip(const char* a
+     app_indicator_set_tooltip(ci, NULL /* icon */, aTooltip /* title */, "");
+   }
+ }
+ 
++// #define DEBUG_RESTORE 1
++
++// Put a window back where it was. This MUST be called while the window is
++// still unmapped, that is, before `SetVisibility(true)`: `gtk_window_move()`
++// and `gtk_window_resize()` are ignored by the window manager while a window
++// is maximized, so restoring the geometry after the window has been mapped
++// does nothing and a maximized window reappears on whichever monitor the
++// window manager happened to pick. On an unmapped window both calls are
++// recorded by GTK and applied at map time, `gtk_window_move()` as a position
++// hint and `gtk_window_maximize()` as the initial `_NET_WM_STATE`, so the
++// window is mapped maximized on the right monitor straight away, without
++// flicker.
++static void restoreGeometry(GtkWindow* aWindow, const WinDims& aDims) {
++  gtk_window_unmaximize(aWindow);
++  gtk_window_move(aWindow, aDims.x, aDims.y);
++  if (aDims.maximized) {
++    // Don't restore the size, that's the maximized size. Leave the window
++    // manager's idea of the unmaximized geometry alone.
++    gtk_window_maximize(aWindow);
++  } else {
++    gtk_window_resize(aWindow, aDims.w, aDims.h);
++  }
++#ifdef DEBUG_RESTORE
++  fprintf(stderr, "=== Restoring to         %d %d %d %d, maximized %d\n",
++          aDims.x, aDims.y, aDims.w, aDims.h, aDims.maximized);
++#endif
++}
++
+ static void activateWindow(mozIDOMWindowProxy* win) {
+   nsCOMPtr<nsPIDOMWindowOuter> domWindow = nsPIDOMWindowOuter::From(win);
+   nsCOMPtr<nsIBaseWindow> baseWindow =
+       do_QueryInterface(domWindow->GetDocShell());
+@@ -100,21 +129,42 @@ static void activateWindow(mozIDOMWindow
+     domWindow->Focus(mozilla::dom::CallerType::System);
+     fprintf(stderr, "Betterbird: Activating window via Focus() only (1)\n");
+     return;
+   }
+-  // Getting the visibility doesn't work, even hidden windows are visible :-(
+-  baseWindow->SetVisibility(true);
+-
+   nsCOMPtr<nsIWidget> widget;
+   baseWindow->GetMainWidget(getter_AddRefs(widget));
+   if (!widget) {
++    // Getting the visibility doesn't work, even hidden windows are visible :-(
++    baseWindow->SetVisibility(true);
+     fprintf(stderr, "Betterbird: Activating window via Focus() only (2)\n");
+     return;
+   }
++  void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
++
++  // Move the window to where it was, while it is still unmapped. We need to
++  // find it first in the list of windows.
++  if (gtkWidget) {
++    for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
++      auto window = sHiddenWindows.SafeElementAt(i);
++      if (!window) {
++        continue;
++      }
++      nsCOMPtr<nsIWidget> w;
++      window->GetMainWidget(getter_AddRefs(w));
++      if (widget == w) {
++        restoreGeometry(GTK_WINDOW(gtkWidget), sHiddenWindowsDims[i]);
++        sHiddenWindows.RemoveElementAt(i);
++        sHiddenWindowsDims.RemoveElementAt(i);
++        break;
++      }
++    }
++  }
++
++  // Getting the visibility doesn't work, even hidden windows are visible :-(
++  baseWindow->SetVisibility(true);
+ 
+   // Raise the window, no good if it appears in the background.
+   // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
+-  void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
+   if (gtkWidget) {
+     if (useWithTime) {
+       gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
+     } else {
+@@ -122,40 +172,10 @@ static void activateWindow(mozIDOMWindow
+     }
+   }
+   widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
+ 
+-  // Now move the window to where it was. We need to find it first in the
+-  // list of windows.
+   if (!gtkWidget) {
+     fprintf(stderr, "Betterbird: Activating window via Focus() only (3)\n");
+-    return;
+-  }
+-  for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
+-    auto window = sHiddenWindows.SafeElementAt(i);
+-    if (!window) {
+-      continue;
+-    }
+-    nsCOMPtr<nsIWidget> w;
+-    window->GetMainWidget(getter_AddRefs(w));
+-    if (widget == w) {
+-      WinDims dims = sHiddenWindowsDims[i];
+-      // The following isn't working well, so use native calls.
+-      // Last parameter: Bits: eRepaint = 1; eDelayResize = 2;
+-      // window->SetPositionAndSize(dims.x, dims.y, dims.w, dims.h, 1);
+-      gtk_window_move(GTK_WINDOW(gtkWidget), dims.x, dims.y);
+-      gtk_window_resize(GTK_WINDOW(gtkWidget), dims.w, dims.h);
+-// #define DEBUG_RESTORE 1
+-#ifdef DEBUG_RESTORE
+-      fprintf(stderr, "=== Trying to restore to %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
+-      // window->GetPositionAndSize(&dims.x, &dims.y, &dims.w, &dims.h);
+-      gtk_window_get_position(GTK_WINDOW(gtkWidget), &dims.x, &dims.y);
+-      gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
+-      fprintf(stderr, "=== was restored to      %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
+-#endif
+-      sHiddenWindows.RemoveElementAt(i);
+-      sHiddenWindowsDims.RemoveElementAt(i);
+-      break;
+-    }
+   }
+ 
+   // Strangely we get "sizemodechange" event with STATE_MINIMIZED,
+   // so we ignore that for some milliseconds.
+@@ -191,43 +211,32 @@ static void activated(AppIndicator* self
+     auto window = sHiddenWindows.SafeElementAt(i);
+     if (!window) {
+       continue;
+     }
+-    window->SetVisibility(true);
+-
+     nsCOMPtr<nsIWidget> widget;
+     window->GetMainWidget(getter_AddRefs(widget));
+     if (!widget) {
++      window->SetVisibility(true);
+       continue;
+     }
++    // Move the window to where it was, while it is still unmapped.
++    void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
++    if (gtkWidget) {
++      restoreGeometry(GTK_WINDOW(gtkWidget), sHiddenWindowsDims[i]);
++    }
++
++    window->SetVisibility(true);
++
+     // Raise the window, no good if it appears in the background.
+     // KDE works with just the `SetFocus()`, `gtk_window_present` was added for Gnome.
+-    void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
+     if (gtkWidget) {
+       if (useWithTime) {
+         gtk_window_present_with_time(GTK_WINDOW(gtkWidget), (guint32)(g_get_monotonic_time() / 1000));
+       } else {
+         gtk_window_present(GTK_WINDOW(gtkWidget));
+       }
+     }
+     widget->SetFocus(nsIWidget::Raise::Yes, mozilla::dom::CallerType::System);
+-
+-    WinDims dims = sHiddenWindowsDims[i];
+-    // The following isn't working well, so use native calls.
+-    // Last parameter: Bits: eRepaint = 1; eDelayResize = 2;
+-    // window->SetPositionAndSize(dims.x, dims.y, dims.w, dims.h, 1);
+-    if (gtkWidget) {
+-      gtk_window_move(GTK_WINDOW(gtkWidget), dims.x, dims.y);
+-      gtk_window_resize(GTK_WINDOW(gtkWidget), dims.w, dims.h);
+-// #define DEBUG_RESTORE 1
+-#ifdef DEBUG_RESTORE
+-      fprintf(stderr, "=== Trying to restore to %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
+-      // window->GetPositionAndSize(&dims.x, &dims.y, &dims.w, &dims.h);
+-      gtk_window_get_position(GTK_WINDOW(gtkWidget), &dims.x, &dims.y);
+-      gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
+-      fprintf(stderr, "=== was restored to      %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
+-#endif
+-    }
+   }
+ 
+   sHiddenWindows.Clear();
+   sHiddenWindowsDims.Clear();
+@@ -368,9 +377,9 @@ nsresult nsMessengerUnixIntegration::Hid
+     fprintf(stderr, "            will have to kill Betterbird.\n");
+     fprintf(stderr, "            USE AT YOUR OWN RISK! If successful, contact support@betterbird.eu\n\n");
+     return NS_OK;
+   }
+-  WinDims dims;
++  WinDims dims = {0, 0, 0, 0, false};
+   // The following isn't working well, so use native calls.
+   // aWindow->GetPositionAndSize(&dims.x, &dims.y, &dims.w, &dims.h);
+   nsCOMPtr<nsIWidget> widget;
+   aWindow->GetMainWidget(getter_AddRefs(widget));
+@@ -378,10 +387,14 @@ nsresult nsMessengerUnixIntegration::Hid
+     void* gtkWidget = widget->GetNativeData(NS_NATIVE_SHELLWIDGET);
+     if (gtkWidget) {
+       gtk_window_get_position(GTK_WINDOW(gtkWidget), &dims.x, &dims.y);
+       gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
++      // A maximized window can't simply be moved back into place, see
++      // restoreGeometry().
++      dims.maximized = gtk_window_is_maximized(GTK_WINDOW(gtkWidget));
+ #ifdef DEBUG_RESTORE
+-      fprintf(stderr, "=== Was at               %d %d %d %d\n", dims.x, dims.y, dims.w, dims.h);
++      fprintf(stderr, "=== Was at               %d %d %d %d, maximized %d\n",
++              dims.x, dims.y, dims.w, dims.h, dims.maximized);
+ #endif
+     }
+   }
+   aWindow->SetVisibility(false);
