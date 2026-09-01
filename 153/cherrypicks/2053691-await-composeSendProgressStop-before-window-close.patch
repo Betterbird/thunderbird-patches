@@ -1,0 +1,178 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1788300880 21600
+# Node ID 8c9e5a0a251d98984c98ace6ad65026ed25ee5e4
+# Parent  a8a4541ad9216e013a43cfb79ae8a07487f2c56e
+Bug 2053691 - Restore the "Save Message" prompt when copying a sent message to the Sent folder fails. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D322673
+
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -941,16 +941,37 @@ var progressListener = {
+       );
+       Services.obs.notifyObservers(
+         { composeWindow: window },
+         "mail:composeSendProgressStop"
+       );
+     }
+   },
+ 
++  async waitForStop() {
++    // Progress can stop before the send promise resolves, so we avoid waiting if it is already done.
++    if (!gSendOperationInProgress) {
++      return;
++    }
++
++    await new Promise(resolve => {
++      function onProgressStop(subject) {
++        if (subject.wrappedJSObject.composeWindow != window) {
++          return;
++        }
++        Services.obs.removeObserver(
++          onProgressStop,
++          "mail:composeSendProgressStop"
++        );
++        resolve();
++      }
++      Services.obs.addObserver(onProgressStop, "mail:composeSendProgressStop");
++    });
++  },
++
+   onProgressChange(
+     aWebProgress,
+     aRequest,
+     aCurSelfProgress,
+     aMaxSelfProgress,
+     aCurTotalProgress,
+     aMaxTotalProgress
+   ) {
+@@ -6612,16 +6633,18 @@ async function CompleteGenericSendMessag
+     window.dispatchEvent(new CustomEvent("aftersave"));
+   }
+ 
+   if (
+     msgType == Ci.nsIMsgCompDeliverMode.Now ||
+     msgType == Ci.nsIMsgCompDeliverMode.Later ||
+     msgType == Ci.nsIMsgCompDeliverMode.Background
+   ) {
++    // We keep the compose window open so the recovery dialog can be shown if copying fails.
++    await progressListener.waitForStop();
+     window.close();
+   }
+ }
+ 
+ /**
+  * Check if the given email address is valid (contains an @).
+  *
+  * @param {string} address - The email address string to check.
+diff --git a/mail/components/compose/test/browser/browser.toml b/mail/components/compose/test/browser/browser.toml
+--- a/mail/components/compose/test/browser/browser.toml
++++ b/mail/components/compose/test/browser/browser.toml
+@@ -26,8 +26,10 @@ support-files = ["data/attachment.pdf"]
+ ["browser_sendMessage_copies.js"]
+ 
+ ["browser_sendMessage_oAuth2.js"]
+ tags = ["oauth"]
+ 
+ ["browser_sendMessage_progress.js"]
+ 
+ ["browser_sendMessage_spellCheck.js"]
++
++["browser_sentCopyFailure.js"]
+diff --git a/mail/components/compose/test/browser/browser_sentCopyFailure.js b/mail/components/compose/test/browser/browser_sentCopyFailure.js
+new file mode 100644
+--- /dev/null
++++ b/mail/components/compose/test/browser/browser_sentCopyFailure.js
+@@ -0,0 +1,87 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that an asynchronous failure to copy a successfully sent message to
++ * an IMAP Sent folder is reported while the compose window is still
++ * available, and that the Save Message recovery prompt is shown.
++ */
++
++let imapServer;
++let localAccount;
++let smtpAccount;
++let smtpIdentity;
++let smtpOutgoingServer;
++
++add_setup(async function () {
++  await addLoginInfo("imap://test.test", "user", "password");
++  await addLoginInfo("smtp://test.test", "user", "password");
++
++  [imapServer] = await ServerTestUtils.createServers([
++    ServerTestUtils.serverDefs.imap.plain,
++    ServerTestUtils.serverDefs.smtp.plain,
++  ]);
++  imapServer.daemon.createMailbox("Sent", {
++    flags: ["\\Sent"],
++    subscribed: true,
++  });
++
++  localAccount = MailServices.accounts.createLocalMailAccount();
++  ({ smtpAccount, smtpIdentity, smtpOutgoingServer } =
++    createSMTPAccount("imap"));
++  smtpIdentity.doFcc = true;
++
++  const incomingServer = smtpAccount.incomingServer;
++  incomingServer.performBiff(window.msgWindow);
++  await TestUtils.waitForCondition(
++    () => incomingServer.rootFolder.containsChildNamed("Sent"),
++    "waiting for the Sent folder to synchronise"
++  );
++  smtpIdentity.fccFolderURI = incomingServer.serverURI + "/Sent";
++
++  registerCleanupFunction(async function () {
++    imapServer.daemon.commandToFail = "";
++    incomingServer.closeCachedConnections();
++    smtpOutgoingServer.closeCachedConnections();
++    MailServices.accounts.removeAccount(smtpAccount, false);
++    MailServices.accounts.removeAccount(localAccount, false);
++    await Services.logins.removeAllLoginsAsync();
++  });
++});
++
++add_task(async function testSentCopyFailureOffersRecovery() {
++  const { composeWindow } = await newComposeWindow(smtpIdentity);
++  const composeClosed = BrowserTestUtils.domWindowClosed(composeWindow);
++
++  imapServer.daemon.commandToFail = "APPEND";
++  const originalPrompt = Services.prompt;
++  const promptCalled = Promise.withResolvers();
++  let promptHadOpenComposeParent;
++  Services.prompt = {
++    QueryInterface: ChromeUtils.generateQI(["nsIPromptService"]),
++    confirmEx(parentWindow) {
++      promptHadOpenComposeParent =
++        parentWindow == composeWindow && !composeWindow.closed;
++      promptCalled.resolve();
++      return 1; // Don't Save.
++    },
++  };
++
++  try {
++    EventUtils.synthesizeMouseAtCenter(
++      composeWindow.document.getElementById("button-send"),
++      {},
++      composeWindow
++    );
++    await Promise.all([promptCalled.promise, composeClosed]);
++  } finally {
++    Services.prompt = originalPrompt;
++    imapServer.daemon.commandToFail = "";
++  }
++
++  Assert.ok(
++    promptHadOpenComposeParent,
++    "the recovery prompt should have an open compose parent"
++  );
++});
+
