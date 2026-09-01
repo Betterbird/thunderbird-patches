@@ -1,0 +1,352 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1788254475 -7200
+# Node ID 7eef3f99e8534f720fc9a308da82f4e690d2f93e
+# Parent  6f3207f2d6c8beb8a1749d9066834deff04f7283
+Bug 2066883 - Resolve CSS variable colours in the dark reader. r=aleca
+
+Differential Revision: https://phabricator.services.mozilla.com/D321822
+
+diff --git a/mail/base/content/modules/DarkReader.mjs b/mail/base/content/modules/DarkReader.mjs
+--- a/mail/base/content/modules/DarkReader.mjs
++++ b/mail/base/content/modules/DarkReader.mjs
+@@ -15,8 +15,14 @@ XPCOMUtils.defineLazyPreferenceGetter(
+ );
+ 
+ const LUMINANCE_THRESHOLD = 200;
+ export const CONTRAST_THRESHOLD = 3.5;
++const VARIABLE_COLOR_PROPERTIES = [
++  "color",
++  "background",
++  "background-color",
++  "background-image",
++];
+ 
+ /**
+  * Convert a color string into an RGB array and returns the luminance value.
+  *
+@@ -72,10 +78,12 @@ export const isTransparent = color => {
+  * Check if the various color customization for the current style are suitable
+  * for dark mode, and sanitize them if not.
+  *
+  * @param {CSSStyleDeclaration} style - The style to sanitize.
++ * @param {object} [resolvedStyle=style] - Resolved style values.
+  */
+-function sanitizeStyle(style) {
++function sanitizeStyle(style, resolvedStyle = style) {
++  const { color, background, backgroundColor, backgroundImage } = resolvedStyle;
+   // A blend mode is written for the backdrop the sender had in mind. Against a
+   // dark one it may blend the content away, and we cannot inspect what it will
+   // end up blending with, so drop it.
+   if (style.mixBlendMode && style.mixBlendMode !== "normal") {
+@@ -95,61 +103,59 @@ function sanitizeStyle(style) {
+   // Strip background images that assume a light context since we cannot
+   // inspect their luminance.
+   if (
+     style.backgroundImage &&
+-    style.backgroundImage !== "none" &&
+-    !style.backgroundImage.includes("gradient")
++    backgroundImage !== "none" &&
++    !backgroundImage.includes("gradient")
+   ) {
+     style.removeProperty("background-image");
+   }
+ 
+   // Clear text color.
+   if (
+     (!style.background || style.background == "none") &&
+-    (!style.backgroundColor || isTransparent(style.backgroundColor))
++    (!style.backgroundColor || isTransparent(backgroundColor))
+   ) {
+     // If no background color is specified, test the color luminance.
+-    if (luminance(style.color) <= LUMINANCE_THRESHOLD) {
++    if (luminance(color) <= LUMINANCE_THRESHOLD) {
+       style.removeProperty("color");
+     }
+     return;
+   }
+ 
+   // Clear background color.
+   if (
+     style.backgroundColor &&
+-    InspectorUtils.isValidCSSColor(style.backgroundColor)
++    InspectorUtils.isValidCSSColor(backgroundColor)
+   ) {
+     // Check if the background color luminance is too bright or if the color
+     // contrast with foreground is not enough if we have a style color.
+     if (
+-      luminance(style.backgroundColor) > LUMINANCE_THRESHOLD ||
+-      (style.color &&
+-        contrast(style.color, style.backgroundColor) < CONTRAST_THRESHOLD)
++      luminance(backgroundColor) > LUMINANCE_THRESHOLD ||
++      (style.color && contrast(color, backgroundColor) < CONTRAST_THRESHOLD)
+     ) {
+       style.removeProperty("background-color");
+       style.removeProperty("background");
+ 
+       // Check for color luminance after we removed the background.
+-      if (style.color && luminance(style.color) <= LUMINANCE_THRESHOLD) {
++      if (style.color && luminance(color) <= LUMINANCE_THRESHOLD) {
+         style.removeProperty("color");
+       }
+     }
+   }
+ 
+   // Clear background style.
+-  if (style.background && InspectorUtils.isValidCSSColor(style.background)) {
++  if (style.background && InspectorUtils.isValidCSSColor(background)) {
+     // If there's only background color manipulation, check that its
+     // luminance is not too bright.
+     if (
+-      luminance(style.background) > LUMINANCE_THRESHOLD ||
+-      (style.color &&
+-        contrast(style.color, style.background) < CONTRAST_THRESHOLD)
++      luminance(background) > LUMINANCE_THRESHOLD ||
++      (style.color && contrast(color, background) < CONTRAST_THRESHOLD)
+     ) {
+       style.removeProperty("background");
+ 
+       // Check for color luminance after we removed the background.
+-      if (style.color && luminance(style.color) <= LUMINANCE_THRESHOLD) {
++      if (style.color && luminance(color) <= LUMINANCE_THRESHOLD) {
+         style.removeProperty("color");
+       }
+     }
+   }
+@@ -231,16 +237,45 @@ export function adaptMessageForDarkMode(
+       node.setAttribute("fill", "currentColor");
+     }
+   }
+ 
+-  // Remove any embedded styles.
++  // Collect resolved embedded styles before mutating any stylesheets, so Gecko
++  // only needs to flush styles once.
++  const stylesToSanitize = [];
+   for (const node of browserDocument.getElementsByTagName("style")) {
+     // Bail out if for whatever reason we don't have the right element.
+     if (!HTMLStyleElement.isInstance(node)) {
+       continue;
+     }
+ 
+-    for (const rule of node.sheet.rules) {
+-      sanitizeStyle(rule.style);
++    for (const rule of node.sheet.cssRules) {
++      if (!CSSStyleRule.isInstance(rule)) {
++        continue;
++      }
++
++      const usesVariables = VARIABLE_COLOR_PROPERTIES.some(property =>
++        rule.style.getPropertyValue(property).includes("var(")
++      );
++      const element = usesVariables
++        ? browserDocument.querySelector(rule.selectorText)
++        : null;
++      let resolvedStyle;
++      if (element) {
++        // We ask Gecko to resolve variables for us when needed.
++        const { color, background, backgroundColor, backgroundImage } =
++          browser.contentWindow.getComputedStyle(element);
++        resolvedStyle = {
++          color,
++          background,
++          backgroundColor,
++          backgroundImage,
++        };
++      }
++      stylesToSanitize.push([rule.style, resolvedStyle]);
+     }
+   }
++
++  // Remove any unsuitable embedded styles after all resolved values are read.
++  for (const [style, resolvedStyle] of stylesToSanitize) {
++    sanitizeStyle(style, resolvedStyle);
++  }
+ }
+diff --git a/mail/test/browser/message-reader/browser_darkReader.js b/mail/test/browser/message-reader/browser_darkReader.js
+--- a/mail/test/browser/message-reader/browser_darkReader.js
++++ b/mail/test/browser/message-reader/browser_darkReader.js
+@@ -380,8 +380,48 @@ add_task(async function test_blend_mode_
+     await BrowserTestUtils.closeWindow(blendMsgc);
+   }
+ });
+ 
++add_task(async function test_css_variables_resolved() {
++  const file = new FileUtils.File(
++    getTestFilePath("data/dark_mode_css_variables.eml")
++  );
++  const variablesMsgc = await open_message_from_file(file);
++  const previousAboutMessage = aboutMessage;
++  aboutMessage = get_about_message(variablesMsgc);
++
++  try {
++    if (!darkTheme.isActive) {
++      await toggle_theme(darkTheme, true);
++    }
++    if (Services.prefs.getBoolPref("mail.dark-reader.enabled", false)) {
++      await toggle_dark_reader(false);
++    }
++    await toggle_dark_reader(true);
++
++    const msgDoc =
++      aboutMessage.document.getElementById("messagepane").contentDocument;
++    const bodyStyle = msgDoc.defaultView.getComputedStyle(msgDoc.body);
++    const textStyle = msgDoc.defaultView.getComputedStyle(
++      msgDoc.querySelector("#messageText")
++    );
++
++    Assert.equal(
++      bodyStyle.backgroundColor,
++      "rgba(0, 0, 0, 0)",
++      "The light variable background should be removed"
++    );
++    Assert.equal(
++      textStyle.color,
++      "rgb(238, 238, 240)",
++      "The message text should inherit the dark reader color"
++    );
++  } finally {
++    aboutMessage = previousAboutMessage;
++    await BrowserTestUtils.closeWindow(variablesMsgc);
++  }
++});
++
+ async function assert_light_style() {
+   await new Promise(resolve => aboutMessage.requestAnimationFrame(resolve));
+   if (AppConstants.DEBUG || AppConstants.ASAN || AppConstants.TSAN) {
+     await new Promise(resolve => aboutMessage.requestIdleCallback(resolve));
+diff --git a/mail/test/browser/message-reader/data/dark_mode_css_variables.eml b/mail/test/browser/message-reader/data/dark_mode_css_variables.eml
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/message-reader/data/dark_mode_css_variables.eml
+@@ -0,0 +1,130 @@
++Message-ID: <dark-mode-css-variables@example.invalid>
++Date: Tue, 10 Apr 2012 00:00:00 +0000
++To: recipient@example.invalid
++From: Dark Mode <sender@example.invalid>
++Subject: Message colours using CSS variables
++MIME-Version: 1.0
++Content-Type: text/html; charset=UTF-8
++Content-Transfer-Encoding: 7bit
++
++<!DOCTYPE html>
++<html>
++  <head>
++    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++    <title>Message colours using CSS variables</title>
++    <style type="text/css">
++html, body { margin: 0; padding: 0; }
++body {
++  background-color: var(--bg-base, #ffffff);
++  color: var(--fg-text, #111111);
++  font-family: Helvetica, Arial, sans-serif;
++  font-size: 14px;
++  line-height: 20.7px;
++  -webkit-text-size-adjust: 100%;
++}
++/* Larger base copy on small devices (inside the editor)
++@media screen and (max-device-width: 1200px) {
++  body, p, div { font-size: 16px; line-height: 24px; }
++}
++*/
++
++h1 {
++  font-size: 30px;
++  line-height: 34.5px;
++  letter-spacing: .6px;
++  font-weight: normal;
++  color: var(--fg-base, #111111);
++}
++h2 {
++  font-size: 21px;
++  line-height: 27.6px;
++  letter-spacing: .6px;
++  font-weight: normal;
++  color: var(--fg-base, #111111);
++}
++h3 {
++  font-size: 16px;
++  line-height: 20.7px;
++  letter-spacing: .6px;
++  font-weight: normal;
++  color: var(--fg-base, #111111);
++}
++h4 {
++  font-size: 14px;
++  line-height: 20.7px;
++  letter-spacing: .4px;
++  font-weight: normal;
++  color: var(--fg-text, #111111);
++}
++h5 {
++  font-size: 12px;
++  font-weight: normal;
++  color: var(--fg-secondary-text, #6b7280);
++}
++h6 {
++  font-size: 11px;
++  line-height: 14px;
++  font-weight: bold;
++  color: var(--fg-secondary-text, #6b7280);
++}
++
++span, a, small, mark, sub, sup {
++  font-family: inherit;
++  font-size: inherit;
++  line-height: inherit;
++  color: inherit;
++}
++
++em, i { font-style: italic; }
++strong, b { font-weight: bold; }
++u { text-decoration: underline; }
++
++a {
++  color: var(--color-primary, #006ce7);
++  text-decoration: underline;
++}
++a:hover { text-decoration: none; }
++
++ul {
++  display: block;
++  list-style: disc outside;
++  margin: 0;
++  padding: 0 0 0 2em;
++}
++ul ul { list-style-type: circle; }
++ul ul ul { list-style-type: square; }
++ol {
++  display: block;
++  list-style: decimal outside;
++  margin: 0;
++  padding: 0 0 0 2em;
++}
++ol ol { list-style-type: lower-alpha; }
++ol ol ol { list-style-type: lower-roman; }
++
++code, pre code {
++  border: 1px solid var(--fg-line, #e5e7eb);
++  background-color: var(--bg-background, #f6f6f6);
++  padding: 7px;
++  margin: 14px 0;
++  display: block;
++  font-family: "Courier New", Courier, monospace;
++  color: var(--fg-base, #222222);
++  border-radius: 3px;
++  white-space: pre-wrap;
++}
++/* Selection highlight
++::selection { background: var(--color-primary, #006ce7); color: #fff; }
++*/
++
++    </style>
++  </head>
++  <body>
++    <div style="background-color: rgba(0, 0, 0, 0);">
++      <span id="messageText" style="background-color: rgba(0, 0, 0, 0); color: #111111;">
++        Text written for a light background.
++      </span>
++      <a href="https://example.invalid/">Example link</a>
++    </div>
++  </body>
++</html>

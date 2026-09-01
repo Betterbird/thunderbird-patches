@@ -1,0 +1,97 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1788255090 -7200
+# Node ID 9ba0f61f7d5f7f0f362bba00fab1cd927a6826ac
+# Parent  ee3febbd3e1351f61bb0e46f3e228e09d5fe9e12
+Bug 2063816 - Improve IMAP recovery from transport failures and prevent post-authentication server setup from blocking logins on other connections. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D321168
+
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -104,8 +104,10 @@ extern LazyLogModule IMAP_DC;  // For im
+   "Reply-To Received"
+ #define IMAP_ENV_AND_DB_HEADERS IMAP_ENV_HEADERS IMAP_DB_HEADERS
+ MOZ_RUNINIT static const PRIntervalTime kImapSleepTime =
+     PR_MillisecondsToInterval(60000);
++MOZ_RUNINIT static const PRIntervalTime kImapRetryDelay =
++    PR_MillisecondsToInterval(1000);
+ static int32_t gPromoteNoopToCheckCount = 0;
+ static const uint32_t kFlagChangesBeforeCheck = 10;
+ static const int32_t kMaxSecondsBeforeCheck = 600;
+ 
+@@ -1978,8 +1980,16 @@ bool nsImapProtocol::ProcessCurrentURL()
+         logonFailed = true;
+         nsCOMPtr<nsIRunnable> logonFunc = NS_NewRunnableFunction(
+             "IMAP TryToLogin", [&]() { logonFailed = !TryToLogon(); });
+         m_imapServerSink->Receiver()->RunLogonExclusive(logonFunc);
++        if (!logonFailed && !m_retryUrlOnError && !DeathSignalReceived() &&
++            NS_SUCCEEDED(GetConnectionStatus()) &&
++            m_imapAction != nsIImapUrl::nsImapVerifylogon) {
++          // The logon lock prevents concurrent attempts with obsolete
++          // credentials. Post-authentication setup does not need that
++          // protection and can be slow, so run it after releasing the lock.
++          ProcessAfterAuthenticated();
++        }
+       }
+       if (m_retryUrlOnError) return RetryUrl();
+     }
+   }  // if death signal not received
+@@ -2150,8 +2160,14 @@ bool nsImapProtocol::ProcessCurrentURL()
+ bool nsImapProtocol::RetryUrl() {
+   nsCOMPtr<nsIImapUrl> kungFuGripImapUrl = m_runningUrl;
+   nsCOMPtr<nsIImapMockChannel> saveMockChannel;
+ 
++  if (m_retryUrlOnError) {
++    // Avoid immediately reconnecting to a server that just failed. URL state
++    // limits this to one retry, and this protocol has its own worker thread.
++    PR_Sleep(kImapRetryDelay);
++  }
++
+   // the mock channel might be null - that's OK.
+   if (m_imapServerSink)
+     (void)m_imapServerSink->PrepareToRetryUrl(kungFuGripImapUrl,
+                                               getter_AddRefs(saveMockChannel));
+@@ -8649,8 +8665,14 @@ bool nsImapProtocol::TryToLogon() {
+         lastReportingErrors);  // restore error reports
+     loginSucceeded = NS_SUCCEEDED(rv);
+ 
+     if (!loginSucceeded) {
++      if (NS_FAILED(GetConnectionStatus()) || DeathSignalReceived()) {
++        // A transport failure is not an authentication rejection. The socket
++        // layer preserves the error and may schedule one URL retry.
++        break;
++      }
++
+       // If server gave reason for authentication failure as [UNAVAILABLE]
+       // then we skip authentication retries, etc. The user will be notified by
+       // pop-up with the reason, provided by the server, as to why it's
+       // unavailable, e.g., too many connection to the server.
+@@ -8739,22 +8761,17 @@ bool nsImapProtocol::TryToLogon() {
+       }
+       m_imapServerSink->SetUserAuthenticated(true);
+     }
+ 
+-    nsImapAction imapAction;
+-    m_runningUrl->GetImapAction(&imapAction);
+-    // We don't want to do any more processing if we're just
+-    // verifying the ability to logon because it can leave us in
+-    // a half-constructed state.
+-    if (imapAction != nsIImapUrl::nsImapVerifylogon)
+-      ProcessAfterAuthenticated();
+   } else  // login failed
+   {
+     MOZ_LOG(IMAP, LogLevel::Error, ("login failed entirely"));
+     m_currentBiffState = nsIMsgFolder::nsMsgBiffState_Unknown;
+     SendSetBiffIndicatorEvent(m_currentBiffState);
+     HandleCurrentUrlError();
+-    SetConnectionStatus(NS_ERROR_FAILURE);  // stop netlib
++    if (NS_SUCCEEDED(GetConnectionStatus())) {
++      SetConnectionStatus(NS_ERROR_FAILURE);  // stop netlib
++    }
+   }
+ 
+   return loginSucceeded;
+ }
