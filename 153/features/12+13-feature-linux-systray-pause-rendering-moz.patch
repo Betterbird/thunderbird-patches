@@ -1,0 +1,43 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1788570799 -7200
+# Parent  e04d62d2929d34855f00b70eb9272e52fddfb171
+Feature: Pause renderer in nsWindow::OnUnmap() to avoid CPU spike when window goes invisible.
+
+diff --git a/docshell/base/CanonicalBrowsingContext.cpp b/docshell/base/CanonicalBrowsingContext.cpp
+--- a/docshell/base/CanonicalBrowsingContext.cpp
++++ b/docshell/base/CanonicalBrowsingContext.cpp
+@@ -1842,9 +1842,10 @@ void CanonicalBrowsingContext::Recompute
+ 
+   (void)NS_WARN_IF(!widget);
+   const bool isNowActive = ForceAppWindowActive() ||
+                            mDocumentPiPWindowCount > 0 ||
+-                           (widget && !widget->IsFullyOccluded() &&
++                           (widget && widget->IsVisible() &&
++                            !widget->IsFullyOccluded() &&
+                             widget->SizeMode() != nsSizeMode_Minimized);
+ 
+   if (isNowActive == wasAlreadyActive) {
+     return;
+diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
+--- a/widget/gtk/nsWindow.cpp
++++ b/widget/gtk/nsWindow.cpp
+@@ -7470,8 +7470,18 @@ void nsWindow::OnUnmap() {
+     // Reset scale for hidden windows
+     mCeiledScaleFactor = sNoScale;
+   }
+ 
++  if (GdkIsX11Display()) {
++    // Pause the compositor while the window is unmapped. The X11 software
++    // vsync source keeps ticking while the window is hidden and the
++    // compositor would otherwise keep trying to render into the unmapped
++    // window on every tick, burning CPU. OnMap() resumes it.
++    if (CompositorBridgeChild* remoteRenderer = GetRemoteRenderer()) {
++      remoteRenderer->SendPause());
++    }
++  }
++
+   // Until bug 1654938 is fixed we delete layer manager for hidden popups,
+   // otherwise it can easily hold 1GB+ memory for a long time.
+   //
+   // Don't do this for temporarily hidden popups tho, as remote content is not
