@@ -1,0 +1,69 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Parent  415af6d6421058322d096eb5e3d9add5e5f56484
+Bug 2068501 - Fix Retry and save to local folder after copy to FCC failed.
+
+diff --git a/mailnews/compose/src/MessageSend.sys.mjs b/mailnews/compose/src/MessageSend.sys.mjs
+--- a/mailnews/compose/src/MessageSend.sys.mjs
++++ b/mailnews/compose/src/MessageSend.sys.mjs
+@@ -30,8 +30,11 @@ export class MessageSend {
+     "nsISupportsWeakReference",
+   ]);
+   classID = Components.ID("{028b9c1e-8d0a-4518-80c2-842e07846eaa}");
+ 
++  _copyAttemptSeq = 0;
++  _copyFailureReportedAttempt = 0;
++
+   /**
+    * Create an rfc822 message and send it.
+ 
+    * @param {nsIEditor} editor - nsIEditor instance that contains message.
+@@ -408,8 +411,11 @@ export class MessageSend {
+   async notifyListenerOnStopCopy(status) {
+     lazy.MsgUtils.sendLogger.debug(
+       `notifyListenerOnStopCopy; status=${status}`
+     );
++    if (!Components.isSuccessCode(status)) {
++      this._copyFailureReportedAttempt = this._copyAttemptSeq;
++    }
+     this._msgCopy = null;
+ 
+     if (!this._isRetry) {
+       const statusMsgEntry = Components.isSuccessCode(status)
+@@ -1055,8 +1061,9 @@ export class MessageSend {
+       [folder?.localizedName || "?"]
+     );
+     this._setStatusMessage(statusMsg);
+     lazy.MsgUtils.sendLogger.debug("startCopyOperation");
++    const copyAttemptId = ++this._copyAttemptSeq;
+     try {
+       this._msgCopy.startCopyOperation(
+         this._userIdentity,
+         this._copyFile,
+@@ -1065,15 +1072,21 @@ export class MessageSend {
+         this._folderUri,
+         this._msgToReplace
+       );
+     } catch (e) {
+-      lazy.MsgUtils.sendLogger.warn(
+-        `startCopyOperation failed with ${e.result}`
+-      );
++      const status = e.result ?? Cr.NS_ERROR_FAILURE;
++      lazy.MsgUtils.sendLogger.warn(`startCopyOperation failed with ${status}`);
+       if (throwOnError) {
+-        throw Components.Exception("startCopyOperation failed", e.result);
++        throw Components.Exception("startCopyOperation failed", status);
+       }
+-      await this.notifyListenerOnStopCopy(e.result);
++      // For a local folder the copy is done synchronously and a failure is
++      // reported both through notifyListenerOnStopCopy by the copy service
++      // listener and through the error thrown here. Don't prompt a second
++      // time.
++      if (this._copyFailureReportedAttempt >= copyAttemptId) {
++        return;
++      }
++      await this.notifyListenerOnStopCopy(status);
+     }
+   }
+ 
+   /**
