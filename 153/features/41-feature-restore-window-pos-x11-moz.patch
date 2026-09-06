@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu> and DeepSeek
-# Date 1788692067 -7200
+# Date 1788702021 -7200
 # Parent  2c5a3790a4f9ad03237d775eea929e3f3bdb62be
 Feature: Introduce pref betterbird.window.restorePositionX11 to restore window position on X11.
 
@@ -85,7 +85,20 @@ diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
  
  bool nsWindow::ConstrainSizeWithScale(int* aWidth, int* aHeight,
                                        double aScale) {
-@@ -1114,8 +1152,16 @@ void nsWindow::Move(const DesktopPoint& 
+@@ -1105,17 +1143,28 @@ void nsWindow::Move(const DesktopPoint& 
+   // the parent, the parent might have moved so we always move a
+   // popup window.
+   auto pos = GetScreenBoundsUnscaled().TopLeft();
+   LOG("  bounds %d x %d\n", int(pos.x), int(pos.y));
++  // Before the window is shown, still issue the move even if the position
++  // is unchanged, so gtk_window_move() sets the USPosition hint and the
++  // window manager honours the requested position.
+   if (pos == request && mLastMoveRequest == request &&
+-      mWindowType != WindowType::Popup) {
++      mWindowType != WindowType::Popup && mIsShown) {
+     LOG("  position is the same, return\n");
+     return;
+   }
  
    // XXX Should we do some AreBoundsSane check here?
    mLastMoveRequest = request;
@@ -102,7 +115,7 @@ diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
      LOG("  is not created, return.\n");
      return;
    }
-@@ -1452,8 +1498,16 @@ nsresult nsWindow::GetRestoredBounds(Lay
+@@ -1452,8 +1501,16 @@ nsresult nsWindow::GetRestoredBounds(Lay
    // decorations yet when we get to restore it. This matches previous behavior,
    // though it's a bit unfortunate.
    aRect = GetScreenBounds();
@@ -119,7 +132,7 @@ diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
    return NS_OK;
  }
  
-@@ -1696,8 +1750,17 @@ void nsWindow::RecomputeBounds(bool aSca
+@@ -1696,8 +1753,17 @@ void nsWindow::RecomputeBounds(bool aSca
    const auto newBounds = Bounds::Compute(this);
    mClientArea = newBounds.mClientArea;
    mClientMargin = newBounds.mClientMargin;
@@ -137,7 +150,7 @@ diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
      // Popup windows is not moved by the window manager, and so any change in
      // position is a result of our direction.
      //
-@@ -4767,17 +4830,15 @@ void nsWindow::NativeMoveResize(bool aMo
+@@ -4767,17 +4833,15 @@ void nsWindow::NativeMoveResize(bool aMo
    // Window size is calculated without decorations, Gtk adds decorations
    // size to our request at gtk_window_resize().
    GdkRectangle moveResizeRect = [&] {
@@ -161,7 +174,7 @@ diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
    }();
  
    LOG("nsWindow::NativeMoveResize mLastMoveRequest [%d,%d] mClientMargin "
-@@ -4785,8 +4846,18 @@ void nsWindow::NativeMoveResize(bool aMo
+@@ -4785,8 +4849,18 @@ void nsWindow::NativeMoveResize(bool aMo
        int(mLastMoveRequest.x), int(mLastMoveRequest.y), int(mClientMargin.left),
        int(mClientMargin.top), aMoved, aResized, moveResizeRect.x,
        moveResizeRect.y, moveResizeRect.width, moveResizeRect.height);
@@ -232,7 +245,7 @@ diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
      // Our position will be relative to our parent, if any
      nsCOMPtr<nsIBaseWindow> parent(do_QueryReferent(mParentWindow));
      if (parent) {
-@@ -1206,10 +1219,16 @@ bool AppWindow::LoadPositionFromXUL(int3
+@@ -1206,10 +1219,19 @@ bool AppWindow::LoadPositionFromXUL(int3
        StaggerPosition(specPoint.x.value, specPoint.y.value, cssSize.width,
                        cssSize.height);
      }
@@ -240,16 +253,20 @@ diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
 +  fprintf(stderr, "BBDEBUG: LoadPositionFromXUL after stagger [%d,%d]\n",
 +          specPoint.x.value, specPoint.y.value);
    mWindow->ConstrainPosition(specPoint);
+-  if (specPoint != curPoint) {
 +  fprintf(stderr, "BBDEBUG: LoadPositionFromXUL after constrain [%d,%d]\n",
 +          specPoint.x.value, specPoint.y.value);
-   if (specPoint != curPoint) {
++  if (gotPosition) {
++    // Apply the saved position even if it equals the current one: the widget
++    // must be told so that gtk_window_move() sets the USPosition hint and the
++    // window manager honours it (e.g. when the window was saved at 0,0).
 +    fprintf(stderr, "BBDEBUG: LoadPositionFromXUL move to [%d,%d]\n",
 +            specPoint.x.value, specPoint.y.value);
      SetPositionDesktopPix(specPoint.x, specPoint.y);
    }
    return gotPosition;
  }
-@@ -1917,8 +1936,16 @@ void AppWindow::MaybeSavePersistentPosit
+@@ -1917,8 +1939,16 @@ void AppWindow::MaybeSavePersistentPosit
    // we use CSS pixels for size, but desktop pixels for position
    CSSToLayoutDeviceScale sizeScale = UnscaledDevicePixelsPerCSSPixel();
    DesktopToLayoutDeviceScale posScale = DevicePixelsPerDesktopPixel();
@@ -266,7 +283,7 @@ diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
    nsCOMPtr<nsIBaseWindow> parent(do_QueryReferent(mParentWindow));
    if (parent) {
      int32_t parentX, parentY;
-@@ -2407,8 +2434,11 @@ void AppWindow::LoadPersistentWindowStat
+@@ -2407,8 +2437,11 @@ void AppWindow::LoadPersistentWindowStat
      if (persist.Find(attrString) >= 0) {
        nsAutoString value;
        nsresult rv = GetPersistentValue(aAttr, value);
@@ -278,7 +295,7 @@ diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
          docShellElement->SetAttr(aAttr, value, IgnoreErrors());
        }
      }
-@@ -2507,9 +2537,28 @@ void AppWindow::SizeShell() {
+@@ -2507,9 +2540,28 @@ void AppWindow::SizeShell() {
  #if defined(XP_UNIX) && !defined(XP_MACOSX)
    // don't override WM placement on unix for independent, top-level windows
    // (however, we think the benefits of intelligent dependent window placement
