@@ -1,46 +1,60 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1788654927 -7200
 # Parent  415af6d6421058322d096eb5e3d9add5e5f56484
 Bug 2068501 - Fix Retry and save to local folder after copy to FCC failed.
 
 diff --git a/mailnews/compose/src/MessageSend.sys.mjs b/mailnews/compose/src/MessageSend.sys.mjs
 --- a/mailnews/compose/src/MessageSend.sys.mjs
 +++ b/mailnews/compose/src/MessageSend.sys.mjs
-@@ -30,8 +30,11 @@ export class MessageSend {
+@@ -30,8 +30,17 @@ export class MessageSend {
      "nsISupportsWeakReference",
    ]);
    classID = Components.ID("{028b9c1e-8d0a-4518-80c2-842e07846eaa}");
  
-+  _copyAttemptSeq = 0;
-+  _copyFailureReportedAttempt = 0;
++  // A failed copy into a local folder is reported twice: through
++  // notifyListenerOnStopCopy, called by the copy service listener while
++  // startCopyOperation is still running, and through the error thrown by
++  // startCopyOperation. _startCopyInProgress marks the synchronous copy call,
++  // and _copyFailureReported that the failure was already reported while it
++  // ran, so it is not handled a second time.
++  _startCopyInProgress = false;
++  _copyFailureReported = false;
 +
    /**
     * Create an rfc822 message and send it.
  
     * @param {nsIEditor} editor - nsIEditor instance that contains message.
-@@ -408,8 +411,11 @@ export class MessageSend {
+@@ -408,8 +417,14 @@ export class MessageSend {
    async notifyListenerOnStopCopy(status) {
      lazy.MsgUtils.sendLogger.debug(
        `notifyListenerOnStopCopy; status=${status}`
      );
-+    if (!Components.isSuccessCode(status)) {
-+      this._copyFailureReportedAttempt = this._copyAttemptSeq;
++    // A failure reported while startCopyOperation is still running will also
++    // be thrown by it once the call returns, so the catch in _mimeDoFcc can
++    // see that the failure was already handled here.
++    if (!Components.isSuccessCode(status) && this._startCopyInProgress) {
++      this._copyFailureReported = true;
 +    }
      this._msgCopy = null;
  
      if (!this._isRetry) {
        const statusMsgEntry = Components.isSuccessCode(status)
-@@ -1055,8 +1061,9 @@ export class MessageSend {
+@@ -1055,8 +1070,13 @@ export class MessageSend {
        [folder?.localizedName || "?"]
      );
      this._setStatusMessage(statusMsg);
      lazy.MsgUtils.sendLogger.debug("startCopyOperation");
-+    const copyAttemptId = ++this._copyAttemptSeq;
++    // Set just before the call, after _createCopyFile. A retry started from
++    // the failure dialog suspends in _createCopyFile, so it can't clear the
++    // record of the failure currently being handled.
++    this._copyFailureReported = false;
++    this._startCopyInProgress = true;
      try {
        this._msgCopy.startCopyOperation(
          this._userIdentity,
          this._copyFile,
-@@ -1065,15 +1072,21 @@ export class MessageSend {
+@@ -1065,15 +1085,23 @@ export class MessageSend {
          this._folderUri,
          this._msgToReplace
        );
@@ -55,14 +69,16 @@ diff --git a/mailnews/compose/src/MessageSend.sys.mjs b/mailnews/compose/src/Mes
 +        throw Components.Exception("startCopyOperation failed", status);
        }
 -      await this.notifyListenerOnStopCopy(e.result);
-+      // For a local folder the copy is done synchronously and a failure is
-+      // reported both through notifyListenerOnStopCopy by the copy service
-+      // listener and through the error thrown here. Don't prompt a second
-+      // time.
-+      if (this._copyFailureReportedAttempt >= copyAttemptId) {
++      // For a local folder the copy runs synchronously, so the failure has
++      // already been reported through notifyListenerOnStopCopy, which showed
++      // the retry/save dialog and may have started a new copy attempt from
++      // it. Don't handle the failure a second time.
++      if (this._copyFailureReported) {
 +        return;
 +      }
 +      await this.notifyListenerOnStopCopy(status);
++    } finally {
++      this._startCopyInProgress = false;
      }
    }
  
