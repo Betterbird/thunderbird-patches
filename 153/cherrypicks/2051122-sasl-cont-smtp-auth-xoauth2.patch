@@ -1,0 +1,183 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1788818438 21600
+# Node ID 38dea5363ce259f860d678133e278e65ce5e6778
+# Parent  9c8230513a39f5e458258b373e867dfd2e31b9c1
+Bug 2051122 - Use SASL continuation to handle large SMTP AUTH XOAUTH2 tokens. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D323974
+
+
+diff --git a/mail/components/compose/test/browser/browser_sendMessage_oAuth2.js b/mail/components/compose/test/browser/browser_sendMessage_oAuth2.js
+--- a/mail/components/compose/test/browser/browser_sendMessage_oAuth2.js
++++ b/mail/components/compose/test/browser/browser_sendMessage_oAuth2.js
+@@ -130,16 +130,48 @@ add_task(async function testNoAccessToke
+   smtpOutgoingServer.closeCachedConnections();
+ });
+ 
+ add_task(async function testNoAccessTokenEWS() {
+   await subtestNoAccessToken(ewsIdentity, ewsOutgoingServer, ewsServer);
+ });
+ 
+ /**
++ * Tests inline and continuation responses around the AUTH command limit.
++ */
++add_task(async function testAccessTokenLengthSMTP() {
++  try {
++    // With username "user", these produce 511- and 515-byte AUTH commands,
++    // including CRLF. Also exercise a substantially longer token.
++    for (const length of [348, 349, 2048]) {
++      const accessToken = "f7b7ced076d09618b52fd787cb4eaa30"
++        .repeat(64)
++        .slice(0, length);
++      oAuth2Server.accessToken = accessToken;
++      smtpServer.options.password = accessToken;
++      await subtestNoAccessToken(smtpIdentity, smtpOutgoingServer, smtpServer);
++      const transaction = [smtpServer.server.playTransaction()].flat().at(-1);
++      Assert.equal(
++        transaction.them.find(command => command.startsWith("AUTH ")),
++        length === 348
++          ? "AUTH XOAUTH2 " +
++              btoa(`user=user\x01auth=Bearer ${accessToken}\x01\x01`)
++          : "AUTH XOAUTH2",
++        `Use an initial response only when the ${length}-character token fits`
++      );
++      smtpOutgoingServer.closeCachedConnections();
++    }
++  } finally {
++    smtpOutgoingServer.closeCachedConnections();
++    oAuth2Server.accessToken = "access_token";
++    smtpServer.options.password = "access_token";
++  }
++});
++
++/**
+  * Tests that with an expired access token, a new access token is requested.
+  */
+ async function subtestExpiredAccessToken(identity, outgoingServer, server) {
+   await addLoginInfo(
+     "oauth://test.test",
+     "user",
+     "refresh_token",
+     "test_mail test_addressbook test_calendar"
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -777,19 +777,36 @@ export class SmtpClient {
+       case "CRAM-MD5":
+         this.logger.debug("Authentication via AUTH CRAM-MD5");
+         this._currentAction = this._actionAUTH_CRAM;
+         this._sendCommand("AUTH CRAM-MD5");
+         return;
+       case "XOAUTH2": {
+         // See https://developers.google.com/gmail/xoauth2_protocol#smtp_protocol_exchange
+         this.logger.debug("Authentication via AUTH XOAUTH2");
+-        this._currentAction = this._actionAUTH_XOAUTH2;
+         const oauthToken = await this._authenticator.getOAuthToken();
+-        this._sendCommand("AUTH XOAUTH2 " + oauthToken, true);
++        const authCommand = "AUTH XOAUTH2 " + oauthToken;
++        // We keep the initial response inline if possible to save a round-trip.
++        // An initial response is subject to the 512-byte AUTH command-line limit
++        // including the mandatory CRLF, while client responses following a
++        // server challenge are independent of that limit.
++        if (authCommand.length + 2 <= 512) {
++          this._currentAction = this._actionAUTH_XOAUTH2;
++          this._sendCommand(authCommand, true);
++          return;
++        }
++        this._currentAction = command => {
++          if (command.statusCode != 334) {
++            this._actionAUTHComplete(command);
++            return;
++          }
++          this._currentAction = this._actionAUTH_XOAUTH2;
++          this._sendCommand(oauthToken, true);
++        };
++        this._sendCommand("AUTH XOAUTH2");
+         return;
+       }
+       case "GSSAPI": {
+         this.logger.debug("Authentication via AUTH GSSAPI");
+         this._currentAction = this._actionAUTH_GSSAPI;
+         this._authenticator.initGssapiAuth("smtp");
+         // Don't send first token until we get a 334 continuation response.
+         // This avoids sending a line that is possibly rejected as too long.
+@@ -1144,20 +1161,20 @@ export class SmtpClient {
+   }
+ 
+   /**
+    * Response to AUTH XOAUTH2 token, if error occurs send empty response
+    *
+    * @param {object} command Parsed command from the server {statusCode, data}
+    */
+   _actionAUTH_XOAUTH2(command) {
+-    if (!command.success) {
++    if (command.statusCode == 334) {
+       this.logger.warn("Error during AUTH XOAUTH2, sending empty response");
++      this._currentAction = this._actionAUTHComplete;
+       this._sendCommand("");
+-      this._currentAction = this._actionAUTHComplete;
+     } else {
+       this._actionAUTHComplete(command);
+     }
+   }
+ 
+   /**
+    * Response to AUTH GSSAPI, if successful expects a base64 encoded challenge.
+    *
+diff --git a/mailnews/test/fakeserver/Smtpd.sys.mjs b/mailnews/test/fakeserver/Smtpd.sys.mjs
+--- a/mailnews/test/fakeserver/Smtpd.sys.mjs
++++ b/mailnews/test/fakeserver/Smtpd.sys.mjs
+@@ -277,23 +277,49 @@ export class SMTP_RFC2821_handler {
+ /**
+  * Implements XOAUTH2 authentication.
+  */
+ export class SMTP_OAUTH2_handler extends SMTP_RFC2821_handler {
+   kAuthSchemes = ["XOAUTH2"];
+ 
+   constructor(daemon, options) {
+     super(daemon, options);
++    this.kAuthRequired = true;
++    this.resetTest();
+     this._kAuthSchemeStartFunction.XOAUTH2 = this.authXOAUTH2Start;
+   }
+ 
++  AUTH(line) {
++    //  The SMTP command limit excludes SASL responses per RFC 4954.
++    if (`AUTH ${line}\r\n`.length > 512) {
++      return "500 5.5.2 Line too long";
++    }
++    return super.AUTH(line);
++  }
++
+   authXOAUTH2Start(line) {
++    if (line === undefined) {
++      this._nextAuthFunction = this.authXOAUTH2Cred;
++      this._multiline = true;
++      return "334 ";
++    }
++    return this.authXOAUTH2Cred(line);
++  }
++
++  authXOAUTH2Cred(line) {
+     const [user, auth] = atob(line).split("\u0001");
+     if (
+       user == `user=${this.kUsername}` &&
+       auth == `auth=Bearer ${this.kPassword}`
+     ) {
+       this._state = kStateAuthenticated;
+       return "235 2.7.0 Yeah, that's the right access token.";
+     }
+-    return "535 5.7.8 Yeah, nah, that's the wrong access token.";
++    // XOAUTH2 reports the error in a 334 challenge. The client must reply with
++    // an empty response before the server ends authentication with 535.
++    this._nextAuthFunction = response =>
++      response === ""
++        ? "535 5.7.8 Invalid access token"
++        : "501 5.5.2 Expected an empty response";
++    this._multiline = true;
++    return "334 " + btoa('{"status":"401","schemes":"bearer"}');
+   }
+ }
+
