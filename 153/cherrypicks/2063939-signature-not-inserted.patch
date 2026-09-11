@@ -1,0 +1,235 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1789105914 -10800
+# Node ID de6fa87dcfa5caa8eebb3e8ea8165f414ad386d0
+# Parent  a6e03a1ed2a63e16952ba0dbfe98fdae969e0945
+Bug 2063939 - Fix signature not inserted in plaintext inline forward with signature below the quote. r=BenC
+
+nsMsgCompose::ConvertAndLoadComposeWindow wraps a plaintext inline forward in
+a <div class="moz-forward-container">. Since an empty <div> would be collected
+by HTMLEditor::RemoveEmptyNodesIn, the div is inserted holding a placeholder
+<br>, which is deleted again once the forwarded text has been inserted.
+
+Bug 2019689 made HTMLEditor::HandleInsertText delete the unnecessary line break
+following the insertion point before inserting, for the plaintext mail composer
+among others. Our placeholder <br> is exactly that line break, so the editor now
+removes it for us. The subsequent nsIEditor::deleteNode call then gets an
+orphaned node, which EditorBase::DeleteNodeWithTransaction refuses via
+HTMLEditUtils::IsRemovableNode with NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE, and the
+NS_ENSURE_SUCCESS returns before the bottom signature is inserted.
+
+Only delete the placeholder if it is still in the tree. Note that dropping the
+placeholder altogether is not an option: the div would then be removed as an
+empty node, Selection::CollapseInLimiter would silently no-op on the detached
+div, and the forwarded text would end up unwrapped in the body.
+
+Differential Revision: https://phabricator.services.mozilla.com/D324680
+
+
+diff --git a/mail/test/browser/composition/browser3.toml b/mail/test/browser/composition/browser3.toml
+--- a/mail/test/browser/composition/browser3.toml
++++ b/mail/test/browser/composition/browser3.toml
+@@ -58,16 +58,18 @@ support-files = [
+ ["browser_forwardContentExchange.js"]
+ 
+ ["browser_forwardDefectiveCharset.js"]
+ 
+ ["browser_forwardHeaders.js"]
+ 
+ ["browser_forwardRFC822Attach.js"]
+ 
++["browser_forwardSignature.js"]
++
+ ["browser_forwardUTF8.js"]
+ 
+ ["browser_forwardedContent.js"]
+ 
+ ["browser_forwardedEmlActions.js"]
+ 
+ ["browser_identityColors.js"]
+ 
+diff --git a/mail/test/browser/composition/browser_forwardSignature.js b/mail/test/browser/composition/browser_forwardSignature.js
+new file mode 100644
+--- /dev/null
++++ b/mail/test/browser/composition/browser_forwardSignature.js
+@@ -0,0 +1,97 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that the signature is inserted when forwarding inline.
++ */
++
++"use strict";
++
++var { close_compose_window, get_compose_body, open_compose_with_forward } =
++  ChromeUtils.importESModule(
++    "resource://testing-common/mail/ComposeHelpers.sys.mjs"
++  );
++var { be_in_folder, create_folder, select_click_row } =
++  ChromeUtils.importESModule(
++    "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
++  );
++var { add_message_to_folder, create_message } = ChromeUtils.importESModule(
++  "resource://testing-common/mail/MessageInjectionHelpers.sys.mjs"
++);
++
++var sig = "roses are red";
++var folder;
++
++add_setup(async function () {
++  folder = await create_folder("ForwardSigTest");
++  registerCleanupFunction(() => folder.deleteSelf(null));
++
++  await add_message_to_folder(
++    [folder],
++    create_message({
++      subject: "message to forward",
++      body: {
++        body: "Hello, this is the original message body.\n",
++        contentType: "text/plain",
++        charset: "UTF-8",
++      },
++    })
++  );
++});
++
++async function check_forward_signature(sigBottom) {
++  await SpecialPowers.pushPrefEnv({
++    set: [
++      ["mail.identity.default.compose_html", false],
++      ["mail.identity.default.reply_on_top", 1],
++      ["mail.identity.default.sig_bottom", sigBottom],
++      ["mail.identity.default.sig_on_fwd", true],
++      ["mail.identity.default.htmlSigText", sig],
++      ["mail.identity.default.htmlSigFormat", false],
++      ["mail.forward_message_mode", 2],
++    ],
++  });
++
++  await be_in_folder(folder);
++  await select_click_row(0);
++
++  const cw = await open_compose_with_forward();
++  const body = get_compose_body(cw);
++  info(`body innerHTML for sig_bottom=${sigBottom}: ${body.innerHTML}`);
++
++  const container = body.querySelector(".moz-forward-container");
++  Assert.ok(container, "forwarded content should be wrapped in a container");
++  Assert.ok(
++    container.textContent.includes("original message body"),
++    "forwarded content should be inside the container"
++  );
++  Assert.ok(
++    !container.innerHTML.endsWith("<br><br>"),
++    `container should not end with a spurious empty line, got ${container.innerHTML}`
++  );
++
++  const signature = body.querySelector(".moz-signature");
++  Assert.ok(signature, "signature should be present");
++  Assert.ok(
++    signature.textContent.includes(sig),
++    "signature should contain the signature text"
++  );
++  Assert.equal(
++    container.compareDocumentPosition(signature) &
++      Node.DOCUMENT_POSITION_FOLLOWING,
++    sigBottom ? Node.DOCUMENT_POSITION_FOLLOWING : 0,
++    `signature should be ${sigBottom ? "after" : "before"} the forwarded content`
++  );
++
++  await close_compose_window(cw);
++  await SpecialPowers.popPrefEnv();
++}
++
++add_task(async function test_forward_plaintext_signature_below_quote() {
++  await check_forward_signature(true);
++});
++
++add_task(async function test_forward_plaintext_signature_above_quote() {
++  await check_forward_signature(false);
++});
+diff --git a/mailnews/compose/src/nsMsgCompose.cpp b/mailnews/compose/src/nsMsgCompose.cpp
+--- a/mailnews/compose/src/nsMsgCompose.cpp
++++ b/mailnews/compose/src/nsMsgCompose.cpp
+@@ -687,30 +687,33 @@ nsMsgCompose::ConvertAndLoadComposeWindo
+         NS_ENSURE_SUCCESS(rv, rv);
+ 
+         if (isForwarded) {
+           // Special treatment for forwarded messages: Part 2.
+           if (sigOnTopInserted) {
+             // Sadly the M-C editor inserts a <br> between the <div> for the
+             // signature and this <div>, so remove the <br> we don't want.
+             nsCOMPtr<nsINode> brBeforeDiv;
+-            nsAutoString tagLocalName;
+             brBeforeDiv = divElem->GetPreviousSibling();
+             if (brBeforeDiv) {
+-              tagLocalName = brBeforeDiv->LocalName();
+-              if (tagLocalName.EqualsLiteral("br")) {
++              if (brBeforeDiv->IsHTMLElement(nsGkAtoms::br)) {
+                 rv = htmlEditor->DeleteNode(brBeforeDiv, false, 1);
+                 NS_ENSURE_SUCCESS(rv, rv);
+               }
+             }
+           }
+ 
+-          // Clean up the <br> we inserted.
+-          rv = htmlEditor->DeleteNode(extraBr, false, 1);
+-          NS_ENSURE_SUCCESS(rv, rv);
++          // Clean up the trailing <br>. That is the placeholder we inserted
++          // above, unless the editor has replaced it with a padding <br> of
++          // its own while inserting the text.
++          nsCOMPtr<nsINode> brAtEndOfDiv = divElem->GetLastChild();
++          if (brAtEndOfDiv && brAtEndOfDiv->IsHTMLElement(nsGkAtoms::br)) {
++            rv = htmlEditor->DeleteNode(brAtEndOfDiv, false, 1);
++            NS_ENSURE_SUCCESS(rv, rv);
++          }
+         }
+ 
+         // Use our own function instead of nsEditor::EndOfDocument() because
+         // we don't want to position at the end of the div we've just created.
+         // It's OK to use, even if we're not forwarding and didn't create a
+         // <div>.
+         rv = MoveToEndOfDocument();
+         NS_ENSURE_SUCCESS(rv, rv);
+@@ -4760,17 +4763,16 @@ nsMsgCompose::SetIdentity(nsIMsgIdentity
+   RefPtr<Element> rootElement;
+   rv = m_editor->GetRootElement(getter_AddRefs(rootElement));
+   if (NS_FAILED(rv) || !rootElement) return rv;
+ 
+   // First look for the current signature, if we have one
+   nsCOMPtr<nsINode> lastNode;
+   nsCOMPtr<nsINode> node;
+   nsCOMPtr<nsINode> tempNode;
+-  nsAutoString tagLocalName;
+ 
+   RefPtr<nsINode> rootElement2 = rootElement;
+   lastNode = rootElement2->GetLastChild();
+   if (lastNode) {
+     node = lastNode;
+     // In html, the signature is inside an element with
+     // class="moz-signature"
+     bool signatureFound = false;
+@@ -4799,18 +4801,17 @@ nsMsgCompose::SetIdentity(nsIMsgIdentity
+       rv = editor->DeleteNode(node, false, 1);
+       if (NS_FAILED(rv)) {
+         editor->EndTransaction();
+         return rv;
+       }
+ 
+       // Also, remove the <br> right before the signature.
+       if (tempNode) {
+-        tagLocalName = tempNode->LocalName();
+-        if (tagLocalName.EqualsLiteral("br"))
++        if (tempNode->IsHTMLElement(nsGkAtoms::br))
+           editor->DeleteNode(tempNode, false, 1);
+       }
+       editor->EndTransaction();
+     }
+   }
+ 
+   if (!CheckIncludeSignaturePrefs(aIdentity)) return NS_OK;
+ 
+
