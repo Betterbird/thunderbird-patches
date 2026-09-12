@@ -1,0 +1,359 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1789081379 21600
+# Node ID 8333a0ec50458deadfe3fafe1ea3eee33ae64f46
+# Parent  1be645cc256b6f6d88898650ce13653b35624607
+Bug 2059469 - Ask for the password when the account hub's stored one is rejected while adding a remote address book. r=arschmitz
+
+The account hub skips the password step when the password manager
+already holds an entry for that server and user. If the server rejects
+that password, the failure was reported on the form that has no password
+field, so there was no way to correct it. A password entered later was
+stored next to the rejected one instead of replacing it, so the next
+attempt could pick the rejected one up again.
+
+Differential Revision: https://phabricator.services.mozilla.com/D318997
+
+
+diff --git a/mail/components/accountcreation/views/address-book.mjs b/mail/components/accountcreation/views/address-book.mjs
+--- a/mail/components/accountcreation/views/address-book.mjs
++++ b/mail/components/accountcreation/views/address-book.mjs
+@@ -2,16 +2,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import "chrome://messenger/content/accountcreation/content/widgets/account-hub-step.mjs"; // eslint-disable-line import/no-unassigned-import
+ import "chrome://messenger/content/accountcreation/content/widgets/account-hub-footer.mjs"; // eslint-disable-line import/no-unassigned-import
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
++  AuthorizationError: "resource:///modules/CardDAVUtils.sys.mjs",
+   MailServices: "resource:///modules/MailServices.sys.mjs",
+   OAuth2Providers: "resource:///modules/OAuth2Providers.sys.mjs",
+   RemoteAddressBookUtils:
+     "resource:///modules/accountcreation/RemoteAddressBookUtils.sys.mjs",
+   LDAPDirectoryUtils:
+     "resource:///modules/accountcreation/LDAPDirectoryUtils.sys.mjs",
+ });
+ 
+@@ -21,16 +22,18 @@ ChromeUtils.defineESModuleGetters(lazy, 
+  *
+  * @typedef {object} RemoteAddressBookState
+  * @property {string} username - Username to log in to the address book with
+  * @property {string} server - The URL or domain of the server the address book
+  *  is stored on.
+  * @property {string} [password] - If the address book server doesn't use oauth,
+  *   the password to login.
+  * @property {boolean} [rememberPassword] - If the password should be stored.
++ * @property {boolean} [passwordFromStore] - If the password was taken from the
++ *   password manager rather than entered by the user.
+  */
+ 
+ class AccountHubAddressBook extends HTMLElement {
+   static get observedAttributes() {
+     return ["hidden"];
+   }
+ 
+   /**
+@@ -401,38 +404,41 @@ class AccountHubAddressBook extends HTML
+             new URL(stateData.server).hostname,
+             "carddav"
+           )
+         ) {
+           // See if we already have the password stored.
+           const logins = await Services.logins.searchLoginsAsync({
+             origin: new URL(stateData.server).origin,
+           });
+-          const login = logins.find(
+-            loginInfo => loginInfo.username === stateData.username
+-          );
++          // No realm to match on yet, so take what worked most recently.
++          const [login] = logins
++            .filter(loginInfo => loginInfo.username === stateData.username)
++            .sort((a, b) => b.timePasswordChanged - a.timePasswordChanged);
+           // If we can't find credentials, ask for the password.
+           if (!login) {
+             await this.#initUI("remotePasswordSubview");
+             this.#currentSubview.setState();
+             break;
+           }
+           // Since we found a login we can complete the state already.
+           this.#remoteAddressBookState.password = login.password;
+           // We retrieved it from the password store, so we should remember it
+           // if we need it for a different origin.
+           this.#remoteAddressBookState.rememberPassword = true;
++          this.#remoteAddressBookState.passwordFromStore = true;
+         }
+         await this.#initializeSyncSubview(currentState);
+         break;
+       }
+       case "remotePasswordSubview":
+         this.#remoteAddressBookState.password = stateData.password;
+         this.#remoteAddressBookState.rememberPassword =
+           stateData.rememberPassword;
++        this.#remoteAddressBookState.passwordFromStore = false;
+         await this.#initializeSyncSubview(currentState);
+         break;
+       case "syncAddressBooksSubview": {
+         // The state data returned from this subview is a list of available
+         // address books that have a create function.
+         let directory;
+         for (const addressBook of stateData) {
+           if (!directory) {
+@@ -507,16 +513,32 @@ class AccountHubAddressBook extends HTML
+       if (books.length === 0) {
+         this.#currentSubview.showNotification({
+           fluentTitleId: "account-hub-no-address-books",
+           type: "info",
+         });
+       }
+       //TODO username?
+     } catch (error) {
++      if (
++        error instanceof lazy.AuthorizationError &&
++        this.#remoteAddressBookState.passwordFromStore
++      ) {
++        // The user never saw the password we just used, so let them enter
++        // one.
++        this.#currentSubview.clearNotifications();
++        await this.#initUI("remotePasswordSubview");
++        this.#currentSubview.setState();
++        this.#currentSubview.showNotification({
++          fluentTitleId: "account-hub-credentials-wrong",
++          error,
++          type: "error",
++        });
++        return;
++      }
+       if (error.result == Cr.NS_ERROR_NOT_AVAILABLE) {
+         this.#currentSubview.showNotification({
+           fluentTitleId: "address-book-carddav-known-incompatible",
+           fluentTitleArguments: {
+             url: new URL(this.#remoteAddressBookState.server).hostname,
+           },
+           error,
+           type: "error",
+diff --git a/mail/test/browser/account/browser_accountHubAbRemote.js b/mail/test/browser/account/browser_accountHubAbRemote.js
+--- a/mail/test/browser/account/browser_accountHubAbRemote.js
++++ b/mail/test/browser/account/browser_accountHubAbRemote.js
+@@ -321,16 +321,103 @@ add_task(async function test_wrongPasswo
+   );
+   EventUtils.sendString(CardDAVServer.password);
+   await passwordOk;
+   EventUtils.synthesizeMouseAtCenter(forward, {}, window);
+ 
+   await checkSyncSubview(dialog);
+ });
+ 
++add_task(async function test_wrongPasswordFromStorage() {
++  await SpecialPowers.pushPrefEnv({
++    set: [["signon.rememberSignons", true]],
++  });
++  // Another service's login for the same origin and user, different realm.
++  await createLogin(
++    "https://carddav.test",
++    CardDAVServer.username,
++    "*******",
++    "some other service"
++  );
++
++  const dialog = await subtest_open_account_hub_dialog("ADDRESS_BOOK");
++  const passwordStep = dialog.querySelector("#addressBookPasswordSubview");
++
++  await goToRemoteForm(dialog);
++  const loading = waitDuringBusy(dialog);
++  await fillInForm(dialog, "https://carddav.test/", false);
++  await loading;
++
++  const askedForPassword = BrowserTestUtils.isVisible(passwordStep);
++  Assert.ok(
++    askedForPassword,
++    "Should ask for the password after the stored one was rejected"
++  );
++
++  if (askedForPassword) {
++    await showingError(
++      dialog,
++      "addressBookPasswordSubview",
++      "account-hub-credentials-wrong"
++    );
++
++    info("Entering correct password");
++    EventUtils.synthesizeMouseAtCenter(
++      passwordStep.querySelector("#password"),
++      {}
++    );
++    EventUtils.sendString(CardDAVServer.password);
++    EventUtils.synthesizeMouseAtCenter(
++      dialog.querySelector("#addressBookFooter #forward"),
++      {},
++      window
++    );
++
++    await checkSyncSubview(dialog);
++  }
++
++  let logins = await Services.logins.searchLoginsAsync({
++    origin: "https://carddav.test",
++  });
++  Assert.equal(logins.length, 2, "Should have stored a second login");
++  Assert.equal(
++    logins.find(login => login.httpRealm == "some other service")?.password,
++    "*******",
++    "Should have left the other service's password alone"
++  );
++  Assert.equal(
++    logins.find(login => login.httpRealm == "test")?.password,
++    CardDAVServer.password,
++    "Should have stored the password that worked under the server's realm"
++  );
++  info("Running the flow again with two logins to choose from");
++  const secondRun = await subtest_open_account_hub_dialog("ADDRESS_BOOK");
++  await goToRemoteForm(secondRun);
++  const reloading = waitDuringBusy(secondRun);
++  await fillInForm(secondRun, "https://carddav.test/", false);
++  await reloading;
++
++  Assert.ok(
++    BrowserTestUtils.isHidden(
++      secondRun.querySelector("#addressBookPasswordSubview")
++    ),
++    "Should take the login that worked last and not ask again"
++  );
++
++  await checkSyncSubview(secondRun);
++
++  logins = await Services.logins.searchLoginsAsync({
++    origin: "https://carddav.test",
++  });
++  for (const login of logins) {
++    await Services.logins.removeLoginAsync(login);
++  }
++  await SpecialPowers.popPrefEnv();
++});
++
+ add_task(async function test_emailWithoutServer() {
+   const login = await createLogin("https://test.invalid", "alice@test.invalid");
+ 
+   const dialog = await subtest_open_account_hub_dialog("ADDRESS_BOOK");
+   await goToRemoteForm(dialog);
+   const loading = waitDuringBusy(dialog);
+   await fillInForm(
+     dialog,
+@@ -851,21 +938,24 @@ async function showingError(dialog, step
+ 
+ /**
+  * Create and store a new login. All parameters default to the values from the
+  * CardDAVServer config.
+  *
+  * @param {string} [origin] - Origin for the login.
+  * @param {string} [username] - Username in the login.
+  * @param {string} [password] - Password of the login.
++ * @param {string} [realm="test"] - HTTP realm of the login. Defaults to the
++ *   realm the CardDAVServer asks for.
+  * @returns {Promise<nsILoginInfo>} - Resolves to the stored login instance.
+  */
+ function createLogin(
+   origin = CardDAVServer.origin,
+   username = CardDAVServer.username,
+-  password = CardDAVServer.password
++  password = CardDAVServer.password,
++  realm = "test"
+ ) {
+   const login = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(
+     Ci.nsILoginInfo
+   );
+-  login.init(origin, null, "test", username, password, "", "");
++  login.init(origin, null, realm, username, password, "", "");
+   return Services.logins.addLoginAsync(login);
+ }
+diff --git a/mailnews/addrbook/modules/CardDAVUtils.sys.mjs b/mailnews/addrbook/modules/CardDAVUtils.sys.mjs
+--- a/mailnews/addrbook/modules/CardDAVUtils.sys.mjs
++++ b/mailnews/addrbook/modules/CardDAVUtils.sys.mjs
+@@ -39,16 +39,26 @@ const PRESETS = {
+ // At least one of these ACL privileges must be present to consider an address
+ // book writable (RFC 3744).
+ const writePrivs = ["write", "write-content", "bind", "all"];
+ 
+ // At least one of these ACL privileges must be present to consider an address
+ // book readable.
+ const readPrivs = ["read", "all"];
+ 
++/**
++ * Thrown when the server rejected the credentials it was sent.
++ */
++export class AuthorizationError extends Error {
++  constructor(message) {
++    super(message);
++    this.name = "AuthorizationError";
++  }
++}
++
+ export var CardDAVUtils = {
+   _contextMap: new Map(),
+ 
+   /**
+    * Returns the id of a unique private context for each username. When the
+    * userContextId is set on a principal, this allows the use of multiple
+    * usernames on the same server without the networking code causing issues.
+    *
+@@ -216,22 +226,17 @@ export var CardDAVUtils = {
+               CardDAVUtils.makeRequest(uri, details).then(resolve, reject);
+               return;
+             }
+             reject(new Components.Exception("Connection failure", status));
+             return;
+           }
+           if (finalChannel.responseStatus == 401) {
+             // We tried to authenticate, but failed.
+-            reject(
+-              new Components.Exception(
+-                "Authorization failure",
+-                Cr.NS_ERROR_FAILURE
+-              )
+-            );
++            reject(new AuthorizationError("Authorization failure"));
+             return;
+           }
+           resolve({
+             get url() {
+               return new URL(finalChannel.URI.spec);
+             },
+             get status() {
+               return finalChannel.responseStatus;
+@@ -675,16 +680,33 @@ export class NotificationCallbacks {
+         null,
+         this.authInfo.realm,
+         this.authInfo.username,
+         this.authInfo.password,
+         "",
+         ""
+       );
+       try {
++        // Replace the rejected password instead of adding a second login
++        // next to it.
++        const logins = await Services.logins.searchLoginsAsync({
++          origin: this.origin,
++          httpRealm: this.authInfo.realm,
++        });
++        const existingLogin = logins.find(
++          login => login.username === this.authInfo.username
++        );
++        if (existingLogin) {
++          const propBag = Cc["@mozilla.org/hash-property-bag;1"].createInstance(
++            Ci.nsIWritablePropertyBag
++          );
++          propBag.setProperty("password", this.authInfo.password);
++          await Services.logins.modifyLoginAsync(existingLogin, propBag);
++          return;
++        }
+         if (!lazy.enforcePrimaryPassword()) {
+           return;
+         }
+         await Services.logins.addLoginAsync(newLoginInfo);
+       } catch (ex) {
+         console.error(ex);
+       }
+     }
+

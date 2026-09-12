@@ -1,0 +1,200 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1788890169 21600
+# Node ID 2bd7510e56a8ab6d06c4c16cc38721dd010a439d
+# Parent  a52e158267e9ed3364c758327f7ba9167dba462f
+Bug 1917314 - Don't drop the last occurrence of an all-day repeating event. r=tobyp
+
+Making an event all-day moves DTSTART from the old time of day to
+midnight, and CalRecurrenceInfo.onStartDateChange shifts the rule's UNTIL
+by that same amount. Adding a sub-day duration to a DATE should be a
+no-op, and it is - until the value gets cloned: ICAL.Time normalizes
+lazily, and Time#clone() ignores the pending normalization, carrying the
+leftover hours into the day rather than dropping them. UNTIL moved back a
+day, so the occurrence falling on it was lost.
+
+Fixing this upstream is https://github.com/kewisch/ical.js/issues/1024
+
+Differential Revision: https://phabricator.services.mozilla.com/D323618
+
+
+diff --git a/calendar/base/modules/Ical.sys.mjs b/calendar/base/modules/Ical.sys.mjs
+--- a/calendar/base/modules/Ical.sys.mjs
++++ b/calendar/base/modules/Ical.sys.mjs
+@@ -1348,16 +1348,23 @@ class Time {
+   }
+ 
+   /**
+    * Returns a clone of the time object.
+    *
+    * @return {Time}              The cloned object
+    */
+   clone() {
++    // Local patch for https://github.com/kewisch/ical.js/issues/1024: flush a
++    // pending normalization, so that cloning a date holding leftover time
++    // components does not carry those over into the day (bug 1917314).
++    if (this._pendingNormalization) {
++      this._normalize();
++      this._pendingNormalization = false;
++    }
+     return new Time(this._time, this.zone);
+   }
+ 
+   /**
+    * Reset the time instance to epoch time
+    */
+   reset() {
+     this.fromData(Time.epochTime);
+diff --git a/calendar/test/browser/recurrence/browser.toml b/calendar/test/browser/recurrence/browser.toml
+--- a/calendar/test/browser/recurrence/browser.toml
++++ b/calendar/test/browser/recurrence/browser.toml
+@@ -17,15 +17,17 @@ tags = ["recurrence"]
+ ["browser_annual.js"]
+ 
+ ["browser_biweekly.js"]
+ 
+ ["browser_daily.js"]
+ 
+ ["browser_lastDayOfMonth.js"]
+ 
++["browser_monthlyUntilAllDay.js"]
++
+ ["browser_recurrenceNavigation.js"]
+ 
+ ["browser_weeklyN.js"]
+ 
+ ["browser_weeklyUntil.js"]
+ 
+ ["browser_weeklyWithException.js"]
+diff --git a/calendar/test/browser/recurrence/browser_monthlyUntilAllDay.js b/calendar/test/browser/recurrence/browser_monthlyUntilAllDay.js
+new file mode 100644
+--- /dev/null
++++ b/calendar/test/browser/recurrence/browser_monthlyUntilAllDay.js
+@@ -0,0 +1,105 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++var { formatDate, menulistSelect, saveAndCloseItemDialog, setData } = ChromeUtils.importESModule(
++  "resource://testing-common/calendar/ItemEditingHelpers.sys.mjs"
++);
++
++var { cal } = ChromeUtils.importESModule("resource:///modules/calendar/calUtils.sys.mjs");
++
++var { dayView, monthView } = CalendarTestUtils;
++
++const UNTIL = cal.createDateTime("20250111"); // Second Saturday of January.
++const HOUR = 8;
++
++/**
++ * Tests that the last occurrence of an all-day event is not dropped, the until
++ * date being inclusive (bug 1917314).
++ */
++add_task(async function testMonthlyUntilAllDayRecurrence() {
++  const calendar = CalendarTestUtils.createCalendar();
++  registerCleanupFunction(() => {
++    CalendarTestUtils.removeCalendar(calendar);
++  });
++
++  await CalendarTestUtils.setCalendarView(window, "day");
++  await CalendarTestUtils.goToDate(window, 2024, 10, 12); // Second Saturday of October.
++
++  const eventBox = dayView.getHourBoxAt(window, HOUR);
++  const { dialogWindow, iframeWindow } = await CalendarTestUtils.editNewEvent(window, eventBox);
++  await setData(dialogWindow, iframeWindow, {
++    title: "Event",
++    allday: true,
++    repeat: setRecurrence,
++  });
++  await saveAndCloseItemDialog(dialogWindow);
++
++  const items = await calendar.getItemsAsArray(
++    Ci.calICalendar.ITEM_FILTER_ALL_ITEMS,
++    0,
++    null,
++    null
++  );
++  const [rule] = items[0].recurrenceInfo.getRecurrenceItems();
++  Assert.equal(
++    rule.untilDate.icalString,
++    "20250111",
++    "the until date should be the date entered in the recurrence dialog"
++  );
++
++  // Each second Saturday from October to January should have an occurrence,
++  // the one on the until date included. All of them are in the second row of
++  // the month view, on the last day of the week.
++  await CalendarTestUtils.setCalendarView(window, "month");
++  for (const [year, month, day] of [
++    [2024, 10, 12],
++    [2024, 11, 9],
++    [2024, 12, 14],
++    [2025, 1, 11],
++  ]) {
++    await CalendarTestUtils.goToDate(window, year, month, day);
++    await monthView.waitForItemAt(window, 2, 7, 1);
++  }
++
++  // February is past the until date.
++  await CalendarTestUtils.goToDate(window, 2025, 2, 8);
++  await monthView.waitForNoItemAt(window, 2, 7, 1);
++
++  Assert.ok(true, "Test ran to completion");
++});
++
++async function setRecurrence(recurrenceWindow) {
++  await SimpleTest.promiseFocus(recurrenceWindow);
++  const recurrenceDocument = recurrenceWindow.document;
++
++  // Monthly.
++  await menulistSelect(recurrenceDocument.getElementById("period-list"), "2");
++
++  // "The second Saturday", already preselected from the start date.
++  EventUtils.synthesizeMouseAtCenter(
++    recurrenceDocument.getElementById("montly-period-relative-date-radio"),
++    {},
++    recurrenceWindow
++  );
++
++  // Set until date.
++  EventUtils.synthesizeMouseAtCenter(
++    recurrenceDocument.getElementById("recurrence-range-until"),
++    {},
++    recurrenceWindow
++  );
++
++  // Delete previous date.
++  const untilInput = recurrenceDocument.getElementById("repeat-until-date");
++  untilInput.focus();
++  EventUtils.synthesizeKey("a", { accelKey: true }, recurrenceWindow);
++  untilInput.focus();
++  EventUtils.synthesizeKey("KEY_Delete", {}, recurrenceWindow);
++
++  EventUtils.sendString(formatDate(UNTIL), recurrenceWindow);
++
++  // Move focus to ensure the date is selected.
++  untilInput.focus();
++  EventUtils.synthesizeKey("KEY_Tab", {}, recurrenceWindow);
++}
+diff --git a/calendar/test/unit/test_datetime.js b/calendar/test/unit/test_datetime.js
+--- a/calendar/test/unit/test_datetime.js
++++ b/calendar/test/unit/test_datetime.js
+@@ -89,9 +89,16 @@ function run_test() {
+   const someDate = new Date();
+   const createdDate = cal.dtz.jsDateToDateTime(someDate).getInTimezone(cal.dtz.defaultTimezone);
+   someDate.setMilliseconds(0);
+   equal(someDate.getTime(), cal.dtz.dateTimeToJsDate(createdDate).getTime());
+ 
+   // Comparing a date-time with a date of the same day should be 0
+   equal(cal.createDateTime("20120101T120000").compare(cal.createDateTime("20120101")), 0);
+   equal(cal.createDateTime("20120101").compare(cal.createDateTime("20120101T120000")), 0);
++
++  // Bug 1917314 - adding a duration with a time part to a date should not
++  // move the date, not even when the result is cloned right away.
++  const allDay = cal.createDateTime("20250111");
++  allDay.addDuration(cal.createDuration("-PT8H"));
++  equal(allDay.clone().icalString, "20250111");
++  equal(allDay.icalString, "20250111");
+ }
+
