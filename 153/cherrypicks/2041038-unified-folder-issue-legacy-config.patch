@@ -1,0 +1,226 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1789552593 -7200
+# Node ID 8cb32abf7a418015e336c314253978b00dd0d342
+# Parent  0534e160576868137512ae994095b1cdd449bb10
+Bug 2041038 - Fix for unified folder view not working - TypeError: can't access property "insertChildInOrder", parentRow is null. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D326167
+
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -1122,32 +1122,27 @@ var folderPane = {
+ 
+       regenerateMode() {
+         if (this._smartMailbox) {
+           SmartMailboxUtils.removeAll(true);
+         }
+         this.init();
+       },
+ 
++      /**
++       * Add a searched folder.
++       *
++       * @param {object} folderType - One of the types in `_folderTypes`.
++       * @param {nsIMsgFolder} parentFolder - Parent folder.
++       * @param {nsIMsgFolder} childFolder - Child folder.
++       */
+       _addSearchedFolder(folderType, parentFolder, childFolder) {
+         if (folderType.flag & childFolder.flags) {
+           // The folder has the flag for this type.
+-          const smartFolder = this._smartMailbox.getSmartFolder(
+-            folderType.name
+-          );
+-          const folderRow = folderPane._createFolderRow(
+-            this.name,
+-            childFolder,
+-            // If the name is not localised, display the name and server name.
+-            childFolder.localizedName == smartFolder.localizedName
+-              ? "server"
+-              : "both"
+-          );
+-          folderRow.setAccountIndicatorColor();
+-          folderPane._insertInServerOrder(folderType.list, folderRow);
++          this._addSearchedFolderToSmartFolder(folderType, childFolder);
+           return;
+         }
+ 
+         if (!childFolder.isSpecialFolder(folderType.flag, true)) {
+           // This folder is searched by the virtual folder but it hasn't got
+           // the flag of this type and no ancestor has the flag of this type.
+           // We don't have a good way of displaying it.
+           return;
+@@ -1161,21 +1156,48 @@ var folderPane = {
+           // confusing way to handle this situation.
+           this._addSearchedFolder(
+             folderType,
+             folderPane._getNonGmailParent(parentFolder),
+             parentFolder
+           );
+           parentRow = folderPane.getRowForFolder(parentFolder, this.name);
+         }
++        if (!parentRow) {
++          // There's still no row to add this folder to, because `parentFolder`
++          // can't be displayed either. This happens if the flag of this type
++          // is on a folder we hide, such as the [Gmail] folder. Display the
++          // folder directly under the smart folder instead of losing it.
++          this._addSearchedFolderToSmartFolder(folderType, childFolder);
++          return;
++        }
+         parentRow.insertChildInOrder(
+           folderPane._createFolderRow(this.name, childFolder)
+         );
+       },
+ 
++      /**
++       * Add a row for a searched folder directly to the smart folder of the
++       * given type.
++       *
++       * @param {object} folderType - One of the types in `_folderTypes`.
++       * @param {nsIMsgFolder} folder - The searched folder.
++       */
++      _addSearchedFolderToSmartFolder(folderType, folder) {
++        const smartFolder = this._smartMailbox.getSmartFolder(folderType.name);
++        const folderRow = folderPane._createFolderRow(
++          this.name,
++          folder,
++          // If the name is not localised, display the name and server name.
++          folder.localizedName == smartFolder.localizedName ? "server" : "both"
++        );
++        folderRow.setAccountIndicatorColor();
++        folderPane._insertInServerOrder(folderType.list, folderRow);
++      },
++
+       changeSearchedFolders(smartFolder) {
+         const folderType = this._folderTypes.find(
+           ft => ft.folderURI == smartFolder.URI
+         );
+         if (!folderType) {
+           // This virtual folder isn't one of the smart folders. It's probably
+           // one of the tags virtual folders.
+           return;
+diff --git a/mail/base/test/browser/browser_folderTreeQuirks.js b/mail/base/test/browser/browser_folderTreeQuirks.js
+--- a/mail/base/test/browser/browser_folderTreeQuirks.js
++++ b/mail/base/test/browser/browser_folderTreeQuirks.js
+@@ -6,16 +6,19 @@ const { GmailServer } = ChromeUtils.impo
+   "resource://testing-common/mailnews/IMAPServer.sys.mjs"
+ );
+ const { MessageGenerator, SyntheticMessageSet } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+ );
+ const { PromiseTestUtils } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+ );
++const { SmartMailboxUtils } = ChromeUtils.importESModule(
++  "resource:///modules/SmartMailboxUtils.sys.mjs"
++);
+ const { VirtualFolderHelper } = ChromeUtils.importESModule(
+   "resource:///modules/VirtualFolderWrapper.sys.mjs"
+ );
+ 
+ const about3Pane = document.getElementById("tabmail").currentAbout3Pane;
+ const { folderPane, folderTree, threadTree } = about3Pane;
+ let account,
+   rootFolder,
+@@ -1423,16 +1426,97 @@ add_task(async function testGmailFolders
+     folderB,
+     folderC,
+   ]);
+ 
+   await promiseServerIdle(gmailAccount.incomingServer);
+   MailServices.accounts.removeAccount(gmailAccount, false);
+ });
+ 
++/**
++ * The [Gmail] folder can end up with a special folder flag, for example if an
++ * identity's archive folder points at it. The folders it contains are then
++ * searched by a unified folder, but [Gmail] is hidden from the folder tree, so
++ * they have no parent row to be added to. Check the unified folders mode still
++ * works.
++ */
++add_task(async function testGmailFolderWithSpecialFlag() {
++  const imapServer = new GmailServer(this);
++  // A folder without a special use flag, so that it is searched by the
++  // unified folder of the type the [Gmail] folder is flagged with.
++  imapServer.daemon.createMailbox("[Gmail]/Important", { subscribed: true });
++
++  const gmailAccount = MailServices.accounts.createAccount();
++  const gmailServer = MailServices.accounts.createIncomingServer(
++    "user",
++    "localhost",
++    "imap"
++  );
++  gmailServer.port = imapServer.port;
++  gmailServer.password = "password";
++  gmailAccount.incomingServer = gmailServer;
++
++  const gmailIdentity = MailServices.accounts.createIdentity();
++  gmailIdentity.email = "imap@invalid";
++  gmailAccount.addIdentity(gmailIdentity);
++  gmailAccount.defaultIdentity = gmailIdentity;
++
++  const gmailRootFolder = gmailServer.rootFolder;
++  gmailServer.performExpand(window.msgWindow);
++  await TestUtils.waitForCondition(
++    () => gmailRootFolder.subFolders.length == 2,
++    "waiting for folders to be created"
++  );
++
++  const gmailGmailFolder = gmailRootFolder.getChildNamed("[Gmail]");
++  await TestUtils.waitForCondition(
++    () => gmailGmailFolder.subFolders.length == 6,
++    "waiting for folders to be created"
++  );
++  const gmailImportantFolder = gmailGmailFolder.getChildNamed("Important");
++
++  gmailGmailFolder.setFlag(Ci.nsMsgFolderFlags.Archive);
++
++  // Recreate the unified folders, so that they search the [Gmail] folder.
++  folderPane.activeModes = ["all"];
++  SmartMailboxUtils.removeAll(true);
++
++  folderPane.activeModes = ["smart"];
++  Assert.deepEqual(
++    folderPane.activeModes,
++    ["smart"],
++    "the folder pane should have switched to unified folders mode"
++  );
++
++  const smartArchivesFolder =
++    getSmartServer().rootFolder.getChildNamed("Archives");
++  Assert.ok(
++    folderPane.getRowForFolder(gmailGmailFolder, "smart"),
++    "the [Gmail] folder should have a row in unified folders mode"
++  );
++  const importantRow = folderPane.getRowForFolder(
++    gmailImportantFolder,
++    "smart"
++  );
++  Assert.ok(
++    importantRow,
++    "the folder in the [Gmail] folder should have a row in unified folders mode"
++  );
++  Assert.equal(
++    importantRow.parentNode.closest("li").uri,
++    smartArchivesFolder.URI,
++    "the folder in the [Gmail] folder should be shown in the unified Archives folder"
++  );
++
++  folderPane.activeModes = ["all"];
++  await promiseServerIdle(gmailAccount.incomingServer);
++  MailServices.accounts.removeAccount(gmailAccount, false);
++  SmartMailboxUtils.removeAll(true);
++});
++
+ add_task(async function testAccountOrder() {
+   // Make some changes to the main account so that it appears in all modes.
+ 
+   [...folderA.messages][0].markRead(false);
+   folderA.setFlag(Ci.nsMsgFolderFlags.Favorite);
+   folderPane.activeModes = ["all", "smart", "unread", "favorite"];
+ 
+   const localFolders = [
+

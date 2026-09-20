@@ -1,0 +1,74 @@
+# HG changeset patch
+# User Gene Smith <gds@chartertn.net>
+# Date 1789681898 -7200
+# Node ID 9ef2d53566cc2f47722cc23d0cd2f66d683032db
+# Parent  5f12a55f7678add1d77d86b47f4c7939286d2443
+Bug 1921163 - For smtp, ensure any data following 334 response to AUTH GSSAPI is ignored. r=mkmelin,maxe
+
+Example:
+C: AUTH GSSAPI
+S: 334 gssapi supported   <-----Ignore any possible text sent by server
+C: <first token>
+S: 334 <next token>
+:
+S: 235 2.7.0 Logged
+
+If text following first 334 response is not ignored it is seen as an invalid base64
+token and fails gssapi/kerberos login. Only M/S Exchange is known to send this text.
+
+Note: This uses the simplified changes suggested my mkmelin.
+Note to me: The patch is in gssapi-kerberos-fix-v3.diff
+
+Differential Revision: https://phabricator.services.mozilla.com/D325759
+
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -805,11 +805,11 @@ export class SmtpClient {
+         return;
+       }
+       case "GSSAPI": {
+         this.logger.debug("Authentication via AUTH GSSAPI");
+-        this._currentAction = this._actionAUTH_GSSAPI;
++        this._currentAction = command => this._actionAUTH_GSSAPI(command, true);
+         this._authenticator.initGssapiAuth("smtp");
+-        // Don't send first token until we get a 334 continuation response.
++        // Don't send first token until we get a 334 challenge response.
+         // This avoids sending a line that is possibly rejected as too long.
+         this._sendCommand("AUTH GSSAPI", true);
+         return;
+       }
+@@ -1188,11 +1188,14 @@ export class SmtpClient {
+ 
+   /**
+    * Response to AUTH GSSAPI, if successful expects a base64 encoded challenge.
+    *
+-   * @param {object} command Parsed command from the server {statusCode, data}
++   * @param {object} command - Parsed command from the server {data, statusCode,
++   *   success}
++   * @param {boolean} [isFirstChallenge=false] - True when handling the 334
++   *   response to the AUTH GSSAPI command itself.
+    */
+-  _actionAUTH_GSSAPI(command) {
++  _actionAUTH_GSSAPI(command, isFirstChallenge = false) {
+     // GSSAPI auth can be multiple steps. We exchange tokens with the server
+     // until success or failure.
+     if (command.success) {
+       this._actionAUTHComplete(command);
+@@ -1203,9 +1206,15 @@ export class SmtpClient {
+       return;
+     }
+     let token;
+     try {
+-      token = this._authenticator.getNextGssapiToken(command.data);
++      // In GSSAPI the client speaks first, so the first challenge never
++      // carries a token. Ignore whatever the server appended to "334 ":
++      // Exchange sends "334 GSSAPI Supported" in response to "AUTH GSSAPI",
++      // which is not valid base64 and would fail the login if not ignored.
++      token = this._authenticator.getNextGssapiToken(
++        isFirstChallenge ? "" : command.data
++      );
+     } catch (e) {
+       this.logger.error(e);
+       this._actionAUTHComplete({ success: false, data: "AUTH GSSAPI" });
+       return;

@@ -1,0 +1,173 @@
+# HG changeset patch
+# User Helge Hüttenlechner <helge.huettenlechner@icloud.com> and DeepSeek
+# Date 1789734440 -7200
+# Parent  3e32f9228e5d42608bde6365fe7e3a9348bd723b
+Bug 1904591 - Fix spurious 'Missing resource in locale XX: devtools/client/toolbox.ftl'.
+
+Root cause
+
+For a locale served by a langpack (e.g. fr), GenerateBundles iterates metasources from
+highest to lowest priority (langpack -> app). The langpack metasource yields complete,
+correctly localized bundles. But after it's exhausted, iteration falls through to the
+app metasource, which only contains en-US - every resource is missing there. Because
+that's the last metasource, the solver's Err was reported as "Missing resource in
+locale fr: devtools/client/toolbox.ftl", even though bundles for fr were already
+generated from the langpack.
+
+Note: has_missing_cell()'s all() in the solver is correct - that's why nordzilla's any()
+experiment just made things worse.
+
+Fix
+
+In both generators (intl/l10n/rust/l10nregistry-rs/src/registry/asynchronous.rs and
+synchronous.rs) I added a generated_bundle flag, reset per locale and set whenever a
+bundle is yielded. The MissingResource report at the last metasource is now only emitted
+when no bundle was generated for that locale at all - the genuine case (e.g. a required
+resource missing from both langpack and app) is still reported.
+
+diff --git a/intl/l10n/rust/l10nregistry-rs/src/registry/asynchronous.rs b/intl/l10n/rust/l10nregistry-rs/src/registry/asynchronous.rs
+--- a/intl/l10n/rust/l10nregistry-rs/src/registry/asynchronous.rs
++++ b/intl/l10n/rust/l10nregistry-rs/src/registry/asynchronous.rs
+@@ -111,8 +111,13 @@ pub struct GenerateBundles<P, B> {
+     locales: std::vec::IntoIter<LanguageIdentifier>,
+     current_metasource: usize,
+     resource_ids: Vec<ResourceId>,
+     state: State<P, B>,
++    /// Whether a complete bundle has been generated for the current locale.
++    /// This is used to suppress missing resource errors when a higher-priority
++    /// metasource (such as a language pack) already provided all resources,
++    /// and only a lower-priority metasource is lacking them.
++    generated_bundle: bool,
+ }
+ 
+ impl<P, B> GenerateBundles<P, B> {
+     fn new(
+@@ -127,8 +132,9 @@ impl<P, B> GenerateBundles<P, B> {
+             locales,
+             current_metasource: 0,
+             resource_ids,
+             state: State::Empty,
++            generated_bundle: false,
+         }
+     }
+ }
+ 
+@@ -219,8 +225,9 @@ where
+                         self.state.put_back_solver(solver);
+ 
+                         if bundle.is_some() {
+                             // The bundle was successfully generated.
++                            self.generated_bundle = true;
+                             return bundle.into();
+                         }
+ 
+                         // No bundle was generated, continue on.
+@@ -246,15 +253,18 @@ where
+                     }
+ 
+                     if let Err(idx) = solver_result {
+                         // Since there are no more metasources, and there is an error,
+-                        // report it instead of ignoring it.
+-                        self.reg.shared.provider.report_errors(vec![
+-                            L10nRegistryError::MissingResource {
+-                                locale: self.state.get_locale().clone(),
+-                                resource_id: self.resource_ids[idx].clone(),
+-                            },
+-                        ]);
++                        // report it instead of ignoring it, unless a higher-priority
++                        // metasource already generated a bundle for this locale.
++                        if !self.generated_bundle {
++                            self.reg.shared.provider.report_errors(vec![
++                                L10nRegistryError::MissingResource {
++                                    locale: self.state.get_locale().clone(),
++                                    resource_id: self.resource_ids[idx].clone(),
++                                },
++                            ]);
++                        }
+                     }
+ 
+                     // There are no more metasources.
+                     self.state = State::Empty;
+@@ -274,8 +284,9 @@ where
+                 // Restart at the end of the metasources for this locale, and iterate
+                 // backwards.
+                 let last_metasource_idx = self.metasources.len() - 1;
+                 self.current_metasource = last_metasource_idx;
++                self.generated_bundle = false;
+ 
+                 let solver = ParallelProblemSolver::new(
+                     self.resource_ids.len(),
+                     self.metasources.get(self.current_metasource).len(),
+diff --git a/intl/l10n/rust/l10nregistry-rs/src/registry/synchronous.rs b/intl/l10n/rust/l10nregistry-rs/src/registry/synchronous.rs
+--- a/intl/l10n/rust/l10nregistry-rs/src/registry/synchronous.rs
++++ b/intl/l10n/rust/l10nregistry-rs/src/registry/synchronous.rs
+@@ -127,8 +127,13 @@ pub struct GenerateBundlesSync<P, B> {
+     locales: std::vec::IntoIter<LanguageIdentifier>,
+     current_metasource: usize,
+     resource_ids: Vec<ResourceId>,
+     state: State,
++    /// Whether a complete bundle has been generated for the current locale.
++    /// This is used to suppress missing resource errors when a higher-priority
++    /// metasource (such as a language pack) already provided all resources,
++    /// and only a lower-priority metasource is lacking them.
++    generated_bundle: bool,
+ }
+ 
+ impl<P, B> GenerateBundlesSync<P, B> {
+     fn new(
+@@ -141,8 +146,9 @@ impl<P, B> GenerateBundlesSync<P, B> {
+             locales,
+             current_metasource: 0,
+             resource_ids,
+             state: State::Empty,
++            generated_bundle: false,
+         }
+     }
+ }
+ 
+@@ -246,8 +252,9 @@ where
+                     self.state.put_back_solver(solver);
+ 
+                     if bundle.is_some() {
+                         // The bundle was successfully generated.
++                        self.generated_bundle = true;
+                         return bundle;
+                     }
+ 
+                     // No bundle was generated, continue on.
+@@ -273,15 +280,18 @@ where
+                 }
+ 
+                 if let Err(idx) = solver_result {
+                     // Since there are no more metasources, and there is an error,
+-                    // report it instead of ignoring it.
+-                    self.reg.shared.provider.report_errors(vec![
+-                        L10nRegistryError::MissingResource {
+-                            locale: self.state.get_locale().clone(),
+-                            resource_id: self.resource_ids[idx].clone(),
+-                        },
+-                    ]);
++                    // report it instead of ignoring it, unless a higher-priority
++                    // metasource already generated a bundle for this locale.
++                    if !self.generated_bundle {
++                        self.reg.shared.provider.report_errors(vec![
++                            L10nRegistryError::MissingResource {
++                                locale: self.state.get_locale().clone(),
++                                resource_id: self.resource_ids[idx].clone(),
++                            },
++                        ]);
++                    }
+                 }
+ 
+                 self.state = State::Empty;
+                 continue;
+@@ -293,8 +303,9 @@ where
+             // Restart at the end of the metasources for this locale, and iterate
+             // backwards.
+             let last_metasource_idx = metasources.len() - 1;
+             self.current_metasource = last_metasource_idx;
++            self.generated_bundle = false;
+ 
+             let solver = SerialProblemSolver::new(
+                 self.resource_ids.len(),
+                 metasources.get(self.current_metasource).len(),

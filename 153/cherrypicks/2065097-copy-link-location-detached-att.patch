@@ -1,0 +1,131 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1789552565 -7200
+# Node ID 0534e160576868137512ae994095b1cdd449bb10
+# Parent  bf6c1aaf851975eddd389ab6e2c31b11a9b44f08
+Bug 2065097 - Correct "Copy Link Location" for detached attachments. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D326154
+
+
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -2502,20 +2502,20 @@ function HandleMultipleAttachments(attac
+         for (const info of infos) {
+           await info.save(top.browsingContext);
+         }
+       };
+       saveAttachments(attachments);
+       return;
+     }
+     case "copyUrl":
+-      // Copy external http url(s) to clipboard. The menuitem is hidden unless
+-      // all selected attachment urls are http.
++      // Copy external url(s) to clipboard. The menuitem is hidden unless all
++      // selected attachments are external (http link or detached file).
+       navigator.clipboard.writeText(
+-        attachments.map(a => encodeURI(a.name)).join("\n")
++        attachments.map(a => a.displayUrl).join("\n")
+       );
+       return;
+     case "openFolder":
+       for (const attachment of attachments) {
+         setTimeout(() => attachment.openFolder());
+       }
+       return;
+     default:
+diff --git a/mail/test/browser/attachment/browser_attachmentMenus.js b/mail/test/browser/attachment/browser_attachmentMenus.js
+--- a/mail/test/browser/attachment/browser_attachmentMenus.js
++++ b/mail/test/browser/attachment/browser_attachmentMenus.js
+@@ -594,16 +594,88 @@ async function help_test_attachment_menu
+ // Generate a test for each message in |messages|.
+ for (let i = 0; i < messages.length; i++) {
+   add_task(function () {
+     return help_test_attachment_menus(i);
+   });
+ }
+ 
+ /**
++ * Select a message, expand the attachment list, and wait for the size of all
++ * attachments to be resolved.
++ *
++ * @param {string} name - The name of the message in |messages|.
++ */
++async function select_message_with_attachments(name) {
++  await be_in_folder(folder);
++  aboutMessage = get_about_message();
++  await select_click_row(messages.findIndex(m => m.name == name));
++  aboutMessage.toggleAttachmentList(true);
++  for (const attachment of aboutMessage.currentAttachments) {
++    await attachment.isEmpty();
++  }
++}
++
++/**
++ * Activate "Copy Link Location" in the context menu of an attachment.
++ *
++ * @param {integer} index - Index of the attachment in the attachmentList.
++ */
++async function activate_copy_attachment_url(index) {
++  const attachmentList = aboutMessage.document.getElementById("attachmentList");
++  const contextMenu = aboutMessage.document.getElementById(
++    "attachmentItemContext"
++  );
++  const shownPromise = BrowserTestUtils.waitForEvent(contextMenu, "popupshown");
++  const node = attachmentList.getItemAtIndex(index);
++  attachmentList.selectItem(node);
++  EventUtils.synthesizeMouseAtCenter(
++    node,
++    { type: "contextmenu" },
++    aboutMessage
++  );
++  await shownPromise;
++
++  assert_shown("context-copyAttachmentUrl", true);
++  const hiddenPromise = BrowserTestUtils.waitForEvent(
++    contextMenu,
++    "popuphidden"
++  );
++  contextMenu.activateItem(
++    aboutMessage.document.getElementById("context-copyAttachmentUrl")
++  );
++  await hiddenPromise;
++}
++
++/**
++ * Tests that "Copy Link Location" copies the location the attachment points
++ * to, and not the attachment's file name.
++ */
++add_task(async function test_copy_attachment_url_detached() {
++  const detachedFile = new FileUtils.File(
++    getTestFilePath("data/attachment.txt")
++  );
++  const expectedUrl = decodeURI(
++    Services.io.newFileURI(detachedFile).displaySpec
++  );
++
++  await select_message_with_attachments("detached_attachment");
++  await SimpleTest.promiseClipboardChange(expectedUrl, () =>
++    activate_copy_attachment_url(0)
++  );
++});
++
++add_task(async function test_copy_attachment_url_link() {
++  await select_message_with_attachments("link_enclosure_valid");
++  await SimpleTest.promiseClipboardChange("https://example.com/", () =>
++    activate_copy_attachment_url(0)
++  );
++});
++
++/**
+  * Tests that the "all attachments" commands act on the attachments that are
+  * still there, when one of the attachments has already been deleted.
+  */
+ add_task(async function test_all_commands_with_deleted_attachment() {
+   await be_in_folder(folder);
+   aboutMessage = get_about_message();
+   await select_click_row(
+     messages.findIndex(m => m.name == "multiple_attachments_one_deleted")
+

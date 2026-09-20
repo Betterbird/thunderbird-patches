@@ -1,0 +1,129 @@
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1789422160 25200
+# Node ID 53096413d9120533ef208421548d3486d5b9e3a8
+# Parent  d7500f82529f7eead6824a8eb86607ed1174d645
+Bug 2071585 - Prevent POP3 connection attempts and alerts while offline. r=mkmelin
+
+POP3 opens sockets directly, so stop mail checks before creating a client when the application is offline. Reset the biff state when that check fails synchronously.
+
+Correct background error classification so checks without a message window do not show alerts, and cover both behaviors with regression tests.
+
+Differential Revision: https://phabricator.services.mozilla.com/D326015
+
+diff --git a/mailnews/local/src/Pop3Client.sys.mjs b/mailnews/local/src/Pop3Client.sys.mjs
+--- a/mailnews/local/src/Pop3Client.sys.mjs
++++ b/mailnews/local/src/Pop3Client.sys.mjs
+@@ -407,23 +407,23 @@ export class Pop3Client {
+         errorName,
+         [this._server.hostname]
+       );
+ 
+       // If there's a message window on the URI, then we should alert the user.
+       // Otherwise (i.e. if the getter for `msgWindow` raised
+       // `NS_ERROR_NULL_POINTER`), this is a background operation and we should
+       // tell the mail session to only call the listeners but not alert.
+-      let silent = false;
++      let silent = true;
+       try {
+         this.runningUri.msgWindow;
+         silent = false;
+       } catch (ex) {
+         if (
+-          !(ex instanceof Ci.nsIException) &&
++          !(ex instanceof Ci.nsIException) ||
+           ex.result != Cr.NS_ERROR_NULL_POINTER
+         ) {
+           throw ex;
+         }
+       }
+ 
+       MailServices.mailSession.alertUser(errorMessage, this.runningUri, silent);
+     }
+@@ -918,23 +918,23 @@ export class Pop3Client {
+         "oAuth2Error",
+         [this._server.hostname]
+       );
+ 
+       // If there's a message window on the URI, then we should alert the user.
+       // Otherwise (i.e. if the getter for `msgWindow` raised
+       // `NS_ERROR_NULL_POINTER`), this is a background operation and we should
+       // tell the mail session to only call the listeners but not alert.
+-      let silent = false;
++      let silent = true;
+       try {
+         this.runningUri.msgWindow;
+         silent = false;
+       } catch (ex) {
+         if (
+-          !(ex instanceof Ci.nsIException) &&
++          !(ex instanceof Ci.nsIException) ||
+           ex.result != Cr.NS_ERROR_NULL_POINTER
+         ) {
+           throw ex;
+         }
+       }
+ 
+       MailServices.mailSession.alertUser(errorMessage, this.runningUri, silent);
+       this._actionDone(Cr.NS_ERROR_FAILURE);
+diff --git a/mailnews/local/src/Pop3IncomingServer.sys.mjs b/mailnews/local/src/Pop3IncomingServer.sys.mjs
+--- a/mailnews/local/src/Pop3IncomingServer.sys.mjs
++++ b/mailnews/local/src/Pop3IncomingServer.sys.mjs
+@@ -115,21 +115,26 @@ export class Pop3IncomingServer extends 
+   }
+ 
+   performBiff(msgWindow) {
+     this.performingBiff = true;
+     const inbox = this.rootMsgFolder.getFolderWithFlags(
+       Ci.nsMsgFolderFlags.Inbox
+     );
+     const urlListener = inbox.QueryInterface(Ci.nsIUrlListener);
+-    // Occurs on biff for an individual server.
+-    if (this.downloadOnBiff) {
+-      MailServices.pop3.GetNewMail(msgWindow, urlListener, inbox, this);
+-    } else {
+-      MailServices.pop3.CheckForNewMail(msgWindow, urlListener, inbox, this);
++    try {
++      // Occurs on biff for an individual server.
++      if (this.downloadOnBiff) {
++        MailServices.pop3.GetNewMail(msgWindow, urlListener, inbox, this);
++      } else {
++        MailServices.pop3.CheckForNewMail(msgWindow, urlListener, inbox, this);
++      }
++    } catch (error) {
++      this.performingBiff = false;
++      throw error;
+     }
+   }
+ 
+   /** @see nsILocalMailIncomingServer */
+   createDefaultMailboxes() {
+     for (const name of ["Inbox", "Trash"]) {
+       const folderUri = this.rootFolder.URI + "/" + name;
+       if (!this.rootFolder.getChildWithURI(folderUri, false, false)) {
+diff --git a/mailnews/local/src/Pop3Service.sys.mjs b/mailnews/local/src/Pop3Service.sys.mjs
+--- a/mailnews/local/src/Pop3Service.sys.mjs
++++ b/mailnews/local/src/Pop3Service.sys.mjs
+@@ -54,16 +54,22 @@ export class Pop3Service {
+ 
+   notifyDownloadCompleted(folder, numMessages) {
+     for (const listener of this._listeners) {
+       listener.onDownloadCompleted(folder, numMessages);
+     }
+   }
+ 
+   _getMail(downloadNewMail, msgWindow, urlListener, inbox, server) {
++    if (Services.io.offline) {
++      throw Components.Exception(
++        "Cannot get mail while offline",
++        Cr.NS_MSG_ERROR_OFFLINE
++      );
++    }
+     server.wrappedJSObject.withClient(client => {
+       client.runningUri.msgWindow = msgWindow;
+       client.urlListener = urlListener;
+       client.onOpen = () => {
+         client.getMail(downloadNewMail, msgWindow, inbox);
+       };
+     });
+   }
