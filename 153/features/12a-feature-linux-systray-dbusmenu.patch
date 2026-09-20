@@ -1,0 +1,260 @@
+# HG changeset patch
+# Github User mfschumann <github@mfs.name> and Kilo Code
+Feature: Linux systray. Also serve an empty com.canonical.dbusmenu on the
+  indicator object, so StatusNotifierItem hosts that only implement the legacy
+  dbusmenu protocol (notably the GNOME Shell AppIndicator extension) stop
+  logging
+
+    Gio.DBusError: ... UnknownMethod: No such interface 'com.canonical.dbusmenu'
+    of the object at path /org/ayatana/appindicator/Betterbird_systray_icon
+
+  libayatana-appindicator-glib exports its menu only via org.gtk.Menus, which
+  such hosts do not understand.  They learn our object path from the
+  StatusNotifierItem "Menu" property and then try to talk dbusmenu to it.
+  Answering the (unused) dbusmenu with an always-empty menu keeps them happy
+  and costs nothing, since Betterbird intentionally shows no context menu.
+
+diff --git a/third_party/appindicator/ayatana-appindicator.c b/third_party/appindicator/ayatana-appindicator.c
+index 8c10dbd..a81996c 100644
+--- a/third_party/appindicator/ayatana-appindicator.c
++++ b/third_party/appindicator/ayatana-appindicator.c
+@@ -70,6 +70,8 @@ static GDBusNodeInfo *m_pItemNodeInfo = NULL;
+ static GDBusInterfaceInfo *m_pItemInterfaceInfo = NULL;
+ static GDBusNodeInfo *m_pWatcherNodeInfo = NULL;
+ static GDBusInterfaceInfo *m_pWatcherInterfaceInfo = NULL;
++static GDBusNodeInfo *m_pMenuNodeInfo = NULL;
++static GDBusInterfaceInfo *m_pMenuInterfaceInfo = NULL;
+ 
+ typedef struct _AppIndicatorPrivate
+ {
+@@ -98,6 +100,7 @@ typedef struct _AppIndicatorPrivate
+     guint nMenuId;
+     GDBusConnection *pConnection;
+     guint nDbusRegistration;
++    guint nMenuDbusRegistration;
+     gchar *sPath;
+     GDBusProxy *pWatcherProxy;
+     guint nWatcherId;
+@@ -504,6 +507,160 @@ static void onRegisterService (GObject *pObject, GAsyncResult *pResult, gpointer
+     return;
+ }
+ 
++// Betterbird: libayatana-appindicator-glib exports its menu exclusively via
++// org.gtk.Menus, but several StatusNotifierItem hosts (most notably the GNOME
++// Shell AppIndicator extension) still implement only the legacy
++// com.canonical.dbusmenu protocol.  When they learn the Menu object path from
++// the SNI "Menu" property, they try to talk dbusmenu to it and fail with
++// "UnknownMethod: No such interface com.canonical.dbusmenu", spamming the
++// journal.  Betterbird never shows a context menu (the tray icon only activates
++// the window), so register an always-empty dbusmenu on the same object path to
++// keep those hosts happy, while org.gtk.Menus remains available for hosts that
++// understand it.
++static const gchar *sDbusMenuXML =
++"<node>"
++"  <interface name=\"com.canonical.dbusmenu\">"
++"    <property name=\"Version\" type=\"u\" access=\"read\" />"
++"    <property name=\"TextDirection\" type=\"s\" access=\"read\" />"
++"    <property name=\"Status\" type=\"s\" access=\"read\" />"
++"    <property name=\"IconThemePath\" type=\"as\" access=\"read\" />"
++"    <method name=\"GetLayout\">"
++"      <arg type=\"i\" name=\"parentId\" direction=\"in\" />"
++"      <arg type=\"i\" name=\"recursionDepth\" direction=\"in\" />"
++"      <arg type=\"as\" name=\"propertyNames\" direction=\"in\" />"
++"      <arg type=\"u\" name=\"revision\" direction=\"out\" />"
++"      <arg type=\"(ia{sv}av)\" name=\"layout\" direction=\"out\" />"
++"    </method>"
++"    <method name=\"GetGroupProperties\">"
++"      <arg type=\"ai\" name=\"ids\" direction=\"in\" />"
++"      <arg type=\"as\" name=\"propertyNames\" direction=\"in\" />"
++"      <arg type=\"a(ia{sv})\" name=\"properties\" direction=\"out\" />"
++"    </method>"
++"    <method name=\"GetProperty\">"
++"      <arg type=\"i\" name=\"id\" direction=\"in\" />"
++"      <arg type=\"s\" name=\"name\" direction=\"in\" />"
++"      <arg type=\"v\" name=\"value\" direction=\"out\" />"
++"    </method>"
++"    <method name=\"Event\">"
++"      <arg type=\"i\" name=\"id\" direction=\"in\" />"
++"      <arg type=\"s\" name=\"eventId\" direction=\"in\" />"
++"      <arg type=\"v\" name=\"data\" direction=\"in\" />"
++"      <arg type=\"u\" name=\"timestamp\" direction=\"in\" />"
++"    </method>"
++"    <method name=\"EventGroup\">"
++"      <arg type=\"a(isvu)\" name=\"events\" direction=\"in\" />"
++"      <arg type=\"ai\" name=\"idErrors\" direction=\"out\" />"
++"    </method>"
++"    <method name=\"AboutToShow\">"
++"      <arg type=\"i\" name=\"id\" direction=\"in\" />"
++"      <arg type=\"b\" name=\"needUpdate\" direction=\"out\" />"
++"    </method>"
++"    <method name=\"AboutToShowGroup\">"
++"      <arg type=\"ai\" name=\"ids\" direction=\"in\" />"
++"      <arg type=\"ai\" name=\"updatesNeeded\" direction=\"out\" />"
++"      <arg type=\"ai\" name=\"idErrors\" direction=\"out\" />"
++"    </method>"
++"  </interface>"
++"</node>";
++
++// Answers the com.canonical.dbusmenu method calls with an always-empty menu.
++static void onMenuMethodCall (GDBusConnection *pConnection, const gchar *sSender, const gchar *sPath, const gchar *sInterface, const gchar *sMethod, GVariant *pParams, GDBusMethodInvocation *pInvocation, gpointer pData)
++{
++    if (g_strcmp0 (sMethod, "GetLayout") == 0)
++    {
++        GVariantBuilder cProps;
++        GVariantBuilder cChildren;
++        g_variant_builder_init (&cProps, G_VARIANT_TYPE ("a{sv}"));
++        g_variant_builder_init (&cChildren, G_VARIANT_TYPE ("av"));
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(u(ia{sv}av))", (guint32) 1, (gint) 0, &cProps, &cChildren));
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "GetGroupProperties") == 0)
++    {
++        GVariantBuilder cProperties;
++        g_variant_builder_init (&cProperties, G_VARIANT_TYPE ("a(ia{sv})"));
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(a(ia{sv}))", &cProperties));
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "GetProperty") == 0)
++    {
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(v)", g_variant_new_string ("")));
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "Event") == 0)
++    {
++        g_dbus_method_invocation_return_value (pInvocation, NULL);
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "EventGroup") == 0)
++    {
++        GVariantBuilder cIdErrors;
++        g_variant_builder_init (&cIdErrors, G_VARIANT_TYPE ("ai"));
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(ai)", &cIdErrors));
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "AboutToShow") == 0)
++    {
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(b)", FALSE));
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "AboutToShowGroup") == 0)
++    {
++        GVariantBuilder cUpdatesNeeded;
++        GVariantBuilder cIdErrors;
++        g_variant_builder_init (&cUpdatesNeeded, G_VARIANT_TYPE ("ai"));
++        g_variant_builder_init (&cIdErrors, G_VARIANT_TYPE ("ai"));
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(aiai)", &cUpdatesNeeded, &cIdErrors));
++
++        return;
++    }
++
++    g_warning ("Calling method '%s' on the dbusmenu and it's unknown", sMethod);
++    g_dbus_method_invocation_return_value (pInvocation, NULL);
++}
++
++static GVariant* onMenuGetProperty (GDBusConnection *pConnection, const gchar *sSender, const gchar *sPath, const gchar *sInterface, const gchar *sProperty, GError **pError, gpointer pData)
++{
++    if (g_strcmp0 (sProperty, "Version") == 0)
++    {
++        return g_variant_new_uint32 (3);
++    }
++
++    if (g_strcmp0 (sProperty, "TextDirection") == 0)
++    {
++        return g_variant_new_string ("ltr");
++    }
++
++    if (g_strcmp0 (sProperty, "Status") == 0)
++    {
++        return g_variant_new_string ("normal");
++    }
++
++    if (g_strcmp0 (sProperty, "IconThemePath") == 0)
++    {
++        GVariantBuilder cPath;
++        g_variant_builder_init (&cPath, G_VARIANT_TYPE ("as"));
++
++        return g_variant_builder_end (&cPath);
++    }
++
++    *pError = g_error_new (0, 0, "Unknown property: %s", sProperty);
++
++    return NULL;
++}
++
+ // This function is used to see if we have enough information to connect to things.  If we do, and we're not connected, it connects for us.
+ static void getConnectable (AppIndicator *self)
+ {
+@@ -552,6 +709,19 @@ static void getConnectable (AppIndicator *self)
+         }
+     }
+ 
++    if (!pPrivate->nMenuDbusRegistration && m_pMenuInterfaceInfo)
++    {
++        GError *pError = NULL;
++        const GDBusInterfaceVTable cMenuTable = {.method_call = onMenuMethodCall, .get_property = onMenuGetProperty, .set_property = NULL};
++        pPrivate->nMenuDbusRegistration = g_dbus_connection_register_object (pPrivate->pConnection, pPrivate->sPath, m_pMenuInterfaceInfo, &cMenuTable, self, NULL, &pError);
++
++        if (pError)
++        {
++            g_warning ("Unable to register dbusmenu object on path '%s': %s", pPrivate->sPath, pError->message);
++            g_error_free (pError);
++        }
++    }
++
+     // Export the actions
+     if (!pPrivate->nActionsId)
+     {
+@@ -668,6 +838,12 @@ static void app_indicator_dispose (GObject *pObject)
+         g_signal_emit (self, signals[CONNECTION_CHANGED], 0, FALSE);
+     }
+ 
++    if (pPrivate->nMenuDbusRegistration != 0)
++    {
++        g_dbus_connection_unregister_object (pPrivate->pConnection, pPrivate->nMenuDbusRegistration);
++        pPrivate->nMenuDbusRegistration = 0;
++    }
++
+     if (pPrivate->nDbusRegistration != 0)
+     {
+         g_dbus_connection_unregister_object (pPrivate->pConnection, pPrivate->nDbusRegistration);
+@@ -1524,6 +1700,28 @@ static void app_indicator_class_init (AppIndicatorClass *klass)
+         }
+     }
+ 
++    if (!m_pMenuNodeInfo)
++    {
++        GError *pError = NULL;
++        m_pMenuNodeInfo = g_dbus_node_info_new_for_xml (sDbusMenuXML, &pError);
++
++        if (pError)
++        {
++            g_error ("Unable to parse DBusMenu interface: %s", pError->message);
++            g_error_free (pError);
++        }
++    }
++
++    if (!m_pMenuInterfaceInfo && m_pMenuNodeInfo)
++    {
++        m_pMenuInterfaceInfo = g_dbus_node_info_lookup_interface (m_pMenuNodeInfo, "com.canonical.dbusmenu");
++
++        if (!m_pMenuInterfaceInfo)
++        {
++            g_error ("Unable to find interface 'com.canonical.dbusmenu'");
++        }
++    }
++
+     if (!m_pWatcherNodeInfo)
+     {
+         GError *pError = NULL;
