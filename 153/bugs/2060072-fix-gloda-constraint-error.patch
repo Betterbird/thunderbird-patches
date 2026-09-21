@@ -1,0 +1,153 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1790018568 -7200
+# Parent  a69419b8bb166cac9ec3546a68ba5dbfe49020b0
+Bug 2060072 - Fix gloda constraint failed errors from leaked conversationsText rows.
+
+Delete the conversationsText row in deleteConversationByID() to stop leaking
+fulltext rows when conversations are deleted. The leaked rows could cause a
+duplicate-docid "constraint failed" (SQLITE_CONSTRAINT, error 19) in
+INSERT INTO conversationsText when _nextConversationId was re-allocated.
+
+Seed _nextConversationId from MAX(docid) of conversationsText in addition
+to MAX(id) of conversations in _populateConversationManagedId(), so ids
+already leaked by past versions can never be re-allocated. This heals
+existing profiles without deleting data.
+
+Log the SQL of failing statements in a SQLTrackingStatementWrapper so
+errors can be attributed to the statement that caused them.
+
+diff --git a/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs b/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
+--- a/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
++++ b/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
+@@ -554,8 +554,54 @@ ExplainedStatementWrapper.prototype = {
+   },
+ };
+ 
+ /**
++ * Wrapper around an async statement that logs the statement's SQL when its
++ *  async execution reports an error, so the failure can be attributed to the
++ *  statement that caused it.
++ */
++function SQLTrackingStatementWrapper(aRealStatement, aSQLString) {
++  this.real = aRealStatement;
++  this.sqlString = aSQLString;
++}
++SQLTrackingStatementWrapper.prototype = {
++  bindByIndex(aColIndex, aValue) {
++    this.real.bindByIndex(aColIndex, aValue);
++  },
++  executeAsync(aCallback) {
++    const sqlString = this.sqlString;
++    return this.real.executeAsync({
++      handleResult(aResultSet) {
++        if (aCallback.handleResult) {
++          aCallback.handleResult(aResultSet);
++        }
++      },
++      handleError(aError) {
++        GlodaDatastore._log.error(
++          "async statement failed: " +
++            aError.result +
++            ": " +
++            aError.message +
++            " - " +
++            sqlString
++        );
++        if (aCallback.handleError) {
++          aCallback.handleError(aError);
++        }
++      },
++      handleCompletion(aReason) {
++        if (aCallback.handleCompletion) {
++          aCallback.handleCompletion(aReason);
++        }
++      },
++    });
++  },
++  finalize() {
++    this.real.finalize();
++  },
++};
++
++/**
+  * Writes a single JSON document to the provide file path in a streaming
+  *  fashion.  At startup we open an array to place the queries in and at
+  *  shutdown we close it.
+  */
+@@ -1620,13 +1666,18 @@ export var GlodaDatastore = {
+           ex
+       );
+     }
+ 
++    const wrappedStatement = new SQLTrackingStatementWrapper(
++      statement,
++      aSQLString
++    );
++
+     if (!aWillFinalize) {
+-      this._outstandingAsyncStatements.push(statement);
++      this._outstandingAsyncStatements.push(wrappedStatement);
+     }
+ 
+-    return statement;
++    return wrappedStatement;
+   },
+ 
+   /**
+    * The ExplainedStatementProcessor instance used by
+@@ -2339,8 +2390,22 @@ export var GlodaDatastore = {
+       // no chance of this SQLITE_BUSY on this call
+       this._nextConversationId = stmt.getInt64(0) + 1;
+     }
+     stmt.finalize();
++
++    // Deleted conversations used to leave their fulltext rows behind, so
++    // also take those docids into account to avoid allocating a colliding id.
++    const textStmt = this._createSyncStatement(
++      "SELECT MAX(docid) FROM conversationsText",
++      true
++    );
++    if (textStmt.executeStep()) {
++      const highestDocid = textStmt.getInt64(0);
++      if (highestDocid >= this._nextConversationId) {
++        this._nextConversationId = highestDocid + 1;
++      }
++    }
++    textStmt.finalize();
+   },
+ 
+   get _insertConversationStatement() {
+     const statement = this._createAsyncStatement(
+@@ -2409,16 +2474,31 @@ export var GlodaDatastore = {
+     this.__defineGetter__("_deleteConversationByIDStatement", () => statement);
+     return this._deleteConversationByIDStatement;
+   },
+ 
++  get _deleteConversationTextByIDStatement() {
++    const statement = this._createAsyncStatement(
++      "DELETE FROM conversationsText WHERE docid = ?1"
++    );
++    this.__defineGetter__(
++      "_deleteConversationTextByIDStatement",
++      () => statement
++    );
++    return this._deleteConversationTextByIDStatement;
++  },
++
+   /**
+    * Asynchronously delete a conversation given its ID.
+    */
+   deleteConversationByID(aConversationID) {
+     const dcbids = this._deleteConversationByIDStatement;
+     dcbids.bindByIndex(0, aConversationID);
+     dcbids.executeAsync(this.trackAsync());
+ 
++    const dctbids = this._deleteConversationTextByIDStatement;
++    dctbids.bindByIndex(0, aConversationID);
++    dctbids.executeAsync(this.trackAsync());
++
+     GlodaCollectionManager.itemsDeleted(GlodaConversation.prototype.NOUN_ID, [
+       aConversationID,
+     ]);
+   },
