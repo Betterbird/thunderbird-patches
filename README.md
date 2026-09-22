@@ -125,7 +125,7 @@ Information you need to supply:
 7. Check whether there are relevant entries in the Error Console: `Tools > Developer Tools > Error Console`. You can clear the console before reproducing the problem by clicking on the trash can icon on the top left. You can enable timestamps by clicking on the gear/sprocket icon on the top right.
 8. Check whether the problem reproduces with all add-ons switched off: `Help > Troubleshoot Mode`. Reset the startup cache: `Help > Troubleshooting Information, Clear startup cache`.
 9. Have you manipulated any preferences, perhaps via `user.js`? Are you using `userChrome.css` or `userContent.css`?
-10. For performance issues, submit a (startup) performance profile, see Mozilla's documentation for details. Note that after capturing the profile via `Tools > Developer Tools > Developer Toolbox, Performance`, you need to click `Upload local profile`, but instead of uploading to Mozilla, click `Download`. Then submit the data to our support, for big files, use a file transfer service.
+10. For performance issues, submit a (startup) performance profile, see Mozilla's documentation for details. Note that after capturing the profile via `Tools > Developer Tools > Developer Toolbox, Performance`, you need to `Download` it. Do **not** use the `Share` button. Then submit the data to our support, for big files, use a file transfer service.
 11. For issues with specific folders, state whether the account uses mbox or maildir storage. Have you tried using the `Repair Folder` function on the folder's property panel? These issues include:
 messages not displaying correctly,
 receiving mail into the folder (if it's an Inbox) not working,
