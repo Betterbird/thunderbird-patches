@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu> and DeepSeek
-# Date 1790109850 -7200
+# Date 1790116568 -7200
 # Parent  29e082d49e740c2d48650f1822e0f3cbc83b6143
 NNN35 - Keep Tags folder mode views, counts and caches up to date when tags change.
 
@@ -90,14 +90,16 @@ diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
 diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxUtils.sys.mjs
 --- a/mail/modules/SmartMailboxUtils.sys.mjs
 +++ b/mail/modules/SmartMailboxUtils.sys.mjs
-@@ -281,8 +281,98 @@ class SmartMailbox {
+@@ -281,8 +281,107 @@ class SmartMailbox {
    }
  }
  
  let smartMailboxInstance = null;
 +let mfnListenerRegistered = false;
 +
-+function isDisplayedIn3Pane(folder) {
++function isMaintainedByView(folder) {
++  let displayed = false;
++  let quickSearch = false;
 +  for (const win of Services.wm.getEnumerator("mail:3pane")) {
 +    const tabmail = win.document.getElementById("tabmail");
 +    for (const tab of tabmail?.tabInfo ?? []) {
@@ -106,11 +108,17 @@ diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxU
 +      }
 +      const about3Pane = tab.chromeBrowser?.contentWindow;
 +      if (about3Pane?.gViewWrapper?.displayedFolder?.URI == folder.URI) {
-+        return true;
++        displayed = true;
++        const search = about3Pane.gViewWrapper.search;
++        if (search?.viewTerms || search?.userTerms) {
++          quickSearch = true;
++        }
 +      }
 +    }
 +  }
-+  return false;
++  // With extra search terms active the view is a snapshot which doesn't
++  // maintain the counts or the cached search results; adjust them here.
++  return displayed && !quickSearch;
 +}
 +
 +function adjustTagFolderCount(folder, delta, aMsg) {
@@ -135,10 +143,11 @@ diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxU
 +}
 +
 +/**
-+ * Update the counts of the tag folders when keywords change, since a message
-+ * may now match, or no longer match, the search of a tag folder. Folders
-+ * displayed in a 3-pane window are skipped: the counts of those are updated
-+ * by the view itself, see nsMsgXFVirtualFolderDBView::OnHdrPropertyChanged().
++ * Update the counts and the cached search results of the tag folders when
++ * keywords change, since a message may now match, or no longer match, the
++ * search of a tag folder. Folders displayed in a 3-pane window without extra
++ * search terms are skipped: those are updated by the view itself, see
++ * nsMsgXFVirtualFolderDBView::OnHdrPropertyChanged().
 + */
 +const tagFolderListener = {
 +  msgPropertyChanged(aMsg, aProperty, aOldValue, aNewValue) {
@@ -178,7 +187,7 @@ diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxU
 +      }
 +      const tag = lazy.MailServices.tags.getAllTags().find(t => t.key == key);
 +      const folder = smartMailboxInstance.getTagFolder(tag);
-+      if (!folder || isDisplayedIn3Pane(folder)) {
++      if (!folder || isMaintainedByView(folder)) {
 +        continue;
 +      }
 +      adjustTagFolderCount(folder, newKeys.has(key) ? 1 : -1, aMsg);
@@ -189,7 +198,7 @@ diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxU
  export const SmartMailboxUtils = {
    /**
     * @returns {SmartMailbox}
-@@ -292,8 +382,17 @@ export const SmartMailboxUtils = {
+@@ -292,8 +391,17 @@ export const SmartMailboxUtils = {
        smartMailboxInstance = new SmartMailbox();
      } else {
        smartMailboxInstance.verify();
@@ -210,7 +219,21 @@ diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxU
 diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
 --- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
 +++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
-@@ -144,17 +144,68 @@ nsresult nsMsgXFVirtualFolderDBView::OnN
+@@ -87,8 +87,13 @@ nsMsgXFVirtualFolderDBView::CopyDBView(
+       (nsMsgXFVirtualFolderDBView*)aNewMsgDBView;
+ 
+   newMsgDBView->m_viewFolder = m_viewFolder;
+   newMsgDBView->m_searchSession = m_searchSession;
++  // Without this, a cloned view (as used by the message pane) would treat
++  // keyword changes as if no extra search terms were active and wrongly
++  // update the counts and the cached search results from its filtered
++  // content.
++  newMsgDBView->m_doingQuickSearch = m_doingQuickSearch;
+ 
+   int32_t scopeCount;
+   nsresult rv;
+   nsCOMPtr<nsIMsgSearchSession> searchSession =
+@@ -144,17 +149,76 @@ nsresult nsMsgXFVirtualFolderDBView::OnN
  NS_IMETHODIMP
  nsMsgXFVirtualFolderDBView::OnHdrPropertyChanged(
      nsIMsgDBHdr* aHdrChanged, const nsACString& property, bool aPreChange,
@@ -233,13 +256,21 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 +    }
 +
 +    const bool wasMatch = *aStatus;
-+    if (m_doingQuickSearch) {  // -- !! Start Betterbird-only !!
-+      // The match can't be checked against the pure virtual folder terms
-+      // while extra terms are active, so invalidate the cached results.
-+      if (m_viewFolder) {
-+        m_viewFolder->ClearFlag(nsMsgFolderFlags::CacheValid);
++    nsMsgViewIndex index = FindHdr(aHdrChanged);
++
++    // -- !! Start Betterbird-only !!
++    if (m_doingQuickSearch) {
++      // With extra terms active the view is a snapshot, matching normal quick
++      // search behaviour: don't add or remove messages. The counts and the
++      // cached search results are maintained by the keyword listener in
++      // SmartMailboxUtils.
++      if (index != nsMsgViewIndex_None) {
++        NoteChange(index, 1, nsMsgViewNotificationCode::changed);
 +      }
-+    } else if (match != wasMatch) {
++      return NS_OK;
++    }
++
++    if (match != wasMatch) {
 +      // Keep the cached search results of the folder the message lives in up
 +      // to date, see nsMsgDatabase::UpdateHdrInCache().
 +      nsCOMPtr<nsIMsgFolder> folder;
@@ -251,8 +282,8 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 +        m_viewFolder->GetURI(searchUri);
 +        db->UpdateHdrInCache(searchUri, aHdrChanged, match);
 +      }
-+    }  // -- !! End Betterbird-only !!
-+    nsMsgViewIndex index = FindHdr(aHdrChanged);
++    }
++    // -- !! End Betterbird-only !!
 +
 +    if (match && !wasMatch && index == nsMsgViewIndex_None) {
 +      nsCOMPtr<nsIMsgFolder> folder;
@@ -261,11 +292,11 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
 +      m_doingSearch = false;
 +      OnSearchHit(aHdrChanged, folder);
 +      m_doingSearch = saveDoingSearch;
-+      if (!m_doingQuickSearch) UpdateFolderCountsFromView();
++      UpdateFolderCountsFromView();  // Needs if (!m_doingQuickSearch) if early return is removed above.
 +    } else if (!match && wasMatch && index != nsMsgViewIndex_None) {
 +      RemoveByIndex(index);
 +      if (m_totalMessagesInView > 0) m_totalMessagesInView--;
-+      if (!m_doingQuickSearch) UpdateFolderCountsFromView();
++      UpdateFolderCountsFromView();  // Needs if (!m_doingQuickSearch) if early return is removed above.
 +    } else if (index != nsMsgViewIndex_None) {
 +      NoteChange(index, 1, nsMsgViewNotificationCode::changed);
 +    }
@@ -285,7 +316,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
    nsMsgViewIndex index = FindHdr(aHdrChanged);
    // Message does not appear in view.
    if (index == nsMsgViewIndex_None) return NS_OK;
-@@ -173,10 +224,8 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+@@ -173,10 +237,8 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
    // Second call, done after the change.
    bool wasPlugin = *aStatus;
  
@@ -296,7 +327,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
  
    if (!match && plugin && !wasPlugin)
      // Remove hdr from view.
-@@ -186,8 +235,45 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+@@ -186,8 +248,45 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
  
    return NS_OK;
  }
@@ -342,7 +373,7 @@ diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/sr
      nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits, bool onDone) {
    nsCOMPtr<nsIMsgDatabase> db;
    nsresult rv = folder->GetMsgDatabase(getter_AddRefs(db));
-@@ -326,37 +412,9 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+@@ -326,37 +425,9 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
  
    // The following should be necessary when `m_usingCachedHits` is true,
    // but it won't hurt to adjust the counts which what we restored from cache.
