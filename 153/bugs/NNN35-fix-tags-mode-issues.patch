@@ -1,0 +1,398 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1790109850 -7200
+# Parent  29e082d49e740c2d48650f1822e0f3cbc83b6143
+NNN35 - Keep Tags folder mode views, counts and caches up to date when tags change.
+
+Issues fixed:
+https://github.com/Betterbird/thunderbird-patches/issues/581
+https://github.com/Betterbird/thunderbird-patches/issues/603
+https://bugzilla.mozilla.org/show_bug.cgi?id=1954441
+
+Note that Betterbird caches virtual folders completely, see:
+1923520-fix-caching-for-virtual-folders.patch
+So parts of this patch only apply to Betterbird. Those are clearly marked.
+
+When a tag was added to or removed from a message, an open tag folder
+view kept showing messages which no longer matched, the message counts
+next to the tags in the folder pane were only refreshed when the tag
+folder was opened, and the cached search results were left stale, so
+that reopening the folder restored an outdated view.
+
+- nsMsgXFVirtualFolderDBView::OnHdrPropertyChanged() now handles keyword
+  (tag) changes: newly matching messages are added to the view,
+  no-longer-matching messages are removed, the cached search results of
+  the folder the message lives in are corrected via
+  nsMsgDatabase::UpdateHdrInCache(), and the search folder's message and
+  unread counts are updated from the view state. While extra search
+  terms are active the cache is invalidated instead.
+- SmartMailboxUtils listens for keyword changes and adjusts the tag
+  folder counts and cached search results when the folder is not
+  displayed in any 3-pane window.
+- Renaming a tag in the settings is now also reflected in the Tags
+  folder pane mode when that mode isn't currently active (bug 1954441).
+
+Test checklist: tag/untag from a tag view (message disappears/appears instantly);
+tag from Inbox and watch the Tags pane counter; rename a tag while Tags mode is off, then enable it.
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -1846,8 +1846,23 @@ var folderPane = {
+        *   changed causing this code to run.
+        */
+       changeTagFromPrefChange(prefName) {
+         const [, , key] = prefName.split(".");
++        // The smart mailbox may not exist yet if the Tags mode hasn't been
++        // enabled in this session. Don't create it just because a tag
++        // preference changed, but do use it if it exists.
++        if (!this._smartMailbox) {
++          const smartServer = MailServices.accounts.findServer(
++            "nobody",
++            "smart mailboxes",
++            "none"
++          );
++          if (!smartServer) {
++            return;
++          }
++          this._smartMailbox = SmartMailboxUtils.getSmartMailbox();
++        }
++
+         if (!MailServices.tags.isValidKey(key)) {
+           const uri = this._smartMailbox.getTagFolderUriForKey(key);
+           folderPane.getRowForFolder(uri)?.remove();
+           return;
+@@ -1863,9 +1878,9 @@ var folderPane = {
+         folder.name = tag.tag;
+         if (row) {
+           row.name = tag.tag;
+           row.icon.style.setProperty("--icon-color", tag.color);
+-        } else {
++        } else if (this.active) {
+           this.containerList.appendChild(
+             folderPane._createTagRow(this.name, folder, tag)
+           );
+         }
+@@ -2066,12 +2081,9 @@ var folderPane = {
+     switch (topic) {
+       case "nsPref:changed":
+         if (data == "mail.accountmanager.accounts") {
+           this._forAllActiveModes("changeAccountOrder");
+-        } else if (
+-          data.startsWith("mailnews.tags.") &&
+-          this._modes.tags.active
+-        ) {
++        } else if (data.startsWith("mailnews.tags.")) {
+           // The tags service isn't updated until immediately after the
+           // preferences change, so go to the back of the event queue before
+           // updating the UI.
+           setTimeout(() => this._modes.tags.changeTagFromPrefChange(data));
+diff --git a/mail/modules/SmartMailboxUtils.sys.mjs b/mail/modules/SmartMailboxUtils.sys.mjs
+--- a/mail/modules/SmartMailboxUtils.sys.mjs
++++ b/mail/modules/SmartMailboxUtils.sys.mjs
+@@ -281,8 +281,98 @@ class SmartMailbox {
+   }
+ }
+ 
+ let smartMailboxInstance = null;
++let mfnListenerRegistered = false;
++
++function isDisplayedIn3Pane(folder) {
++  for (const win of Services.wm.getEnumerator("mail:3pane")) {
++    const tabmail = win.document.getElementById("tabmail");
++    for (const tab of tabmail?.tabInfo ?? []) {
++      if (tab.mode?.name != "mail3PaneTab") {
++        continue;
++      }
++      const about3Pane = tab.chromeBrowser?.contentWindow;
++      if (about3Pane?.gViewWrapper?.displayedFolder?.URI == folder.URI) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++function adjustTagFolderCount(folder, delta, aMsg) {
++  try {
++    const msgDatabase = folder.msgDatabase;
++    const folderInfo = msgDatabase.dBFolderInfo;
++    folderInfo.numMessages = Math.max(0, folderInfo.numMessages + delta);
++    if (!aMsg.isRead) {
++      folderInfo.numUnreadMessages = Math.max(
++        0,
++        folderInfo.numUnreadMessages + delta
++      );
++    }
++    msgDatabase.commit(Ci.nsMsgDBCommitType.kLargeCommit);
++    folder.updateSummaryTotals(true);
++    // Keep the cached search results of the folder the message lives in up to
++    // date, see nsMsgDatabase::UpdateHdrInCache(). -- !! Betterbird only !!
++    aMsg.folder.msgDatabase.updateHdrInCache(folder.URI, aMsg, delta == 1);
++  } catch (ex) {
++    console.error(`Failed to update tag folder counts for ${folder.URI}`, ex);
++  }
++}
++
++/**
++ * Update the counts of the tag folders when keywords change, since a message
++ * may now match, or no longer match, the search of a tag folder. Folders
++ * displayed in a 3-pane window are skipped: the counts of those are updated
++ * by the view itself, see nsMsgXFVirtualFolderDBView::OnHdrPropertyChanged().
++ */
++const tagFolderListener = {
++  msgPropertyChanged(aMsg, aProperty, aOldValue, aNewValue) {
++    if (aProperty != "keywords" || !smartMailboxInstance) {
++      return;
++    }
++    // The tag folders search all folders except the unwanted types listed.
++    if (
++      aMsg.folder.isSpecialFolder(
++        Ci.nsMsgFolderFlags.Trash |
++          Ci.nsMsgFolderFlags.Junk |
++          Ci.nsMsgFolderFlags.Queue |
++          Ci.nsMsgFolderFlags.Virtual,
++        true
++      )
++    ) {
++      return;
++    }
++
++    const oldKeys = new Set(aOldValue.split(" ").filter(Boolean));
++    const newKeys = new Set(aNewValue.split(" ").filter(Boolean));
++    const changedKeys = new Set();
++    for (const key of oldKeys) {
++      if (!newKeys.has(key)) {
++        changedKeys.add(key);
++      }
++    }
++    for (const key of newKeys) {
++      if (!oldKeys.has(key)) {
++        changedKeys.add(key);
++      }
++    }
++
++    for (const key of changedKeys) {
++      if (!lazy.MailServices.tags.isValidKey(key)) {
++        continue;
++      }
++      const tag = lazy.MailServices.tags.getAllTags().find(t => t.key == key);
++      const folder = smartMailboxInstance.getTagFolder(tag);
++      if (!folder || isDisplayedIn3Pane(folder)) {
++        continue;
++      }
++      adjustTagFolderCount(folder, newKeys.has(key) ? 1 : -1, aMsg);
++    }
++  },
++};
+ 
+ export const SmartMailboxUtils = {
+   /**
+    * @returns {SmartMailbox}
+@@ -292,8 +382,17 @@ export const SmartMailboxUtils = {
+       smartMailboxInstance = new SmartMailbox();
+     } else {
+       smartMailboxInstance.verify();
+     }
++    // Only register the listener once the smart mailbox exists: before that,
++    // there are no tag folders whose counts could need updating.
++    if (!mfnListenerRegistered) {
++      mfnListenerRegistered = true;
++      lazy.MailServices.mfn.addListener(
++        tagFolderListener,
++        Ci.nsIMsgFolderNotificationService.msgPropertyChanged
++      );
++    }
+     return smartMailboxInstance;
+   },
+ 
+   /**
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.cpp
+@@ -144,17 +144,68 @@ nsresult nsMsgXFVirtualFolderDBView::OnN
+ NS_IMETHODIMP
+ nsMsgXFVirtualFolderDBView::OnHdrPropertyChanged(
+     nsIMsgDBHdr* aHdrChanged, const nsACString& property, bool aPreChange,
+     uint32_t* aStatus, nsIDBChangeListener* aInstigator) {
++  NS_ENSURE_ARG_POINTER(aStatus);
++  NS_ENSURE_ARG_POINTER(aHdrChanged);
++
++  nsCOMPtr<nsIMsgSearchSession> searchSession(
++      do_QueryReferent(m_searchSession));
++
++  // Keyword (tag) changes can alter the search results: add newly matching
++  // messages to the view, remove no-longer-matching messages from it.
++  if (property.EqualsLiteral("keywords") && searchSession) {
++    bool match = false;
++    searchSession->MatchHdr(aHdrChanged, m_db, &match);
++
++    if (aPreChange) {
++      *aStatus = match;
++      return NS_OK;
++    }
++
++    const bool wasMatch = *aStatus;
++    if (m_doingQuickSearch) {  // -- !! Start Betterbird-only !!
++      // The match can't be checked against the pure virtual folder terms
++      // while extra terms are active, so invalidate the cached results.
++      if (m_viewFolder) {
++        m_viewFolder->ClearFlag(nsMsgFolderFlags::CacheValid);
++      }
++    } else if (match != wasMatch) {
++      // Keep the cached search results of the folder the message lives in up
++      // to date, see nsMsgDatabase::UpdateHdrInCache().
++      nsCOMPtr<nsIMsgFolder> folder;
++      aHdrChanged->GetFolder(getter_AddRefs(folder));
++      nsCOMPtr<nsIMsgDatabase> db;
++      if (folder && NS_SUCCEEDED(folder->GetMsgDatabase(getter_AddRefs(db))) &&
++          db) {
++        nsCString searchUri;
++        m_viewFolder->GetURI(searchUri);
++        db->UpdateHdrInCache(searchUri, aHdrChanged, match);
++      }
++    }  // -- !! End Betterbird-only !!
++    nsMsgViewIndex index = FindHdr(aHdrChanged);
++
++    if (match && !wasMatch && index == nsMsgViewIndex_None) {
++      nsCOMPtr<nsIMsgFolder> folder;
++      aHdrChanged->GetFolder(getter_AddRefs(folder));
++      bool saveDoingSearch = m_doingSearch;
++      m_doingSearch = false;
++      OnSearchHit(aHdrChanged, folder);
++      m_doingSearch = saveDoingSearch;
++      if (!m_doingQuickSearch) UpdateFolderCountsFromView();
++    } else if (!match && wasMatch && index != nsMsgViewIndex_None) {
++      RemoveByIndex(index);
++      if (m_totalMessagesInView > 0) m_totalMessagesInView--;
++      if (!m_doingQuickSearch) UpdateFolderCountsFromView();
++    } else if (index != nsMsgViewIndex_None) {
++      NoteChange(index, 1, nsMsgViewNotificationCode::changed);
++    }
++    return NS_OK;
++  }
++
+   // If the junk mail plugin just activated on a message, then
+   // we'll allow filters to remove from view.
+   // Otherwise, just update the view line.
+-  //
+-  // Note this will not add newly matched headers to the view. This is
+-  // probably a bug that needs fixing.
+-
+-  NS_ENSURE_ARG_POINTER(aStatus);
+-  NS_ENSURE_ARG_POINTER(aHdrChanged);
+ 
+   nsMsgViewIndex index = FindHdr(aHdrChanged);
+   // Message does not appear in view.
+   if (index == nsMsgViewIndex_None) return NS_OK;
+@@ -173,10 +224,8 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+   // Second call, done after the change.
+   bool wasPlugin = *aStatus;
+ 
+   bool match = true;
+-  nsCOMPtr<nsIMsgSearchSession> searchSession(
+-      do_QueryReferent(m_searchSession));
+   if (searchSession) searchSession->MatchHdr(aHdrChanged, m_db, &match);
+ 
+   if (!match && plugin && !wasPlugin)
+     // Remove hdr from view.
+@@ -186,8 +235,45 @@ nsMsgXFVirtualFolderDBView::OnHdrPropert
+ 
+   return NS_OK;
+ }
+ 
++void nsMsgXFVirtualFolderDBView::UpdateFolderCountsFromView() {
++  if (!m_viewFolder) {
++    return;
++  }
++
++  nsCOMPtr<nsIMsgDatabase> virtDatabase;
++  nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
++  nsresult rv = m_viewFolder->GetDBFolderInfoAndDB(
++      getter_AddRefs(dbFolderInfo), getter_AddRefs(virtDatabase));
++  NS_ENSURE_SUCCESS_VOID(rv);
++
++  // Count up the number of unread and total messages from the view, and set
++  // those in the folder - easier than trying to keep the count up to date in
++  // the face of search hits coming in while the user is reading/deleting
++  // messages.
++  uint32_t numUnread = 0;
++  for (uint32_t i = 0; i < m_flags.Length(); i++) {
++    if (m_flags[i] & nsMsgMessageFlags::Elided) {
++      nsCOMPtr<nsIMsgThread> thread;
++      GetThreadContainingIndex(i, getter_AddRefs(thread));
++      if (thread) {
++        uint32_t unreadInThread;
++        thread->GetNumUnreadChildren(&unreadInThread);
++        numUnread += unreadInThread;
++      }
++    } else if (!(m_flags[i] & nsMsgMessageFlags::Read)) {
++      numUnread++;
++    }
++  }
++
++  dbFolderInfo->SetNumUnreadMessages(numUnread);
++  dbFolderInfo->SetNumMessages(m_totalMessagesInView);
++  // Force update from db.
++  m_viewFolder->UpdateSummaryTotals(true);
++  virtDatabase->Commit(nsMsgDBCommitType::kLargeCommit);
++}
++
+ void nsMsgXFVirtualFolderDBView::UpdateCacheAndViewForFolder(
+     nsIMsgFolder* folder, nsTArray<nsMsgKey> const& newHits, bool onDone) {
+   nsCOMPtr<nsIMsgDatabase> db;
+   nsresult rv = folder->GetMsgDatabase(getter_AddRefs(db));
+@@ -326,37 +412,9 @@ nsMsgXFVirtualFolderDBView::OnSearchDone
+ 
+   // The following should be necessary when `m_usingCachedHits` is true,
+   // but it won't hurt to adjust the counts which what we restored from cache.
+   if (!m_doingQuickSearch && status != NS_MSG_SEARCH_INTERRUPTED) {
+-    nsCOMPtr<nsIMsgDatabase> virtDatabase;
+-    nsCOMPtr<nsIDBFolderInfo> dbFolderInfo;
+-    nsresult rv = m_viewFolder->GetDBFolderInfoAndDB(
+-        getter_AddRefs(dbFolderInfo), getter_AddRefs(virtDatabase));
+-    NS_ENSURE_SUCCESS(rv, rv);
+-    // Count up the number of unread and total messages from the view, and set
+-    // those in the folder - easier than trying to keep the count up to date in
+-    // the face of search hits coming in while the user is reading/deleting
+-    // messages.
+-    uint32_t numUnread = 0;
+-    for (uint32_t i = 0; i < m_flags.Length(); i++) {
+-      if (m_flags[i] & nsMsgMessageFlags::Elided) {
+-        nsCOMPtr<nsIMsgThread> thread;
+-        GetThreadContainingIndex(i, getter_AddRefs(thread));
+-        if (thread) {
+-          uint32_t unreadInThread;
+-          thread->GetNumUnreadChildren(&unreadInThread);
+-          numUnread += unreadInThread;
+-        }
+-      } else {
+-        if (!(m_flags[i] & nsMsgMessageFlags::Read)) numUnread++;
+-      }
+-    }
+-
+-    dbFolderInfo->SetNumUnreadMessages(numUnread);
+-    dbFolderInfo->SetNumMessages(m_totalMessagesInView);
+-    // Force update from db.
+-    m_viewFolder->UpdateSummaryTotals(true);
+-    virtDatabase->Commit(nsMsgDBCommitType::kLargeCommit);
++    UpdateFolderCountsFromView();
+   }
+ 
+   if (!m_sortValid && m_sortType != nsMsgViewSortType::byThread &&
+       !(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay)) {
+diff --git a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+--- a/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
++++ b/mailnews/base/src/nsMsgXFVirtualFolderDBView.h
+@@ -49,8 +49,11 @@ class nsMsgXFVirtualFolderDBView : publi
+ 
+  protected:
+   virtual nsresult GetMessageEnumerator(nsIMsgEnumerator** enumerator) override;
+ 
++  // Update the search folder's total and unread counts from the view state.
++  void UpdateFolderCountsFromView();
++
+   nsCOMArray<nsIMsgFolder> m_foldersSearchingOver;
+   nsCOMArray<nsIMsgDBHdr> m_hdrHits;
+   nsCOMPtr<nsIMsgFolder> m_curFolderGettingHits;
+   // keeps track of the index of the first hit from the cur folder
