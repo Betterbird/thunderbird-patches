@@ -1,0 +1,1063 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1790192534 -7200
+#      Tue Sep 15 12:44:10 2026 -0600
+# Node ID ed71134ff4fb8200acf2e7863ce12fa85195773e
+# Parent  735aa179932fe6aafe41f0a1c055b1a10c36a258
+MessageEditor enhancements and tweaks 2
+1. Reworked to do copy before delete.
+2. Adapt to change in Bug 1887518 - Dragging a message does not select that message.
+   Significant refactor to maintain thread selection state, depends on
+   Bug 2065806 - Keep MSG_VIEW_FLAG_ISTHREAD on single-message thread roots.
+3. Ensure glodaFacetView and conversation view are updated on message edit.
+4. Ensure gloda updates the subject, likely the most common message edit.
+5. Implement pref to optionally view duplicates in glodaFacetView, for multiple copies case.
+6. Function to enable message body updates.
+
+diff --git a/mail/app/profile/all-thunderbird.js b/mail/app/profile/all-thunderbird.js
+--- a/mail/app/profile/all-thunderbird.js
++++ b/mail/app/profile/all-thunderbird.js
+@@ -717,8 +717,10 @@ pref("gloda.facetview.sortby", 2);
+ // faceted search view. Defaults to false (facet view). When true, results open
+ // directly in a table list, equivalent to clicking "Show results as list".
+ pref("gloda.show_as_list_by_default", false);
+ pref("gloda.facetview.max_messages_to_show", 10);
++// Do not show duplicate messageID items.
++pref("gloda.facetview.show_duplicates", false);
+ 
+ // Enable gloda by default!
+ pref("mailnews.database.global.indexer.enabled", true);
+ // Limit the number of gloda message results
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -5732,8 +5732,12 @@ var threadPane = {
+     // and ctrl-t rethreads the drag target to the selected drop target; on no
+     // selection change, ctrl-x will unthread the drag target; ctrl-z will
+     // reset headers to the message's original headers.
+     if (event.ctrlKey && ["KeyT", "KeyX", "KeyZ"].includes(event.code)) {
++      this._rethreadingAllowDragAndDrop = Services.prefs.getBoolPref(
++        "mail.thread.rethreading.allowDragAndDrop",
++        true
++      );
+       if (!this._canReThread(nsMsgViewIndex_None, nsMsgViewIndex_None)) {
+         return;
+       }
+       if (threadTree.inKeyDnD) {
+@@ -5769,8 +5773,10 @@ var threadPane = {
+         threadTree.inKeyDnD = "rethread";
+       }
+     }
+     if (event.key == "Escape" && threadTree.inKeyDnD) {
++      // Need a dt for later _onDragEnd().
++      event.dataTransfer = new DataTransfer();
+       this._onKeyDragEnd(event);
+     }
+   },
+ 
+@@ -6242,167 +6248,124 @@ var threadPane = {
+   saveStateForMessageReplaceAtIndex(index) {
+     if (!this.isValidIndex(index)) {
+       return [() => {}, () => {}];
+     }
+-    const MSG_VIEW_FLAG_ISTHREAD = 0x8000000;
+-    // Ensure the thread and selection state is restored.
+-    const isIndexExpandedContainer =
+-      gViewWrapper.dbView.isContainer(index) &&
+-      gViewWrapper.dbView.isContainerOpen(index);
+-    const origThreadRootMsgHdr = gViewWrapper.dbView
+-      .getThreadContainingIndex(index)
+-      .getRootHdr();
++
++    const currentSelectedMsgURI = gDBView.getURIForViewIndex(index);
++    const currentDisplayedMsgURI = messageBrowser.contentWindow.gMessageURI;
++    const currentDisplayedMsgHdr = messageBrowser.contentWindow.gMessage;
++    const multiMessageDisplayed = !multiMessageBrowser.hidden;
++    const noSelection = !currentDisplayedMsgHdr && !multiMessageDisplayed;
++    // In keyDnD always reselect the necessarily selected message. Otherwise,
++    // select if there is a displayed message and the displayed message
++    // is the same as the selected message (meaning context menu temp selected)
++    // and rethreading the collapsed root in multimessage view.
++    // Note: Using saveSelection() does not work for our purpose.
+     const selectNewMsgHdr = Boolean(
+-      threadTree.inKeyDnD || threadTree.selectedIndex == index
+-    );
+-    const saveSelectionSummarizedPref = Services.prefs.getBoolPref(
+-      "mail.operate_on_msgs_in_collapsed_threads"
++      threadTree.inKeyDnD ||
++      (currentSelectedMsgURI == currentDisplayedMsgURI && !noSelection)
+     );
+-
+-    // If rethreading a rootMsgHdr, collapse it first otherwise display is
+-    // incorrect.
+-    if (gViewWrapper.dbView.isContainer(index)) {
+-      Services.prefs.setBoolPref(
+-        "mail.operate_on_msgs_in_collapsed_threads",
+-        false
+-      );
+-      threadTree.collapseRowAtIndex(index);
+-    }
+-
+     // Ensure no selection after delete. Any selection will be handled in the
+-    // callback functions. This is the only way to truly prevent unwanted
+-    // selection on delete.
++    // callback functions. Nulling gDBView.selection is the only way to truly
++    // prevent unwanted selection on delete.
+     const TreeSelection = threadTree.view.selection;
+-    threadPane.saveSelection();
+-    threadTree.view.selection = null;
+-
+-    const successFn = newMsgHdr => {
+-      threadTree.view.selection = TreeSelection;
+-      Services.prefs.setBoolPref(
+-        "mail.operate_on_msgs_in_collapsed_threads",
+-        saveSelectionSummarizedPref
+-      );
++    gDBView.selection = null;
++
++    const successFn = async (newMsgHdr, log) => {
++      log?.debug("successFn: newMsgHdr - " + newMsgHdr.messageKey);
++      log?.debug("successFn: index - " + index);
++      log?.debug("successFn: selIndex - " + threadTree.selectedIndex);
++      log?.debug("successFn: curIndex - " + threadTree.currentIndex);
++      log?.debug("successFn: inKeyDnD - " + threadTree.inKeyDnD);
++      log?.debug("successFn: selectNewMsgHdr - " + selectNewMsgHdr);
++      log?.debug("successFn: noSelection - " + noSelection);
++
+       if (!newMsgHdr) {
+         // No change or other noop; nothing further to do in the view.
+-        threadPane.releaseSelection();
+-        if (selectNewMsgHdr) {
+-          const row = threadTree.getRowAtIndex(threadTree.currentIndex);
+-          if (row) {
+-            row.selected = true;
+-            row.focus();
+-          }
+-        }
+-        if (isIndexExpandedContainer) {
+-          threadTree.expandRowAtIndex(threadTree.currentIndex);
++        threadTree.view.selection = TreeSelection;
++        if (noSelection && !this.isValidIndex(threadTree.selectedIndex)) {
++          threadTree.currentIndex = index;
+         }
+         return;
+       }
+ 
+-      const newThreadRootMsgHdr = gViewWrapper.dbView
+-        .getThreadContainingMsgHdr(newMsgHdr)
+-        .getRootHdr();
+-      const newThreadRootMsgHdrIndex =
+-        gViewWrapper.getViewIndexForMsgHdr(newThreadRootMsgHdr);
+-      const origThreadRootMsgHdrIndex =
+-        gViewWrapper.getViewIndexForMsgHdr(origThreadRootMsgHdr);
+-
+-      // Upon both a row's removal from and insertion into a thread, the view
+-      // does not update correctly.
+-      if (threadPane.isValidIndex(origThreadRootMsgHdrIndex)) {
+-        if (gViewWrapper.dbView.isContainerOpen(origThreadRootMsgHdrIndex)) {
+-          threadTree.collapseRowAtIndex(origThreadRootMsgHdrIndex);
+-          threadTree.expandRowAtIndex(origThreadRootMsgHdrIndex);
+-        }
+-        // All messages in threaded view have this flag, even if a singleton.
+-        // Core code clears the flag if the last child in a thread is deleted.
+-        // Restore it otherwise the message will disappear upon sorting..
++      // The rethread/unthread/reset/edit source was the selected message. The
++      // new message will have a different messageKey.
++      // Note: Post Bug 1887518, a dnd message is selected on mouse down.
++      // Note: The view must be populated before the new message can be found;
++      // there is no notice. IMAP copy is too early; there are many unreliable
++      // onMessagesAdded events. So we wait for it to get there.
++      let newIndex = nsMsgViewIndex_None;
++      let timer = 0;
++      while (newIndex == nsMsgViewIndex_None && timer < 2000) {
++        await new Promise(resolve => setTimeout(resolve, (timer += 100)));
++        newIndex = threadTree.view.findIndexOfMsgHdr(newMsgHdr, true);
++        log?.debug("successFn: newMsgHdr index - " + newIndex);
++      }
++      log?.debug("successFn: found newMsgHdr index - " + newIndex);
++      try {
++        // Update newly unthreaded thread root message subject to remove Re.
++        // gViewWrapper.dbView.getMsgHdrAt(0).flags & Ci.nsMsgMessageFlags.HasRe
++        // gViewWrapper.dbView.getFlagsAt(0) & Ci.nsMsgMessageFlags.HasRe
++        // are not in sync if a message no longer has References/In-Reply-To
++        // when re-added - m_flags is wrong.
++        // Note: if repairing an IMAP folder, the Re will return even though
++        // there are no References; maybe Bug 2072314 will fix.
++        const newThreadRootMsgHdr = gViewWrapper.dbView
++          .getThreadContainingMsgHdr(newMsgHdr)
++          .getRootHdr();
+         if (
+-          gViewWrapper.showThreaded &&
+-          !(
+-            gViewWrapper.dbView.getFlagsAt(origThreadRootMsgHdrIndex) &
+-            MSG_VIEW_FLAG_ISTHREAD
+-          )
++          newThreadRootMsgHdr == newMsgHdr &&
++          newMsgHdr.flags & Ci.nsMsgMessageFlags.HasRe
+         ) {
+-          origThreadRootMsgHdr.orFlags(MSG_VIEW_FLAG_ISTHREAD);
+-          origThreadRootMsgHdr.folder?.msgDatabase.notifyHdrChangeAll(
+-            origThreadRootMsgHdr,
++          newMsgHdr.folder?.msgDatabase.notifyHdrChangeAll(
++            newMsgHdr,
+             0,
+-            origThreadRootMsgHdr.flags,
++            (newMsgHdr.flags &= ~Ci.nsMsgMessageFlags.HasRe),
+             {}
+           );
+         }
+-      }
+-      // Note: we will not get here if folders are different, so no issue
+-      // of dupe messageKeys in multifolder view.
+-      if (newThreadRootMsgHdr.messageKey != origThreadRootMsgHdr.messageKey) {
+-        threadTree.collapseRowAtIndex(newThreadRootMsgHdrIndex);
+-        threadTree.expandRowAtIndex(newThreadRootMsgHdrIndex);
+-      }
+-      // Update thread root message subject to remove Re.
+-      // gViewWrapper.dbView.getMsgHdrAt(0).flags & Ci.nsMsgMessageFlags.HasRe
+-      // gViewWrapper.dbView.getFlagsAt(0) & Ci.nsMsgMessageFlags.HasRe
+-      // are not in sync if a message no longer has References/In-Reply-To when
+-      // re-added - m_flags is wrong.
+-      if (newThreadRootMsgHdr.messageKey == newMsgHdr.messageKey) {
+-        newMsgHdr.folder?.msgDatabase.notifyHdrChangeAll(
+-          newMsgHdr,
+-          0,
+-          newMsgHdr.flags,
+-          {}
+-        );
+-      }
+-      // In many cases (sort by date/received, thread root msgHdr property) the
+-      // insertion to or removal from a thread will result in an incorrect sort
+-      // order. Re sort is required.
+-      // If the last child of a thread is unthreaded, or a message is inserted
+-      // that becomes the last child of the thread, then a resort is required
+-      // as the view will no longer potentially be sorted in correct date order.
+-      // TODO: Maybe - currently adding a flag to a messages in a sort by flag
+-      // order does not change the sort order automatically.
+-
++      } catch {}
++      // Restore selection object after the message is found in the list.
++      threadTree.view.selection = TreeSelection;
+       if (selectNewMsgHdr) {
+-        // The drag-source was the selected message. The new message will have
+-        // a different messageKey, even if it were previously selected and in
+-        // savedSelections. Restore selectEvents and clear savedSelections.
+-        threadTree._selection.selectEventsSuppressed = false;
+-        threadPane.forgetSavedSelection(newMsgHdr.folder.URI);
+-        selectMessage(newMsgHdr);
++        threadTree.selectedIndex = -1;
++        await selectMessage(newMsgHdr);
++        threadTree.getRowAtIndex(threadTree.selectedIndex)?.focus();
++        if (multiMessageDisplayed) {
++          threadTree.collapseRowAtIndex(threadTree.selectedIndex);
++        }
++        log?.debug("successFn: selected - " + newMsgHdr.messageKey);
++      } else if (noSelection) {
++        if (!this.isValidIndex(threadTree.selectedIndex)) {
++          threadTree.currentIndex = newIndex;
++        }
+       } else {
+-        // Restore the saved selection, if any, if the drag-source was not the
+-        // selected message.
+-        threadPane.releaseSelection();
+-        // The saved selection was restored. However, it may not be in view.
+-        // Or, there was no selected message in the saved selection.
+-        // Attention is on the new drag-source message.
+-        // We want to indicate and set focus on (but not select) the new
+-        // drag-source message.
+-        threadTree.currentIndex = threadTree.view.findIndexOfMsgHdr(
+-          newMsgHdr,
+-          true
+-        );
+-      }
+-      setTimeout(() => {
++        if (multiMessageDisplayed) {
++          threadTree.collapseRowAtIndex(threadTree.selectedIndex);
++        } else {
++          await selectMessage(currentDisplayedMsgHdr);
++          // Focus on non selected but rethreaded message.
++          threadTree.currentIndex = newIndex;
++        }
+         threadTree.getRowAtIndex(threadTree.currentIndex)?.focus();
+-        threadTree.scrollToIndex(threadTree.currentIndex, true);
+-      }, 100);
++      }
+     };
+ 
+-    const errorFn = _error => {
++    const errorFn = async (error, log) => {
++      log?.debug("errorFn: restore selection on error - " + error);
+       threadTree.view.selection = TreeSelection;
+-      Services.prefs.setBoolPref(
+-        "mail.operate_on_msgs_in_collapsed_threads",
+-        saveSelectionSummarizedPref
+-      );
+-      threadPane.releaseSelection();
+-      if (selectNewMsgHdr) {
+-        const row = threadTree.getRowAtIndex(threadTree.selectedIndex);
+-        if (row) {
+-          row.selected = true;
+-          row.focus();
+-        }
+-      }
+-      if (isIndexExpandedContainer) {
+-        threadTree.expandRowAtIndex(threadTree.selectedIndex);
++      if (noSelection) {
++        if (!this.isValidIndex(threadTree.selectedIndex)) {
++          threadTree.currentIndex = index;
++        }
++      } else {
++        if (multiMessageDisplayed) {
++          threadTree.collapseRowAtIndex(threadTree.selectedIndex);
++        } else {
++          await selectMessage(currentDisplayedMsgHdr);
++        }
++        threadTree.getRowAtIndex(threadTree.currentIndex)?.focus();
+       }
+     };
+ 
+     return [successFn, errorFn];
+diff --git a/mail/base/content/aboutMessage.js b/mail/base/content/aboutMessage.js
+--- a/mail/base/content/aboutMessage.js
++++ b/mail/base/content/aboutMessage.js
+@@ -667,37 +667,57 @@ var msgObserver = {
+         // mail3PaneTab).
+         const tabOrWindow = window.tabOrWindow || parent.tabOrWindow;
+         const isMail3PaneTab = tabOrWindow.mode?.name == "mail3PaneTab";
+         const isSynthetic = isMail3PaneTab && parent.gViewWrapper.isSynthetic;
+-        const { oldMessageURI, newMessageURI } = subject.wrappedJSObject;
++        const { oldMessageURI, newMessageURI, log } = subject.wrappedJSObject;
++        const msgService = MailServices.messageServiceFromURI(newMessageURI);
++        const msgHdr = msgService.messageURIToMsgHdr(newMessageURI);
+         const doMessageUpdate =
+           gMessageURI &&
+           gMessageURI != newMessageURI &&
+           messageHistory.lastSelectedRemovedMessageURI == oldMessageURI;
+ 
+-        if (doMessageUpdate || isSynthetic) {
+-          if (isMail3PaneTab) {
+-            const msgService =
+-              MailServices.messageServiceFromURI(newMessageURI);
+-            const msgHdr = msgService.messageURIToMsgHdr(newMessageURI);
+-            if (isSynthetic) {
+-              // A search results list with no gFolder; refresh() to get the
+-              // updated list otherwise the message won't be there.
+-              // XXX: this does not work very well.
+-              setTimeout(() => {
+-                parent.gViewWrapper.refresh();
+-                if (doMessageUpdate) {
+-                  displayMessage(newMessageURI, gViewWrapper);
++        if (isMail3PaneTab) {
++          if (isSynthetic) {
++            const syntheticView = parent.gViewWrapper._syntheticView;
++            const searchListener = {
++              onNewSearch: () => {},
++              onSearchHit: (addedMsgHdr, _msgFolder) => {
++                log?.debug("onSearchHit: added message to syntheticView");
++                if (addedMsgHdr == msgHdr) {
++                  log?.debug(
++                    "onSearchHit: added message matches newMessageURI, refresh"
++                  );
++                  parent.gViewWrapper.refresh();
++                  if (doMessageUpdate) {
++                    parent.selectMessage(msgHdr);
++                  }
+                 }
+-              }, 500);
+-            } else if (doMessageUpdate) {
+-              // Select the message in the list.
+-              parent.selectMessage(msgHdr);
++              },
++              onQueryCompleted: () => {},
++              onSearchDone: () => {},
++            };
++            log?.debug("syntheticView.viewType - " + syntheticView.viewType);
++            if (syntheticView.viewType == "conversation") {
++              syntheticView.searchListener = searchListener;
++            } else {
++              // This is viewType "global", a glodaList in 3pane. Messages
++              // are removed when deleted but there is no way to rerun the
++              // search, or even know if it should be rerun, as the collection
++              // is provided from the glodaFacetView on tab open.
+             }
+           } else if (doMessageUpdate) {
+-            // Only for standalone messages (window or tab).
+-            displayMessage(newMessageURI, gViewWrapper);
++            // Select the message in the list.
++            parent.selectMessage(msgHdr);
+           }
++        } else if (doMessageUpdate) {
++          // Only for standalone messages (window or tab). Display formerly
++          // selected now updated message.
++          displayMessage(newMessageURI, gViewWrapper);
++        } else if (oldMessageURI == newMessageURI && msgHdr.folder == gFolder) {
++          // Only for standalone messages (window or tab). Message added, not
++          // replaced, in the same folder. For back/forward navigation.
++          gViewWrapper.refresh();
+         }
+         break;
+       }
+ 
+diff --git a/mail/base/content/glodaFacetView.js b/mail/base/content/glodaFacetView.js
+--- a/mail/base/content/glodaFacetView.js
++++ b/mail/base/content/glodaFacetView.js
+@@ -574,10 +574,16 @@ var FacetContext = {
+    * in the pipeline, but that's a bit hard right now.  So as a workaround
+    * we'd rather not show them in the Search Results UI.  The simplest way
+    * of doing that is just to cull (from the display) messages with have the
+    * Message-ID of a message already displayed.
++   *
++   * However, it may be useful to change this default so there is a pref for it
++   * and it would be nice to expose the option as a facet.
+    */
+   _removeDupes(aItems) {
++    if (Services.prefs.getBoolPref("gloda.facetview.show_duplicates", false)) {
++      return aItems;
++    }
+     const deduped = [];
+     const msgIdsSeen = {};
+     for (const item of aItems) {
+       if (item.headerMessageID in msgIdsSeen) {
+@@ -1091,8 +1097,71 @@ function reachOutAndTouchFrame() {
+   parentWin.tab = null;
+   window.addEventListener("resize", function () {
+     document.getElementById("facet-date").build(true);
+   });
++
++  const msgObserver = {
++    QueryInterface: ChromeUtils.generateQI(["nsIObserver"]),
++    observe(subject, topic, _data) {
++      switch (topic) {
++        case "message-replaced":
++          {
++            const { oldMessageURI, newMessageURI, log } =
++              subject.wrappedJSObject;
++            const msgService =
++              MailServices.messageServiceFromURI(oldMessageURI);
++            const msgHdr = msgService.messageURIToMsgHdr(oldMessageURI);
++            log?.debug("glodaFacetView: oldMessageURI - " + oldMessageURI);
++            log?.debug("glodaFacetView: newMessageURI - " + newMessageURI);
++            const oldMessageURIinActiveSet = FacetContext.activeSet.some(
++              item =>
++                item.messageKey == msgHdr.messageKey &&
++                item.folderURI == msgHdr.folder.URI
++            );
++            const oldMessageURIinCollection =
++              FacetContext.collection.items.some(
++                item =>
++                  item.messageKey == msgHdr.messageKey &&
++                  item.folderURI == msgHdr.folder.URI
++              );
++            log?.debug(
++              `glodaFacetView: old inActiveSet - ${oldMessageURIinActiveSet}`
++            );
++            log?.debug(
++              `glodaFacetView: old inCollection - ${oldMessageURIinCollection}`
++            );
++            if (!(oldMessageURIinActiveSet && !oldMessageURIinCollection)) {
++              break;
++            }
++            // Update the view. The old message is no longer in the new
++            // collection. The new message may or may not match the search.
++            // Note: it would be nice to restore constraints.
++            setTimeout(() => {
++              FacetContext.tab.collection =
++                FacetContext.tab.collection.query.getCollection({
++                  onQueryCompleted: () => {
++                    log?.debug("glodaFacetView.onQueryCompleted");
++                    parent.tab = FacetContext.tab;
++                    FacetContext.tab.browser.reload();
++                    log?.debug(`glodaFacetView: reloaded`);
++                  },
++                  onItemsAdded: items => {
++                    log?.debug("glodaFacetView.onItemsAdded " + items.length);
++                  },
++                  onItemsModified() {},
++                  onItemsRemoved() {},
++                });
++            }, 1000);
++          }
++          break;
++      }
++    },
++  };
++  Services.obs.addObserver(msgObserver, "message-replaced");
++  window.addEventListener("unload", () => {
++    Services.obs.removeObserver(msgObserver, "message-replaced");
++  });
++
+   // we need to hook the context up as a listener in all cases since
+   //  removal notifications are required.
+   if ("searcher" in aTab) {
+     FacetContext.searcher = aTab.searcher;
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -3933,11 +3933,10 @@ function MsgMarkAsFlagged() {
+  *  loaded; otherwise there is no selection or the selection is different
+  *  from the loaded message (as when using the threadpane contextmenu).
+  */
+ function MsgEditHeaders(messageIsDisplayed) {
+-  const msgWindow = top.msgWindow;
+   const selectedIndex = window.parent.threadTree.selectedIndex;
+-  const restoreIndex = messageIsDisplayed ? selectedIndex : -1;
++  const restoreIndex = selectedIndex;
+   const messageURI = messageIsDisplayed
+     ? gMessageURI
+     : window.parent.gViewWrapper.dbView.getURIForViewIndex(selectedIndex);
+ 
+@@ -3950,9 +3949,8 @@ function MsgEditHeaders(messageIsDisplay
+     window.parent.threadPane.saveStateForMessageReplaceAtIndex(restoreIndex);
+ 
+   const messageEditor = new window.parent.MessageEditor({
+     messageURI,
+-    msgWindow,
+     successFn,
+     errorFn,
+   });
+ 
+diff --git a/mail/modules/MessageEditor.sys.mjs b/mail/modules/MessageEditor.sys.mjs
+--- a/mail/modules/MessageEditor.sys.mjs
++++ b/mail/modules/MessageEditor.sys.mjs
+@@ -9,9 +9,8 @@ import { AppConstants } from "resource:/
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   MailServices: "resource:///modules/MailServices.sys.mjs",
+   MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
+-  MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   MimeParser: "resource:///modules/mimeParser.sys.mjs",
+ });
+ 
+ /**
+@@ -20,11 +19,13 @@ ChromeUtils.defineESModuleGetters(lazy, 
+  * getHeaderLines(headerName)
+  * getHeaderValueRaw(headerLine, headerName)
+  * getHeaderValue(headerLine, headerName)
+  * restoreHeaderValue(headerName)
++ * changeHeaderValue(headerLine, headerName, newHeaderValue)
+  * updateHeaderValue(headerName, newHeaderValue)
+  * updateThreading(action, newParentMessageURI)
+  * getReferencesForThreading(messageURI)
++ * updateMessage(replace, doupdate)
+  *
+  */
+ export class MessageEditor {
+   /**
+@@ -34,8 +35,15 @@ export class MessageEditor {
+    */
+   #messageURI = null;
+ 
+   /**
++   * The edited message's new URI.
++   *
++   * @type {string}
++   */
++  #newMessageURI = null;
++
++  /**
+    * Edited message is replaced (original deleted). May be overriden.
+    *
+    * @type {boolean}
+    */
+@@ -112,8 +120,9 @@ export class MessageEditor {
+   }
+ 
+   async #initialize(messageURI) {
+     this.#messageURI = messageURI;
++    this.#newMessageURI = null;
+     this.#replace = true;
+     this.origMsgHdr = this.#messageService.messageURIToMsgHdr(this.#messageURI);
+     if (!(this.origMsgHdr instanceof Ci.nsIMsgDBHdr)) {
+       throw new Error(
+@@ -394,9 +403,9 @@ export class MessageEditor {
+     await this.#getMessageDeferred.promise;
+ 
+     const currentMsgHeaders = this.msgHeaders;
+     this.#restoreHeaderValue(headerName, headerLineIndex);
+-    this.#doUpdate("restoreheader", this.msgHeaders != currentMsgHeaders);
++    await this.#doUpdate("restoreheader", this.msgHeaders != currentMsgHeaders);
+   }
+ 
+   /*
+    * Restore a backed up header - internal.
+@@ -440,8 +449,35 @@ export class MessageEditor {
+     this.#updateHeaderName(origHeaderLine, origHeaderName, headerName);
+   }
+ 
+   /**
++   * Change a header value in place, no update.
++   *
++   * @param {string} headerLine - There may be more than 1 with the same
++   *  headerName; caller decides which headerLine to pass.
++   * @param {string} headerName
++   * @param {string} newHeaderValue
++   * @returns {boolean} True if the cached header was updated, else false.
++   */
++  async changeHeaderValue(headerLine, headerName, newHeaderValue) {
++    this.log.debug(
++      "changeHeaderValue: headerLine:headerName:newHeaderValue - " +
++        headerLine +
++        ":" +
++        headerName +
++        ":" +
++        newHeaderValue
++    );
++    await this.#getMessageDeferred.promise;
++    const headersChanged = this.#updateHeaderValue(
++      headerLine,
++      headerName,
++      newHeaderValue
++    );
++    this.log.debug("changeHeaderValue: headersChanged - " + headersChanged);
++  }
++
++  /**
+    * Update a header value.
+    *
+    * @param {string} headerName
+    * @param {integer} headerLineIndex - For second or more same headerName line.
+@@ -540,9 +576,9 @@ export class MessageEditor {
+       headerName,
+       newHeaderValue
+     );
+ 
+-    this.#doUpdate("updatevalue", headersChanged);
++    await this.#doUpdate("updatevalue", headersChanged);
+   }
+ 
+   /**
+    * Update a header value - internal.
+@@ -694,34 +730,50 @@ export class MessageEditor {
+       return;
+     }
+ 
+     // Replace current message with the new message temp .eml file;
+-    // args are for a single message delete/copyFile transaction.
++    // args are for a single message copyFile/delete transaction.
+     const args = {
+       deleteStorage: !this.#backupToTrash,
+-      msgWindow: null,
+       folder: this.origMsgHdr.folder,
++      origMsgHdr: this.origMsgHdr,
+       msgHdrToReplace: null,
+       flags: this.origMsgHdrFlags,
+       keywords: this.origMsgHdrKeywords,
+       tmpFile,
+     };
+ 
+-    if (this.#replace) {
+-      // Do the delete before the copy. If there is an error here, continue, as
+-      // we still want to import the new message from tmpFile. Do not await the
+-      // delete; if the promise is not resolved (no onStopyCopy notice), we will
+-      // wait forever.
+-      this.#deleteMessages(args);
++    const newMsgKey = await this.#copyFileMessage(args);
++    if (newMsgKey === false) {
++      // Error function already called.
++      return;
+     }
+ 
+-    await this.#copyFileMessage(args);
++    await this.#onSuccess(newMsgKey, args);
++    await this.#updateFolder(args.folder);
++
++    if (this.#newMessageURI) {
++      // Initialize this object again with the new message. This will allow
++      // repeated operations on an updated message.
++      await this.#initialize(this.#newMessageURI);
++    }
+   }
+ 
+-  async updateMessage(replace = true) {
++  /**
++   * Used to update message content. The caller will have changed .msgBody.
++   *
++   * @param {boolean} replace - If true, delete the original message.
++   * @param {boolean} doupdate - If true, insert the new message. Otherwise,
++   *   complete the transaction without update, ie if an error has been caught
++   */
++  async updateMessage(replace = true, doupdate = true) {
+     this.log.debug(`updateMessage: START, replace ${replace}`);
+     this.#replace = replace;
+-    await this.#doUpdate("update", true);
++    if (!replace) {
++      // Thread the copy to the original if not replacing.
++      await this.#reThread(this.#messageURI);
++    }
++    await this.#doUpdate("update", doupdate);
+   }
+ 
+   async #reThread(newParentMessageURI) {
+     const currentMsgHeaders = this.msgHeaders;
+@@ -1129,9 +1181,11 @@ export class MessageEditor {
+       PathUtils.join(PathUtils.tempDir, this.#TMP_FILENAME)
+     );
+     const success = await IOUtils.write(
+       tmpFile.path,
+-      lazy.MailStringUtils.byteStringToUint8Array(this.newMessage)
++      lazy.MailStringUtils.byteStringToUint8Array(
++        this.newMessage.replace(/\r\n?|\n/g, "\r\n")
++      )
+     )
+       .then(() => {
+         this.log.debug("#replaceChanges: wrote to tmpFile - " + tmpFile.path);
+         return true;
+@@ -1202,10 +1256,10 @@ export class MessageEditor {
+     };
+ 
+     try {
+       args.folder.deleteMessages(
+-        [this.origMsgHdr],
+-        args.msgWindow,
++        [args.origMsgHdr],
++        null, // msgWindow,
+         args.deleteStorage,
+         false, // isMove
+         deleteListener,
+         false // allowUndo
+@@ -1241,24 +1295,14 @@ export class MessageEditor {
+           error("copyServiceListener.onStopCopy: error status - " + status);
+           resolve(false);
+         } else {
+           log.debug(`copyServiceListener.onStopCopy - status ${status}`);
+-          await lazy.MailUtils.updateFolderAsync(args.folder).catch(error => {
+-            log.warn(
+-              "copyServiceListener.onStopCopy: updateFolder error, " + error
+-            );
+-          });
+-          await success(this.newMsgKey);
+-          resolve(true);
++          resolve(this.newMsgKey);
+         }
+       },
+       QueryInterface: ChromeUtils.generateQI([Ci.nsIMsgCopyServiceListener]),
+     };
+ 
+-    const success = async newMsgKey => {
+-      await this.#onSuccess(newMsgKey);
+-    };
+-
+     const error = status => {
+       this.#onError(status);
+     };
+ 
+@@ -1270,17 +1314,18 @@ export class MessageEditor {
+         false, // isDraftOrTemplate
+         args.flags,
+         args.keywords,
+         copyServiceListener,
+-        args.msgWindow
++        null // msgWindow
+       );
+     } catch (ex) {
+       this.#onError("#copyFileMessage: error - " + ex);
+       resolve(false);
+     }
+ 
+     await promise;
+     this.#removeTmpFile(args.tmpFile);
++    return promise;
+   }
+ 
+   async #removeTmpFile(file) {
+     try {
+@@ -1298,8 +1343,28 @@ export class MessageEditor {
+       extAppLauncher.deleteTemporaryFileOnExit(file);
+     }
+   }
+ 
++  async #updateFolder(folder) {
++    const log = this.log;
++    if (!(folder instanceof Ci.nsIMsgImapMailFolder)) {
++      return;
++    }
++    const { promise, resolve } = Promise.withResolvers();
++    /**  @implements {nsIUrlListener} */
++    const urlListener = {
++      OnStartRunningUrl() {},
++      OnStopRunningUrl(url, statusCode) {
++        if (!Components.isSuccessCode(statusCode)) {
++          log.warn("#updateFolder: error - " + statusCode);
++        }
++        resolve();
++      },
++    };
++    folder.updateFolderWithListener(null, urlListener);
++    await promise;
++  }
++
+   /*
+    * Create the <dialog> to accept a header value update.
+    * Note: we could also use a template or even a custom element.
+    */
+@@ -1396,9 +1461,9 @@ export class MessageEditor {
+     const updateButton = winDoc.createElement("button");
+     updateButton.id = "updateButton";
+     // "Update"
+     winDoc.l10n.setAttributes(updateButton, "msg-edit-update-button");
+-    const onUpdate = () => {
++    const onUpdate = async () => {
+       this.log.groupCollapsed(`onUpdate: ${this.origMsgHdr.subject}`);
+       const selectedOption = select.selectedOptions[0];
+       const headerName = selectedOption.value;
+       const headerLineIndex = selectedOption.headerLineIndex;
+@@ -1434,11 +1499,15 @@ export class MessageEditor {
+       if (
+         textarea.value.replace(/\r/g, "") ==
+         textarea.getAttribute("origHeaderValue").replace(/\r/g, "")
+       ) {
+-        this.restoreHeaderValue(headerName, headerLineIndex);
++        await this.restoreHeaderValue(headerName, headerLineIndex);
+       } else {
+-        this.updateHeaderValue(headerName, headerLineIndex, textarea.value);
++        await this.updateHeaderValue(
++          headerName,
++          headerLineIndex,
++          textarea.value
++        );
+       }
+     };
+     updateButton.addEventListener("click", onUpdate);
+     buttons.appendChild(updateButton);
+@@ -1509,10 +1578,10 @@ export class MessageEditor {
+           origHeaderNameLC
+         ) ?? curHeaderValue;
+       option.setAttribute("origHeaderValue", origHeaderValue ?? "");
+ 
+-      // The header doesn't exist.
+-      option.disabled = curHeaderValue === null;
++      // The header doesn't exist. Subject is special.
++      option.disabled = curHeaderValue === null && headerNameLC != "subject";
+ 
+       select.appendChild(option);
+       this.log.debug(
+         "#initHeadersList: " +
+@@ -1552,33 +1621,33 @@ export class MessageEditor {
+     mainWindow.setTimeout(() => textarea.focus(), 50);
+ 
+     // Override #successFn to close the dialog on update.
+     const successFn = this.#successFn;
+-    this.#successFn = newMsgHdr => {
++    this.#successFn = async newMsgHdr => {
+       this.log.debug(
+         "updateHeadersWithDialog.successFn: newMsgHdr.key - " +
+           newMsgHdr.messageKey
+       );
+       this.#headerEditorDialog.close("success");
+-      successFn(newMsgHdr);
++      await successFn(newMsgHdr, this.log);
+       this.log.groupEnd(`onUpdate: ${this.origMsgHdr.subject}`);
+     };
+ 
+     const errorFn = this.#errorFn;
+     this.#errorFn = error => {
+       this.log.debug("updateHeadersWithDialog.errorFn: " + error);
+       // Display an error in the dialog?
+       this.#headerEditorDialog.close("error");
+-      errorFn(error);
++      errorFn(error, this.log);
+       this.log.groupEnd(`onUpdate: ${this.origMsgHdr.subject}`);
+     };
+ 
+     headerEditorDialog.returnValue = "";
+     const onClose = () => {
+       if (headerEditorDialog.returnValue != "success") {
+         // On cancel or ESC, restore the view state by calling successFn in
+         // no change mode. The caller will have set this up if necessary.
+-        successFn(false);
++        successFn(false, this.log);
+       }
+       this.#headerEditorDialog.remove();
+       this.#headerEditorDialog = null;
+       this.log.debug("onclose: closed - " + headerEditorDialog.returnValue);
+@@ -1603,9 +1672,9 @@ export class MessageEditor {
+ 
+     this.log.groupEnd(`updateHeadersWithDialog: ${this.origMsgHdr.subject}`);
+   }
+ 
+-  async #onSuccess(newMsgKey) {
++  async #onSuccess(newMsgKey, args) {
+     this.log.debug("#onSuccess: newMsgKey - " + newMsgKey);
+     this.log.debug(
+       "#onSuccess: origMsgHdr messageKey:flags:keywords - " +
+         this.origMsgHdr.messageKey +
+@@ -1617,9 +1686,9 @@ export class MessageEditor {
+ 
+     if (newMsgKey === false) {
+       // Case of no change.
+       try {
+-        this.#successFn(false);
++        this.#successFn(false, this.log);
+       } catch (exception) {
+         this.log.error("#onError: successFn exception - " + exception);
+       }
+       return;
+@@ -1667,37 +1736,39 @@ export class MessageEditor {
+       newMsgHdr.orFlags(this.origMsgHdrFlags);
+       this.log.debug("#onSuccess: restore IMAP flags - " + newMsgHdr.flags);
+     }
+ 
+-    const newMessageURI = newMsgHdr.folder.getUriForMsg(newMsgHdr);
++    this.#newMessageURI = newMsgHdr.folder.getUriForMsg(newMsgHdr);
+     const oldMessageURI = this.#messageURI;
+ 
+     this.log.debug("#onSuccess: oldMessageURI - " + oldMessageURI);
+-    this.log.debug("#onSuccess: newMessageURI - " + newMessageURI);
++    this.log.debug("#onSuccess: newMessageURI - " + this.#newMessageURI);
++
++    if (this.#replace) {
++      await this.#deleteMessages(args);
++    }
+ 
+     try {
+-      this.#successFn(newMsgHdr);
++      this.#successFn(newMsgHdr, this.log);
+     } catch (exception) {
+       this.log.error("#onError: successFn exception - " + exception);
+     }
+ 
+-    // Initialize this object again with the new message. This will allow
+-    // repeated operations on an updated message.
+-    await this.#initialize(newMessageURI);
+-
+-    // And update all other places with the new message.
+-    if (this.#replace) {
+-      Services.obs.notifyObservers(
+-        { oldMessageURI, newMessageURI },
+-        "message-replaced"
+-      );
+-    }
++    // And update all other places with the new or added message.
++    Services.obs.notifyObservers(
++      {
++        oldMessageURI: this.#replace ? oldMessageURI : this.#newMessageURI,
++        newMessageURI: this.#newMessageURI,
++        log: this.log,
++      },
++      "message-replaced"
++    );
+   }
+ 
+   #onError(error) {
+     this.log.error("#onError: error - " + (error ?? "logged to console"));
+     try {
+-      this.#errorFn(error);
++      this.#errorFn(error, this.log);
+     } catch (exception) {
+       this.log.error("#onError: errorFn exception - " + exception);
+     }
+   }
+diff --git a/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs b/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
+--- a/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
++++ b/mailnews/db/gloda/modules/GlodaDatastore.sys.mjs
+@@ -2730,10 +2730,11 @@ export var GlodaDatastore = {
+ 
+   get _updateMessageTextStatement() {
+     const statement = this._createAsyncStatement(
+       "UPDATE messagesText SET body = ?1, \
+-                               attachmentNames = ?2 \
+-              WHERE docid = ?3"
++                               subject = ?2, \
++                               attachmentNames = ?3 \
++              WHERE docid = ?4"
+     );
+ 
+     this.__defineGetter__("_updateMessageTextStatement", () => statement);
+     return this._updateMessageTextStatement;
+@@ -2791,8 +2792,9 @@ export var GlodaDatastore = {
+   /**
+    * Updates the full-text row associated with this message. This only performs
+    * the UPDATE query if the indexed body text has changed, which means that if
+    * the body hasn't changed but the attachments have, we don't update.
++   * Note: also UPDATE if the subject has changed.
+    */
+   _updateMessageText(aMessage) {
+     let newIndexedBodyText;
+     if (aMessage._content && aMessage._content.hasContent()) {
+@@ -2802,30 +2804,39 @@ export var GlodaDatastore = {
+     } else {
+       newIndexedBodyText = null;
+     }
+ 
+-    // If the body text matches, don't perform an update
+-    if (newIndexedBodyText == aMessage._indexedBodyText) {
++    // If the body text and subject match, don't perform an update.
++    if (
++      newIndexedBodyText == aMessage._indexedBodyText &&
++      !aMessage._isNewSubject
++    ) {
+       this._log.debug(
+-        "in _updateMessageText, skipping update because body matches"
++        "in _updateMessageText, skipping update because body and subject match"
+       );
+       return;
+     }
+ 
+     aMessage._indexedBodyText = newIndexedBodyText;
+     const umts = this._updateMessageTextStatement;
+-    umts.bindByIndex(2, aMessage.id);
++    umts.bindByIndex(3, aMessage.id);
+ 
+     if (aMessage._indexedBodyText == null) {
+       umts.bindByIndex(0, null);
+     } else {
+       umts.bindByIndex(0, aMessage._indexedBodyText);
+     }
+ 
+-    if (aMessage._attachmentNames == null) {
++    if (aMessage._subject == null) {
+       umts.bindByIndex(1, null);
+     } else {
+-      umts.bindByIndex(1, aMessage._attachmentNames.join("\n"));
++      umts.bindByIndex(1, aMessage._subject);
++    }
++
++    if (aMessage._attachmentNames == null) {
++      umts.bindByIndex(2, null);
++    } else {
++      umts.bindByIndex(2, aMessage._attachmentNames.join("\n"));
+     }
+ 
+     try {
+       umts.executeAsync(this.trackAsync());
+diff --git a/mailnews/db/gloda/modules/IndexMsg.sys.mjs b/mailnews/db/gloda/modules/IndexMsg.sys.mjs
+--- a/mailnews/db/gloda/modules/IndexMsg.sys.mjs
++++ b/mailnews/db/gloda/modules/IndexMsg.sys.mjs
+@@ -3240,17 +3240,21 @@ export var GlodaMsgIndexer = {
+     if (insertFulltext) {
+       curMsg._isNew = true;
+     }
+ 
+-    curMsg._subject = aMsgHdr.getStringProperty("originalSubject");
+-    if (curMsg._subject) {
+-      let arr = new Uint8Array(curMsg._subject.length);
+-      for (let i = 0; i < curMsg._subject.length; i++) {
+-        arr[i] = curMsg._subject.charCodeAt(i);
++    // The subject can be changed; make a note.
++    const originalSubject = aMsgHdr.getStringProperty("originalSubject");
++    const msgHdrSubject = aMsgHdr.mime2DecodedSubject;
++    curMsg._isNewSubject =
++      curMsg._subject != msgHdrSubject && originalSubject != msgHdrSubject;
++    if (originalSubject) {
++      const arr = new Uint8Array(originalSubject.length);
++      for (let i = 0; i < originalSubject.length; i++) {
++        arr[i] = originalSubject.charCodeAt(i);
+       }
+       curMsg._subject = new TextDecoder().decode(arr);
+     } else {
+-      curMsg._subject = aMsgHdr.mime2DecodedSubject;
++      curMsg._subject = msgHdrSubject;
+     }
+     curMsg._attachmentNames = attachmentNames;
+ 
+     // curMsg._indexAuthor gets set by GlodaFundAttr.sys.mjs
+@@ -3271,8 +3275,9 @@ export var GlodaMsgIndexer = {
+ 
+     delete curMsg._bodyLines;
+     delete curMsg._content;
+     delete curMsg._isNew;
++    delete curMsg._isNewSubject;
+     delete curMsg._indexAuthor;
+     delete curMsg._indexRecipients;
+ 
+     // we want to update the header for messages only after the transaction
