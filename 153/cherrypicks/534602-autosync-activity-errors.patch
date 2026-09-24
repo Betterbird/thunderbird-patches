@@ -1,0 +1,345 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1789896924 -10800
+# Node ID c23e6c9bfba26e3ef0926b2a4274de2170e46b27
+# Parent  5d390b679160b6b00eefc3939925abb523f77b40
+Bug 534602 - Tolerate out-of-order AutoSync activity notifications. r=mkmelin
+
+AutoSync activity bookkeeping assumed that every download and removal callback followed a priority-queue addition. Some IMAP paths can report completion without a tracked folder, causing the activity listener to dereference a missing sync item and throw.
+
+Centralize creation of per-folder and per-server activity state, recover that state when a download starts without a preceding queue notification, preserve existing state across duplicate additions, and ignore untracked completion or removal notifications when there is no activity to update.
+
+Keep canceled and completed processes in their terminal state during queue removal instead of attempting an invalid transition to completed. Add xpcshell coverage for untracked callbacks, recovered download state, cleanup, and canceled-process removal.
+
+Differential Revision: https://phabricator.services.mozilla.com/D327482
+
+
+diff --git a/mail/components/activity/modules/autosync.sys.mjs b/mail/components/activity/modules/autosync.sys.mjs
+--- a/mail/components/activity/modules/autosync.sys.mjs
++++ b/mail/components/activity/modules/autosync.sys.mjs
+@@ -63,16 +63,53 @@ export var autosyncModule = {
+     try {
+       return this.bundle.GetStringFromName(stringName);
+     } catch (e) {
+       this.log.error("error trying to get a string called: " + stringName);
+       throw e;
+     }
+   },
+ 
++  /**
++   * Get the activity state for a folder, creating it if necessary.
++   *
++   * AutoSync notifications are not guaranteed to start with a priority-queue
++   * notification. In particular, the activity listener can begin observing an
++   * operation after the folder was queued. Recover when a download notification
++   * is the first event we see for a folder.
++   *
++   * @param {nsIMsgFolder} folder
++   * @param {number} pendingMsgCount
++   * @returns {object}
++   */
++  getOrCreateSyncItem(folder, pendingMsgCount) {
++    let syncItem = this._syncInfoPerFolder.get(folder.URI);
++    if (syncItem) {
++      return syncItem;
++    }
++
++    syncItem = {
++      syncFolder: folder,
++      activity: this.createSyncMailProcess(folder),
++      percentComplete: 0,
++      totalDownloaded: 0,
++      pendingMsgCount,
++    };
++    this._syncInfoPerFolder.set(folder.URI, syncItem);
++
++    if (!this._syncInfoPerServer.has(folder.server)) {
++      this._syncInfoPerServer.set(folder.server, {
++        startTime: Date.now(),
++        totalDownloads: 0,
++      });
++    }
++
++    return syncItem;
++  },
++
+   createSyncMailProcess(folder) {
+     try {
+       // create an activity process for this folder
+       const msg = this.bundle.formatStringFromName(
+         "autosyncProcessDisplayText",
+         [folder.localizedName]
+       );
+       const process = new nsActProcess(msg, this.autoSyncManager);
+@@ -165,49 +202,31 @@ export var autosyncModule = {
+   },
+ 
+   onFolderAddedIntoQ(queue, folder) {
+     try {
+       if (
+         folder instanceof Ci.nsIMsgFolder &&
+         queue == Ci.nsIAutoSyncMgrListener.PriorityQueue
+       ) {
+-        this._inQFolderList.push(folder);
++        if (!this._inQFolderList.includes(folder)) {
++          this._inQFolderList.push(folder);
++        }
+         this.log.info(
+           "Auto_Sync OnFolderAddedIntoQ [" +
+             this._inQFolderList.length +
+             "] " +
+             folder.localizedName +
+             " of " +
+             folder.server.prettyName
+         );
+-        // create an activity process for this folder
+-        const process = this.createSyncMailProcess(folder);
+-
+-        // create a sync object to keep track of the process of this folder
+-        const syncItem = {
+-          syncFolder: folder,
+-          activity: process,
+-          percentComplete: 0,
+-          totalDownloaded: 0,
+-          pendingMsgCount: folder.autoSyncStateObj.pendingMessageCount,
+-        };
+-
+-        // if this is the first folder of this server in the queue, then set the sync start time
+-        // for activity event
+-        if (!this._syncInfoPerServer.has(folder.server)) {
+-          this._syncInfoPerServer.set(folder.server, {
+-            startTime: Date.now(),
+-            totalDownloads: 0,
+-          });
+-        }
+-
+-        // associate the sync object with the folder in question
+-        // use folder.URI as key
+-        this._syncInfoPerFolder.set(folder.URI, syncItem);
++        this.getOrCreateSyncItem(
++          folder,
++          folder.autoSyncStateObj.pendingMessageCount
++        );
+       }
+     } catch (e) {
+       this.log.error("onFolderAddedIntoQ: " + e);
+       throw e;
+     }
+   },
+   onFolderRemovedFromQ(queue, folder) {
+     try {
+@@ -226,55 +245,66 @@ export var autosyncModule = {
+             "] " +
+             folder.localizedName +
+             " of " +
+             folder.server.prettyName +
+             "\n"
+         );
+ 
+         const syncItem = this._syncInfoPerFolder.get(folder.URI);
++        if (!syncItem) {
++          this.log.debug(
++            `Ignoring removal of untracked AutoSync folder: ${folder.URI}`
++          );
++          return;
++        }
+         const process = syncItem.activity;
+         let canceled = false;
+         if (process instanceof Ci.nsIActivityProcess) {
+           canceled = process.state == Ci.nsIActivityProcess.STATE_CANCELED;
+-          process.state = Ci.nsIActivityProcess.STATE_COMPLETED;
++          if (
++            !canceled &&
++            process.state != Ci.nsIActivityProcess.STATE_COMPLETED
++          ) {
++            process.state = Ci.nsIActivityProcess.STATE_COMPLETED;
++          }
+ 
+           try {
+             this.activityMgr.removeActivity(process.id);
+           } catch (e) {
+             // It is OK to end up here; If the folder is queued and the
+             // message get manually downloaded by the user, we might get
+             // a folder removed notification even before a download
+             // started for this folder. This behavior stems from the fact
+             // that we add activities into the activity manager in
+             // onDownloadStarted notification rather than onFolderAddedIntoQ.
+             // This is an expected side effect.
+             // Log a warning, but do not throw an error.
+             this.log.warn("onFolderRemovedFromQ: " + e);
+           }
++        }
+ 
+-          // remove the folder/syncItem association from the table
+-          this._syncInfoPerFolder.delete(folder.URI);
+-        }
++        // remove the folder/syncItem association from the table
++        this._syncInfoPerFolder.delete(folder.URI);
+ 
+         // if this is the last folder of this server in the queue
+         // create a sync event and clean the sync start time
+         let found = false;
+         for (const value of this._syncInfoPerFolder.values()) {
+           if (value.syncFolder.server == folder.server) {
+             found = true;
+             break;
+           }
+         }
+         this.log.info(
+           "Auto_Sync OnFolderRemovedFromQ Last folder of the server: " + !found
+         );
+         if (!found) {
+           // create an sync event for the completed process if it's not canceled
+-          if (!canceled) {
++          if (!canceled && this._syncInfoPerServer.has(folder.server)) {
+             const key = folder.server.prettyName;
+             if (
+               this._lastMessage.has(key) &&
+               this.activityMgr.containsActivity(this._lastMessage.get(key))
+             ) {
+               this.activityMgr.removeActivity(this._lastMessage.get(key));
+             }
+             this._lastMessage.set(
+@@ -300,17 +330,20 @@ export var autosyncModule = {
+             totalPending +
+             "): " +
+             folder.localizedName +
+             " of " +
+             folder.server.prettyName +
+             "\n"
+         );
+ 
+-        const syncItem = this._syncInfoPerFolder.get(folder.URI);
++        const syncItem = this.getOrCreateSyncItem(folder, totalPending);
++        if (!this._inQFolderList.includes(folder)) {
++          this._inQFolderList.push(folder);
++        }
+         const process = syncItem.activity;
+ 
+         // Update the totalPending number. if new messages have been discovered in the folder
+         // after we added the folder into the q, totalPending might be greater than what we have
+         // initially set
+         if (totalPending > syncItem.pendingMsgCount) {
+           syncItem.pendingMsgCount = totalPending;
+         }
+@@ -367,17 +400,24 @@ export var autosyncModule = {
+       if (folder instanceof Ci.nsIMsgFolder) {
+         this.log.info(
+           "OnDownloadCompleted: " +
+             folder.localizedName +
+             " of " +
+             folder.server.prettyName
+         );
+ 
+-        const process = this._syncInfoPerFolder.get(folder.URI).activity;
++        const syncItem = this._syncInfoPerFolder.get(folder.URI);
++        if (!syncItem) {
++          this.log.debug(
++            `Ignoring completion of untracked AutoSync folder: ${folder.URI}`
++          );
++          return;
++        }
++        const process = syncItem.activity;
+         if (process instanceof Ci.nsIActivityProcess && !this._running) {
+           this.log.info(
+             "OnDownloadCompleted: Auto-Sync Manager is paused, pausing the process"
+           );
+           process.state = Ci.nsIActivityProcess.STATE_PAUSED;
+         }
+       }
+     } catch (e) {
+diff --git a/mail/components/activity/moz.build b/mail/components/activity/moz.build
+--- a/mail/components/activity/moz.build
++++ b/mail/components/activity/moz.build
+@@ -29,8 +29,10 @@ EXTRA_JS_MODULES += [
+     "ActivityManagerUI.sys.mjs",
+ ]
+ 
+ JAR_MANIFESTS += ["jar.mn"]
+ 
+ XPCOM_MANIFESTS += [
+     "components.conf",
+ ]
++
++XPCSHELL_TESTS_MANIFESTS += ["test/unit/xpcshell.toml"]
+diff --git a/mail/components/activity/test/unit/test_autosync.js b/mail/components/activity/test/unit/test_autosync.js
+new file mode 100644
+--- /dev/null
++++ b/mail/components/activity/test/unit/test_autosync.js
+@@ -0,0 +1,66 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { autosyncModule } = ChromeUtils.importESModule(
++  "resource:///modules/activity/autosync.sys.mjs"
++);
++const { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++
++let testAccount;
++let testFolder;
++
++add_setup(function () {
++  do_get_profile();
++  testAccount = MailServices.accounts.createLocalMailAccount();
++  const rootFolder = testAccount.incomingServer.rootFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  testFolder = rootFolder.createLocalSubfolder("AutoSync Activity Test");
++
++  registerCleanupFunction(() => {
++    autosyncModule._inQFolderList.length = 0;
++    autosyncModule._syncInfoPerFolder.clear();
++    autosyncModule._syncInfoPerServer.clear();
++    autosyncModule._lastMessage.clear();
++    MailServices.accounts.removeAccount(testAccount, false);
++  });
++});
++
++add_task(function test_untracked_notifications_are_ignored() {
++  autosyncModule.onDownloadCompleted(testFolder);
++  autosyncModule.onFolderRemovedFromQ(
++    Ci.nsIAutoSyncMgrListener.PriorityQueue,
++    testFolder
++  );
++
++  Assert.equal(autosyncModule._syncInfoPerFolder.size, 0);
++  Assert.equal(autosyncModule._syncInfoPerServer.size, 0);
++});
++
++add_task(function test_download_start_recovers_missing_queue_notification() {
++  autosyncModule._running = true;
++  autosyncModule.onDownloadStarted(testFolder, 1, 2);
++
++  const syncItem = autosyncModule._syncInfoPerFolder.get(testFolder.URI);
++  Assert.ok(syncItem, "download start should create missing activity state");
++  Assert.equal(syncItem.totalDownloaded, 1);
++  Assert.equal(syncItem.pendingMsgCount, 2);
++  Assert.ok(autosyncModule._syncInfoPerServer.has(testFolder.server));
++
++  autosyncModule.onDownloadCompleted(testFolder);
++
++  // Avoid creating a completed activity event, which is outside this test's
++  // scope and would otherwise remain in the global activity manager.
++  syncItem.activity.state = Ci.nsIActivityProcess.STATE_CANCELED;
++  autosyncModule.onFolderRemovedFromQ(
++    Ci.nsIAutoSyncMgrListener.PriorityQueue,
++    testFolder
++  );
++
++  Assert.ok(!autosyncModule._syncInfoPerFolder.has(testFolder.URI));
++  Assert.ok(!autosyncModule._syncInfoPerServer.has(testFolder.server));
++  Assert.ok(!autosyncModule._inQFolderList.includes(testFolder));
++});
+diff --git a/mail/components/activity/test/unit/xpcshell.toml b/mail/components/activity/test/unit/xpcshell.toml
+new file mode 100644
+--- /dev/null
++++ b/mail/components/activity/test/unit/xpcshell.toml
+@@ -0,0 +1,3 @@
++[DEFAULT]
++
++["test_autosync.js"]
+

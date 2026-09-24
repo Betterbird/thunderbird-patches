@@ -1,0 +1,190 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1790023169 25200
+# Node ID a03348ec09ccc27a8036d9df0f22137157f3d36f
+# Parent  c8108f9b6104473a6c4e2df3338da4a1fd9c35c5
+Bug 2064660 - Return null when local injection removes a source header. r=mkmelin
+
+Before addMessage() and addMessageBatch() return, check whether each added
+header remains in the source database and return null for headers already
+removed, including by synchronous filter moves. Preserve input order in batch
+results and cover both mailbox stores.
+
+Differential Revision: https://phabricator.services.mozilla.com/D327504
+
+
+diff --git a/mailnews/local/public/nsIMsgLocalMailFolder.idl b/mailnews/local/public/nsIMsgLocalMailFolder.idl
+--- a/mailnews/local/public/nsIMsgLocalMailFolder.idl
++++ b/mailnews/local/public/nsIMsgLocalMailFolder.idl
+@@ -77,31 +77,33 @@ interface nsIMsgLocalMailFolder : nsISup
+    * @return newly created folder.
+    */
+   nsIMsgFolder createLocalSubfolder(in AUTF8String aFolderName);
+ 
+   /**
+    * Adds a message to the end of the folder, parsing it as it goes, and
+    * applying filters, if applicable.
+    * @param aMessage string containing the entire body of the message to add
+-   * @return the nsIMsgDBHdr of the added message
++   * @return The header if it is still in this folder's database when the call
++   *         completes, or null if already removed. A pending move may remove
++   *         a returned header later.
+    */
+   nsIMsgDBHdr addMessage(in string aMessage);
+ 
+   /**
+    * Add one or more messages to the end of the folder in a single batch. Each
+    * batch requires an fsync() on the mailbox file so it is a good idea to
+    * try and minimize the number of calls you make to this method or addMessage.
+    *
+    * Filters are applied, if applicable.
+    *
+-   * @param aMessageCount The number of messages.
+-   * @param aMessages An array of pointers to strings containing entire message
+-   *                  bodies.
+-   * @return an array of nsIMsgDBHdr of the added messages
++   * @param aMessages Strings containing the complete messages to add.
++   * @return Headers in input order, with null for any header already removed
++   *         from this folder's database. A pending move may remove a returned
++   *         header later.
+    */
+   Array<nsIMsgDBHdr> addMessageBatch(in Array<ACString> aMessages);
+ 
+   /**
+    * Check if DownloadMessagesForOffline() has stored a message header of
+    * a partial message with the same message ID in mDownloadPartialMessages.
+    * If so, remove the header from that array and return it.
+    *
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -3299,17 +3299,17 @@ nsMsgLocalMailFolder::GetUidlFromFolder(
+ NS_IMETHODIMP
+ nsMsgLocalMailFolder::AddMessage(const char* aMessage, nsIMsgDBHdr** aHdr) {
+   AUTO_PROFILER_LABEL("nsMsgLocalMailFolder::AddMessage", MAILNEWS);
+   NS_ENSURE_ARG_POINTER(aHdr);
+   AutoTArray<nsCString, 1> aMessages = {nsDependentCString(aMessage)};
+   nsTArray<RefPtr<nsIMsgDBHdr>> hdrs;
+   nsresult rv = AddMessageBatch(aMessages, hdrs);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  NS_ADDREF(*aHdr = hdrs[0]);
++  NS_IF_ADDREF(*aHdr = hdrs[0]);
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgLocalMailFolder::AddMessageBatch(
+     const nsTArray<nsCString>& aMessages,
+     nsTArray<RefPtr<nsIMsgDBHdr>>& aHdrArray) {
+   AUTO_PROFILER_LABEL("nsMsgLocalMailFolder::AddMessageBatch", MAILNEWS);
+@@ -3380,16 +3380,26 @@ nsMsgLocalMailFolder::AddMessageBatch(
+       nsAutoCString storeToken;
+       rv = msgStore->FinishNewMessage(this, outStream, storeToken);
+       NS_ENSURE_SUCCESS(rv, rv);
+       outGuard.release();
+       rv = newHdr->SetStoreToken(storeToken);
+       NS_ENSURE_SUCCESS(rv, rv);
+       newMailParser->DoneParsing();
+       newMailParser->EndMsgDownload();
++      // Synchronous filtering may already have removed the source header.
++      // A queued move can still remove it after this method returns.
++      bool isLive = false;
++      rv = newHdr->GetIsLive(&isLive);
++      if (NS_FAILED(rv)) {
++        break;
++      }
++      if (!isLive) {
++        newHdr = nullptr;
++      }
+       aHdrArray.AppendElement(newHdr);
+     }
+   }
+   ReleaseSemaphore(static_cast<nsIMsgLocalMailFolder*>(this),
+                    "nsMsgLocalMailFolder::AddMessageBatch"_ns);
+   return rv;
+ }
+ 
+diff --git a/mailnews/local/test/unit/test_nsIMsgLocalMailFolder.js b/mailnews/local/test/unit/test_nsIMsgLocalMailFolder.js
+--- a/mailnews/local/test/unit/test_nsIMsgLocalMailFolder.js
++++ b/mailnews/local/test/unit/test_nsIMsgLocalMailFolder.js
+@@ -372,16 +372,67 @@ function test_unsafe_characters(root) {
+   Assert.equal(newFolderAlpha.name, "folder α");
+   Assert.equal(newFolderAlpha.filePath.leafName, safeAlpha);
+   Assert.ok(newFolderAlpha.filePath.exists());
+   Assert.equal(newFolderAlpha.summaryFile.leafName, `${safeAlpha}.msf`);
+   Assert.ok(newFolderAlpha.summaryFile.exists());
+   Assert.equal(newFolderAlpha.filePath.parent.leafName, `${safeDelta}.sbd`);
+ }
+ 
++function test_filtered_message_return_values(root, server) {
++  const source = root
++    .createLocalSubfolder("filter source")
++    .QueryInterface(Ci.nsIMsgLocalMailFolder);
++  const destination = root.createLocalSubfolder("filter destination");
++  const filterList = server.getFilterList(null);
++  const filter = filterList.createFilter("Move matching messages");
++  const term = filter.createTerm();
++  term.attrib = Ci.nsMsgSearchAttrib.Subject;
++  term.op = Ci.nsMsgSearchOp.Contains;
++  const value = term.value;
++  value.str = "move me";
++  term.value = value;
++  filter.appendTerm(term);
++  const action = filter.createAction();
++  action.type = Ci.nsMsgFilterAction.MoveToFolder;
++  action.targetFolderUri = destination.URI;
++  filter.appendAction(action);
++  filter.enabled = true;
++  filter.filterType = Ci.nsMsgFilterType.InboxRule;
++  filterList.insertFilterAt(0, filter);
++
++  const generator = new MessageGenerator();
++  const message = subject =>
++    generator.makeMessage({ subject }).toMessageString();
++  source.gettingNewMessages = true;
++  try {
++    const kept = source.addMessage(message("keep single"));
++    Assert.equal(kept.subject, "keep single");
++    Assert.ok(kept.isLive);
++    Assert.equal(source.addMessage(message("move me single")), null);
++
++    const headers = source.addMessageBatch([
++      message("keep batch first"),
++      message("move me batch"),
++      message("keep batch last"),
++    ]);
++    Assert.equal(headers.length, 3);
++    Assert.equal(headers[0].subject, "keep batch first");
++    Assert.equal(headers[1], null);
++    Assert.equal(headers[2].subject, "keep batch last");
++    Assert.ok(headers[0].isLive);
++    Assert.ok(headers[2].isLive);
++    Assert.equal([...source.messages].length, 3);
++    Assert.equal([...destination.messages].length, 2);
++  } finally {
++    source.gettingNewMessages = false;
++    filterList.removeFilterAt(0);
++  }
++}
++
+ add_task(function testMbox() {
+   Services.prefs.setCharPref(
+     "mail.serverDefaultStoreContractID",
+     "@mozilla.org/msgstore/berkeleystore;1"
+   );
+   run_all_tests("LocalFoldersTest-mbox");
+ });
+ 
+@@ -403,9 +454,10 @@ function run_all_tests(aHostName) {
+   account.incomingServer = server;
+ 
+   const root = server.rootMsgFolder.QueryInterface(Ci.nsIMsgLocalMailFolder);
+   subtest_folder_operations(root);
+   subtest_folder_deletion(root);
+   test_parse_uri(root);
+   test_store_rename(root);
+   test_unsafe_characters(root);
++  test_filtered_message_return_values(root, server);
+ }
+

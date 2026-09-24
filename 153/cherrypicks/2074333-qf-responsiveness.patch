@@ -1,0 +1,219 @@
+
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1790138503 0
+# Node ID 0b0dce405d9a7ac0a9d1cb8d8f2cbe49e3d5790f
+# Parent  7b3dc375cd8dbad534300f1376e7efd5aa30a44e
+Bug 2074333 - Improve the responsiveness of quick filter. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D328049
+
+
+diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.cpp b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+--- a/mailnews/base/src/nsMsgQuickSearchDBView.cpp
++++ b/mailnews/base/src/nsMsgQuickSearchDBView.cpp
+@@ -31,19 +31,32 @@ NS_IMETHODIMP nsMsgQuickSearchDBView::Op
+                                            nsMsgViewFlagsTypeValue viewFlags) {
+   AUTO_PROFILER_LABEL("nsMsgQuickSearchDBView::Open", MAILNEWS);
+   nsresult rv = nsMsgDBView::Open(folder, sortType, sortOrder, viewFlags);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (!m_db) return NS_ERROR_NULL_POINTER;
+   m_viewFolder = nullptr;
+ 
+-  int32_t count;
+-  rv = InitThreadedView(count);
+-  return rv;
++  return InitThreadedView();
++}
++
++// Like nsMsgThreadedDBView::InitThreadedView (which we inherit), but without
++// the "loading in all the messages and sorting them" bits, since we're going to
++// immediately forget about them anyway.
++nsresult nsMsgQuickSearchDBView::InitThreadedView() {
++  m_keys.Clear();
++  m_flags.Clear();
++  m_levels.Clear();
++  m_prevKeys.Clear();
++  m_prevFlags.Clear();
++  m_prevLevels.Clear();
++  m_havePrevView = false;
++
++  return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgQuickSearchDBView::CloneDBView(nsIMessenger* aMessengerInstance,
+                                     nsIMsgWindow* aMsgWindow,
+                                     nsIMsgDBViewCommandUpdater* aCmdUpdater,
+                                     nsIMsgDBView** _retval) {
+   nsMsgQuickSearchDBView* newMsgDBView = new nsMsgQuickSearchDBView();
+diff --git a/mailnews/base/src/nsMsgQuickSearchDBView.h b/mailnews/base/src/nsMsgQuickSearchDBView.h
+--- a/mailnews/base/src/nsMsgQuickSearchDBView.h
++++ b/mailnews/base/src/nsMsgQuickSearchDBView.h
+@@ -49,16 +49,17 @@ class nsMsgQuickSearchDBView : public ns
+                                   nsIDBChangeListener* aInstigator) override;
+   NS_IMETHOD OnHdrDeleted(nsIMsgDBHdr* aHdrDeleted, nsMsgKey aParentKey,
+                           int32_t aFlags,
+                           nsIDBChangeListener* aInstigator) override;
+   NS_IMETHOD GetNumMsgsInView(int32_t* aNumMsgs) override;
+ 
+  protected:
+   virtual ~nsMsgQuickSearchDBView();
++  nsresult InitThreadedView();
+   nsWeakPtr m_searchSession;
+   nsTArray<nsMsgKey> m_origKeys;
+   bool m_usingCachedHits;
+   bool m_cacheEmpty;
+   nsCOMArray<nsIMsgDBHdr> m_hdrHits;
+   virtual nsresult AddHdr(nsIMsgDBHdr* msgHdr,
+                           nsMsgViewIndex* resultIndex = nullptr) override;
+   virtual nsresult OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
+diff --git a/mailnews/base/src/nsMsgThreadedDBView.cpp b/mailnews/base/src/nsMsgThreadedDBView.cpp
+--- a/mailnews/base/src/nsMsgThreadedDBView.cpp
++++ b/mailnews/base/src/nsMsgThreadedDBView.cpp
+@@ -55,18 +55,17 @@ nsMsgThreadedDBView::Open(nsIMsgFolder* 
+       // Allocate extra entries to avoid reallocation on new mail.
+       totalMessages += MSGHDR_CACHE_LOOK_AHEAD_SIZE;
+   }
+ 
+   // If total messages is 0, then we probably don't have any idea how many
+   // headers are in the db so we have no business setting the cache size.
+   if (totalMessages > 0) m_db->SetMsgHdrCacheSize((uint32_t)totalMessages);
+ 
+-  int32_t count;
+-  rv = InitThreadedView(count);
++  rv = InitThreadedView();
+ 
+   // This is a hack, but we're trying to find a way to correct
+   // incorrect total and unread msg counts w/o paying a big
+   // performance penalty. So, if we're not threaded, just add
+   // up the total and unread messages in the view and see if that
+   // matches what the db totals say. Except ignored threads are
+   // going to throw us off...hmm. Unless we just look at the
+   // unread counts which is what mostly tweaks people anyway...
+@@ -83,18 +82,17 @@ nsMsgThreadedDBView::Open(nsIMsgFolder* 
+ 
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsMsgThreadedDBView::Close() { return nsMsgDBView::Close(); }
+ 
+ // Populate the view with the ids of the first message in each thread.
+-nsresult nsMsgThreadedDBView::InitThreadedView(int32_t& count) {
+-  count = 0;
++nsresult nsMsgThreadedDBView::InitThreadedView() {
+   m_keys.Clear();
+   m_flags.Clear();
+   m_levels.Clear();
+   m_prevKeys.Clear();
+   m_prevFlags.Clear();
+   m_prevLevels.Clear();
+   m_havePrevView = false;
+ 
+@@ -176,18 +174,16 @@ nsresult nsMsgThreadedDBView::InitThread
+ 
+     // We expand as we build the view, which allows us to insert at the end
+     // of the key array, instead of the middle, and is much faster.
+     if ((!(m_viewFlags & nsMsgViewFlagsType::kThreadedDisplay) ||
+          m_viewFlags & nsMsgViewFlagsType::kExpandAll) &&
+         msgFlags & nsMsgMessageFlags::Elided) {
+       ExpandByIndex(m_keys.Length() - 1, nullptr);
+     }
+-
+-    count++;
+   }
+ 
+   rv = InitSort(m_sortType, m_sortOrder);
+   SaveSortInfo(m_sortType, m_sortOrder);
+   return rv;
+ }
+ 
+ nsresult nsMsgThreadedDBView::SortThreads(nsMsgViewSortTypeValue sortType,
+@@ -323,18 +319,17 @@ nsMsgThreadedDBView::Sort(nsMsgViewSortT
+         RestoreSelection(preservedKey, preservedSelection);
+         if (mTree) mTree->Invalidate();
+         if (mJSTree) mJSTree->Invalidate();
+ 
+         return NS_OK;
+       } else {
+         // Set sort info in anticipation of what Init will do.
+         // Build up thread list.
+-        int32_t unused;  // count.
+-        InitThreadedView(unused);
++        InitThreadedView();
+         if (sortOrder != nsMsgViewSortOrder::ascending)
+           Sort(sortType, sortOrder);
+ 
+         // The sort may have changed the number of rows
+         // before we update the selection, tell the tree
+         // do this before we call restore selection
+         // this is safe when there is no selection.
+         rv = AdjustRowCount(rowCountBeforeSort, GetSize());
+diff --git a/mailnews/base/src/nsMsgThreadedDBView.h b/mailnews/base/src/nsMsgThreadedDBView.h
+--- a/mailnews/base/src/nsMsgThreadedDBView.h
++++ b/mailnews/base/src/nsMsgThreadedDBView.h
+@@ -23,17 +23,17 @@ class nsMsgThreadedDBView : public nsMsg
+   NS_IMETHOD Sort(nsMsgViewSortTypeValue sortType,
+                   nsMsgViewSortOrderValue sortOrder) override;
+   NS_IMETHOD GetViewType(nsMsgViewTypeValue* aViewType) override;
+   NS_IMETHOD OnParentChanged(nsMsgKey aKeyChanged, nsMsgKey oldParent,
+                              nsMsgKey newParent,
+                              nsIDBChangeListener* aInstigator) override;
+ 
+  protected:
+-  nsresult InitThreadedView(int32_t& count);
++  nsresult InitThreadedView();
+   virtual nsresult OnNewHeader(nsIMsgDBHdr* newHdr, nsMsgKey aParentKey,
+                                bool ensureListed) override;
+   virtual nsresult AddMsgToThreadNotInView(nsIMsgThread* threadHdr,
+                                            nsIMsgDBHdr* msgHdr,
+                                            bool ensureListed);
+   nsresult InitSort(nsMsgViewSortTypeValue sortType,
+                     nsMsgViewSortOrderValue sortOrder);
+   virtual nsresult SortThreads(nsMsgViewSortTypeValue sortType,
+diff --git a/mailnews/search/src/nsMsgLocalSearch.cpp b/mailnews/search/src/nsMsgLocalSearch.cpp
+--- a/mailnews/search/src/nsMsgLocalSearch.cpp
++++ b/mailnews/search/src/nsMsgLocalSearch.cpp
+@@ -613,17 +613,17 @@ nsresult nsMsgSearchOfflineMail::MatchTe
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsMsgSearchOfflineMail::Search(bool* aDone) {
+   RefPtr<nsIMsgSearchAdapter> kungFuDeathGrip(this);
+   NS_ENSURE_ARG(aDone);
+   *aDone = false;
+-  const uint32_t kTimeSliceInMS = 200;
++  const uint32_t kTimeSliceInMS = 50;
+   nsresult err = NS_OK;
+ 
+   if (!m_db) {
+     // Try to open the DB lazily. This will set up a parser if one is required.
+     err = OpenSummaryFile();
+   }
+   if (!m_db) {
+     // If a reparsing has been initiated, this will return NS_OK. In case of
+diff --git a/mailnews/search/src/nsMsgSearchSession.cpp b/mailnews/search/src/nsMsgSearchSession.cpp
+--- a/mailnews/search/src/nsMsgSearchSession.cpp
++++ b/mailnews/search/src/nsMsgSearchSession.cpp
+@@ -392,16 +392,17 @@ nsresult nsMsgSearchSession::GetNextUrl(
+       msgService->Search(this, msgWindow, currentTerm->m_folder, m_runningUrl);
+     return rv;
+   }
+   return NS_OK;
+ }
+ 
+ /* static */
+ void nsMsgSearchSession::TimerCallback(nsITimer* aTimer, void* aClosure) {
++  AUTO_PROFILER_LABEL("nsMsgSearchSession::TimerCallback", MAILNEWS);
+   NS_ENSURE_TRUE_VOID(aClosure);
+   nsMsgSearchSession* searchSession = (nsMsgSearchSession*)aClosure;
+ 
+   bool isShuttingDown = false;
+   nsCOMPtr<nsIAppStartup> appStartup(
+       mozilla::components::AppStartup::Service());
+   NS_ENSURE_TRUE_VOID(appStartup);
+   appStartup->GetShuttingDown(&isShuttingDown);
+

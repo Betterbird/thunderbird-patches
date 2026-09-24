@@ -1,0 +1,303 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1790023075 25200
+# Node ID c8108f9b6104473a6c4e2df3338da4a1fd9c35c5
+# Parent  ca083dcdf51d75a4431312548dbffc92fd49ac19
+Bug 2064660 - Persist RSS category tags before applying incoming filters. r=mkmelin
+
+Create feed category tags and write their keys and the feed flag into the message before it is added. This makes tags available to incoming filters and preserves them when a filter moves the message.
+
+Differential Revision: https://phabricator.services.mozilla.com/D327390
+
+
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -1,13 +1,14 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import { MailServices } from "resource:///modules/MailServices.sys.mjs";
++import { MailStringUtils } from "resource:///modules/MailStringUtils.sys.mjs";
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
+ });
+ 
+ export function FeedItem() {
+   this.mDate = lazy.FeedUtils.getValidRFC5322Date();
+@@ -237,21 +238,24 @@ FeedItem.prototype = {
+     const fromStr = this.createHeaderStrFromArray("From: ", this.author);
+ 
+     // If there are keywords (categories), create the headers.
+     const keywordsStr = this.createHeaderStrFromArray(
+       "Keywords: ",
+       this.keywords
+     );
+ 
++    const tagKeys = this.getTagKeys(this.keywords).join(" ");
++    const status = Ci.nsMsgMessageFlags.FeedMsg.toString(16).padStart(4, "0");
++
+     let source =
+-      "X-Mozilla-Status: 0000\n" +
++      `X-Mozilla-Status: ${status}\n` +
+       "X-Mozilla-Status2: 00000000\n" +
+       "X-Mozilla-Keys: " +
+-      " ".repeat(80) +
++      tagKeys.padEnd(80, " ") +
+       "\n" +
+       "Received: by localhost; " +
+       lazy.FeedUtils.getValidRFC5322Date() +
+       "\n" +
+       "Date: " +
+       this.mDate +
+       "\n" +
+       "Message-Id: " +
+@@ -306,23 +310,21 @@ FeedItem.prototype = {
+         source.length +
+         " characters long"
+     );
+ 
+     // Get the folder and database storing the feed's messages and headers.
+     const folder = this.feed.folder.QueryInterface(Ci.nsIMsgLocalMailFolder);
+     const msgFolder = folder.QueryInterface(Ci.nsIMsgFolder);
+     msgFolder.gettingNewMessages = true;
+-    // Source is a unicode js string, as UTF-16, and we want to save a
+-    // char * cpp |string| as UTF-8 bytes. The source xml doc encoding is utf8.
+-    source = unescape(encodeURIComponent(source));
+-    const msgDBHdr = folder.addMessage(source);
+-    msgDBHdr.orFlags(Ci.nsMsgMessageFlags.FeedMsg);
+-    msgFolder.gettingNewMessages = false;
+-    this.tagItem(msgDBHdr, this.keywords);
++    try {
++      folder.addMessage(MailStringUtils.stringToByteString(source));
++    } finally {
++      msgFolder.gettingNewMessages = false;
++    }
+   },
+ 
+   /**
+    * Create a header string from an array. Intended for comma separated headers
+    * like From or Keywords. In the case of a longer than RFC5322 recommended
+    * line length, create multiple folded lines (easier to parse than multiple
+    * headers).
+    *
+@@ -362,49 +364,47 @@ FeedItem.prototype = {
+     headerStr = headerStr.replace(/,\s$/, "\n");
+     lines.push(headerStr);
+     headerStr = lines.join("\n");
+ 
+     return headerStr;
+   },
+ 
+   /**
+-   * Autotag messages.
++   * Create tags for feed categories and return their keys.
+    *
+-   * @param  {nsIMsgDBHdr} aMsgDBHdr - message to tag
+-   * @param  {Array} aKeywords       - keywords (tags)
+-   * @returns {void}
++   * @param {string[]} aKeywords - Keywords (tags).
++   * @returns {string[]} The tag keys.
+    */
+-  tagItem(aMsgDBHdr, aKeywords) {
++  getTagKeys(aKeywords) {
+     const category = this.feed.options.category;
+     if (!aKeywords.length || !category.enabled) {
+-      return;
++      return [];
+     }
+ 
+     const prefix = category.prefixEnabled ? category.prefix : "";
+     const rtl = Services.prefs.getIntPref("bidi.direction") == 2;
+ 
+     const keys = [];
+     for (let keyword of aKeywords) {
+       keyword = rtl ? keyword + prefix : prefix + keyword;
+       let keyForTag = MailServices.tags.getKeyForTag(keyword);
+       if (!keyForTag) {
+         // Add the tag if it doesn't exist.
+         MailServices.tags.addTag(keyword, "", lazy.FeedUtils.AUTOTAG);
+         keyForTag = MailServices.tags.getKeyForTag(keyword);
+       }
+ 
+       // Add the tag key to the keys array.
+-      keys.push(keyForTag);
++      if (keyForTag && !keys.includes(keyForTag)) {
++        keys.push(keyForTag);
++      }
+     }
+ 
+-    if (keys.length) {
+-      // Add the keys to the message.
+-      aMsgDBHdr.folder.addKeywordsToMessages([aMsgDBHdr], keys.join(" "));
+-    }
++    return keys;
+   },
+ 
+   htmlEscape(s) {
+     s = s.replace(/&/g, "&amp;");
+     s = s.replace(/>/g, "&gt;");
+     s = s.replace(/</g, "&lt;");
+     s = s.replace(/'/g, "&#39;");
+     s = s.replace(/"/g, "&quot;");
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feeditem.js b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+@@ -0,0 +1,140 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { FeedItem } = ChromeUtils.importESModule(
++  "resource:///modules/FeedItem.sys.mjs"
++);
++
++const TAG_KEY = "rss-camera";
++const TAG_NAME = "Cameras";
++
++add_setup(function () {
++  MailServices.tags.addTagForKey(TAG_KEY, TAG_NAME, "", FeedUtils.AUTOTAG);
++  registerCleanupFunction(() => MailServices.tags.deleteKey(TAG_KEY));
++});
++
++/**
++ * Create an RSS item and write it directly to a folder.
++ *
++ * @param {nsIMsgFolder} folder - Folder in which to create the item.
++ * @param {string} id - Unique item identifier.
++ */
++function writeFeedItem(folder, id) {
++  const item = new FeedItem();
++  item.feed = {
++    folder,
++    name: folder.name,
++    options: {
++      category: {
++        enabled: true,
++        prefixEnabled: false,
++        prefix: "",
++      },
++    },
++  };
++  item.id = id;
++  item.title = `Feed item ${id}`;
++  item.author = ["author@example.invalid"];
++  item.keywords = [TAG_NAME];
++  item.content = "\n<p>Feed item content</p>";
++  item.url = `https://example.invalid/${id}`;
++  item.writeToFolder();
++}
++
++/**
++ * Add an incoming move filter to an RSS account.
++ *
++ * @param {nsIMsgIncomingServer} server - RSS incoming server.
++ * @param {nsIMsgFolder} destination - Move destination.
++ * @param {boolean} matchTag - Whether to match TAG_KEY instead of all items.
++ */
++function addMoveFilter(server, destination, matchTag) {
++  const filterList = server.getFilterList(null);
++  const filter = filterList.createFilter(
++    matchTag ? "Move tagged feed item" : "Move all feed items"
++  );
++  const term = filter.createTerm();
++  if (matchTag) {
++    term.attrib = Ci.nsMsgSearchAttrib.Keywords;
++    term.op = Ci.nsMsgSearchOp.Contains;
++    const value = term.value;
++    value.attrib = Ci.nsMsgSearchAttrib.Keywords;
++    value.str = TAG_KEY;
++    term.value = value;
++  } else {
++    term.matchAll = true;
++  }
++  filter.appendTerm(term);
++
++  const action = filter.createAction();
++  action.type = Ci.nsMsgFilterAction.MoveToFolder;
++  action.targetFolderUri = destination.URI;
++  filter.appendAction(action);
++  filter.enabled = true;
++  filter.filterType = Ci.nsMsgFilterType.InboxRule;
++  filterList.insertFilterAt(0, filter);
++}
++
++/**
++ * Check that an item was moved with its RSS metadata intact.
++ *
++ * @param {nsIMsgFolder} source - Original feed folder.
++ * @param {nsIMsgFolder} destination - Move destination.
++ */
++function assertMovedAndTagged(source, destination) {
++  Assert.equal([...source.messages].length, 0, "source folder should be empty");
++  const messages = [...destination.messages];
++  Assert.equal(messages.length, 1, "destination should contain the feed item");
++  Assert.equal(
++    messages[0].getStringProperty("keywords"),
++    TAG_KEY,
++    "moved item should retain its feed category tag"
++  );
++  Assert.ok(
++    messages[0].flags & Ci.nsMsgMessageFlags.FeedMsg,
++    "moved item should retain its feed flag"
++  );
++  const storedMessage = mailTestUtils.loadMessageToString(
++    destination,
++    messages[0]
++  );
++  Assert.ok(
++    storedMessage.includes("X-Mozilla-Status: 0040"),
++    "feed flag should be persisted in the message"
++  );
++  Assert.ok(
++    storedMessage.includes(`X-Mozilla-Keys: ${TAG_KEY}`),
++    "feed category tag should be persisted in the message"
++  );
++}
++
++add_task(function test_feed_category_tag_available_to_incoming_filter() {
++  const account = FeedUtils.createRssAccount("tag filter account");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const source = rootFolder.createLocalSubfolder("tag filter source");
++  const destination = rootFolder.createLocalSubfolder("tag filter destination");
++  addMoveFilter(account.incomingServer, destination, true);
++
++  writeFeedItem(source, "tag-filter");
++
++  assertMovedAndTagged(source, destination);
++});
++
++add_task(function test_feed_category_tag_survives_incoming_filter_move() {
++  const account = FeedUtils.createRssAccount("move filter account");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const source = rootFolder.createLocalSubfolder("move filter source");
++  const destination = rootFolder.createLocalSubfolder(
++    "move filter destination"
++  );
++  addMoveFilter(account.incomingServer, destination, false);
++
++  writeFeedItem(source, "move-filter");
++
++  assertMovedAndTagged(source, destination);
++});
+diff --git a/mailnews/extensions/newsblog/test/unit/xpcshell.toml b/mailnews/extensions/newsblog/test/unit/xpcshell.toml
+--- a/mailnews/extensions/newsblog/test/unit/xpcshell.toml
++++ b/mailnews/extensions/newsblog/test/unit/xpcshell.toml
+@@ -1,5 +1,7 @@
+ [DEFAULT]
+ head = "head_feeds.js"
+ support-files = ["resources/*"]
+ 
++["test_feeditem.js"]
++
+ ["test_feedparser.js"]
+
