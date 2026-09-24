@@ -1,0 +1,259 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Parent  8758ce129fdbd500bdd1e5223503808f9ca9bb29
+Bug 2074786 - Backout regressor bug 2019689.
+
+diff --git a/editor/libeditor/HTMLEditSubActionHandler.cpp b/editor/libeditor/HTMLEditSubActionHandler.cpp
+--- a/editor/libeditor/HTMLEditSubActionHandler.cpp
++++ b/editor/libeditor/HTMLEditSubActionHandler.cpp
+@@ -1236,14 +1236,26 @@ Result<EditActionResult, nsresult> HTMLE
+               *this, aInsertionString,
+               compositionEndPoint.IsSet()
+                   ? EditorDOMRange(pointToInsert, compositionEndPoint)
+                   : EditorDOMRange(pointToInsert),
+-              aPurpose, *editingHost);
++              aPurpose);
+       if (MOZ_UNLIKELY(replaceTextResult.isErr())) {
+         NS_WARNING("WhiteSpaceVisibilityKeeper::ReplaceText() failed");
+         return replaceTextResult.propagateErr();
+       }
+       InsertTextResult unwrappedReplaceTextResult = replaceTextResult.unwrap();
++      nsresult rv = EnsureNoFollowingUnnecessaryLineBreak(
++          unwrappedReplaceTextResult.EndOfInsertedTextRef(),
++          // When user inserting text, the web app may expect that nothing
++          // extant content will be deleted. Therefore, we should preserve
++          // preformatted linefeed at least.
++          PreservePreformattedLineBreak::Yes, PaddingForEmptyBlock::Unnecessary,
++          *editingHost);
++      if (NS_FAILED(rv)) {
++        NS_WARNING(
++            "HTMLEditor::EnsureNoFollowingUnnecessaryLineBreak() failed");
++        return Err(rv);
++      }
+       endOfInsertedText = unwrappedReplaceTextResult.EndOfInsertedTextRef();
+       if (InsertingTextForCommittingComposition(aPurpose)) {
+         // If we're committing the composition,
+         // WhiteSpaceVisibilityKeeper::InsertOrUpdateCompositionString() may
+@@ -1354,49 +1366,8 @@ Result<EditActionResult, nsresult> HTMLE
+     // for efficiency, break out the pre case separately.  This is because
+     // its a lot cheaper to search the input string for only newlines than
+     // it is to search for both tabs and newlines.
+     if (!isWhiteSpaceCollapsible || IsPlaintextMailComposer()) {
+-      if (!aInsertionString.IsEmpty()) [[likely]] {
+-        // If the inserting string is not empty, we need to delete padding
+-        // line break after the insertion point first because X (Twitter)
+-        // expects that character data change will be notified at last.
+-        const WSScanResult nextThing = HTMLEditUtils::
+-            ScanInclusiveNextThingWithIgnoringUnnecessaryLineBreak(
+-                currentPoint, PaddingForEmptyBlock::Unnecessary, *editingHost);
+-        if (nextThing.MaybeIgnoredLineBreak().isSome()) {
+-          const EditorLineBreak& lineBreak =
+-              nextThing.MaybeIgnoredLineBreak().ref();
+-          // When user inserting content, the web app may expect that nothing
+-          // extant content will be deleted. Therefore, we should preserve
+-          // preformatted linefeed at least. However, we should delete it if
+-          // it's a padding for empty block for the compatibility with the other
+-          // browsers.
+-          if (lineBreak.IsHTMLBRElement() ||
+-              lineBreak.IsPaddingForEmptyBlock()) {
+-            const RefPtr<Element> ancestorLimiterToDeleteEmptyInlines =
+-                lineBreak.ContentRef().IsInclusiveDescendantOf(
+-                    currentPoint.GetContainer())
+-                    ? currentPoint.GetContainerOrContainerParentElement()
+-                    : editingHost.get();
+-            {
+-              AutoTrackDOMPoint trackCurrentPoint(RangeUpdaterRef(),
+-                                                  &currentPoint);
+-              Result<EditorDOMPoint, nsresult> deleteLineBreakResultOrError =
+-                  DeleteLineBreakWithTransaction(
+-                      lineBreak, nsIEditor::eStrip,
+-                      *ancestorLimiterToDeleteEmptyInlines);
+-              if (deleteLineBreakResultOrError.isErr()) [[unlikely]] {
+-                NS_WARNING(
+-                    "HTMLEditor::DeleteLineBreakWithTransaction() failed");
+-                return deleteLineBreakResultOrError.propagateErr();
+-              }
+-            }
+-            if (NS_WARN_IF(!currentPoint.IsSetAndValidInComposedDoc())) {
+-              return Err(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
+-            }
+-          }
+-        }
+-      }
+       if (*lineBreakType == LineBreakType::Linefeed) {
+         // Both Chrome and us inserts a preformatted linefeed with its own
+         // `Text` node in various cases.  However, when inserting multiline
+         // text, we should insert a `Text` because Chrome does so and the
+@@ -1511,17 +1482,15 @@ Result<EditActionResult, nsresult> HTMLE
+                                                 lineStartOffset, lineLength);
+             if (!lineText.Contains(u'\t')) {
+               return WhiteSpaceVisibilityKeeper::InsertText(
+                   *this, lineText, currentPoint,
+-                  GetInsertTextTo(inclusiveNextLinefeedOffset, lineStartOffset),
+-                  *editingHost);
++                  GetInsertTextTo(inclusiveNextLinefeedOffset, lineStartOffset));
+             }
+             nsAutoString formattedLineText(lineText);
+             formattedLineText.ReplaceSubstring(u"\t"_ns, u"    "_ns);
+             return WhiteSpaceVisibilityKeeper::InsertText(
+                 *this, formattedLineText, currentPoint,
+-                GetInsertTextTo(inclusiveNextLinefeedOffset, lineStartOffset),
+-                *editingHost);
++                GetInsertTextTo(inclusiveNextLinefeedOffset, lineStartOffset));
+           }();
+           if (MOZ_UNLIKELY(insertTextResult.isErr())) {
+             NS_WARNING("WhiteSpaceVisibilityKeeper::InsertText() failed");
+             return insertTextResult.propagateErr();
+diff --git a/editor/libeditor/HTMLEditUtils.h b/editor/libeditor/HTMLEditUtils.h
+--- a/editor/libeditor/HTMLEditUtils.h
++++ b/editor/libeditor/HTMLEditUtils.h
+@@ -2374,9 +2374,8 @@ class HTMLEditUtils final {
+           !HTMLEditUtils::IsSimplyEditableNode(*element)) {
+         break;
+       }
+       if (element->GetChildCount() > 1) {
+-        // FIXME: We should check whether the each other children is empty.
+         for (const nsIContent* child = element->GetFirstChild(); child;
+              child = child->GetNextSibling()) {
+           if (child == lastEmptyContent || child->IsComment()) {
+             continue;
+diff --git a/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp b/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp
+--- a/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp
++++ b/editor/libeditor/WhiteSpaceVisibilityKeeper.cpp
+@@ -30,9 +30,8 @@
+ namespace mozilla {
+ 
+ using namespace dom;
+ 
+-using EmptyCheckOption = HTMLEditUtils::EmptyCheckOption;
+ using LeafNodeOption = HTMLEditUtils::LeafNodeOption;
+ using TreatInvisibleLineBreakAs = HTMLEditUtils::TreatInvisibleLineBreakAs;
+ 
+ Result<EditorDOMPoint, nsresult>
+@@ -2061,9 +2060,9 @@ WhiteSpaceVisibilityKeeper::EnsureNoInvi
+ Result<InsertTextResult, nsresult>
+ WhiteSpaceVisibilityKeeper::InsertTextOrInsertOrUpdateCompositionString(
+     HTMLEditor& aHTMLEditor, const nsAString& aStringToInsert,
+     const EditorDOMRange& aRangeToBeReplaced, InsertTextTo aInsertTextTo,
+-    InsertTextFor aPurpose, const Element& aEditingHost) {
++    InsertTextFor aPurpose) {
+   MOZ_ASSERT(aRangeToBeReplaced.StartRef().IsInContentNode());
+   MOZ_ASSERT_IF(!EditorBase::InsertingTextForExtantComposition(aPurpose),
+                 aRangeToBeReplaced.Collapsed());
+   if (aStringToInsert.IsEmpty()) {
+@@ -2183,49 +2182,8 @@ WhiteSpaceVisibilityKeeper::InsertTextOr
+                 ? HTMLEditor::NormalizeSurroundingWhiteSpaces::No
+                 : HTMLEditor::NormalizeSurroundingWhiteSpaces::Yes);
+       }();
+ 
+-  // Now, we prepare to insert normalized text and the text may be going to be
+-  // followed by an unnecessary line break. In this case, we need to delete the
+-  // unnecessary line break before inserting the new text because X (Twitter)
+-  // expects the last mutation is the character data change.
+-  if (!aStringToInsert.IsEmpty() &&
+-      !EditorBase::InsertingTextForExtantComposition(aPurpose)) {
+-    const WSScanResult nextThing =
+-        HTMLEditUtils::ScanInclusiveNextThingWithIgnoringUnnecessaryLineBreak(
+-            pointToInsert, PaddingForEmptyBlock::Unnecessary, aEditingHost);
+-    if (nextThing.MaybeIgnoredLineBreak().isSome()) {
+-      const EditorLineBreak& lineBreak =
+-          nextThing.MaybeIgnoredLineBreak().ref();
+-      // When user inserting content, the web app may expect that nothing
+-      // extant content will be deleted. Therefore, we should preserve
+-      // preformatted linefeed at least. However, we should delete it if it's a
+-      // padding for empty block for the compatibility with the other browsers.
+-      if (lineBreak.IsHTMLBRElement() || lineBreak.IsPaddingForEmptyBlock()) {
+-        const RefPtr<const Element> ancestorLimiterToDeleteEmptyInlines =
+-            lineBreak.ContentRef().IsInclusiveDescendantOf(
+-                pointToInsert.GetContainer())
+-                ? pointToInsert.GetContainerOrContainerParentElement()
+-                : &aEditingHost;
+-        {
+-          AutoTrackDOMPoint trackCurrentPoint(aHTMLEditor.RangeUpdaterRef(),
+-                                              &pointToInsert);
+-          Result<EditorDOMPoint, nsresult> deleteLineBreakResultOrError =
+-              aHTMLEditor.DeleteLineBreakWithTransaction(
+-                  nextThing.MaybeIgnoredLineBreak().ref(), nsIEditor::eStrip,
+-                  *ancestorLimiterToDeleteEmptyInlines);
+-          if (deleteLineBreakResultOrError.isErr()) [[unlikely]] {
+-            NS_WARNING("HTMLEditor::DeleteLineBreakWithTransaction() failed");
+-            return deleteLineBreakResultOrError.propagateErr();
+-          }
+-        }
+-        if (NS_WARN_IF(!pointToInsert.IsSetAndValidInComposedDoc())) {
+-          return Err(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
+-        }
+-      }
+-    }
+-  }
+-
+   MOZ_ASSERT_IF(insertTextData.ReplaceLength(), pointToInsert.IsInTextNode());
+   Result<InsertTextResult, nsresult> insertOrReplaceTextResultOrError =
+       aHTMLEditor.InsertOrReplaceTextWithTransaction(pointToInsert,
+                                                      insertTextData, aPurpose);
+diff --git a/editor/libeditor/WhiteSpaceVisibilityKeeper.h b/editor/libeditor/WhiteSpaceVisibilityKeeper.h
+--- a/editor/libeditor/WhiteSpaceVisibilityKeeper.h
++++ b/editor/libeditor/WhiteSpaceVisibilityKeeper.h
+@@ -239,19 +239,18 @@ class WhiteSpaceVisibilityKeeper final {
+    * @param aRangeToBeReplaced  The range to be replaced.
+    * @param aInsertTextTo       Whether forcibly creates a new `Text` node in
+    *                            specific condition or use existing `Text` if
+    *                            available.
+-   * @param aEditingHost        The editing host at aPointToInsert.
+    */
+   template <typename EditorDOMPointType>
+   [[nodiscard]] MOZ_CAN_RUN_SCRIPT static Result<InsertTextResult, nsresult>
+   InsertText(HTMLEditor& aHTMLEditor, const nsAString& aStringToInsert,
+              const EditorDOMPointType& aPointToInsert,
+-             InsertTextTo aInsertTextTo, const Element& aEditingHost) {
++             InsertTextTo aInsertTextTo) {
+     return WhiteSpaceVisibilityKeeper::
+         InsertTextOrInsertOrUpdateCompositionString(
+             aHTMLEditor, aStringToInsert, EditorDOMRange(aPointToInsert),
+-            aInsertTextTo, InsertTextFor::NormalText, aEditingHost);
++            aInsertTextTo, InsertTextFor::NormalText);
+   }
+ 
+   /**
+    * Insert aCompositionString to the start boundary of aCompositionStringRange
+@@ -264,21 +263,18 @@ class WhiteSpaceVisibilityKeeper final {
+    * @param aCompositionStringRange
+    *                            If there is old composition string, this should
+    *                            cover all of it.  Otherwise, this should be
+    *                            collapsed and indicate the insertion point.
+-   * @param aEditingHost        The editing host at aCompositionStringRange.
+    */
+   [[nodiscard]] MOZ_CAN_RUN_SCRIPT static Result<InsertTextResult, nsresult>
+   InsertOrUpdateCompositionString(HTMLEditor& aHTMLEditor,
+                                   const nsAString& aCompositionString,
+                                   const EditorDOMRange& aCompositionStringRange,
+-                                  InsertTextFor aPurpose,
+-                                  const Element& aEditingHost) {
++                                  InsertTextFor aPurpose) {
+     MOZ_ASSERT(EditorBase::InsertingTextForComposition(aPurpose));
+     return InsertTextOrInsertOrUpdateCompositionString(
+         aHTMLEditor, aCompositionString, aCompositionStringRange,
+-        HTMLEditor::InsertTextTo::ExistingTextNodeIfAvailable, aPurpose,
+-        aEditingHost);
++        HTMLEditor::InsertTextTo::ExistingTextNodeIfAvailable, aPurpose);
+   }
+ 
+   /**
+    * Normalize white-space sequence containing aPoint or starts from next to
+@@ -379,15 +375,14 @@ class WhiteSpaceVisibilityKeeper final {
+    *                            specific condition or use existing `Text` if
+    *                            available.
+    * @param aPurpose            Whether it's handling normal text input or
+    *                            updating composition.
+-   * @param aEditingHost        The editing host at aRangeToBeReplaced.
+    */
+   [[nodiscard]] MOZ_CAN_RUN_SCRIPT static Result<InsertTextResult, nsresult>
+   InsertTextOrInsertOrUpdateCompositionString(
+       HTMLEditor& aHTMLEditor, const nsAString& aStringToInsert,
+       const EditorDOMRange& aRangeToBeReplaced, InsertTextTo aInsertTextTo,
+-      InsertTextFor aPurpose, const Element& aEditingHost);
++      InsertTextFor aPurpose);
+ };
+ 
+ }  // namespace mozilla
+ 
