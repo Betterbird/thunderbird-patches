@@ -1,0 +1,611 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1790364371 -7200
+# Parent  325938d49b2dd951bddcd25ad4f42b5f31447e84
+Feature: Linux systray. Implement context menu with: Quit Betterbird to match Windows functionality.
+
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -9,17 +9,24 @@
+ #include "nsCOMArray.h"
+ #include "nsString.h"
+ #include <gtk/gtk.h>
+ #include "../../../third_party/appindicator/ayatana-appindicator.h"
++#include "mozilla/Components.h"
++#include "mozilla/intl/Localization.h"
+ #include "mozilla/Preferences.h"
++#include "mozilla/Services.h"
+ #include "mozIDOMWindow.h"
++#include "nsIAppStartup.h"
+ #include "nsIBaseWindow.h"
+ #include "nsIDocShell.h"
++#include "nsIObserverService.h"
+ #include "nsIPrefService.h"
++#include "nsISupportsPrimitives.h"
+ #include "nsIWidget.h"
++#include "nsIWindowMediator.h"
++#include "nsMsgUtils.h"
++#include "nsPIDOMWindow.h"
+ #include "mozilla/WidgetUtilsGtk.h"
+-#include "nsIWindowMediator.h"
+-#include "nsPIDOMWindow.h"
+ #include <time.h>
+ 
+ #define SHOW_TRAY_ICON_PREF "mail.biff.show_tray_icon"
+ #define SHOW_TRAY_ICON_ALWAYS_PREF "mail.biff.show_tray_icon_always"
+@@ -260,8 +267,97 @@ static void activated(AppIndicator* self
+ static void trayIconActivated(GtkStatusIcon* aIcon, gpointer aData) {
+   activated(NULL, 0, 0, aData);
+ }
+ 
++static nsAutoCString sQuitLabel;
++static GtkMenu* trayMenu = NULL;
++
++static void quitBetterbird() {
++  // Check if it's okay to quit.
++  nsCOMPtr<nsISupportsPRBool> cancelQuit =
++      do_CreateInstance(NS_SUPPORTS_PRBOOL_CONTRACTID);
++  cancelQuit->SetData(false);
++
++  nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
++  obs->NotifyObservers(cancelQuit, "quit-application-requested", nullptr);
++
++  bool shouldCancelQuit;
++  cancelQuit->GetData(&shouldCancelQuit);
++
++  if (!shouldCancelQuit) {
++    // Perform quit.
++    nsCOMPtr<nsIAppStartup> appStartup = components::AppStartup::Service();
++    if (!appStartup) {
++      return;
++    }
++    bool userAllowedQuit = true;
++    appStartup->Quit(nsIAppStartup::eAttemptQuit, 0, &userAllowedQuit);
++  }
++}
++
++static void quitActionActivated(GSimpleAction* aAction, GVariant* aParameter,
++                                gpointer aData) {
++  quitBetterbird();
++}
++
++static void trayEnsureQuitLabel() {
++  if (!sQuitLabel.IsEmpty()) {
++    return;
++  }
++  // Localize the exit item label.
++  RefPtr<mozilla::intl::Localization> l10n =
++      mozilla::intl::Localization::Create(
++          {"branding/brand.ftl"_ns, "messenger/menubar.ftl"_ns}, true);
++  nsresult rv = LocalizeMessage(l10n, "system-tray-menuitem-quit"_ns, {},
++                                sQuitLabel);
++  if (NS_FAILED(rv)) {
++    sQuitLabel.AssignLiteral("Quit Betterbird");
++  }
++}
++
++static void trayCreateMenu() {
++  trayEnsureQuitLabel();
++
++  GMenu* menu = g_menu_new();
++  g_menu_append(menu, sQuitLabel.get(), "quit");
++
++  GSimpleActionGroup* actions = g_simple_action_group_new();
++  GSimpleAction* quitAction = g_simple_action_new("quit", NULL);
++  g_signal_connect(quitAction, "activate", G_CALLBACK(quitActionActivated),
++                   NULL);
++  g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(quitAction));
++  g_object_unref(quitAction);
++
++  app_indicator_set_menu(ci, menu);
++  app_indicator_set_actions(ci, actions);
++  g_object_unref(menu);
++  g_object_unref(actions);
++}
++
++static void trayMenuItemQuitActivated(GtkMenuItem* aItem, gpointer aData) {
++  quitBetterbird();
++}
++
++static void trayCreateGtkMenu() {
++  trayEnsureQuitLabel();
++
++  GtkWidget* menu = gtk_menu_new();
++  GtkWidget* item = gtk_menu_item_new_with_label(sQuitLabel.get());
++  g_signal_connect(G_OBJECT(item), "activate",
++                   G_CALLBACK(trayMenuItemQuitActivated), NULL);
++  gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
++  gtk_widget_show(item);
++  trayMenu = GTK_MENU(menu);
++}
++
++static void trayIconPopupMenu(GtkStatusIcon* aIcon, guint aButton,
++                              guint aActivateTime, gpointer aData) {
++  if (trayMenu) {
++    gtk_menu_popup(trayMenu, NULL, NULL, gtk_status_icon_position_menu, aIcon,
++                   aButton, aActivateTime);
++  }
++}
++
+ NS_IMETHODIMP
+ nsMessengerUnixIntegration::UpdateUnreadCount(uint32_t unreadCount,
+                                               const nsAString& unreadTooltip) {
+   sLastUnreadCount = unreadCount;
+@@ -320,16 +416,18 @@ nsMessengerUnixIntegration::UpdateUnread
+           gtk_status_icon_new_from_icon_name(unreadCount > 0 ? icon_pathN : icon_path0);
+ #else
+           gtk_status_icon_new_from_file(unreadCount > 0 ? icon_pathN : icon_path0);
+ #endif
++      trayCreateGtkMenu();
++      g_signal_connect(G_OBJECT(trayIcon), "popup-menu",
++                       G_CALLBACK(trayIconPopupMenu), NULL);
+       g_signal_connect(G_OBJECT(trayIcon), "activate",
+                        G_CALLBACK(trayIconActivated), NULL);
+     } else {
+       ci = app_indicator_new("Betterbird-systray-icon",
+                              unreadCount > 0 ? icon_pathN : icon_path0,
+                              APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+-      app_indicator_set_menu(ci, g_menu_new());
+-      app_indicator_set_actions(ci, g_simple_action_group_new());
++      trayCreateMenu();
+       g_signal_connect(ci, "activate", G_CALLBACK(activated), NULL);
+     }
+ 
+     // Initialise to something non-zero, subtract a second
+diff --git a/third_party/appindicator/ayatana-appindicator.c b/third_party/appindicator/ayatana-appindicator.c
+--- a/third_party/appindicator/ayatana-appindicator.c
++++ b/third_party/appindicator/ayatana-appindicator.c
+@@ -507,17 +507,14 @@ static void onRegisterService (GObject *
+     return;
+ }
+ 
+ // Betterbird: libayatana-appindicator-glib exports its menu exclusively via
+-// org.gtk.Menus, but several StatusNotifierItem hosts (most notably the GNOME
+-// Shell AppIndicator extension) still implement only the legacy
+-// com.canonical.dbusmenu protocol.  When they learn the Menu object path from
+-// the SNI "Menu" property, they try to talk dbusmenu to it and fail with
+-// "UnknownMethod: No such interface com.canonical.dbusmenu", spamming the
+-// journal.  Betterbird never shows a context menu (the tray icon only activates
+-// the window), so register an always-empty dbusmenu on the same object path to
+-// keep those hosts happy, while org.gtk.Menus remains available for hosts that
+-// understand it.
++// org.gtk.Menus, but the StatusNotifierItem hosts used in practice (KDE
++// Plasma, the Xfce SNI plugin and the GNOME Shell AppIndicator extension)
++// only implement the legacy com.canonical.dbusmenu protocol.  When they learn
++// the Menu object path from the SNI "Menu" property, they talk dbusmenu to it.
++// So serve the menu over com.canonical.dbusmenu as well, on the same object
++// path, mirroring the GMenu set via app_indicator_set_menu().
+ static const gchar *sDbusMenuXML =
+ "<node>"
+ "  <interface name=\"com.canonical.dbusmenu\">"
+ "    <property name=\"Version\" type=\"u\" access=\"read\" />"
+@@ -562,40 +559,288 @@ static const gchar *sDbusMenuXML =
+ "    </method>"
+ "  </interface>"
+ "</node>";
+ 
+-// Answers the com.canonical.dbusmenu method calls with an always-empty menu.
++// Adds the dbusmenu properties of the item at nIndex in pModel to cProps.
++static void menuAddItemProps (GVariantBuilder *cProps, GMenuModel *pModel, gint nIndex, gboolean bHasChildren)
++{
++    gchar *sLabel = NULL;
++    g_menu_model_get_item_attribute (pModel, nIndex, G_MENU_ATTRIBUTE_LABEL, "s", &sLabel);
++
++    if (!sLabel)
++    {
++        sLabel = g_strdup ("");
++    }
++
++    g_variant_builder_add (cProps, "{sv}", "label", g_variant_new_string (sLabel));
++    g_variant_builder_add (cProps, "{sv}", "enabled", g_variant_new_boolean (TRUE));
++    g_variant_builder_add (cProps, "{sv}", "visible", g_variant_new_boolean (TRUE));
++    g_variant_builder_add (cProps, "{sv}", "type", g_variant_new_string ("standard"));
++
++    if (bHasChildren)
++    {
++        g_variant_builder_add (cProps, "{sv}", "children-display", g_variant_new_string ("submenu"));
++    }
++
++    g_free (sLabel);
++}
++
++// Walks the menu model with the same numbering as menuBuildLayout() and
++// returns the model and index of the item with the id nTarget.
++static gboolean menuFindItem (GMenuModel *pModel, gint nTarget, gint *pNextId, GMenuModel **ppModel, gint *pnIndex)
++{
++    gint nItems = g_menu_model_get_n_items (pModel);
++
++    for (gint i = 0; i < nItems; i++)
++    {
++        (*pNextId)++;
++
++        if (*pNextId == nTarget)
++        {
++            *ppModel = pModel;
++            *pnIndex = i;
++
++            return TRUE;
++        }
++
++        GMenuModel *pSection = g_menu_model_get_item_link (pModel, i, G_MENU_LINK_SECTION);
++
++        if (!pSection)
++        {
++            pSection = g_menu_model_get_item_link (pModel, i, G_MENU_LINK_SUBMENU);
++        }
++
++        if (pSection)
++        {
++            gboolean bFound = menuFindItem (pSection, nTarget, pNextId, ppModel, pnIndex);
++            g_object_unref (pSection);
++
++            if (bFound)
++            {
++                return TRUE;
++            }
++        }
++    }
++
++    return FALSE;
++}
++
++// Builds the dbusmenu layout of the items of the model pModel into cChildren,
++// assigning ids from *pNextId in preorder, starting with 1 (0 is the root).
++static void menuBuildLayout (GVariantBuilder *cChildren, GMenuModel *pModel, gint *pNextId)
++{
++    gint nItems = g_menu_model_get_n_items (pModel);
++
++    for (gint i = 0; i < nItems; i++)
++    {
++        gint nId = ++(*pNextId);
++
++        GMenuModel *pSection = g_menu_model_get_item_link (pModel, i, G_MENU_LINK_SECTION);
++
++        if (!pSection)
++        {
++            pSection = g_menu_model_get_item_link (pModel, i, G_MENU_LINK_SUBMENU);
++        }
++
++        gboolean bHasChildren = pSection && g_menu_model_get_n_items (pSection) > 0;
++
++        GVariantBuilder cProps;
++        g_variant_builder_init (&cProps, G_VARIANT_TYPE ("a{sv}"));
++        menuAddItemProps (&cProps, pModel, i, bHasChildren);
++
++        GVariantBuilder cChildItems;
++        g_variant_builder_init (&cChildItems, G_VARIANT_TYPE ("av"));
++
++        if (bHasChildren)
++        {
++            menuBuildLayout (&cChildItems, pSection, pNextId);
++        }
++
++        g_variant_builder_add (cChildren, "v", g_variant_new ("(ia{sv}av)", nId, &cProps, &cChildItems));
++
++        if (pSection)
++        {
++            g_object_unref (pSection);
++        }
++    }
++}
++
++// Finds the node with the id nId in the layout children array pChildren (an
++// 'av' array whose elements are variants wrapping the nodes) and returns a new
++// reference to the unwrapped node, or NULL if there is no such node.
++static GVariant* menuFindNode (GVariant *pChildren, gint nId)
++{
++    gsize nCount = g_variant_n_children (pChildren);
++
++    for (gsize i = 0; i < nCount; i++)
++    {
++        GVariant *pWrapped = g_variant_get_child_value (pChildren, i);
++        GVariant *pNode = g_variant_get_variant (pWrapped);
++        g_variant_unref (pWrapped);
++        gint nNodeId = 0;
++        g_variant_get_child (pNode, 0, "i", &nNodeId);
++
++        if (nNodeId == nId)
++        {
++            return pNode;
++        }
++
++        GVariant *pGrandChildren = g_variant_get_child_value (pNode, 2);
++        GVariant *pFound = menuFindNode (pGrandChildren, nId);
++        g_variant_unref (pGrandChildren);
++        g_variant_unref (pNode);
++
++        if (pFound)
++        {
++            return pFound;
++        }
++    }
++
++    return NULL;
++}
++
++// Finds the menu item with the id nTarget (using the same numbering as
++// menuBuildLayout()) and returns its action name and target.  Returns FALSE if
++// there is no such item.
++static gboolean menuFindAction (GMenuModel *pModel, gint nTarget, gint *pNextId, gchar **ppAction, GVariant **ppTarget)
++{
++    gint nItems = g_menu_model_get_n_items (pModel);
++
++    for (gint i = 0; i < nItems; i++)
++    {
++        (*pNextId)++;
++
++        if (*pNextId == nTarget)
++        {
++            gchar *sAction = NULL;
++            g_menu_model_get_item_attribute (pModel, i, G_MENU_ATTRIBUTE_ACTION, "s", &sAction);
++            *ppAction = sAction;
++            *ppTarget = g_menu_model_get_item_attribute_value (pModel, i, G_MENU_ATTRIBUTE_TARGET, NULL);
++
++            return TRUE;
++        }
++
++        GMenuModel *pSection = g_menu_model_get_item_link (pModel, i, G_MENU_LINK_SECTION);
++
++        if (!pSection)
++        {
++            pSection = g_menu_model_get_item_link (pModel, i, G_MENU_LINK_SUBMENU);
++        }
++
++        if (pSection)
++        {
++            gboolean bFound = menuFindAction (pSection, nTarget, pNextId, ppAction, ppTarget);
++            g_object_unref (pSection);
++
++            if (bFound)
++            {
++                return TRUE;
++            }
++        }
++    }
++
++    return FALSE;
++}
++
++// Activates the action of the menu item with the id nId, mirroring a
++// "clicked" event.  Returns TRUE if the event was handled.
++static gboolean menuActivateItem (AppIndicatorPrivate *pPrivate, gint nId)
++{
++    if (!pPrivate->pMenu || !pPrivate->pActions)
++    {
++        return FALSE;
++    }
++
++    gint nNextId = 0;
++    gchar *sAction = NULL;
++    GVariant *pTarget = NULL;
++    gboolean bHandled = FALSE;
++
++    if (menuFindAction (G_MENU_MODEL (pPrivate->pMenu), nId, &nNextId, &sAction, &pTarget) && sAction)
++    {
++        GAction *pAction = g_action_map_lookup_action (G_ACTION_MAP (pPrivate->pActions), sAction);
++
++        if (pAction)
++        {
++            g_action_activate (pAction, pTarget);
++            bHandled = TRUE;
++        }
++    }
++
++    g_free (sAction);
++
++    if (pTarget)
++    {
++        g_variant_unref (pTarget);
++    }
++
++    return bHandled;
++}
++
++// Serves the com.canonical.dbusmenu methods for the indicator's context menu.
+ static void onMenuMethodCall (GDBusConnection *pConnection, const gchar *sSender, const gchar *sPath, const gchar *sInterface, const gchar *sMethod, GVariant *pParams, GDBusMethodInvocation *pInvocation, gpointer pData)
+ {
++    g_return_if_fail (APP_IS_INDICATOR (pData));
++
++    AppIndicator *self = APP_INDICATOR (pData);
++    AppIndicatorPrivate *pPrivate = app_indicator_get_instance_private (self);
++
+     if (g_strcmp0 (sMethod, "GetLayout") == 0)
+     {
+-        GVariantBuilder cProps;
++        gint nParentId = 0;
++        gint nRecursionDepth = -1;
++        const gchar* const* sPropertyNames = NULL;
++        g_variant_get (pParams, "(ii^as)", &nParentId, &nRecursionDepth, &sPropertyNames);
++
+         GVariantBuilder cChildren;
+-        g_variant_builder_init (&cProps, G_VARIANT_TYPE ("a{sv}"));
+         g_variant_builder_init (&cChildren, G_VARIANT_TYPE ("av"));
+-        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(u(ia{sv}av))", (guint32) 1, (gint) 0, &cProps, &cChildren));
+-
+-        return;
+-    }
+-
+-    if (g_strcmp0 (sMethod, "GetGroupProperties") == 0)
+-    {
+-        GVariantBuilder cProperties;
+-        g_variant_builder_init (&cProperties, G_VARIANT_TYPE ("a(ia{sv})"));
+-        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(a(ia{sv}))", &cProperties));
+-
+-        return;
+-    }
+-
+-    if (g_strcmp0 (sMethod, "GetProperty") == 0)
+-    {
+-        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(v)", g_variant_new_string ("")));
++        gint nNextId = 0;
++
++        if (pPrivate->pMenu)
++        {
++            menuBuildLayout (&cChildren, G_MENU_MODEL (pPrivate->pMenu), &nNextId);
++        }
++
++        if (nParentId == 0)
++        {
++            GVariantBuilder cRootProps;
++            g_variant_builder_init (&cRootProps, G_VARIANT_TYPE ("a{sv}"));
++            g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(u(ia{sv}av))", (guint32) 1, (gint) 0, &cRootProps, &cChildren));
++
++            return;
++        }
++
++        GVariant *pChildrenArray = g_variant_builder_end (&cChildren);
++        GVariant *pNode = menuFindNode (pChildrenArray, nParentId);
++        g_variant_unref (pChildrenArray);
++
++        if (pNode)
++        {
++            g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(u@(ia{sv}av))", (guint32) 1, pNode));
++            g_variant_unref (pNode);
++        }
++        else
++        {
++            g_dbus_method_invocation_return_error (pInvocation, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "No such menu item: %d", nParentId);
++        }
+ 
+         return;
+     }
+ 
+     if (g_strcmp0 (sMethod, "Event") == 0)
+     {
++        gint nId = 0;
++        const gchar *sEventId = NULL;
++        GVariant *pData = NULL;
++        guint nTimestamp = 0;
++        g_variant_get (pParams, "(i&svu)", &nId, &sEventId, &pData, &nTimestamp);
++
++        if (g_strcmp0 (sEventId, "clicked") == 0)
++        {
++            menuActivateItem (pPrivate, nId);
++        }
++
++        g_variant_unref (pData);
+         g_dbus_method_invocation_return_value (pInvocation, NULL);
+ 
+         return;
+     }
+@@ -603,13 +848,119 @@ static void onMenuMethodCall (GDBusConne
+     if (g_strcmp0 (sMethod, "EventGroup") == 0)
+     {
+         GVariantBuilder cIdErrors;
+         g_variant_builder_init (&cIdErrors, G_VARIANT_TYPE ("ai"));
++
++        GVariant *pEvents = g_variant_get_child_value (pParams, 0);
++        gsize nEvents = g_variant_n_children (pEvents);
++
++        for (gsize i = 0; i < nEvents; i++)
++        {
++            GVariant *pEvent = g_variant_get_child_value (pEvents, i);
++            gint nId = 0;
++            const gchar *sEventId = NULL;
++            GVariant *pData = NULL;
++            guint nTimestamp = 0;
++            g_variant_get (pEvent, "(i&svu)", &nId, &sEventId, &pData, &nTimestamp);
++
++            gboolean bHandled = FALSE;
++
++            if (g_strcmp0 (sEventId, "clicked") == 0)
++            {
++                bHandled = menuActivateItem (pPrivate, nId);
++            }
++
++            if (!bHandled)
++            {
++                g_variant_builder_add (&cIdErrors, "i", nId);
++            }
++
++            g_variant_unref (pData);
++            g_variant_unref (pEvent);
++        }
++
++        g_variant_unref (pEvents);
++
+         g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(ai)", &cIdErrors));
+ 
+         return;
+     }
+ 
++    if (g_strcmp0 (sMethod, "GetGroupProperties") == 0)
++    {
++        GVariantBuilder cProperties;
++        g_variant_builder_init (&cProperties, G_VARIANT_TYPE ("a(ia{sv})"));
++
++        GVariant *pIds = g_variant_get_child_value (pParams, 0);
++        GVariant *pNames = g_variant_get_child_value (pParams, 1);
++        gsize nIds = g_variant_n_children (pIds);
++
++        for (gsize i = 0; i < nIds; i++)
++        {
++            gint nId = 0;
++            g_variant_get_child (pIds, i, "i", &nId);
++
++            if (nId == 0 && pPrivate->pMenu)
++            {
++                // The root only exposes how its children are displayed.
++                GVariantBuilder cProps;
++                g_variant_builder_init (&cProps, G_VARIANT_TYPE ("a{sv}"));
++
++                if (g_menu_model_get_n_items (G_MENU_MODEL (pPrivate->pMenu)) > 0)
++                {
++                    g_variant_builder_add (&cProps, "{sv}", "children-display", g_variant_new_string ("submenu"));
++                }
++
++                g_variant_builder_add (&cProperties, "(ia{sv})", (gint) 0, &cProps);
++
++                continue;
++            }
++
++            GMenuModel *pModel = NULL;
++            gint nIndex = -1;
++            gint nNextId = 0;
++
++            if (!pPrivate->pMenu ||
++                !menuFindItem (G_MENU_MODEL (pPrivate->pMenu), nId, &nNextId, &pModel, &nIndex))
++            {
++                continue;
++            }
++
++            GMenuModel *pSection = g_menu_model_get_item_link (pModel, nIndex, G_MENU_LINK_SECTION);
++
++            if (!pSection)
++            {
++                pSection = g_menu_model_get_item_link (pModel, nIndex, G_MENU_LINK_SUBMENU);
++            }
++
++            gboolean bHasChildren = pSection && g_menu_model_get_n_items (pSection) > 0;
++
++            GVariantBuilder cProps;
++            g_variant_builder_init (&cProps, G_VARIANT_TYPE ("a{sv}"));
++            menuAddItemProps (&cProps, pModel, nIndex, bHasChildren);
++            g_variant_builder_add (&cProperties, "(ia{sv})", nId, &cProps);
++
++            if (pSection)
++            {
++                g_object_unref (pSection);
++            }
++        }
++
++        g_variant_unref (pNames);
++        g_variant_unref (pIds);
++
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(a(ia{sv}))", &cProperties));
++
++        return;
++    }
++
++    if (g_strcmp0 (sMethod, "GetProperty") == 0)
++    {
++        g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(v)", g_variant_new_string ("")));
++
++        return;
++    }
++
+     if (g_strcmp0 (sMethod, "AboutToShow") == 0)
+     {
+         g_dbus_method_invocation_return_value (pInvocation, g_variant_new ("(b)", FALSE));
+ 
