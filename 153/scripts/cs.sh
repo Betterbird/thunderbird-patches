@@ -303,3 +303,5 @@ echo "  .accesskey = z"                                                         
 echo "start-in-tray-label ="                                                           >> localization/cs/messenger/preferences/preferences.ftl
 echo "  .label = Spustit { -brand-short-name } v oznamovací oblasti"                   >> localization/cs/messenger/preferences/preferences.ftl
 echo "  .accesskey = S"                                                                >> localization/cs/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Ukončit { -brand-full-name }" >> localization/cs/messenger/menubar.ftl

@@ -299,3 +299,5 @@ echo "  .accesskey = g"                                                         
 echo "start-in-tray-label ="                                                                >> localization/nl/messenger/preferences/preferences.ftl
 echo "  .label = { -brand-short-name } in de systeembalk starten"                           >> localization/nl/messenger/preferences/preferences.ftl
 echo "  .accesskey = s"                                                                     >> localization/nl/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = { -brand-full-name } afsluiten" >> localization/nl/messenger/menubar.ftl

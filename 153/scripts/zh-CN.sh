@@ -299,3 +299,5 @@ echo "  .accesskey = c"                               >> localization/zh-CN/mess
 echo "start-in-tray-label ="                          >> localization/zh-CN/messenger/preferences/preferences.ftl
 echo "  .label = 在系统托盘启动 { -brand-short-name }"  >> localization/zh-CN/messenger/preferences/preferences.ftl
 echo "  .accesskey = s"                               >> localization/zh-CN/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = 退出 { -brand-full-name }" >> localization/zh-CN/messenger/menubar.ftl

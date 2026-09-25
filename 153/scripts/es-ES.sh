@@ -303,3 +303,9 @@ echo "  .accesskey = c"                                                         
 echo "start-in-tray-label ="                                                               >> localization/es-ES/messenger/preferences/preferences.ftl
 echo "  .label = Iniciar { -brand-short-name } en la bandeja del sistema"                  >> localization/es-ES/messenger/preferences/preferences.ftl
 echo "  .accesskey = I"                                                                    >> localization/es-ES/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit ="                     >> localization/es-ES/messenger/menubar.ftl
+echo "    { PLATFORM() ->"                             >> localization/es-ES/messenger/menubar.ftl
+echo "        [windows] Salir de { -brand-full-name }" >> localization/es-ES/messenger/menubar.ftl
+echo "       *[other] Cerrar { -brand-full-name }"     >> localization/es-ES/messenger/menubar.ftl
+echo "    }"                                           >> localization/es-ES/messenger/menubar.ftl

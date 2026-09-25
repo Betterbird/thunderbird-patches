@@ -299,3 +299,5 @@ echo "  .accesskey = t"                                                         
 echo "start-in-tray-label ="                                                       >> localization/sv-SE/messenger/preferences/preferences.ftl
 echo "  .label = Starta { -brand-short-name } i aktivitetsfältet"                  >> localization/sv-SE/messenger/preferences/preferences.ftl
 echo "  .accesskey = S"                                                            >> localization/sv-SE/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Avsluta { -brand-full-name }" >> localization/sv-SE/messenger/menubar.ftl

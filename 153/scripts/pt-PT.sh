@@ -302,3 +302,5 @@ echo "  .accesskey = f"                                                         
 echo "start-in-tray-label ="                                                         >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "  .label = Iniciar o { -brand-short-name } na bandeja"                         >> localization/pt-PT/messenger/preferences/preferences.ftl
 echo "  .accesskey = I"                                                              >> localization/pt-PT/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Sair do { -brand-full-name }" >> localization/pt-PT/messenger/menubar.ftl

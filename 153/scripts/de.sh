@@ -302,3 +302,5 @@ echo "  .accesskey = S"                                                         
 echo "start-in-tray-label ="                                                          >> localization/de/messenger/preferences/preferences.ftl
 echo "  .label = { -brand-short-name } im Infobereich starten"                        >> localization/de/messenger/preferences/preferences.ftl
 echo "  .accesskey = I"                                                               >> localization/de/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = { -brand-full-name } beenden" >> localization/de/messenger/menubar.ftl

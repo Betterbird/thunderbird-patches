@@ -299,3 +299,5 @@ echo "  .accesskey = c"                                        >> localization/j
 echo "start-in-tray-label ="                                   >> localization/ja/messenger/preferences/preferences.ftl
 echo "  .label = タスクトレイで { -brand-short-name } を起動する"      >> localization/ja/messenger/preferences/preferences.ftl
 echo "  .accesskey = s"                                        >> localization/ja/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = { -brand-full-name } を終了" >> localization/ja/messenger/menubar.ftl

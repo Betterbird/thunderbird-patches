@@ -299,3 +299,5 @@ echo "  .accesskey = c"                                                         
 echo "start-in-tray-label ="                                                            >> localization/it/messenger/preferences/preferences.ftl
 echo "  .label = Avvia { -brand-short-name } nell’area di notifica"                     >> localization/it/messenger/preferences/preferences.ftl
 echo "  .accesskey = A"                                                                 >> localization/it/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Esci da { -brand-full-name }" >> localization/it/messenger/menubar.ftl

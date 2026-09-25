@@ -299,3 +299,5 @@ echo "  .accesskey = к"                                               >> locali
 echo "start-in-tray-label ="                                          >> localization/uk/messenger/preferences/preferences.ftl
 echo "  .label = Запускати { -brand-short-name } в області сповіщень" >> localization/uk/messenger/preferences/preferences.ftl
 echo "  .accesskey = п"                                               >> localization/uk/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Вийти з { -brand-full-name }" >> localization/uk/messenger/menubar.ftl

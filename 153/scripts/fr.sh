@@ -299,3 +299,5 @@ echo "  .accesskey = f"                                                         
 echo "start-in-tray-label ="                                                                       >> localization/fr/messenger/preferences/preferences.ftl
 echo "  .label = Démarrer { -brand-short-name } dans la barre de notification"                     >> localization/fr/messenger/preferences/preferences.ftl
 echo "  .accesskey = D"                                                                            >> localization/fr/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Quitter { -brand-full-name }" >> localization/fr/messenger/menubar.ftl

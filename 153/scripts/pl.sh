@@ -299,3 +299,5 @@ echo "  .accesskey = Z"                                                         
 echo "start-in-tray-label ="                                                            >> localization/pl/messenger/preferences/preferences.ftl
 echo "  .label = Uruchamiaj program { -brand-short-name } w obszarze powiadomień"       >> localization/pl/messenger/preferences/preferences.ftl
 echo "  .accesskey = U"                                                                 >> localization/pl/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit = Zakończ program { -brand-full-name }" >> localization/pl/messenger/menubar.ftl
