@@ -1,0 +1,69 @@
+
+# HG changeset patch
+# User Michal Szopinski <mszopinski@mssnt.pl>
+# Date 1782364835 0
+# Node ID 21775b0224c541daf50c323f57a8b2f855825c9d
+# Parent  dab97f1a0a692bfca1411e7a702f9f4f2eba2675
+Bug 2044250 - When the tray icon is clicked, don't restore windows that are not minimized. r=aleca
+
+Ran into this issue when testing start in tray with a maximized window. When the tray icon is clicked, we are unconditionally calling `::ShowWindow(hwnd, SW_RESTORE)` on each hidden window. The assumption here is that each window was previously minimized and now needs to be restored (un-minimized). With close to tray and start to tray in place of minimize to tray, this is no longer true, and sometimes we end up "restoring" (un-maximizing) maximized windows.
+
+1. Add an if statement to make sure we only restore minimized windows.
+2. Remove a hack where we'd minimize a window prior to hiding it so as to counteract the restore.
+
+Testing:
+1. Enable close to tray and start in tray
+2. Maximize the window
+3. Close the window, restore it from the tray
+4. The window should come back maximized
+5. Restart Thunderbird, restore main window from the tray
+6. The window should come back maximized
+
+Differential Revision: https://phabricator.services.mozilla.com/D308142
+
+
+diff --git a/mail/base/content/closeToTray.mjs b/mail/base/content/closeToTray.mjs
+--- a/mail/base/content/closeToTray.mjs
++++ b/mail/base/content/closeToTray.mjs
+@@ -9,17 +9,13 @@ window.addEventListener("close", event =
+ 
+   // Only move to the tray when the last three-pane window is being closed.
+   if (Array.from(Services.wm.getEnumerator("mail:3pane")).length > 1) {
+     return;
+   }
+ 
+   event.preventDefault();
+ 
+-  // To ensure that a maximized window is restored in the maximized state,
+-  // we must minimize it first.
+-  window.minimize();
+-
+   const baseWindow = window.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow);
+   Cc["@mozilla.org/messenger/osintegration;1"]
+     .getService(Ci.nsIMessengerWindowsIntegration)
+     .hideWindow(baseWindow);
+ });
+diff --git a/mailnews/base/src/nsMessengerWinIntegration.cpp b/mailnews/base/src/nsMessengerWinIntegration.cpp
+--- a/mailnews/base/src/nsMessengerWinIntegration.cpp
++++ b/mailnews/base/src/nsMessengerWinIntegration.cpp
+@@ -152,17 +152,18 @@ nsresult nsMessengerWinIntegration::Hand
+ 
+     nsCOMPtr<nsIWidget> widget;
+     window->GetMainWidget(getter_AddRefs(widget));
+     if (!widget) {
+       continue;
+     }
+ 
+     HWND hwnd = (HWND)(widget->GetNativeData(NS_NATIVE_WIDGET));
+-    ::ShowWindow(hwnd, SW_RESTORE);
++    // Restore the window if it is minimized.
++    if (::IsIconic(hwnd)) ::ShowWindow(hwnd, SW_RESTORE);
+     ::SetForegroundWindow(hwnd);
+ 
+     nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
+     obs->NotifyObservers(window, "windows-refresh-badge-tray", 0);
+   }
+ 
+   sHiddenWindows.Clear();
+   return NS_OK;
+

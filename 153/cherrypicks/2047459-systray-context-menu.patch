@@ -1,0 +1,515 @@
+
+# HG changeset patch
+# User Michal Szopinski <mszopinski@mssnt.pl>
+# Date 1782071055 -43200
+# Node ID 6e87059cedb6bb4e51bcfeae5e36926058bcee94
+# Parent  835e07554d036cdead02d7a26168f29626393441
+Bug 2047459 - Add context menu to the Windows tray icon. r=aleca,darktrojan
+
+
+1. Move business logic out of IconWindowProc and into helper functions
+2. Upgrade NOTIFYICONDATAW to version 4 in order to receive WM_CONTEXTMENU
+3. Add sIconMenu, a static menu object initialized together with the icon window object
+4. Add HandleIconContextMenu, a helper that displays and handles the context menu
+5. Alter the system-tray-menu-quit message to make it accessible from C++
+
+Differential Revision: https://phabricator.services.mozilla.com/D306644
+
+diff --git a/mail/locales/en-US/messenger/menubar.ftl b/mail/locales/en-US/messenger/menubar.ftl
+--- a/mail/locales/en-US/messenger/menubar.ftl
++++ b/mail/locales/en-US/messenger/menubar.ftl
+@@ -78,22 +78,21 @@ menu-quit =
+             [windows] x
+            *[other] Q
+         }
+ 
+ # This menu-quit-mac string is only used on macOS.
+ menu-quit-mac =
+     .label = Quit { -brand-shorter-name }
+ 
+-system-tray-menu-quit =
+-    .label =
+-        { PLATFORM() ->
+-            [windows] Exit { -brand-full-name }
+-           *[other] Quit { -brand-full-name }
+-        }
++system-tray-menuitem-quit =
++    { PLATFORM() ->
++        [windows] Exit { -brand-full-name }
++        *[other] Quit { -brand-full-name }
++    }
+ 
+ # Localization note: Do not translate unless your locale's keyboard layout
+ # does not include this key, as it determines the keyboard shortcut for
+ # shutting down the application.
+ quit-app-shortcut =
+     .key = Q
+ 
+ ## Mail Toolbar
+diff --git a/mailnews/base/src/nsMessengerWinIntegration.cpp b/mailnews/base/src/nsMessengerWinIntegration.cpp
+--- a/mailnews/base/src/nsMessengerWinIntegration.cpp
++++ b/mailnews/base/src/nsMessengerWinIntegration.cpp
+@@ -1,38 +1,44 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "nsMessengerWinIntegration.h"
+ 
+ #include <windows.h>
++#include <windowsx.h>
+ #include <shellapi.h>
+ #include <strsafe.h>
+ 
+ #include "mozilla/Components.h"
++#include "mozilla/intl/Localization.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+ #include "mozIDOMWindow.h"
+ #include "nsCOMArray.h"
++#include "nsIAppStartup.h"
+ #include "nsIBaseWindow.h"
+ #include "nsIDocShell.h"  // IWYU pragma: keep
+ #include "nsIStringBundle.h"
++#include "nsISupportsPrimitives.h"
+ #include "nsIMsgWindow.h"
+ #include "nsIObserverService.h"
+ #include "nsIWidget.h"
+ #include "nsIWindowMediator.h"
++#include "nsMsgUtils.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsPIDOMWindow.h"
+ 
+ using namespace mozilla;
+ 
+ #define IDI_MAILBIFF 32576
+ #define SHOW_TRAY_ICON_PREF "mail.biff.show_tray_icon"
+ #define SHOW_TRAY_ICON_ALWAYS_PREF "mail.biff.show_tray_icon_always"
++#define EXIT_MENU_ITEM_ID 1
+ 
+ // since we are including windows.h in this file, undefine get user name....
+ #ifdef GetUserName
+ #  undef GetUserName
+ #endif
+ 
+ #ifndef NIIF_USER
+ #  define NIIF_USER 0x00000004
+@@ -82,118 +88,202 @@ static void activateWindow(mozIDOMWindow
+   } else {
+     // Use internal method.
+     nsCOMPtr<nsPIDOMWindowOuter> privateWindow = nsPIDOMWindowOuter::From(win);
+     privateWindow->Focus(mozilla::dom::CallerType::System);
+   }
+ }
+ 
+ NOTIFYICONDATAW sMailIconData = {
+-    /* cbSize */ (DWORD)NOTIFYICONDATAW_V2_SIZE,
++    /* cbSize */ sizeof(NOTIFYICONDATAW),
+     /* hWnd */ 0,
+     /* uID */ 2,
+-    /* uFlags */ NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_INFO,
++    /* uFlags */ NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP | NIF_INFO,
+     /* uCallbackMessage */ WM_USER,
+     /* hIcon */ 0,
+     /* szTip */ L"",
+     /* dwState */ 0,
+     /* dwStateMask */ 0,
+     /* szInfo */ L"",
+-    /* uVersion */ {30000},
++    /* uVersion */ {NOTIFYICON_VERSION_4},
+     /* szInfoTitle */ L"",
+     /* dwInfoFlags */ NIIF_USER | NIIF_NOSOUND};
+ 
+ constinit static nsCOMArray<nsIBaseWindow> sHiddenWindows;
++constinit nsString nsMessengerWinIntegration::kSystemTrayMenuQuitMsg;
+ static HWND sIconWindow;
++static HMENU sIconMenu;
+ static uint32_t sUnreadCount;
++
++/* static */
++nsresult nsMessengerWinIntegration::HandleIconLeftClick(
++    nsMessengerWinIntegration* instance) {
++  nsresult rv;
++
++  bool showTrayIcon = Preferences::GetBool(SHOW_TRAY_ICON_PREF);
++  bool showTrayIconAlways = Preferences::GetBool(SHOW_TRAY_ICON_ALWAYS_PREF);
++  if ((!showTrayIcon || !sUnreadCount) && !showTrayIconAlways) {
++    ::Shell_NotifyIconW(NIM_DELETE, &sMailIconData);
++    if (instance) {
++      instance->mTrayIconShown = false;
++    }
++  }
++
++  // No minimized window, bring the most recent 3pane window to the front.
++  if (sHiddenWindows.Length() == 0) {
++    nsCOMPtr<nsIWindowMediator> windowMediator =
++        do_GetService(NS_WINDOWMEDIATOR_CONTRACTID, &rv);
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    nsCOMPtr<mozIDOMWindowProxy> domWindow;
++    rv = windowMediator->GetMostRecentBrowserWindow(getter_AddRefs(domWindow));
++    NS_ENSURE_SUCCESS(rv, rv);
++    if (domWindow) {
++      activateWindow(domWindow);
++      return NS_OK;
++    }
++  }
++
++  // Bring the minimized windows to the front.
++  for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
++    auto window = sHiddenWindows.SafeElementAt(i);
++    if (!window) {
++      continue;
++    }
++    window->SetVisibility(true);
++
++    nsCOMPtr<nsIWidget> widget;
++    window->GetMainWidget(getter_AddRefs(widget));
++    if (!widget) {
++      continue;
++    }
++
++    HWND hwnd = (HWND)(widget->GetNativeData(NS_NATIVE_WIDGET));
++    ::ShowWindow(hwnd, SW_RESTORE);
++    ::SetForegroundWindow(hwnd);
++
++    nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
++    obs->NotifyObservers(window, "windows-refresh-badge-tray", 0);
++  }
++
++  sHiddenWindows.Clear();
++  return NS_OK;
++}
++
++/* static */
++nsresult nsMessengerWinIntegration::HandleIconContextMenu(int xPos, int yPos) {
++  // Needed to ensure the menu closes when the user clicks outside of it.
++  SetForegroundWindow(sIconWindow);
++
++  UINT uFlags = TPM_NONOTIFY | TPM_RETURNCMD;
++
++  // Determine the correct horizontal alignment flag. Per Microsoft, this is
++  // essential for creating an optimal user experience.
++  if (GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0) {
++    uFlags |= TPM_RIGHTALIGN;
++  } else {
++    uFlags |= TPM_LEFTALIGN;
++  }
++
++  BOOL selection = TrackPopupMenuEx(
++      /* hMenu */ sIconMenu,
++      /* uFlags */ uFlags,
++      /* x */ xPos,
++      /* y */ yPos,
++      /* hwnd */ sIconWindow,
++      /* lptpm */ NULL);
++
++  // Force a task switch to the application that called TrackPopupMenuEx.
++  PostMessage(sIconWindow, WM_NULL, 0, 0);
++
++  if (selection == EXIT_MENU_ITEM_ID) {
++    // Check if it's okay to quit.
++    nsCOMPtr<nsISupportsPRBool> cancelQuit =
++        do_CreateInstance(NS_SUPPORTS_PRBOOL_CONTRACTID);
++    cancelQuit->SetData(false);
++
++    nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
++    obs->NotifyObservers(cancelQuit, "quit-application-requested", nullptr);
++
++    bool shouldCancelQuit;
++    cancelQuit->GetData(&shouldCancelQuit);
++
++    if (!shouldCancelQuit) {
++      // Perform quit.
++      nsCOMPtr<nsIAppStartup> appStartup = components::AppStartup::Service();
++      NS_ENSURE_TRUE(appStartup, NS_ERROR_FAILURE);
++
++      bool userAllowedQuit = true;
++      appStartup->Quit(nsIAppStartup::eAttemptQuit, 0, &userAllowedQuit);
++    }
++  }
++
++  return NS_OK;
++}
++
++/* static */
++nsresult nsMessengerWinIntegration::HandleTaskbarRecreated(
++    nsMessengerWinIntegration* instance) {
++  // When taskbar is recreated (e.g. by restarting Windows Explorer), all
++  // tray icons are removed. If there are windows minimized to tray icon,
++  // we have to recreate the tray icon, otherwise the windows can't be
++  // restored.
++  if (instance) {
++    instance->mTrayIconShown = false;
++  }
++  for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
++    auto window = sHiddenWindows.SafeElementAt(i);
++    if (!window) {
++      continue;
++    }
++    nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
++    obs->NotifyObservers(window, "windows-refresh-badge-tray", 0);
++  }
++
++  return NS_OK;
++}
++
+ /* static */
+ LRESULT CALLBACK nsMessengerWinIntegration::IconWindowProc(HWND msgWindow,
+                                                            UINT msg, WPARAM wp,
+                                                            LPARAM lp) {
+   nsresult rv;
++  WORD event;
+   static UINT sTaskbarRecreated;
+ 
+   switch (msg) {
+     case WM_USER:
+-      if (msg == WM_USER && lp == WM_LBUTTONDOWN) {
+-        bool showTrayIcon = Preferences::GetBool(SHOW_TRAY_ICON_PREF);
+-        bool showTrayIconAlways =
+-            Preferences::GetBool(SHOW_TRAY_ICON_ALWAYS_PREF);
+-        if ((!showTrayIcon || !sUnreadCount) && !showTrayIconAlways) {
+-          ::Shell_NotifyIconW(NIM_DELETE, &sMailIconData);
+-          if (auto instance = reinterpret_cast<nsMessengerWinIntegration*>(
+-                  ::GetWindowLongPtrW(msgWindow, GWLP_USERDATA))) {
+-            instance->mTrayIconShown = false;
+-          }
+-        }
+-
+-        // No minimized window, bring the most recent 3pane window to the front.
+-        if (sHiddenWindows.Length() == 0) {
+-          nsCOMPtr<nsIWindowMediator> windowMediator =
+-              do_GetService(NS_WINDOWMEDIATOR_CONTRACTID, &rv);
+-          NS_ENSURE_SUCCESS(rv, FALSE);
++      event = LOWORD(lp);
++      if (event == WM_LBUTTONDOWN) {
++        auto instance = reinterpret_cast<nsMessengerWinIntegration*>(
++            ::GetWindowLongPtrW(msgWindow, GWLP_USERDATA));
+ 
+-          nsCOMPtr<mozIDOMWindowProxy> domWindow;
+-          rv = windowMediator->GetMostRecentBrowserWindow(
+-              getter_AddRefs(domWindow));
+-          NS_ENSURE_SUCCESS(rv, FALSE);
+-          if (domWindow) {
+-            activateWindow(domWindow);
+-            return TRUE;
+-          }
+-        }
++        rv = HandleIconLeftClick(instance);
++        NS_ENSURE_SUCCESS(rv, 0);
++        return 0;
++      } else if (event == WM_CONTEXTMENU) {
++        int xPos = GET_X_LPARAM(wp);
++        int yPos = GET_Y_LPARAM(wp);
+ 
+-        // Bring the minimized windows to the front.
+-        for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
+-          auto window = sHiddenWindows.SafeElementAt(i);
+-          if (!window) {
+-            continue;
+-          }
+-          window->SetVisibility(true);
+-
+-          nsCOMPtr<nsIWidget> widget;
+-          window->GetMainWidget(getter_AddRefs(widget));
+-          if (!widget) {
+-            continue;
+-          }
+-
+-          HWND hwnd = (HWND)(widget->GetNativeData(NS_NATIVE_WIDGET));
+-          ::ShowWindow(hwnd, SW_RESTORE);
+-          ::SetForegroundWindow(hwnd);
+-
+-          nsCOMPtr<nsIObserverService> obs =
+-              mozilla::services::GetObserverService();
+-          obs->NotifyObservers(window, "windows-refresh-badge-tray", 0);
+-        }
+-
+-        sHiddenWindows.Clear();
++        rv = HandleIconContextMenu(xPos, yPos);
++        NS_ENSURE_SUCCESS(rv, 0);
++        return 0;
+       }
+       break;
+     case WM_CREATE:
+       sTaskbarRecreated = ::RegisterWindowMessageW(L"TaskbarCreated");
+       break;
+     default:
+       if (msg == sTaskbarRecreated) {
+-        // When taskbar is recreated (e.g. by restarting Windows Explorer), all
+-        // tray icons are removed. If there are windows minimized to tray icon,
+-        // we have to recreate the tray icon, otherwise the windows can't be
+-        // restored.
+-        if (auto instance = reinterpret_cast<nsMessengerWinIntegration*>(
+-                ::GetWindowLongPtrW(msgWindow, GWLP_USERDATA))) {
+-          instance->mTrayIconShown = false;
+-        }
+-        for (uint32_t i = 0; i < sHiddenWindows.Length(); i++) {
+-          auto window = sHiddenWindows.SafeElementAt(i);
+-          if (!window) {
+-            continue;
+-          }
+-          nsCOMPtr<nsIObserverService> obs =
+-              mozilla::services::GetObserverService();
+-          obs->NotifyObservers(window, "windows-refresh-badge-tray", 0);
+-        }
++        auto instance = reinterpret_cast<nsMessengerWinIntegration*>(
++            ::GetWindowLongPtrW(msgWindow, GWLP_USERDATA));
++
++        rv = HandleTaskbarRecreated(instance);
++        NS_ENSURE_SUCCESS(rv, 0);
++        return 0;
+       }
+       break;
+   }
+   return ::DefWindowProc(msgWindow, msg, wp, lp);
+ }
+ 
+ NS_IMETHODIMP
+ nsMessengerWinIntegration::HideWindow(nsIBaseWindow* aWindow) {
+@@ -322,16 +412,18 @@ nsresult nsMessengerWinIntegration::SetT
+ /**
+  * Create a custom window for the taskbar icon if it's not created yet.
+  */
+ nsresult nsMessengerWinIntegration::CreateIconWindow() {
+   if (sMailIconData.hWnd) {
+     return NS_OK;
+   }
+ 
++  nsresult rv;
++
+   const wchar_t kClassName[] = L"IconWindowClass";
+   WNDCLASS classStruct = {/* style */ 0,
+                           /* lpfnWndProc */ &IconWindowProc,
+                           /* cbClsExtra */ 0,
+                           /* cbWndExtra */ 0,
+                           /* hInstance */ 0,
+                           /* hIcon */ 0,
+                           /* hCursor */ 0,
+@@ -352,16 +444,43 @@ nsresult nsMessengerWinIntegration::Crea
+                      /* instance */ 0,
+                      /* create struct */ 0),
+                  NS_ERROR_FAILURE);
+   NS_ENSURE_TRUE(::SetWindowLongPtrW(sIconWindow, GWLP_USERDATA,
+                                      reinterpret_cast<LONG_PTR>(this)) == 0,
+                  NS_ERROR_FAILURE);
+ 
+   sMailIconData.hWnd = sIconWindow;
++
++  // Create the context menu.
++  NS_ENSURE_TRUE(sIconMenu = CreatePopupMenu(), NS_ERROR_FAILURE);
++
++  // Localize the exit item label.
++  RefPtr<mozilla::intl::Localization> l10n =
++      mozilla::intl::Localization::Create(
++          {"branding/brand.ftl"_ns, "messenger/menubar.ftl"_ns}, true);
++
++  nsAutoCString systemTrayMenuQuitMsg;
++  rv = LocalizeMessage(l10n, "system-tray-menuitem-quit"_ns, {},
++                       systemTrayMenuQuitMsg);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  CopyUTF8toUTF16(systemTrayMenuQuitMsg, kSystemTrayMenuQuitMsg);
++
++  // Create and insert menu item.
++  MENUITEMINFOW menuItemData;
++  menuItemData.cbSize = sizeof(MENUITEMINFOW);
++  menuItemData.fMask = MIIM_STRING | MIIM_ID;
++  menuItemData.wID = EXIT_MENU_ITEM_ID;
++  menuItemData.dwTypeData = kSystemTrayMenuQuitMsg.get();
++
++  NS_ENSURE_TRUE(InsertMenuItemW(sIconMenu, GetMenuItemCount(sIconMenu), TRUE,
++                                 &menuItemData),
++                 NS_ERROR_FAILURE);
++
+   return NS_OK;
+ }
+ 
+ /**
+  * Update the tray icon according to the current unread count and pref value.
+  */
+ nsresult nsMessengerWinIntegration::UpdateTrayIcon() {
+   nsresult rv;
+diff --git a/mailnews/base/src/nsMessengerWinIntegration.h b/mailnews/base/src/nsMessengerWinIntegration.h
+--- a/mailnews/base/src/nsMessengerWinIntegration.h
++++ b/mailnews/base/src/nsMessengerWinIntegration.h
+@@ -15,16 +15,22 @@ class nsMessengerWinIntegration : public
+  public:
+   nsMessengerWinIntegration();
+ 
+   NS_DECL_ISUPPORTS
+   NS_DECL_NSIMESSENGERWINDOWSINTEGRATION
+   NS_DECL_NSIMESSENGEROSINTEGRATION
+ 
+  private:
++  static nsString kSystemTrayMenuQuitMsg;
++
++  static nsresult HandleIconLeftClick(nsMessengerWinIntegration* instance);
++  static nsresult HandleIconContextMenu(int xPos, int yPos);
++  static nsresult HandleTaskbarRecreated(nsMessengerWinIntegration* instance);
++
+   static LRESULT CALLBACK IconWindowProc(HWND msgWindow, UINT msg, WPARAM wp,
+                                          LPARAM lp);
+ 
+   virtual ~nsMessengerWinIntegration();
+ 
+   nsresult CreateIconWindow();
+   nsresult SetTooltip();
+   nsresult UpdateTrayIcon();
+diff --git a/python/l10n/tb_fluent_migrations/bug_2047459_tray_menu_quit.py b/python/l10n/tb_fluent_migrations/bug_2047459_tray_menu_quit.py
+new file mode 100644
+--- /dev/null
++++ b/python/l10n/tb_fluent_migrations/bug_2047459_tray_menu_quit.py
+@@ -0,0 +1,21 @@
++# Any copyright is dedicated to the Public Domain.
++# http://creativecommons.org/publicdomain/zero/1.0/
++
++import fluent.syntax.ast as FTL
++from fluent.migratetb.helpers import transforms_from
++
++
++def migrate(ctx):
++    """Bug 2047459 - Add context menu to the Windows tray icon. part {index}"""
++
++    source = target = reference = "mail/messenger/menubar.ftl"
++    ctx.add_transforms(
++        target,
++        reference,
++        transforms_from(
++            """
++system-tray-menuitem-quit = {COPY_PATTERN(from_path, "system-tray-menu-quit.label")}
++            """,
++            from_path=source,
++        ),
++    )
+diff --git a/rust/sys_tray/src/linux/mod.rs b/rust/sys_tray/src/linux/mod.rs
+--- a/rust/sys_tray/src/linux/mod.rs
++++ b/rust/sys_tray/src/linux/mod.rs
+@@ -72,21 +72,22 @@ impl LinuxSysTrayHandler {
+         adapt_bundle_for_gecko(&mut bundle, None);
+ 
+         bundle
+             .add_resource(Rc::new(resource))
+             .expect("Failed to add resources to bundle");
+ 
+         // Grab the quit message
+         let msg = bundle
+-            .get_message("system-tray-menu-quit")
+-            .expect("Message doesn't exist.");
++            .get_message("system-tray-menuitem-quit")
++            .expect("Message doesn't exist.")
++            .value()
++            .expect("Message has no value.");
+         let mut errors = vec![];
+-        let label = msg.get_attribute("label").expect("Message doesn't exist.");
+-        let quit_msg = bundle.format_pattern(label.value(), None, &mut errors);
++        let quit_msg = bundle.format_pattern(msg, None, &mut errors);
+         if !errors.is_empty() {
+             log::error!("translation issues: {errors:?}");
+         }
+ 
+         // Determine correct image
+         let icon = if XdgIcon::requires_symbolic() {
+             system_tray::locate_icon_on_system("TB-symbolic.svg").map(XdgIcon::Path)
+         } else {
+
