@@ -1,0 +1,355 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1790589050 -7200
+# Node ID 94f5757f9c233999c0ae346e7c02f88c60f89d3c
+# Parent  cab46a0fa6edca424a69183df198da4209fafa7b
+Bug 2075316 - Show the To: field in Gloda search results. r=mkmelin
+
+The To: field of messages shown in the Gloda (search) results view was
+empty.
+
+Bug 1935334 replaced the recipient loop with an Intl.ListFormat based
+version, but read the display name from the wrong property. Gloda identity
+objects expose the name as recipient.contact.name, not recipient.name, so
+every name resolved to undefined and was dropped by filter(Boolean),
+leaving only the "to:" label behind.
+
+Render the names from recipient.contact?.name. The same rewrite had two
+further problems: contactNames was sliced to MAX_RECIPIENTS - 1 before
+being compared against MAX_RECIPIENTS, so the "N others" branch was
+unreachable, and separator/recipient styling alternated via a boolean
+rather than following part.type. Classify each node by part.type instead,
+which is clearer than tracking position.
+
+Count the "N others" from the number of recipients that were not shown,
+rather than from a fixed MAX_RECIPIENTS offset, so that the names on
+screen plus the label always add up to the total number of recipients.
+This matters for recipients without a display name: they are not shown,
+but they must still be counted, or a named recipient gets pushed out of
+the visible slots while the label claims it was not.
+
+Adds browser_glodaFacetResultMessage.js covering one, two, exactly three
+and more than three recipients, the singular "1 other" form, recipients
+without a name, the separator nodes produced by Intl.ListFormat, and the
+To: label.
+
+Differential Revision: https://phabricator.services.mozilla.com/D329240
+
+
+diff --git a/mail/base/content/widgets/glodaFacet.js b/mail/base/content/widgets/glodaFacet.js
+--- a/mail/base/content/widgets/glodaFacet.js
++++ b/mail/base/content/widgets/glodaFacet.js
+@@ -1556,48 +1556,51 @@
+       );
+       this.date.textContent = makeFriendlyDateAgo(message.date);
+ 
+       // - Recipients
+       try {
+         const recipientsNode = this.recipients;
+         if (message.recipients) {
+           const MAX_RECIPIENTS = 3;
+-          const totalRecipientCount = message.recipients.length;
+ 
+           const formatter = new Intl.ListFormat(
+             Services.locale.appLocaleAsBCP47,
+             {
+               style: "long",
+               type: "conjunction",
+             }
+           );
++          // Gloda identities expose the display name as contact.name.
++          // Recipients without one are not shown, but still count towards
++          // the "N others" total so that it matches the number of
++          // recipients that were left out.
+           const contactNames = message.recipients
+-            .map(contact => contact.name)
+-            .slice(0, MAX_RECIPIENTS - 1);
+-          if (contactNames.length > MAX_RECIPIENTS) {
++            .map(recipient => recipient.contact?.name)
++            .filter(Boolean)
++            .slice(0, MAX_RECIPIENTS);
++          const otherCount = message.recipients.length - contactNames.length;
++          if (otherCount > 0) {
+             contactNames.push(
+               lazy.l10n.formatValueSync("facet-view-and-others", {
+-                count: totalRecipientCount - MAX_RECIPIENTS,
++                count: otherCount,
+               })
+             );
+           }
+-          const parts = formatter.formatToParts(
+-            message.recipients.map(contact => contact.name).filter(Boolean)
+-          );
+-          let separator = false;
++          const parts = formatter.formatToParts(contactNames);
+           for (const part of parts) {
+             const recipNode = document.createElement("span");
+             recipNode.setAttribute(
+               "class",
+-              separator ? "message-recipient-separator" : "message-recipient"
++              part.type == "element"
++                ? "message-recipient"
++                : "message-recipient-separator"
+             );
+             recipNode.textContent = part.value;
+             recipientsNode.appendChild(recipNode);
+-            separator = !separator;
+           }
+         }
+       } catch (e) {
+         console.error(e);
+       }
+ 
+       // - Starred
+       const starNode = this.star;
+diff --git a/mail/base/test/browser/widgets/browser.toml b/mail/base/test/browser/widgets/browser.toml
+--- a/mail/base/test/browser/widgets/browser.toml
++++ b/mail/base/test/browser/widgets/browser.toml
+@@ -35,16 +35,18 @@ skip-if = [
+ 
+ ["browser_formPickers.js"]
+ support-files = ["head_formPickers.js"]
+ 
+ ["browser_formPickers_webextensions.js"]
+ support-files = ["head_formPickers.js"]
+ tags = ["webextensions"]
+ 
++["browser_glodaFacetResultMessage.js"]
++
+ ["browser_linkHandler.js"]
+ https_first_disabled = true
+ 
+ ["browser_menulist.js"]
+ run-if = [
+   "os != 'mac'",
+ ]
+ 
+diff --git a/mail/base/test/browser/widgets/browser_glodaFacetResultMessage.js b/mail/base/test/browser/widgets/browser_glodaFacetResultMessage.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/browser/widgets/browser_glodaFacetResultMessage.js
+@@ -0,0 +1,204 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const tabmail = document.getElementById("tabmail");
++let win, doc;
++
++add_setup(async function () {
++  const tab = tabmail.openTab("contentTab", {
++    url: "chrome://mochitests/content/browser/comm/mail/base/test/browser/widgets/files/glodaFacetResultMessage.xhtml",
++  });
++
++  info("Loading tab...");
++  await BrowserTestUtils.browserLoaded(tab.browser);
++  tab.browser.focus();
++
++  win = tab.browser.contentWindow;
++  doc = win.document;
++  await win.customElements.whenDefined("facet-result-message");
++
++  registerCleanupFunction(() => {
++    tabmail.closeOtherTabs(tabmail.tabInfo[0]);
++  });
++});
++
++/**
++ * Create a minimal gloda-like message object.
++ *
++ * @param {object[]} aRecipients - The recipient identities.
++ * @returns {object} The message.
++ */
++function createMessage(aRecipients) {
++  return {
++    subject: "Test subject",
++    from: { value: "author@example.com", contact: { name: "Author" } },
++    date: new Date(),
++    recipients: aRecipients,
++    starred: false,
++    read: true,
++  };
++}
++
++/**
++ * Render a message with the given recipients and return the resulting nodes.
++ *
++ * @param {object[]} aRecipients - The recipient identities.
++ * @returns {Element} The facet-result-message element.
++ */
++function renderMessage(aRecipients) {
++  const element = doc.createElement("facet-result-message");
++  element.message = createMessage(aRecipients);
++  doc.body.appendChild(element);
++  return element;
++}
++
++/**
++ * Get the rendered recipient names.
++ *
++ * @param {Element} aElement - The facet-result-message element.
++ * @returns {string[]} The rendered recipient names.
++ */
++function getRecipients(aElement) {
++  return [...aElement.querySelectorAll(".message-recipient")].map(
++    node => node.textContent
++  );
++}
++
++function recipient(name) {
++  return { contact: { name } };
++}
++
++add_task(function testSingleRecipient() {
++  const element = renderMessage([recipient("Alice")]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Alice"],
++    "a single recipient should be shown"
++  );
++  element.remove();
++});
++
++add_task(function testMultipleRecipients() {
++  const element = renderMessage([recipient("Alice"), recipient("Bob")]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Alice", "Bob"],
++    "all recipients should be shown"
++  );
++  element.remove();
++});
++
++add_task(function testExactlyMaxRecipients() {
++  const element = renderMessage([
++    recipient("Alice"),
++    recipient("Bob"),
++    recipient("Carol"),
++  ]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Alice", "Bob", "Carol"],
++    "all three recipients should be shown"
++  );
++  Assert.ok(
++    !element.textContent.includes("other"),
++    "no 'others' label should be shown for exactly three recipients"
++  );
++  element.remove();
++});
++
++add_task(function testOneOtherRecipient() {
++  const element = renderMessage([
++    recipient("Alice"),
++    recipient("Bob"),
++    recipient("Carol"),
++    recipient("Dave"),
++  ]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Alice", "Bob", "Carol", "1 other"],
++    "the singular 'other' form should be used for a single extra recipient"
++  );
++  element.remove();
++});
++
++add_task(function testMoreThanMaxRecipients() {
++  const element = renderMessage([
++    recipient("Alice"),
++    recipient("Bob"),
++    recipient("Carol"),
++    recipient("Dave"),
++    recipient("Erin"),
++  ]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Alice", "Bob", "Carol", "2 others"],
++    "the recipients should be limited and an 'others' label added"
++  );
++  element.remove();
++});
++
++add_task(function testSeparatorsAreClassified() {
++  const element = renderMessage([
++    recipient("Alice"),
++    recipient("Bob"),
++    recipient("Carol"),
++  ]);
++
++  Assert.deepEqual(
++    [...element.querySelectorAll(".message-recipient-separator")].map(
++      node => node.textContent
++    ),
++    [", ", ", and "],
++    "separator nodes should be rendered by Intl.ListFormat"
++  );
++  element.remove();
++});
++
++add_task(function testRecipientWithoutNameIsSkipped() {
++  const element = renderMessage([
++    { contact: { name: "" } },
++    { contact: {} },
++    recipient("Bob"),
++  ]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Bob", "2 others"],
++    "recipients without a name should not be rendered, but still be counted"
++  );
++  element.remove();
++});
++
++add_task(function testOthersCountUsesAllRecipients() {
++  // The "N others" count must cover every recipient that is not shown, so
++  // that the names on screen plus the label always add up to the total
++  // number of recipients.
++  const element = renderMessage([
++    { contact: { name: "" } },
++    recipient("Bob"),
++    recipient("Carol"),
++    recipient("Dave"),
++  ]);
++
++  Assert.deepEqual(
++    getRecipients(element),
++    ["Bob", "Carol", "Dave", "1 other"],
++    "the three named recipients are shown and the nameless one is counted as other"
++  );
++  element.remove();
++});
++
++add_task(function testToLabel() {
++  const element = renderMessage([recipient("Alice")]);
++
++  const toLabel = element.querySelector(".message-to-label");
++  Assert.ok(toLabel, "the To: label should be present");
++  Assert.equal(toLabel.textContent, "to:", "the To: label should read 'to:'");
++  element.remove();
++});
+diff --git a/mail/base/test/browser/widgets/files/glodaFacetResultMessage.xhtml b/mail/base/test/browser/widgets/files/glodaFacetResultMessage.xhtml
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/browser/widgets/files/glodaFacetResultMessage.xhtml
+@@ -0,0 +1,13 @@
++<?xml version="1.0"?>
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<html xmlns="http://www.w3.org/1999/xhtml">
++<head>
++  <meta charset="utf-8" />
++  <title>Test for the facet-result-message custom element</title>
++  <link rel="localization" href="messenger/glodaFacetView.ftl" />
++  <script src="chrome://messenger/content/glodaFacet.js"></script>
++</head>
++<body></body>
++</html>
+
