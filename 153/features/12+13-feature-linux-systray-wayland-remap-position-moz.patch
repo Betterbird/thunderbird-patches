@@ -1,0 +1,39 @@
+# HG changeset patch
+# Martin F. Schumann <github@mfs.name> and Kilo Code
+# Date 1791403258 -7200
+# Parent  ddbd4dec6a3d6505a9b3c373bb2afa93f5e1761e
+Feature: Fix Wayland content offset ("phantom shadow") after window is hidden and re-shown, e.g. minimise to tray (issues #399, follow-up to #563).
+
+When a window is re-mapped after being hidden, moz_container_wayland_map_event()
+re-creates the content wl_subsurface at position (0,0), and no size-allocate
+with a changed allocation follows to correct it via MoveLocked() when the
+geometry is unchanged. The painted content then appears shifted by the CSD
+decoration offset while hit-testing stays correct. Reuse the container's
+current allocation as the initial subsurface position on re-map; a later
+size-allocate corrects it if it is stale. A (0,0) allocation keeps the old
+behaviour, so first map and non-CSD windows are unaffected.
+
+diff --git a/widget/gtk/MozContainerWayland.cpp b/widget/gtk/MozContainerWayland.cpp
+--- a/widget/gtk/MozContainerWayland.cpp
++++ b/widget/gtk/MozContainerWayland.cpp
+@@ -142,9 +142,19 @@ gboolean moz_container_wayland_map_event
+       MOZ_WL_CONTAINER(container)->before_first_size_alloc) {
+     return false;
+   }
+ 
+-  return moz_container_wayland_ensure_surface(container);
++  // On re-map (e.g. after minimise to tray) the container still carries its
++  // allocation, which for CSD windows is offset by the decoration margin
++  // inside the toplevel. Use it as the initial subsurface position so the
++  // re-created surface does not stick at (0,0) when no size-allocate with
++  // changed geometry follows (issue #399 phantom shadow).
++  GtkAllocation allocation;
++  gtk_widget_get_allocation(widget, &allocation);
++  DesktopIntPoint allocPos(allocation.x, allocation.y);
++  DesktopIntPoint* pos =
++      (allocation.x != 0 || allocation.y != 0) ? &allocPos : nullptr;
++  return moz_container_wayland_ensure_surface(container, pos);
+ }
+ 
+ void moz_container_wayland_size_allocate(GtkWidget* widget,
+                                          GtkAllocation* allocation) {
