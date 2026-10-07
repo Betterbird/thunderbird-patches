@@ -1,0 +1,111 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1790745918 -10800
+# Node ID c4a4c0280f833031b1263b0277d848cb2d3d2059
+# Parent  a6ca5d5e9ca52d6486f9cb74273cf4f7cce3b246
+Bug 2075909 - Fix Using Body Text instead of Paragraph format causes Save Message prompt when closing unmodified compose window. r=arschmitz
+
+Differential Revision: https://phabricator.services.mozilla.com/D329706
+
+
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -709,33 +709,38 @@ var stateListener = {
+           insertParagraph = false;
+         }
+       } else if (firstChild && firstChild.nodeType == Node.TEXT_NODE) {
+         insertParagraph = false;
+       }
+     }
+ 
+     // Control insertion of line breaks.
++    const editor = GetCurrentEditor();
++    editor.enableUndo(false);
++    editor.selection.collapse(mailBody, 0);
+     if (insertParagraph) {
+-      const editor = GetCurrentEditor();
+-      editor.enableUndo(false);
+-
+-      editor.selection.collapse(mailBody, 0);
+       const pElement = editor.createElementWithDefaults("p");
+       pElement.appendChild(editor.createElementWithDefaults("br"));
+       editor.insertElementAtSelection(pElement, false);
+-
+       document.getElementById("cmd_paragraphState").setAttribute("state", "p");
+-
+-      editor.beginningOfDocument();
+-      editor.enableUndo(true);
+-      editor.resetModificationCount();
+     } else {
++      if (gMsgCompose.composeHTML && !mailBody.hasChildNodes()) {
++        // Insert the line break ourselves, otherwise the editor adds one
++        // later on, which marks the message as modified.
++        editor.insertElementAtSelection(
++          editor.createElementWithDefaults("br"),
++          false
++        );
++      }
+       document.getElementById("cmd_paragraphState").setAttribute("state", "");
+     }
++    editor.beginningOfDocument();
++    editor.enableUndo(true);
++    editor.resetModificationCount();
+     onParagraphFormatChange();
+   },
+ 
+   NotifyComposeBodyReadyReply() {
+     // Control insertion of line breaks.
+     const useParagraph = Services.prefs.getBoolPref(
+       "mail.compose.default_to_paragraph"
+     );
+diff --git a/mail/test/browser/composition/browser_saveChangesOnQuit.js b/mail/test/browser/composition/browser_saveChangesOnQuit.js
+--- a/mail/test/browser/composition/browser_saveChangesOnQuit.js
++++ b/mail/test/browser/composition/browser_saveChangesOnQuit.js
+@@ -208,16 +208,44 @@ add_task(async function test_no_prompt_o
+   const rwc = await open_compose_with_reply();
+   await close_compose_window(rwc, false);
+ 
+   const fwc = await open_compose_with_forward();
+   await close_compose_window(fwc, false);
+ });
+ 
+ /**
++ * Tests that we don't get a prompt to save for unmodified messages when not
++ * using paragraph mode.
++ */
++add_task(async function test_no_prompt_on_close_for_unmodified_no_paragraph() {
++  await SpecialPowers.pushPrefEnv({
++    set: [["mail.compose.default_to_paragraph", false]],
++  });
++  await be_in_folder(folder);
++  const msg = await select_click_row(0);
++  await assert_selected_and_displayed(window, msg);
++
++  for (const openCompose of [
++    open_compose_new_mail,
++    open_compose_with_reply,
++    open_compose_with_forward,
++  ]) {
++    const cwc = await openCompose();
++    await new Promise(resolve => cwc.setTimeout(resolve));
++    Assert.ok(
++      !cwc.gMsgCompose.bodyModified,
++      `body should not be modified after ${openCompose.name}`
++    );
++    await close_compose_window(cwc, false);
++  }
++  await SpecialPowers.popPrefEnv();
++});
++
++/**
+  * Tests that we get a prompt to save if the user made changes to the message
+  * before trying to close it.
+  */
+ add_task(async function test_prompt_on_close_for_modified() {
+   await be_in_folder(folder);
+   const msg = await select_click_row(0);
+   await assert_selected_and_displayed(window, msg);
+ 
+

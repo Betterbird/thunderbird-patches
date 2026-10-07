@@ -1,0 +1,51 @@
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1791392830 -7200
+# Node ID f910fdbdc90e5ea9e5720ee75010e0ee79fd3a08
+# Parent  089456bbc809b6e21186ca9dbb77aae053efc649
+Bug 2077839 - Preserve encoded related-part data during size accounting. r=maxe, mkmelin
+
+Hidden multipart/related leaves are decoded to calculate their attachment
+size before their encoded content is buffered for compose replay. The
+decoder overwrites its input, so Forward and Edit as New decode altered
+data and create corrupt attachments even when replay and writes succeed.
+
+Decode a scratch copy during size accounting to keep the original encoded
+content intact while retaining accurate decoded attachment sizes.
+
+Add xpcshell regression coverage that forwards orphan CID-bearing
+attachments through the compose service and captures the complete SMTP
+message. Compare each decoded attachment's name, exact size, and every
+byte with its source. Cover memory and temporary-file buffering and both
+base64 padding cases.
+
+Differential Revision: https://phabricator.services.mozilla.com/D330742
+
+diff --git a/mailnews/mime/src/mimeleaf.cpp b/mailnews/mime/src/mimeleaf.cpp
+--- a/mailnews/mime/src/mimeleaf.cpp
++++ b/mailnews/mime/src/mimeleaf.cpp
+@@ -7,8 +7,9 @@
+ #include "nsMimeTypes.h"
+ #include "prmem.h"
+ #include "plstr.h"
+ #include "prlog.h"
++#include "nsString.h"
+ #include "nsMimeStringResources.h"
+ #include "modmimee.h"  // for MimeConverterOutputCallback
+ 
+ #define MIME_SUPERCLASS mimeObjectClass
+@@ -192,9 +193,13 @@ int MimeLeaf_parse_buffer_for_size(const
+                                    MimeObject* obj) {
+   if (!obj || !mime_subclass_p(obj->clazz, (MimeObjectClass*)&mimeLeafClass))
+     return 0;
+ 
+-  return MimeLeaf_decode_buffer(buffer, size, obj, MimeLeaf_discard_decoded);
++  // Decoders overwrite their input. Preserve the encoded content, which
++  // multipart/related may buffer for later replay when composing.
++  nsAutoCStringN<128> bufferCopy(buffer, size);
++  return MimeLeaf_decode_buffer(bufferCopy.BeginWriting(), size, obj,
++                                MimeLeaf_discard_decoded);
+ }
+ 
+ static int MimeLeaf_parse_line(const char* line, int32_t length,
+                                MimeObject* obj) {

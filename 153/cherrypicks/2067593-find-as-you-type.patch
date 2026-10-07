@@ -1,0 +1,129 @@
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1791392233 -7200
+# Node ID 6e2c072c341799bdd04289e074ec386812e89e75
+# Parent  975a2d4d1d1eac7463a5f1031a81122610fe3365
+Bug 2067593 - Materialize the lazy findbar for manual FAYT. r=mkmelin
+
+Register lazy findbars with the FindBar actor as proxies so pressing `/` can materialize and use the findbar before Ctrl-F has been pressed. Keep proxy registration ownership safe across deferred loads and reconnects, and avoid materializing a findbar for mouseup events.
+
+Add browser coverage for deferred registration, materialized-findbar ownership, FAYT mode and reuse, while preserving the fresh Ctrl-F path.
+
+Differential Revision: https://phabricator.services.mozilla.com/D329739
+
+diff --git a/mail/base/content/widgets/lazy-findbar.mjs b/mail/base/content/widgets/lazy-findbar.mjs
+--- a/mail/base/content/widgets/lazy-findbar.mjs
++++ b/mail/base/content/widgets/lazy-findbar.mjs
+@@ -9,12 +9,93 @@
+  *
+  * @tagname lazy-findbar
+  */
+ export class LazyFindbar extends HTMLElement {
++  constructor() {
++    super();
++    this._registerWithFindBarActor = this._registerWithFindBarActor.bind(this);
++  }
++
+   connectedCallback() {
+     // Ensure this wrapper doesn't disrupt Thunderbird's strict XUL <vbox> flex
+     // layouts.
+     this.style.display = "contents";
++
++    // Once materialized, the real findbar owns the actor registration.
++    if (this.firstElementChild) {
++      return;
++    }
++
++    const browser = this._getBrowser();
++    // A `nodefaultsrc` browser has no window global until its first load. A
++    // single retry is enough: the actor keys its registrations by the browser
++    // element, which outlives navigations and remoteness changes.
++    if (!this._registerWithFindBarActor()) {
++      browser?.addEventListener("load", this._registerWithFindBarActor, {
++        capture: true,
++        once: true,
++      });
++    }
++  }
++
++  connectedMoveCallback() {
++    // No-op: Allow moving this wrapper in the DOM tree without unregistering
++    // and re-registering it (bug 2056718).
++  }
++
++  disconnectedCallback() {
++    this._getBrowser()?.removeEventListener(
++      "load",
++      this._registerWithFindBarActor,
++      true
++    );
++    // Once materialized, the real findbar owns the registration.
++    if (!this.firstElementChild) {
++      this._unregisterFromFindBarActor();
++    }
++  }
++
++  // The wrapped <browser> is expected to be connected to the same document.
++  _getBrowser() {
++    const browserId = this.getAttribute("browserid");
++    return browserId ? this.ownerDocument.getElementById(browserId) : null;
++  }
++
++  /**
++   * Registers the wrapper with the FindBar actor, so in-content find as you
++   * type reaches it before a real findbar has been materialized.
++   *
++   * @returns {boolean} Whether the wrapper is now the registered findbar.
++   */
++  _registerWithFindBarActor() {
++    // Never shadow the real findbar, which registers itself once it exists.
++    if (this.firstElementChild) {
++      return false;
++    }
++
++    const browser = this._getBrowser();
++    const windowGlobal = browser?.browsingContext?.currentWindowGlobal;
++    if (!browser?.frameLoader || !windowGlobal) {
++      return false;
++    }
++
++    const findbarParent = windowGlobal.getActor("FindBar");
++    if (!findbarParent) {
++      return false;
++    }
++
++    findbarParent.setFindbar(browser, this);
++    return true;
++  }
++
++  _unregisterFromFindBarActor() {
++    const browser = this._getBrowser();
++    const windowGlobal = browser?.browsingContext?.currentWindowGlobal;
++    if (!browser?.frameLoader || !windowGlobal) {
++      return;
++    }
++
++    windowGlobal.getActor("FindBar")?.setFindbar(browser, null);
+   }
+ 
+   /**
+    * Gets the inner findbar, creating it if it doesn't exist yet.
+@@ -44,8 +125,18 @@ export class LazyFindbar extends HTMLEle
+   open() {
+     this.findbar.open();
+   }
+ 
++  // These methods allow the lazy wrapper to stand in for a real findbar in
++  // FindBarParent until the first find operation materializes one.
++  _onBrowserKeypress(event) {
++    this.findbar._onBrowserKeypress(event);
++  }
++
++  onMouseUp() {
++    this.firstElementChild?.onMouseUp();
++  }
++
+   get browser() {
+     return this.firstElementChild?.browser ?? null;
+   }
+   set browser(val) {

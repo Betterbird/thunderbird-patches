@@ -1,0 +1,115 @@
+
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1790937801 -7200
+# Node ID 331bb126e67819e525bc0eca52e8c4f869e97765
+# Parent  b54bc027d79475072113d82a7476e1ac19fa97b5
+Bug 2076654 - Fix Wrap Long Lines in view source when wrapping starts on. r=mkmelin
+
+The toggle read its state from a body class that Gecko no longer sets since
+bug 1926922, so with wrapping on the first click did nothing. Derive the new
+state from the pref instead, like Firefox does.
+
+The menu check mark does not follow the command yet, so it can show the
+opposite state. That is bug 2076486 (D329884); this patch does not depend on it.
+
+Differential Revision: https://phabricator.services.mozilla.com/D329896
+
+
+diff --git a/mail/base/content/viewSource.js b/mail/base/content/viewSource.js
+--- a/mail/base/content/viewSource.js
++++ b/mail/base/content/viewSource.js
+@@ -74,24 +74,23 @@ addEventListener("load", () => {
+ 
+ var viewSourceChrome = {
+   promptAndGoToLine() {
+     const actor = gViewSourceUtils.getViewSourceActor(gBrowser.browsingContext);
+     actor.manager.getActor("ViewSourcePage").promptAndGoToLine();
+   },
+ 
+   toggleWrapping() {
+-    const state = gBrowser.contentDocument.body.classList.toggle("wrap");
+-    if (state) {
+-      document
+-        .getElementById("cmd_wrapLongLines")
+-        .toggleAttribute("checked", true);
+-    } else {
+-      document.getElementById("cmd_wrapLongLines").removeAttribute("checked");
+-    }
++    const state = !Services.prefs.getBoolPref(
++      "view_source.wrap_long_lines",
++      false
++    );
++    document
++      .getElementById("cmd_wrapLongLines")
++      .toggleAttribute("checked", state);
+     Services.prefs.setBoolPref("view_source.wrap_long_lines", state);
+   },
+ 
+   /**
+    * Called by clicks on a menuitem to force the character set detection.
+    */
+   onForceCharacterSet() {
+     gBrowser.forceEncodingDetection();
+diff --git a/mail/test/browser/folder-display/browser_viewSource.js b/mail/test/browser/folder-display/browser_viewSource.js
+--- a/mail/test/browser/folder-display/browser_viewSource.js
++++ b/mail/test/browser/folder-display/browser_viewSource.js
+@@ -62,16 +62,57 @@ add_task(async function utf8Header_with_
+ /**
+  * Header matches the body. Should be readable in both places, but the
+  * view-source display defaults to windows-1252.
+  */
+ add_task(async function utf8Header_with_utf8Body() {
+   await subtest(3, contentReadable, contentGarbled);
+ });
+ 
++/** Wrap Long Lines should toggle wrapping when the window opens wrapped. */
++add_task(async function toggleWrappingFromOn() {
++  await SpecialPowers.pushPrefEnv({
++    set: [["view_source.wrap_long_lines", true]],
++  });
++  await select_click_row(0);
++
++  const viewSourcePromise = promise_new_window("navigator:view-source");
++  EventUtils.synthesizeKey("U", { shiftKey: false, accelKey: true });
++  const viewSourceWin = await viewSourcePromise;
++  const browser = viewSourceWin.document.getElementById("content");
++  await TestUtils.waitForCondition(
++    () => browser.contentDocument.querySelector("pre") != null,
++    "Timeout waiting for the view-source document to load."
++  );
++  const pre = browser.contentDocument.querySelector("pre");
++  const command = viewSourceWin.document.getElementById("cmd_wrapLongLines");
++  Assert.equal(
++    browser.contentWindow.getComputedStyle(pre).whiteSpace,
++    "pre-wrap",
++    "Source should be wrapped when the window opens with wrapping on"
++  );
++
++  command.doCommand();
++  Assert.ok(
++    !Services.prefs.getBoolPref("view_source.wrap_long_lines"),
++    "Pref should be off after turning wrapping off"
++  );
++  Assert.ok(
++    !command.hasAttribute("checked"),
++    "Command should be unchecked after turning wrapping off"
++  );
++  await TestUtils.waitForCondition(
++    () => browser.contentWindow.getComputedStyle(pre).whiteSpace == "pre",
++    "Source should not be wrapped after turning wrapping off"
++  );
++
++  await BrowserTestUtils.closeWindow(viewSourceWin);
++  await SpecialPowers.popPrefEnv();
++});
++
+ function addToFolder(subject, charset, body) {
+   const msgId = Services.uuid.generateUUID() + "@invalid";
+ 
+   const source =
+     "X-Mozilla-Status: 0001\n" +
+     "X-Mozilla-Status2: 00000000\n" +
+     "Message-ID: <" +
+     msgId +
+

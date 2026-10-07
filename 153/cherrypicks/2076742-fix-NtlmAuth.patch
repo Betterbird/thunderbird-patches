@@ -1,0 +1,111 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1791398904 -7200
+# Node ID 999bb95ec56708b1afbca718d34125f2a0776c50
+# Parent  da55bec6376f40645b5106e6d719de7d32354b1e
+Bug 2076742 - Pass the password to MailAuthenticator.initNtlmAuth and catch auth module init failures. r=babolivier
+
+initNtlmAuth called this.getPassword() without awaiting it, and
+Pop3Authenticator.getPassword() is async, so POP3 NTLM passed a Promise that
+ended up as the password "[object Promise]". Have callers pass the password
+in, and await it for POP3.
+
+Also call initNtlmAuth()/initGssapiAuth() inside the existing try blocks in
+Pop3Client and SmtpClient, so a failing auth module or a cancelled SMTP
+password prompt ends the login instead of stalling it.
+
+Differential Revision: https://phabricator.services.mozilla.com/D329936
+
+diff --git a/mailnews/base/src/MailAuthenticator.sys.mjs b/mailnews/base/src/MailAuthenticator.sys.mjs
+--- a/mailnews/base/src/MailAuthenticator.sys.mjs
++++ b/mailnews/base/src/MailAuthenticator.sys.mjs
+@@ -118,10 +118,12 @@ class MailAuthenticator {
+   }
+ 
+   /**
+    * Init a nsIMailAuthModule instance for NTLM auth.
++   *
++   * @param {string} password - The server password.
+    */
+-  initNtlmAuth() {
++  initNtlmAuth(password) {
+     this._authModule = Cc["@mozilla.org/mail/auth-module;1"].createInstance(
+       Ci.nsIMailAuthModule
+     );
+     this._authModule.init(
+@@ -129,9 +131,9 @@ class MailAuthenticator {
+       null, // Service name
+       0, // nsIAuthModule::REQ_DEFAULT
+       null, // domain
+       this.username,
+-      this.getPassword()
++      password
+     );
+   }
+ 
+   /**
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -806,20 +806,30 @@ export class SmtpClient {
+       }
+       case "GSSAPI": {
+         this.logger.debug("Authentication via AUTH GSSAPI");
+         this._currentAction = command => this._actionAUTH_GSSAPI(command, true);
+-        this._authenticator.initGssapiAuth("smtp");
++        try {
++          this._authenticator.initGssapiAuth("smtp");
++        } catch (e) {
++          this.logger.error("Init GSSAPI FAILED!", e);
++          this._actionAUTHComplete({ success: false, data: "AUTH GSSAPI" });
++          return;
++        }
+         // Don't send first token until we get a 334 challenge response.
+         // This avoids sending a line that is possibly rejected as too long.
+         this._sendCommand("AUTH GSSAPI", true);
+         return;
+       }
+       case "NTLM": {
+         this.logger.debug("Authentication via AUTH NTLM");
++        const password = this._getPassword();
++        if (password == null) {
++          return;
++        }
+         this._currentAction = this._actionAUTH_NTLM;
+-        this._authenticator.initNtlmAuth("smtp");
+         let token;
+         try {
++          this._authenticator.initNtlmAuth(password);
+           token = this._authenticator.getNextNtlmToken("");
+         } catch (e) {
+           this.logger.error("Getting NTLM token FAILED!", e);
+           this._actionAUTHComplete({ success: false, data: "AUTH NTLM" });
+diff --git a/mailnews/local/src/Pop3Client.sys.mjs b/mailnews/local/src/Pop3Client.sys.mjs
+--- a/mailnews/local/src/Pop3Client.sys.mjs
++++ b/mailnews/local/src/Pop3Client.sys.mjs
+@@ -821,10 +821,10 @@ export class Pop3Client {
+         );
+         break;
+       }
+       case "GSSAPI": {
+-        this._authenticator.initGssapiAuth("pop");
+         try {
++          this._authenticator.initGssapiAuth("pop");
+           const token = this._authenticator.getNextGssapiToken("");
+           this._nextAction = res => this._actionAuthGssapi(res, token);
+         } catch (e) {
+           this._logger.error(e);
+@@ -834,10 +834,12 @@ export class Pop3Client {
+         await this._send("AUTH GSSAPI");
+         break;
+       }
+       case "NTLM": {
+-        this._authenticator.initNtlmAuth("pop");
+         try {
++          this._authenticator.initNtlmAuth(
++            await this._authenticator.getPassword()
++          );
+           const token = this._authenticator.getNextNtlmToken("");
+           this._nextAction = res => this._actionAuthNtlm(res, token);
+         } catch (e) {
+           this._logger.error(e);
