@@ -1,0 +1,233 @@
+
+# HG changeset patch
+# User Jan Horak <jhorak@redhat.com>
+# Date 1788976559 0
+# Node ID cc541589be42ba3324714317962c5b54c8b38803
+# Parent  29041ea89ea333419bcebbd752f1236af758d725
+Bug 1955255 Allow passing returned GUnixFDList to the DBusCallFDListPromise; r=emilio
+
+We want to use the returned fds when g_dbus_proxy_call_with_unix_fd_list_finish is called.
+This change passes the argument as a std::pair to the fulfillment handler.
+
+Differential Revision: https://phabricator.services.mozilla.com/D242322
+
+
+diff --git a/toolkit/system/gnome/nsGIOService.cpp b/toolkit/system/gnome/nsGIOService.cpp
+--- a/toolkit/system/gnome/nsGIOService.cpp
++++ b/toolkit/system/gnome/nsGIOService.cpp
+@@ -1049,18 +1049,16 @@ const char kFreedesktopPortalPath[] = "/
+ const char kFreedesktopPortalOpenURI[] = "org.freedesktop.portal.OpenURI";
+ const char kMethodOpenDirectory[] = "OpenDirectory";
+ 
+ static nsresult RevealFileViaDBusWithProxy(GDBusProxy* aProxy, nsIFile* aFile,
+                                            const char* aMethod) {
+   nsAutoCString path;
+   MOZ_TRY(aFile->GetNativePath(path));
+ 
+-  RefPtr<mozilla::widget::DBusCallPromise> dbusPromise;
+-
+   char* activationToken = nullptr;
+   auto releaseActivationToken = MakeScopeExit([&] { g_free(activationToken); });
+ 
+   // Try to get activation token from GdkDisplay
+   if (GdkDisplay* display = gdk_display_get_default()) {
+     if (GdkAppLaunchContext* context =
+             gdk_display_get_app_launch_context(display)) {
+       activationToken = g_app_launch_context_get_startup_notify_id(
+@@ -1083,18 +1081,28 @@ static nsresult RevealFileViaDBusWithPro
+     GVariantBuilder builder;
+     g_variant_builder_init(&builder, G_VARIANT_TYPE_STRING_ARRAY);
+     g_variant_builder_add(&builder, "s", uri.get());
+ 
+     RefPtr<GVariant> variant = dont_AddRef(g_variant_ref_sink(g_variant_new(
+         "(ass)", &builder, activationToken ? activationToken : "")));
+     g_variant_builder_clear(&builder);
+ 
+-    dbusPromise = widget::DBusProxyCall(aProxy, aMethod, variant,
+-                                        G_DBUS_CALL_FLAGS_NONE, timeout);
++    widget::DBusProxyCall(aProxy, aMethod, variant, G_DBUS_CALL_FLAGS_NONE,
++                          timeout)
++        ->Then(
++            GetCurrentSerialEventTarget(), __func__,
++            [](RefPtr<GVariant>&& aResult) {
++              // Do nothing, file is shown, we're done.
++            },
++            [file = RefPtr{aFile}, aMethod](GUniquePtr<GError>&& aError) {
++              g_printerr("Failed to query file manager via %s: %s\n", aMethod,
++                         aError->message);
++              RevealDirectory(file, /* aForce = */ true);
++            });
+   } else {
+     int fd = open(path.get(), O_RDONLY | O_CLOEXEC);
+     if (fd < 0) {
+       g_printerr("Failed to open file: %s returned %d\n", path.get(), errno);
+       RevealDirectory(aFile, /* aForce = */ true);
+       return NS_ERROR_FAILURE;
+     }
+ 
+@@ -1108,30 +1116,29 @@ static nsresult RevealFileViaDBusWithPro
+     // Will take ownership of the fd, so we dont have to care about it anymore
+     RefPtr<GUnixFDList> fd_list =
+         dont_AddRef(g_unix_fd_list_new_from_array(&fd, 1));
+ 
+     RefPtr<GVariant> variant = dont_AddRef(g_variant_ref_sink(g_variant_new(
+         "(sha{sv})", activationToken ? activationToken : "", 0, &options)));
+     g_variant_builder_clear(&options);
+ 
+-    dbusPromise = widget::DBusProxyCallWithUnixFDList(
+-        aProxy, aMethod, variant, G_DBUS_CALL_FLAGS_NONE, timeout, fd_list);
++    widget::DBusProxyCallWithUnixFDList(
++        aProxy, aMethod, variant, G_DBUS_CALL_FLAGS_NONE, timeout, fd_list)
++        ->Then(
++            GetCurrentSerialEventTarget(), __func__,
++            [](std::pair<RefPtr<GVariant>, RefPtr<GUnixFDList>>&& aResult) {
++              // Do nothing, file is shown, we're done.
++            },
++            [file = RefPtr{aFile}, aMethod](GUniquePtr<GError>&& aError) {
++              g_printerr("Failed to query file manager via %s: %s\n", aMethod,
++                         aError->message);
++              RevealDirectory(file, /* aForce = */ true);
++            });
+   }
+-
+-  dbusPromise->Then(
+-      GetCurrentSerialEventTarget(), __func__,
+-      [](RefPtr<GVariant>&& aResult) {
+-        // Do nothing, file is shown, we're done.
+-      },
+-      [file = RefPtr{aFile}, aMethod](GUniquePtr<GError>&& aError) {
+-        g_printerr("Failed to query file manager via %s: %s\n", aMethod,
+-                   aError->message);
+-        RevealDirectory(file, /* aForce = */ true);
+-      });
+   return NS_OK;
+ }
+ 
+ static void RevealFileViaDBus(nsIFile* aFile, const char* aName,
+                               const char* aPath, const char* aCall,
+                               const char* aMethod) {
+   widget::CreateDBusProxyForBus(
+       G_BUS_TYPE_SESSION,
+diff --git a/widget/gtk/AsyncDBus.cpp b/widget/gtk/AsyncDBus.cpp
+--- a/widget/gtk/AsyncDBus.cpp
++++ b/widget/gtk/AsyncDBus.cpp
+@@ -62,37 +62,39 @@ RefPtr<DBusCallPromise> DBusProxyCall(GD
+   g_dbus_proxy_call(aProxy, aMethod, aArgs, aFlags, aTimeout, aCancellable,
+                     ProxyCallCallback, do_AddRef(promise).take());
+   return promise.forget();
+ }
+ 
+ static void ProxyCallWithUnixFDListCallback(GObject* aSourceObject,
+                                             GAsyncResult* aResult,
+                                             gpointer aUserData) {
+-  RefPtr<DBusCallPromise::Private> promise =
+-      dont_AddRef(static_cast<DBusCallPromise::Private*>(aUserData));
++  RefPtr<DBusCallFDListPromise::Private> promise =
++      dont_AddRef(static_cast<DBusCallFDListPromise::Private*>(aUserData));
+   GUniquePtr<GError> error;
+-  GUnixFDList** aFDList = nullptr;
++  RefPtr<GUnixFDList> fdList;
+   RefPtr<GVariant> result =
+       dont_AddRef(g_dbus_proxy_call_with_unix_fd_list_finish(
+-          G_DBUS_PROXY(aSourceObject), aFDList, aResult,
++          G_DBUS_PROXY(aSourceObject), getter_AddRefs(fdList), aResult,
+           getter_Transfers(error)));
+   if (result) {
+-    promise->Resolve(std::move(result), __func__);
++    auto pair = std::make_pair<RefPtr<GVariant>, RefPtr<GUnixFDList>>(
++        std::move(result), std::move(fdList));
++    promise->Resolve(std::move(pair), __func__);
+   } else {
+     promise->Reject(std::move(error), __func__);
+   }
+   nsAppShell::DBusConnectionCheck();
+ }
+ 
+-RefPtr<DBusCallPromise> DBusProxyCallWithUnixFDList(
++RefPtr<DBusCallFDListPromise> DBusProxyCallWithUnixFDList(
+     GDBusProxy* aProxy, const char* aMethod, GVariant* aArgs,
+     GDBusCallFlags aFlags, gint aTimeout, GUnixFDList* aFDList,
+     GCancellable* aCancellable) {
+-  auto promise = MakeRefPtr<DBusCallPromise::Private>(__func__);
++  auto promise = MakeRefPtr<DBusCallFDListPromise::Private>(__func__);
+   nsAppShell::DBusConnectionCheck();
+   g_dbus_proxy_call_with_unix_fd_list(
+       aProxy, aMethod, aArgs, aFlags, aTimeout, aFDList, aCancellable,
+       ProxyCallWithUnixFDListCallback, do_AddRef(promise).take());
+   return promise.forget();
+ }
+ 
+ // Tokens should be unique and not guessable. To avoid clashes with calls
+diff --git a/widget/gtk/AsyncDBus.h b/widget/gtk/AsyncDBus.h
+--- a/widget/gtk/AsyncDBus.h
++++ b/widget/gtk/AsyncDBus.h
+@@ -1,39 +1,45 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #ifndef mozilla_widget_AsyncDBus_h
+ #define mozilla_widget_AsyncDBus_h
+ 
++#include <utility>
+ #include "mozilla/GRefPtr.h"
+ #include "mozilla/GUniquePtr.h"
+ #include "mozilla/MozPromise.h"
+ 
+ namespace mozilla::widget {
+ 
+ using DBusProxyPromise = MozPromise<RefPtr<GDBusProxy>, GUniquePtr<GError>,
+                                     /* IsExclusive = */ true>;
+ 
+ using DBusCallPromise = MozPromise<RefPtr<GVariant>, GUniquePtr<GError>,
+                                    /* IsExclusive = */ true>;
+ 
++using DBusCallFDListPromise =
++    MozPromise<std::pair<RefPtr<GVariant>, RefPtr<GUnixFDList>>,
++               GUniquePtr<GError>,
++               /* IsExclusive = */ true>;
++
+ RefPtr<DBusProxyPromise> CreateDBusProxyForBus(
+     GBusType aBusType, GDBusProxyFlags aFlags,
+     GDBusInterfaceInfo* aInterfaceInfo, const char* aName,
+     const char* aObjectPath, const char* aInterfaceName,
+     GCancellable* aCancellable = nullptr);
+ 
+ RefPtr<DBusCallPromise> DBusProxyCall(GDBusProxy*, const char* aMethod,
+                                       GVariant* aArgs, GDBusCallFlags,
+                                       gint aTimeout = -1,
+                                       GCancellable* = nullptr);
+ 
+-RefPtr<DBusCallPromise> DBusProxyCallWithUnixFDList(
++RefPtr<DBusCallFDListPromise> DBusProxyCallWithUnixFDList(
+     GDBusProxy*, const char* aMethod, GVariant* aArgs, GDBusCallFlags,
+     gint aTimeout = -1, GUnixFDList* = nullptr, GCancellable* = nullptr);
+ 
+ // https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html#org-freedesktop-portal-request
+ void MakePortalRequestToken(const nsCString& aType, nsACString& aOutToken);
+ void GetPortalRequestPath(GDBusProxy*, const nsCString& aRequestToken,
+                           nsACString& aOutPath);
+ using PortalResponseListener = std::function<void(GVariant*)>;
+diff --git a/widget/gtk/FileTransferPortal.cpp b/widget/gtk/FileTransferPortal.cpp
+--- a/widget/gtk/FileTransferPortal.cpp
++++ b/widget/gtk/FileTransferPortal.cpp
+@@ -173,17 +173,17 @@ RefPtr<AddFilesPromise> FileTransferPort
+   DBusProxyCallWithUnixFDList(
+       mProxy, "AddFiles",
+       g_variant_new("(saha{sv})", aKey.get(), &fds, &options),
+       G_DBUS_CALL_FLAGS_NONE, /* timeout */ -1, fdList, mCancellable.get())
+       ->Then(
+           GetCurrentSerialEventTarget(), __func__,
+           [this, promise, keyCopy = std::move(keyCopy),
+            filesCopy = std::move(filesCopy),
+-           nextStart](RefPtr<GVariant>&&) mutable {
++           nextStart](std::pair<RefPtr<GVariant>, RefPtr<GUnixFDList>>&&) mutable {
+             AddFilesBatch(keyCopy, filesCopy, nextStart)
+                 ->Then(
+                     GetCurrentSerialEventTarget(), __func__,
+                     [promise](bool aVal) { promise->Resolve(aVal, __func__); },
+                     [promise](GUniquePtr<GError>&& aError) {
+                       promise->Reject(std::move(aError), __func__);
+                     });
+           },
+

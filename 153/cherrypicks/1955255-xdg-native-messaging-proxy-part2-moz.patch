@@ -1,0 +1,1085 @@
+
+# HG changeset patch
+# User Jan Horak <jhorak@redhat.com>
+# Date 1791359094 -7200
+# Node ID 04544093c9dd9a756a0f89d16d41db672d8737cf
+# Parent  f730e4554340499f9b02d5079d213e06a024edc5
+Bug 1955255 Implement native messaging using xdg-native-messaging-proxy; r=robwu,extension-reviewers,ahal
+
+Differential Revision: https://phabricator.services.mozilla.com/D242328
+
+diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -20569,8 +20569,18 @@
+   type: int32_t
+   value: 0
+   mirror: always
+ 
++# Whether to use XDG proxy for native messaging.
++# https://github.com/flatpak/xdg-native-messaging-proxy
++#  - 0: never
++#  - 1: always
++#  - 2: auto (true for snap and flatpak or GTK_USE_PORTAL=1, false otherwise)
++- name: widget.use-xdg-desktop-portal.native-messaging-proxy
++  type: int32_t
++  value: 0
++  mirror: always
++
+ # Whether to try to use XDG portal for settings / look-and-feel information.
+ # https://flatpak.github.io/xdg-desktop-portal/#gdbus-org.freedesktop.portal.Settings
+ #  - 0: never
+ #  - 1: always
+diff --git a/testing/mozbase/manifestparser/manifestparser/token.py b/testing/mozbase/manifestparser/manifestparser/token.py
+--- a/testing/mozbase/manifestparser/manifestparser/token.py
++++ b/testing/mozbase/manifestparser/manifestparser/token.py
+@@ -145,8 +145,11 @@ class ManifestTokens:
+         )
+         _v2404: Token = self.add(
+             Token(t_type=t_os_version, depends=linux, value="24.04")
+         )
++        _v2604: Token = self.add(
++            Token(t_type=t_os_version, depends=linux, value="26.04")
++        )
+ 
+         _v1015: Token = self.add(Token(t_type=t_os_version, depends=mac, value="10.15"))
+         _v1470: Token = self.add(Token(t_type=t_os_version, depends=mac, value="14.70"))
+         _v1530: Token = self.add(Token(t_type=t_os_version, depends=mac, value="15.30"))
+diff --git a/toolkit/components/extensions/NativeMessaging.sys.mjs b/toolkit/components/extensions/NativeMessaging.sys.mjs
+--- a/toolkit/components/extensions/NativeMessaging.sys.mjs
++++ b/toolkit/components/extensions/NativeMessaging.sys.mjs
+@@ -32,8 +32,12 @@ const lazy = XPCOMUtils.declareLazy({
+   portal: {
+     service: "@mozilla.org/extensions/native-messaging-portal;1",
+     iid: Ci.nsINativeMessagingPortal,
+   },
++  nmproxy: {
++    service: "@mozilla.org/extensions/native-messaging-proxy;1",
++    iid: Ci.nsINativeMessagingProxy,
++  },
+ });
+ 
+ const { ExtensionError, promiseTimeout } = ExtensionUtils;
+ 
+@@ -67,20 +71,34 @@ export class NativeApp extends EventEmit
+     this.sendQueue = [];
+     this.writePromise = null;
+     this.cleanupStarted = false;
+     this.portalSessionHandle = null;
++    this.portalImp = null;
+ 
+-    if ("@mozilla.org/extensions/native-messaging-portal;1" in Cc) {
++    if ("@mozilla.org/extensions/native-messaging-proxy;1" in Cc) {
++      if (lazy.nmproxy.shouldUse()) {
++        this.portalImp = lazy.nmproxy;
++      }
++    }
++
++    if (
++      !this.portalImp &&
++      "@mozilla.org/extensions/native-messaging-portal;1" in Cc
++    ) {
+       if (lazy.portal.shouldUse()) {
+-        this.startupPromise = this._doInitPortal().catch(err => {
+-          this.startupPromise = null;
+-          Cu.reportError(err instanceof Error ? err : err.message);
+-          this._cleanup(err);
+-        });
+-        return;
++        this.portalImp = lazy.portal;
+       }
+     }
+ 
++    if (this.portalImp) {
++      this.startupPromise = this._doInitPortalOrNMProxy().catch(err => {
++        this.startupPromise = null;
++        Cu.reportError(err instanceof Error ? err : err.message);
++        this._cleanup(err);
++      });
++      return;
++    }
++
+     this.startupPromise = lazy.NativeManifests.lookupManifest(
+       "stdio",
+       application,
+       context
+@@ -132,26 +150,39 @@ export class NativeApp extends EventEmit
+         this._cleanup(err);
+       });
+   }
+ 
+-  async _doInitPortal() {
+-    let available = await lazy.portal.available;
++  async _doInitPortalOrNMProxy() {
++    let available = await this.portalImp.available;
+     if (!available) {
+-      Cu.reportError("Native messaging portal is not available");
++      if (this.portalImp === lazy.nmproxy && lazy.portal.shouldUse()) {
++        this.portalImp = lazy.portal;
++        return this._doInitPortalOrNMProxy();
++      }
++      Cu.reportError("Native messaging proxy/portal is not available");
+       this._throwGenericError(this.name);
+     }
+ 
+-    let handle = await lazy.portal.createSession(this.name);
+-    this.portalSessionHandle = handle;
++    if (this.portalImp === lazy.portal) {
++      this.portalSessionHandle = await lazy.portal.createSession(this.name);
++    }
+ 
+     let hostInfo = null;
+     let path;
+     try {
+-      let manifest = await lazy.portal.getManifest(
+-        handle,
+-        this.name,
+-        this.context.extension.id
+-      );
++      let manifest;
++      if (this.portalImp === lazy.portal) {
++        manifest = await lazy.portal.getManifest(
++          this.portalSessionHandle,
++          this.name,
++          this.context.extension.id
++        );
++      } else {
++        manifest = await lazy.nmproxy.getManifest(
++          this.name,
++          this.context.extension.id
++        );
++      }
+       path = manifest.substring(0, 30) + "...";
+       hostInfo = await lazy.NativeManifests.parseManifest(
+         "stdio",
+         path,
+@@ -162,32 +193,39 @@ export class NativeApp extends EventEmit
+     } catch (ex) {
+       if (ex instanceof SyntaxError && ex.message.startsWith("JSON.parse:")) {
+         Cu.reportError(`Error parsing native manifest ${path}: ${ex.message}`);
+         this._throwGenericError(this.name);
++      } else {
++        Cu.reportError(ex);
+       }
+     }
+     if (!hostInfo) {
+       this._throwGenericError(this.name);
+     }
+ 
+-    let pipes;
++    let result;
+     try {
+-      pipes = await lazy.portal.start(
+-        handle,
+-        this.name,
+-        this.context.extension.id
+-      );
++      if (this.portalImp === lazy.portal) {
++        result = await lazy.portal.start(
++          this.portalSessionHandle,
++          this.name,
++          this.context.extension.id
++        );
++      } else {
++        result = await lazy.nmproxy.start(this.name, this.context.extension.id);
++        this.portalSessionHandle = result.handle;
++      }
+     } catch (err) {
+       if (err.name == "NotFoundError") {
+         this._throwGenericError(this.name);
+       } else {
+         throw err;
+       }
+     }
+     this.proc = await lazy.Subprocess.connectRunning([
+-      pipes.stdin,
+-      pipes.stdout,
+-      pipes.stderr,
++      result.stdin,
++      result.stdout,
++      result.stderr,
+     ]);
+     this.startupPromise = null;
+     this._startRead();
+     this._startWrite();
+@@ -373,12 +411,12 @@ export class NativeApp extends EventEmit
+     if (this.portalSessionHandle) {
+       if (this.writePromise) {
+         await this.writePromise.catch(Cu.reportError);
+       }
+-      // When using the WebExtensions portal, we don't control the external
+-      // process, the portal does. So let the portal handle waiting/killing the
+-      // external process as it sees fit.
+-      await lazy.portal
++      // When using the WebExtensions portal or native messaging proxy,
++      // we don't control the external process, the portal does.
++      // So let the portal handle waiting/killing the external process as it sees fit.
++      await this.portalImp
+         .closeSession(this.portalSessionHandle)
+         .catch(Cu.reportError);
+       this.portalSessionHandle = null;
+       this.proc?.kill();
+diff --git a/toolkit/components/extensions/NativeMessagingProxy.cpp b/toolkit/components/extensions/NativeMessagingProxy.cpp
+new file mode 100644
+--- /dev/null
++++ b/toolkit/components/extensions/NativeMessagingProxy.cpp
+@@ -0,0 +1,439 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set ts=8 sts=2 et sw=2 tw=80: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "NativeMessagingProxy.h"
++
++#include <gio/gunixfdlist.h>
++#include <glib.h>
++
++#include "mozilla/ClearOnShutdown.h"
++#include "mozilla/GUniquePtr.h"
++#include "mozilla/Logging.h"
++#include "mozilla/UniquePtrExtensions.h"
++#include "mozilla/WidgetUtilsGtk.h"
++#include "mozilla/dom/Promise.h"
++#include "mozilla/widget/AsyncDBus.h"
++
++#include "prlink.h"
++
++static mozilla::LazyLogModule gNativeMessagingProxyLog("NativeMessagingProxy");
++
++#ifdef MOZ_LOGGING
++#  define LOG_NMPROXY(...) \
++    MOZ_LOG(gNativeMessagingProxyLog, mozilla::LogLevel::Debug, (__VA_ARGS__))
++#else
++#  define LOG_NMPROXY(...)
++#endif
++
++#define GET_FUNC(func, lib) \
++  func##_fn = (decltype(func##_fn))PR_FindFunctionSymbol(lib, #func)
++
++static const char* const kNativeMessagingProxyName =
++    "org.freedesktop.NativeMessagingProxy";
++static const char* const kNativeMessagingProxyInterface =
++    "org.freedesktop.NativeMessagingProxy";
++static const char* const kNativeMessagingProxyObjectPath =
++    "/org/freedesktop/nativemessagingproxy";
++static const char* const kNativeMessagingProxyMode = "mozilla";
++
++static gint _g_unix_fd_list_get(GUnixFDList* list, gint index_,
++                                GError** error) {
++  static PRLibrary* gioLib = nullptr;
++  static bool gioInitialized = false;
++  static gint (*g_unix_fd_list_get_fn)(GUnixFDList* list, gint index_,
++                                       GError** error) = nullptr;
++
++  if (!gioInitialized) {
++    gioInitialized = true;
++    gioLib = PR_LoadLibrary("libgio-2.0.so.0");
++    if (!gioLib) {
++      return -1;
++    }
++    GET_FUNC(g_unix_fd_list_get, gioLib);
++  }
++
++  if (!g_unix_fd_list_get_fn) {
++    return -1;
++  }
++
++  return g_unix_fd_list_get_fn(list, index_, error);
++}
++
++namespace mozilla::extensions {
++
++NS_IMPL_ISUPPORTS(NativeMessagingProxy, nsINativeMessagingProxy)
++
++/* static */
++already_AddRefed<NativeMessagingProxy> NativeMessagingProxy::GetSingleton() {
++  static StaticRefPtr<NativeMessagingProxy> sInstance;
++
++  if (MOZ_UNLIKELY(!sInstance)) {
++    sInstance = new NativeMessagingProxy();
++    ClearOnShutdown(&sInstance);
++    // KillClearOnShutdown is LIFO, so this runs first, cancelling pending D-Bus
++    // calls before the sInstance is cleared.
++    RunOnShutdown([instance = &sInstance] {
++      if (*instance) {
++        g_cancellable_cancel((*instance)->mCancellable);
++      }
++    });
++  }
++
++  return do_AddRef(sInstance);
++}
++
++static void LogError(const char* aMethod, const GError& aError) {
++  g_warning("%s error: %s", aMethod, aError.message);
++}
++
++NativeMessagingProxy::NativeMessagingProxy() {
++  LOG_NMPROXY("NativeMessagingProxy::NativeMessagingProxy()");
++  mCancellable = dont_AddRef(g_cancellable_new());
++}
++
++NativeMessagingProxy::~NativeMessagingProxy() {
++  LOG_NMPROXY("NativeMessagingProxy::~NativeMessagingProxy()");
++
++  if (!mProxy) {
++    LOG_NMPROXY("failed to get a D-Bus proxy");
++    return;
++  }
++
++  for (const auto& handle : mSessions) {
++    GUniquePtr<GError> error;
++    GVariantBuilder options;
++    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++    RefPtr<GVariant> res = dont_AddRef(g_dbus_proxy_call_sync(
++        mProxy, "Close", g_variant_new("(oa{sv})", handle.get(), &options),
++        G_DBUS_CALL_FLAGS_NONE, -1, nullptr, getter_Transfers(error)));
++    LOG_NMPROXY("closing: %s", handle.get());
++    if (!res) {
++      LOG_NMPROXY("failed to close session: %s", error->message);
++      LogError(__func__, *error);
++    }
++  }
++}
++
++NS_IMETHODIMP
++NativeMessagingProxy::ShouldUse(bool* aResult) {
++  *aResult = widget::ShouldUsePortal(widget::PortalKind::NativeMessagingProxy);
++  LOG_NMPROXY("will %sbe used", *aResult ? "" : "not ");
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++NativeMessagingProxy::GetAvailable(JSContext* aCx, dom::Promise** aPromise) {
++  MOZ_ASSERT(aCx);
++  MOZ_ASSERT(aPromise);
++
++  if (!mAvailablePromise) {
++    auto holder = MakeRefPtr<GenericNonExclusivePromise::Private>(__func__);
++
++    widget::CreateDBusProxyForBus(
++        G_BUS_TYPE_SESSION, GDBusProxyFlags(G_DBUS_PROXY_FLAGS_NONE),
++        /* aInterfaceInfo = */ nullptr, kNativeMessagingProxyName,
++        kNativeMessagingProxyObjectPath, kNativeMessagingProxyInterface,
++        mCancellable)
++        ->Then(
++            GetCurrentSerialEventTarget(), __func__,
++            [self = RefPtr{this}, this, holder](RefPtr<GDBusProxy>&& aProxy) {
++              mProxy = std::move(aProxy);
++              bool available = false;
++              RefPtr<GVariant> version = dont_AddRef(
++                  g_dbus_proxy_get_cached_property(mProxy, "version"));
++              if (!version ||
++                  !g_variant_is_of_type(version, G_VARIANT_TYPE_UINT32)) {
++                LOG_NMPROXY(
++                    "failed to get version for "
++                    "org.freedesktop.NativeMessagingProxy");
++                mProxy = nullptr;
++                holder->Resolve(false, __func__);
++                return;
++              }
++              if (g_variant_get_uint32(version) >= 1) {
++                available = true;
++              } else {
++                mProxy = nullptr;
++              }
++              LOG_NMPROXY("is %savailable", available ? "" : "not ");
++              holder->Resolve(available, __func__);
++            },
++            [self = RefPtr{this}, holder](GUniquePtr<GError>&& aError) {
++              LOG_NMPROXY(
++                  "failed to get dbus proxy for "
++                  "org.freedesktop.NativeMessagingProxy: %s",
++                  aError->message);
++              holder->Resolve(false, __func__);
++            });
++    mAvailablePromise = holder;
++  }
++
++  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
++  if (NS_WARN_IF(!globalObject)) {
++    return NS_ERROR_FAILURE;
++  }
++
++  ErrorResult result;
++  RefPtr<dom::Promise> retPromise = dom::Promise::Create(globalObject, result);
++  if (NS_WARN_IF(result.Failed())) {
++    return result.StealNSResult();
++  }
++
++  mAvailablePromise->Then(
++      GetCurrentSerialEventTarget(), __func__,
++      [retPromise](bool aAvailable) { retPromise->MaybeResolve(aAvailable); },
++      [retPromise](nsresult aError) { retPromise->MaybeReject(aError); });
++
++  retPromise.forget(aPromise);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++NativeMessagingProxy::CloseSession(const nsACString& aHandle, JSContext* aCx,
++                                   dom::Promise** aPromise) {
++  const nsCString& sessionHandle = PromiseFlatCString(aHandle);
++
++  if (!mProxy) {
++    LOG_NMPROXY("failed - dbus proxy not available");
++    return NS_ERROR_FAILURE;
++  }
++
++  if (!g_variant_is_object_path(sessionHandle.get())) {
++    LOG_NMPROXY("cannot close session %s, invalid handle", sessionHandle.get());
++    return NS_ERROR_INVALID_ARG;
++  }
++
++  if (!mSessions.RemoveElement(sessionHandle)) {
++    LOG_NMPROXY("cannot close session %s, unknown handle", sessionHandle.get());
++    return NS_ERROR_INVALID_ARG;
++  }
++
++  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
++  if (NS_WARN_IF(!globalObject)) {
++    return NS_ERROR_FAILURE;
++  }
++
++  ErrorResult result;
++  RefPtr<dom::Promise> retPromise = dom::Promise::Create(globalObject, result);
++  if (NS_WARN_IF(result.Failed())) {
++    return result.StealNSResult();
++  }
++
++  LOG_NMPROXY("closing session %s", sessionHandle.get());
++
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  widget::DBusProxyCall(
++      mProxy, "Close", g_variant_new("(oa{sv})", sessionHandle.get(), &options),
++      G_DBUS_CALL_FLAGS_NONE, -1, nullptr)
++      ->Then(
++          GetCurrentSerialEventTarget(), __func__,
++          [s = RefPtr{this}, sessionHandle,
++           retPromise](RefPtr<GVariant>&& aResult) {
++            LOG_NMPROXY("session %s closed", sessionHandle.get());
++            retPromise->MaybeResolveWithUndefined();
++          },
++          [s = RefPtr{this}, sessionHandle,
++           retPromise](GUniquePtr<GError>&& aError) {
++            LOG_NMPROXY("failed to close session %s: %s", sessionHandle.get(),
++                        aError->message);
++            LogError(__func__, *aError);
++            retPromise->MaybeRejectWithUnknownError(nsPrintfCString(
++                "failed - Close method failed: %s", aError->message));
++          });
++
++  retPromise.forget(aPromise);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++NativeMessagingProxy::GetManifest(const nsACString& aName,
++                                  const nsACString& aExtension, JSContext* aCx,
++                                  dom::Promise** aPromise) {
++  const nsCString& name = PromiseFlatCString(aName);
++  const nsCString& extension = PromiseFlatCString(aExtension);
++
++  if (!mProxy) {
++    LOG_NMPROXY("mProxy not initialized, failed to GetManifest");
++    return NS_ERROR_FAILURE;
++  }
++
++  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
++  if (NS_WARN_IF(!globalObject)) {
++    return NS_ERROR_FAILURE;
++  }
++
++  ErrorResult result;
++  RefPtr<dom::Promise> retPromise = dom::Promise::Create(globalObject, result);
++  if (NS_WARN_IF(result.Failed())) {
++    return result.StealNSResult();
++  }
++
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  widget::DBusProxyCall(mProxy, "GetManifest",
++                        g_variant_new("(ssa{sv})", name.get(),
++                                      kNativeMessagingProxyMode, &options),
++                        G_DBUS_CALL_FLAGS_NONE, -1, nullptr)
++      ->Then(
++          GetCurrentSerialEventTarget(), __func__,
++          [s = RefPtr{this}, retPromise](RefPtr<GVariant>&& aResult) {
++            RefPtr<GVariant> jsonManifest =
++                dont_AddRef(g_variant_get_child_value(aResult, 0));
++            gsize length;
++            const char* value = g_variant_get_string(jsonManifest, &length);
++            LOG_NMPROXY("manifest found: %s", value);
++            retPromise->MaybeResolve(nsDependentCString(value, length));
++          },
++          [s = RefPtr{this}, name, extension,
++           retPromise](GUniquePtr<GError>&& aError) {
++            LOG_NMPROXY("failed to find a manifest %s for %s: %s", name.get(),
++                        extension.get(), aError->message);
++            LogError(__func__, *aError);
++            retPromise->MaybeRejectWithNotFoundError(
++                "failed to find a manifest");
++          });
++
++  retPromise.forget(aPromise);
++  return NS_OK;
++}
++
++static int GetFD(const RefPtr<GVariant>& result, GUnixFDList* fds, gint index) {
++  RefPtr<GVariant> value =
++      dont_AddRef(g_variant_get_child_value(result, index));
++  GUniquePtr<GError> error;
++  gint fd = _g_unix_fd_list_get(fds, g_variant_get_handle(value),
++                                getter_Transfers(error));
++  if (fd == -1) {
++    if (error) {
++      LOG_NMPROXY("failed to get file descriptor at index %d: %s", index,
++                  error->message);
++      LogError("GetFD", *error);
++    } else {
++      LOG_NMPROXY(
++          "failed to get file descriptor at index %d, g_unix_fd_list_get not "
++          "available",
++          index);
++    }
++  }
++  return fd;
++}
++
++NS_IMETHODIMP
++NativeMessagingProxy::Start(const nsACString& aName,
++                            const nsACString& aExtension, JSContext* aCx,
++                            dom::Promise** aPromise) {
++  const nsCString& name = PromiseFlatCString(aName);
++  const nsCString& extension = PromiseFlatCString(aExtension);
++
++  if (!mProxy) {
++    LOG_NMPROXY("cannot start %s, missing D-Bus proxy", name.get());
++    return NS_ERROR_FAILURE;
++  }
++
++  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
++  if (NS_WARN_IF(!globalObject)) {
++    return NS_ERROR_FAILURE;
++  }
++
++  ErrorResult result;
++  RefPtr<dom::Promise> retPromise = dom::Promise::Create(globalObject, result);
++  if (NS_WARN_IF(result.Failed())) {
++    return result.StealNSResult();
++  }
++
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++
++  widget::DBusProxyCallWithUnixFDList(
++      mProxy, "Start",
++      g_variant_new("(sssa{sv})", name.get(), extension.get(),
++                    kNativeMessagingProxyMode, &options),
++      G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr)
++      ->Then(
++          GetCurrentSerialEventTarget(), __func__,
++          [s = RefPtr{this}, this, retPromise](
++              std::pair<RefPtr<GVariant>, RefPtr<GUnixFDList>>&& aResult) {
++            UniqueFileHandle _stdin(GetFD(aResult.first, aResult.second, 0));
++            UniqueFileHandle _stdout(GetFD(aResult.first, aResult.second, 1));
++            UniqueFileHandle _stderr(GetFD(aResult.first, aResult.second, 2));
++            RefPtr<GVariant> handle =
++                dont_AddRef(g_variant_get_child_value(aResult.first, 3));
++            const char* handle_str = g_variant_get_string(handle, nullptr);
++
++            LOG_NMPROXY(
++                "got file descriptors for native application handle %s: (%d, "
++                "%d, %d)",
++                handle_str, static_cast<int>(_stdin.get()),
++                static_cast<int>(_stdout.get()),
++                static_cast<int>(_stderr.get()));
++
++            if (_stdin.get() == nullptr || _stdout.get() == nullptr ||
++                _stderr.get() == nullptr) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Invalid file descriptor");
++            }
++            mSessions.AppendElement(nsCString(handle_str));
++
++            dom::AutoJSAPI jsapi;
++            if (NS_WARN_IF(!jsapi.Init(retPromise->GetGlobalObject()))) {
++              return retPromise->MaybeRejectWithUnknownError(
++                  "Failed to initialize JS context");
++            }
++            JSContext* cx = jsapi.cx();
++
++            JS::Rooted<JSObject*> jsPipes(cx, JS_NewPlainObject(cx));
++            if (!jsPipes) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Failed to create a JS object to hold the file descriptors");
++            }
++
++            auto setPipeProperty = [&](const char* name, int32_t value) {
++              JS::Rooted<JS::Value> jsValue(cx, JS::Value::fromInt32(value));
++              return JS_SetProperty(cx, jsPipes, name, jsValue);
++            };
++            if (!setPipeProperty("stdin", _stdin.get())) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Failed to set the 'stdin' property on the JS object");
++            }
++            if (!setPipeProperty("stdout", _stdout.get())) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Failed to set the 'stdout' property on the JS object");
++            }
++            if (!setPipeProperty("stderr", _stderr.get())) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Failed to set the 'stderr' property on the JS object");
++            }
++
++            JSString* strHandle = JS_NewStringCopyZ(cx, handle_str);
++            if (!strHandle) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Failed to create the JS string containing handle");
++            }
++            JS::Rooted<JS::Value> jsString(cx, JS::StringValue(strHandle));
++            if (!JS_SetProperty(cx, jsPipes, "handle", jsString)) {
++              return retPromise->MaybeRejectWithOperationError(
++                  "Failed to set the 'handle' property on the JS object");
++            }
++            _stdin.release();
++            _stdout.release();
++            _stderr.release();
++            retPromise->MaybeResolve(jsPipes);
++          },
++          [s = RefPtr{this}, retPromise](GUniquePtr<GError>&& aError) {
++            LOG_NMPROXY(
++                "failed to get file descriptors for native application: "
++                "%s",
++                aError->message);
++            LogError(__func__, *aError);
++            retPromise->MaybeRejectWithAbortError("failed to obtain fds");
++          });
++
++  retPromise.forget(aPromise);
++  return NS_OK;
++}
++
++}  // namespace mozilla::extensions
+diff --git a/toolkit/components/extensions/NativeMessagingProxy.h b/toolkit/components/extensions/NativeMessagingProxy.h
+new file mode 100644
+--- /dev/null
++++ b/toolkit/components/extensions/NativeMessagingProxy.h
+@@ -0,0 +1,41 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set ts=8 sts=2 et sw=2 tw=80: */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_extensions_NativeMessagingProxy_h
++#define mozilla_extensions_NativeMessagingProxy_h
++
++#include "nsINativeMessagingProxy.h"
++
++#include <gio/gio.h>
++
++#include "mozilla/GRefPtr.h"
++#include "mozilla/MozPromise.h"
++#include "nsString.h"
++#include "nsTArray.h"
++
++namespace mozilla::extensions {
++
++class NativeMessagingProxy : public nsINativeMessagingProxy {
++ public:
++  NS_DECL_NSINATIVEMESSAGINGPROXY
++  NS_DECL_ISUPPORTS
++
++  static already_AddRefed<NativeMessagingProxy> GetSingleton();
++
++ private:
++  NativeMessagingProxy();
++  virtual ~NativeMessagingProxy();
++
++  RefPtr<GDBusProxy> mProxy;
++  RefPtr<GCancellable> mCancellable;
++  RefPtr<GenericNonExclusivePromise> mAvailablePromise;
++
++  nsTArray<nsCString> mSessions;
++};
++
++}  // namespace mozilla::extensions
++
++#endif  // mozilla_extensions_NativeMessagingProxy_h
+diff --git a/toolkit/components/extensions/components.conf b/toolkit/components/extensions/components.conf
+--- a/toolkit/components/extensions/components.conf
++++ b/toolkit/components/extensions/components.conf
+@@ -23,4 +23,14 @@ if buildconfig.substs['MOZ_WIDGET_TOOLKI
+             'constructor': 'mozilla::extensions::NativeMessagingPortal::GetSingleton',
+             'headers': ['mozilla/extensions/NativeMessagingPortal.h'],
+         },
+     ]
++    Classes += [
++        {
++            'cid': '{a89af240-f53f-48c4-8468-168136a628d4}',
++            'contract_ids': ['@mozilla.org/extensions/native-messaging-proxy;1'],
++            'singleton': True,
++            'type': 'mozilla::extensions::NativeMessagingProxy',
++            'constructor': 'mozilla::extensions::NativeMessagingProxy::GetSingleton',
++            'headers': ['mozilla/extensions/NativeMessagingProxy.h'],
++        },
++    ]
+diff --git a/toolkit/components/extensions/moz.build b/toolkit/components/extensions/moz.build
+--- a/toolkit/components/extensions/moz.build
++++ b/toolkit/components/extensions/moz.build
+@@ -81,8 +81,9 @@ XPIDL_SOURCES += [
+     "extIWebNavigation.idl",
+     "mozIExtensionAPIRequestHandling.idl",
+     "mozIExtensionProcessScript.idl",
+     "nsINativeMessagingPortal.idl",
++    "nsINativeMessagingProxy.idl",
+ ]
+ 
+ XPIDL_MODULE = "webextensions"
+ 
+@@ -108,10 +109,11 @@ UNIFIED_SOURCES += [
+     "WebExtensionPolicy.cpp",
+ ]
+ 
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk" and CONFIG["MOZ_ENABLE_DBUS"]:
+-    EXPORTS.mozilla.extensions += ["NativeMessagingPortal.h"]
++    EXPORTS.mozilla.extensions += ["NativeMessagingPortal.h", "NativeMessagingProxy.h"]
+     UNIFIED_SOURCES += ["NativeMessagingPortal.cpp"]
++    SOURCES += ["NativeMessagingProxy.cpp"]
+     CXXFLAGS += CONFIG["MOZ_DBUS_GLIB_CFLAGS"]
+     CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
+     DEFINES["MOZ_APP_NAME"] = '"%s"' % CONFIG["MOZ_APP_NAME"]
+ 
+diff --git a/toolkit/components/extensions/nsINativeMessagingProxy.idl b/toolkit/components/extensions/nsINativeMessagingProxy.idl
+new file mode 100644
+--- /dev/null
++++ b/toolkit/components/extensions/nsINativeMessagingProxy.idl
+@@ -0,0 +1,77 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++/**
++ * An interface to talk to the XDG Native Messaging Proxy,
++ * for sandboxed browsers (e.g. packaged as a snap or a flatpak):
++ * https://github.com/flatpak/xdg-native-messaging-proxy
++ * This is a newer version of nsINativeMessagingPortal.
++ */
++[scriptable, builtinclass, uuid(a89af240-f53f-48c4-8468-168136a628d4)]
++interface nsINativeMessagingProxy : nsISupports
++{
++  /**
++   * Whether client code should use the proxy, or fall back to the "legacy"
++   * implementation that spawns and communicates directly with native
++   * applications.
++   */
++  boolean shouldUse();
++
++  /**
++   * Whether the proxy is available and can be talked to. It is an error to
++   * call other methods in this interface if the proxy isn't available.
++   *
++   * @returns Promise that resolves with a boolean that reflects
++              the availability of the proxy.
++   */
++  [implicit_jscontext]
++  readonly attribute Promise available;
++
++  /**
++   * Close a previously open session.
++   *
++   * @param aHandle The handle of a valid session.
++   *
++   * @returns Promise that resolves when the session is successfully closed.
++   */
++  [implicit_jscontext]
++  Promise closeSession(in ACString aHandle);
++
++  /**
++   * Find and return the JSON manifest for the named native messaging server
++   * as a string. This allows the browser to validate the manifest before
++   * deciding to start the server.
++   *
++   * @param aName      The name of the native messaging server to start.
++   * @param aExtension The ID of the extension that issues the request.
++   *
++   * @returns Promise that resolves with an UTF8-encoded string containing
++   *          the raw JSON manifest.
++   */
++  [implicit_jscontext]
++  Promise getManifest(in ACString aName, in ACString aExtension);
++
++  /**
++   * Start the named native messaging server, in a previously open session.
++   * The caller must indicate the requesting web extension (by extension ID).
++   *
++   * @param aName      The name of the native messaging server to start.
++   * @param aExtension The ID of the extension that issues the request.
++   *
++   * @returns Promise that resolves with an object containing:
++   *          - stdin  (unsigned long) - file descriptor for writing to the
++   *            native application
++   *          - stdout (unsigned long) - file descriptor for reading from the
++   *            native application
++   *          - stderr (unsigned long) - file descriptor for the native
++   *            application's error output
++   *          - handle (ACString) - a D-Bus object path of the form
++   *            /org/freedesktop/nativemessagingproxy/TOKEN, used to close
++   *            the session
++   */
++  [implicit_jscontext]
++  Promise start(in ACString aName, in ACString aExtension);
++};
+diff --git a/toolkit/components/extensions/test/xpcshell/native_messaging.toml b/toolkit/components/extensions/test/xpcshell/native_messaging.toml
+--- a/toolkit/components/extensions/test/xpcshell/native_messaging.toml
++++ b/toolkit/components/extensions/test/xpcshell/native_messaging.toml
+@@ -43,5 +43,11 @@ run-if = [
+   "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11'",
+ ]
+ tags = "portal"
+ 
++["test_ext_native_messaging_proxy_real.js"]
++environment = ["GTK_USE_PORTAL=1"]
++run-if = [
++  "os == 'linux' && os_version == '26.04' && arch == 'x86_64'",
++]
++
+ ["test_ext_native_messaging_unresponsive.js"]
+diff --git a/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_portal.js b/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_portal.js
+--- a/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_portal.js
++++ b/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_portal.js
+@@ -384,9 +384,11 @@ add_task(async function test_portal_unav
+   });
+ 
+   let logged = false;
+   function listener(msg) {
+-    logged ||= /Native messaging portal is not available/.test(msg.message);
++    logged ||= /Native messaging proxy\/portal is not available/.test(
++      msg.message
++    );
+   }
+   Services.console.registerListener(listener);
+   registerCleanupFunction(() => {
+     Services.console.unregisterListener(listener);
+diff --git a/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_proxy_real.js b/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_proxy_real.js
+new file mode 100644
+--- /dev/null
++++ b/toolkit/components/extensions/test/xpcshell/test_ext_native_messaging_proxy_real.js
+@@ -0,0 +1,146 @@
++/* We need xdg-native-messaging-proxy which is available in Ubuntu 26.04 and higher:
++https://packages.ubuntu.com/resolute/xdg-native-messaging-proxy
++ */
++"use strict";
++
++const NATIVE_APP_BASENAME = "pingpong_nativemessaging_proxy_test";
++/*
++ * Write native application manifest to $HOME/.mozilla/native-messaging-hosts
++ * We write it there because that is where the xdg-desktop-portal looks and we
++ * are supposedly running this inside a sandbox (snap or flatpak).
++ */
++const NATIVE_APP_PATH = do_get_file(
++  "data/pingpong_nativemessaging_test.py"
++).path;
++info(`This test will launch ${NATIVE_APP_PATH}`);
++
++/*
++ * This extension ID cannot be registered by regular users
++ * because the addons.mozilla.org website won't sign such extensions.
++ *
++ * This is important, to make sure that nobody can trick a Mozilla developer
++ * into installing an extension and then abusing the functionality exposed in
++ * the native messaging host from this test.
++ */
++const EXTENSION_ID = "native-messaging-portal-test@tests.mozilla.org";
++let pingpong_manifest = `
++{
++  "name": "${NATIVE_APP_BASENAME}",
++  "description": "Example host for native messaging",
++  "path": "${NATIVE_APP_PATH}",
++  "type": "stdio",
++  "allowed_extensions": [ "${EXTENSION_ID}" ]
++}
++`;
++
++add_setup(async function setup() {
++  // This environment variable must be enabled
++  Assert.equal(
++    Services.env.get("GTK_USE_PORTAL"),
++    "1",
++    "GTK_USE_PORTAL needs to be set."
++  );
++
++  // Change from default 0 (proxy disabled) to 2 (auto detect).
++  Services.prefs.setIntPref(
++    "widget.use-xdg-desktop-portal.native-messaging-proxy",
++    2
++  );
++
++  /* Although this test doesn't use any native app script,
++   * head_native_messaging.js relies on dirsvc, which this line sets up. */
++  await setupHosts([]);
++
++  /* Write to $HOME/.mozilla/native-messaging-hosts/ because that is the
++   * location with the highest precedence, where native messaging hosts should
++   * be looked up. Firefox looks up the path from XREUserNativeManifests, which
++   * effectively maps to that path on regular releases of Firefox. But in this
++   * test, we want the portal to look up the path, which is independent of
++   * Firefox, and therefore the value of XREUserNativeManifests is meaningless.
++   * Therefore, we write directly to ~/.mozilla/native-messaging-hosts/.
++   *
++   * Side note: in reality, Firefox should not even be able to write to that
++   * path when inside a sandbox (snap or flatpak). In this test, the xpcshell
++   * runtime (which shares the same process as the parts of Firefox that is
++   * being tested) is not actually being run in a real snap/flatpak. We merely
++   * verify that the portal works.
++   */
++  let home = Services.env.get("HOME");
++  Assert.notEqual(home, "", "HOME is set");
++  /* This path should match XREUserNativeManifests, which is already verified
++   * by test_force_legacy in
++   * toolkit/components/extensions/test/xpcshell/test_native_messaging_paths_linux.js.
++   */
++  let pingpong_manifest_file =
++    home + `/.mozilla/native-messaging-hosts/${NATIVE_APP_BASENAME}.json`;
++  await IOUtils.writeUTF8(pingpong_manifest_file, pingpong_manifest, {
++    flush: true,
++  });
++  registerCleanupFunction(async function () {
++    await IOUtils.remove(pingpong_manifest_file);
++  });
++});
++
++async function background() {
++  try {
++    let res = await browser.runtime.sendNativeMessage(
++      "pingpong_nativemessaging_proxy_test",
++      "ping"
++    );
++    browser.test.assertEq(
++      "native app sends pong",
++      res,
++      "Expected reply from native messaging host"
++    );
++    await browser.test.assertRejects(
++      browser.runtime.sendNativeMessage(
++        "non_existent_nativemessaging_host",
++        "ping"
++      ),
++      "No such native application non_existent_nativemessaging_host",
++      "Expected error for non-existing native messaging host"
++    );
++  } catch (e) {
++    browser.test.fail(`Unexpected error: ${e}`);
++  }
++  browser.test.sendMessage("done");
++}
++
++const { sinon } = ChromeUtils.importESModule(
++  "resource://testing-common/Sinon.sys.mjs"
++);
++
++add_task(async function test_talk_to_native_application() {
++  const sinonSandbox = sinon.createSandbox();
++  const { NativeApp } = ChromeUtils.importESModule(
++    "resource://gre/modules/NativeMessaging.sys.mjs"
++  );
++  const spyInit = sinonSandbox.spy(
++    NativeApp.prototype,
++    "_doInitPortalOrNMProxy"
++  );
++  let extension = ExtensionTestUtils.loadExtension({
++    background,
++    manifest: {
++      browser_specific_settings: { gecko: { id: EXTENSION_ID } },
++      permissions: ["nativeMessaging"],
++    },
++  });
++
++  await extension.startup();
++  await extension.awaitMessage("done");
++  await extension.unload();
++
++  // Check if native messaging proxy was used in the test
++  Assert.equal(
++    spyInit.thisValues[0].portalImp instanceof Ci.nsINativeMessagingProxy,
++    true,
++    "instance of nsINativeMessagingProxy"
++  );
++  Assert.equal(
++    spyInit.callCount,
++    2,
++    "Used nmproxy for each sendNativeMessage callImplementation used nmproxy"
++  );
++  sinonSandbox.restore();
++});
+diff --git a/tools/@types/generated/lib.gecko.xpcom.d.ts b/tools/@types/generated/lib.gecko.xpcom.d.ts
+--- a/tools/@types/generated/lib.gecko.xpcom.d.ts
++++ b/tools/@types/generated/lib.gecko.xpcom.d.ts
+@@ -13001,8 +13001,24 @@ interface nsINativeMessagingPortal exten
+   getManifest(aHandle: string, aName: string, aExtension: string): Promise<any>;
+   start(aHandle: string, aName: string, aExtension: string): Promise<any>;
+ }
+ 
++// https://searchfox.org/firefox-main/source/toolkit/components/extensions/nsINativeMessagingProxy.idl
++
++/** <!-- binding_to(idl, interface_name, XPIDL_nsINativeMessagingProxy) --> */
++interface nsINativeMessagingProxy extends nsISupports {
++  /** <!-- binding_to(idl, method, XPIDL_nsINativeMessagingProxy_shouldUse) --> */
++  shouldUse(): boolean;
++  /** <!-- binding_to(idl, attribute, XPIDL_nsINativeMessagingProxy_available) --> */
++  readonly available: Promise<any>;
++  /** <!-- binding_to(idl, method, XPIDL_nsINativeMessagingProxy_closeSession) --> */
++  closeSession(aHandle: string): Promise<any>;
++  /** <!-- binding_to(idl, method, XPIDL_nsINativeMessagingProxy_getManifest) --> */
++  getManifest(aName: string, aExtension: string): Promise<any>;
++  /** <!-- binding_to(idl, method, XPIDL_nsINativeMessagingProxy_start) --> */
++  start(aName: string, aExtension: string): Promise<any>;
++}
++
+ // https://searchfox.org/firefox-main/source/dom/media/webvtt/nsIWebVTTListener.idl
+ 
+ interface nsIWebVTTListener extends nsISupports {
+   onCue(cue: any): void;
+@@ -16556,8 +16572,9 @@ interface nsIXPCComponents_Interfaces {
+   mozIExtensionAPIRequestResult: nsJSIID<mozIExtensionAPIRequestResult, typeof mozIExtensionAPIRequestResult_ResultType>;
+   mozIExtensionAPIRequestHandler: nsJSIID<mozIExtensionAPIRequestHandler>;
+   mozIExtensionProcessScript: nsJSIID<mozIExtensionProcessScript>;
+   nsINativeMessagingPortal: nsJSIID<nsINativeMessagingPortal>;
++  nsINativeMessagingProxy: nsJSIID<nsINativeMessagingProxy>;
+   nsIWebVTTListener: nsJSIID<nsIWebVTTListener>;
+   nsIWebVTTParserWrapper: nsJSIID<nsIWebVTTParserWrapper>;
+   nsIBaseWindow: nsJSIID<nsIBaseWindow>;
+   nsIBidiKeyboard: nsJSIID<nsIBidiKeyboard>;
+diff --git a/widget/gtk/WidgetUtilsGtk.cpp b/widget/gtk/WidgetUtilsGtk.cpp
+--- a/widget/gtk/WidgetUtilsGtk.cpp
++++ b/widget/gtk/WidgetUtilsGtk.cpp
+@@ -318,8 +318,11 @@ bool ShouldUsePortal(PortalKind aPortalK
+         autoBehavior = IsRunningUnderFlatpakOrSnap();
+         return StaticPrefs::widget_use_xdg_desktop_portal_mime_handler();
+       case PortalKind::NativeMessaging:
+         return StaticPrefs::widget_use_xdg_desktop_portal_native_messaging();
++      case PortalKind::NativeMessagingProxy:
++        return StaticPrefs::
++            widget_use_xdg_desktop_portal_native_messaging_proxy();
+       case PortalKind::Settings:
+         autoBehavior = true;
+         return StaticPrefs::widget_use_xdg_desktop_portal_settings();
+       case PortalKind::Location:
+diff --git a/widget/gtk/WidgetUtilsGtk.h b/widget/gtk/WidgetUtilsGtk.h
+--- a/widget/gtk/WidgetUtilsGtk.h
++++ b/widget/gtk/WidgetUtilsGtk.h
+@@ -59,8 +59,9 @@ void RegisterHostApp();
+ enum class PortalKind {
+   FilePicker,
+   MimeHandler,
+   NativeMessaging,
++  NativeMessagingProxy,
+   Settings,
+   Location,
+   OpenUri,
+ };
