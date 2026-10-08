@@ -1,0 +1,307 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1789552538 -7200
+# Node ID bf6c1aaf851975eddd389ab6e2c31b11a9b44f08
+# Parent  1841d05ea4fcc3663d36fbc5632748ee6823842e
+Bug 2069089 - Don't leak one message's cached sender/recipient name into another. r=BenC
+
+FetchAuthor() and FetchRecipients() use their out parameter as input: FetchAuthor
+only computes a name if the string is empty (GetDisplayNameInAddressBook leaves
+it alone when there is no card), and FetchRecipients appends to it. The result
+is then persisted on the header as the sender_name / recipient_names property.
+
+Since bug 2022456 GetCollationKey passes its result string directly to those
+functions, and the binary searches in GetIndexForThread, GetInsertIndexHelper
+and GetThreadRootIndex reuse one IdKey for every header they probe. So each
+probe inherited the previous probe's name and wrote it to the summary file,
+making the message list show a completely unrelated sender while the opened
+message showed the correct one. Copying such a message preserves the bad
+property, so the wrong sender followed it into other folders.
+
+Truncate the out parameter in all three functions, and bump
+mail.displayname.version on upgrade so names already cached incorrectly are
+discarded.
+
+Differential Revision: https://phabricator.services.mozilla.com/D325352
+
+
+diff --git a/mail/modules/MailMigrator.sys.mjs b/mail/modules/MailMigrator.sys.mjs
+--- a/mail/modules/MailMigrator.sys.mjs
++++ b/mail/modules/MailMigrator.sys.mjs
+@@ -24,17 +24,17 @@ ChromeUtils.defineESModuleGetters(lazy, 
+ export var MailMigrator = {
+   /**
+    * Determine if the UI has been upgraded in a way that requires us to reset
+    * some user configuration.  If so, performs the resets.
+    */
+   _migrateUI() {
+     // The code for this was ported from
+     // mozilla/browser/components/nsBrowserGlue.js
+-    const UI_VERSION = 63;
++    const UI_VERSION = 64;
+     const UI_VERSION_PREF = "mail.ui-rdf.version";
+     let currentUIVersion = Services.prefs.getIntPref(UI_VERSION_PREF, 0);
+ 
+     if (currentUIVersion >= UI_VERSION) {
+       return;
+     }
+ 
+     const newProfile = currentUIVersion == 0;
+@@ -504,16 +504,25 @@ export var MailMigrator = {
+           updateCollapsedValue(url, "mail-bar3");
+         }
+       }
+ 
+       if (currentUIVersion < 63) {
+         this._migrateSmtpUsernamesToUtf8();
+       }
+ 
++      if (currentUIVersion < 64) {
++        // Bug 2069089 caused wrong sender/recipient names to be cached in the
++        // summary files. Bumping the version discards every cached name.
++        Services.prefs.setIntPref(
++          "mail.displayname.version",
++          Services.prefs.getIntPref("mail.displayname.version", 0) + 1
++        );
++      }
++
+       // Migration tasks that may take a long time are not run immediately, but
+       // added to the MigrationTasks object then run at the end.
+       //
+       // See the documentation on MigrationTask and MigrationTasks for how to
+       // add a task.
+       MigrationTasks.runTasks();
+ 
+       // Update the migration version.
+diff --git a/mailnews/base/src/nsMsgDBView.cpp b/mailnews/base/src/nsMsgDBView.cpp
+--- a/mailnews/base/src/nsMsgDBView.cpp
++++ b/mailnews/base/src/nsMsgDBView.cpp
+@@ -351,16 +351,20 @@ static void UpdateCachedName(nsIMsgDBHdr
+ 
+   // Save name.
+   newCachedName.Append(NS_ConvertUTF16toUTF8(newName));
+ 
+   aHdr->SetStringProperty(header_field, newCachedName);
+ }
+ 
+ nsresult nsMsgDBView::FetchAuthor(nsIMsgDBHdr* aHdr, nsAString& aSenderString) {
++  // Anything the caller left in here would be mistaken for an address book
++  // display name below, and then cached as this message's sender.
++  aSenderString.Truncate();
++
+   nsCString unparsedAuthor;
+   int32_t currentDisplayNameVersion =
+       mozilla::StaticPrefs::mail_displayname_version();
+   bool showCondensedAddresses =
+       mozilla::StaticPrefs::mail_showCondensedAddresses();
+ 
+   aHdr->GetStringProperty("sender_name", unparsedAuthor);
+ 
+@@ -466,16 +470,19 @@ nsresult nsMsgDBView::FetchServerKey(nsI
+ 
+   CopyASCIItoUTF16(serverKey, aServerKey);
+ 
+   return rv;
+ }
+ 
+ nsresult nsMsgDBView::FetchRecipients(nsIMsgDBHdr* aHdr,
+                                       nsAString& aRecipientsString) {
++  // The recipients are appended below, so don't keep what the caller left here.
++  aRecipientsString.Truncate();
++
+   nsCString recipients;
+   int32_t currentDisplayNameVersion =
+       mozilla::StaticPrefs::mail_displayname_version();
+   bool showCondensedAddresses =
+       mozilla::StaticPrefs::mail_showCondensedAddresses();
+ 
+   aHdr->GetStringProperty("recipient_names", recipients);
+ 
+@@ -3540,16 +3547,20 @@ void nsMsgDBView::UpdateSortInfo(nsMsgVi
+ 
+ nsresult nsMsgDBView::GetCollationKey(nsIMsgDBHdr* msgHdr,
+                                       nsMsgViewSortTypeValue sortType,
+                                       nsAString& result,
+                                       nsIMsgCustomColumnHandler* colHandler) {
+   nsresult rv = NS_ERROR_UNEXPECTED;
+   NS_ENSURE_ARG_POINTER(msgHdr);
+ 
++  // Callers reuse the same IdKey (and hence the same string) for successive
++  // headers, so never let a previous header's key leak into this one.
++  result.Truncate();
++
+   switch (sortType) {
+     case nsMsgViewSortType::bySubject:
+       rv = msgHdr->GetMime2DecodedSubject(result);
+       break;
+     case nsMsgViewSortType::byLocation:
+       rv = GetLocationCollationKey(msgHdr, result);
+       break;
+     case nsMsgViewSortType::byRecipient: {
+diff --git a/mailnews/base/test/unit/test_viewSenderNameCache.js b/mailnews/base/test/unit/test_viewSenderNameCache.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/base/test/unit/test_viewSenderNameCache.js
+@@ -0,0 +1,138 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that the sender/recipient names nsMsgDBView caches in the summary file
++ * always belong to the message they are stored on. Finding the insertion point
++ * for a new message is a binary search which recomputes the name of every
++ * header it visits, and it used to leak the name of one header into the next.
++ */
++
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++var { MessageGenerator, SyntheticMessageSet } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++);
++var { MessageInjection } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageInjection.sys.mjs"
++);
++
++var gMessageGenerator = new MessageGenerator();
++var messageInjection = new MessageInjection({ mode: "local" });
++
++var gDBView;
++var gTreeView;
++var gFolder;
++
++function makeMessage(index) {
++  return gMessageGenerator.makeMessage({
++    from: [`sender${index}`, `sender${index}@example.invalid`],
++    to: [[`recipient${index}`, `recipient${index}@example.invalid`]],
++  });
++}
++
++function bumpDisplayNameVersion() {
++  Services.prefs.setIntPref(
++    "mail.displayname.version",
++    Services.prefs.getIntPref("mail.displayname.version", 0) + 1
++  );
++}
++
++async function addMessages(messages) {
++  await messageInjection.addSetsToFolders(
++    [gFolder],
++    [new SyntheticMessageSet(messages)]
++  );
++}
++
++/**
++ * Check that the given column, and the summary file property backing it, hold
++ * each message's own address rather than some other message's.
++ *
++ * @param {string} column - "senderCol" or "recipientCol".
++ * @param {string} property - The cached name property for that column.
++ */
++function checkColumn(column, property) {
++  const version = Services.prefs.getIntPref("mail.displayname.version");
++  const rowCount = gTreeView.rowCount;
++  Assert.equal(
++    rowCount,
++    gFolder.getTotalMessages(false),
++    "every message should be in the view"
++  );
++  for (let row = 0; row < rowCount; row++) {
++    const hdr = gDBView.getMsgHdrAt(row);
++    const [{ name, email }] = MailServices.headerParser.parseDecodedHeader(
++      column == "senderCol" ? hdr.author : hdr.recipients
++    );
++    const expected = `${name} <${email}>`;
++    Assert.equal(
++      gDBView.cellTextForColumn(row, column),
++      expected,
++      `${column} of row ${row} should be the address of that message`
++    );
++    Assert.equal(
++      hdr.getStringProperty(property),
++      `${version}|${expected}`,
++      `cached ${property} of row ${row} should be the address of that message`
++    );
++  }
++}
++
++add_setup(async function () {
++  Services.prefs.setBoolPref("mail.showCondensedAddresses", false);
++  Services.prefs.setIntPref("mail.addressDisplayFormat", 0);
++
++  gFolder = await messageInjection.makeEmptyFolder();
++
++  const messages = [];
++  for (let i = 1; i <= 8; i++) {
++    messages.push(makeMessage(i));
++  }
++  await addMessages(messages);
++
++  gDBView = Cc[
++    "@mozilla.org/messenger/msgdbview;1?type=threaded"
++  ].createInstance(Ci.nsIMsgDBView);
++  gDBView.init(null, null, null);
++  gDBView.open(
++    gFolder,
++    Ci.nsMsgViewSortType.byDate,
++    Ci.nsMsgViewSortOrder.ascending,
++    Ci.nsMsgViewFlagsType.kNone
++  );
++
++  gTreeView = gDBView.QueryInterface(Ci.nsITreeView);
++
++  registerCleanupFunction(() => gDBView.close());
++});
++
++add_task(function test_sender_names_are_correct() {
++  gDBView.sort(Ci.nsMsgViewSortType.byAuthor, Ci.nsMsgViewSortOrder.ascending);
++  checkColumn("senderCol", "sender_name");
++});
++
++add_task(async function test_sender_names_after_insertion() {
++  gDBView.sort(Ci.nsMsgViewSortType.byAuthor, Ci.nsMsgViewSortOrder.ascending);
++  // Discard the names cached by the sort above, the way an address book change
++  // does, so that the insertion below has to recompute them.
++  bumpDisplayNameVersion();
++
++  await addMessages([makeMessage(9)]);
++
++  checkColumn("senderCol", "sender_name");
++});
++
++add_task(async function test_recipient_names_after_insertion() {
++  gDBView.sort(
++    Ci.nsMsgViewSortType.byRecipient,
++    Ci.nsMsgViewSortOrder.ascending
++  );
++  bumpDisplayNameVersion();
++
++  await addMessages([makeMessage(10)]);
++
++  checkColumn("recipientCol", "recipient_names");
++});
+diff --git a/mailnews/base/test/unit/xpcshell.toml b/mailnews/base/test/unit/xpcshell.toml
+--- a/mailnews/base/test/unit/xpcshell.toml
++++ b/mailnews/base/test/unit/xpcshell.toml
+@@ -171,16 +171,18 @@ tags = ["oauth"]
+ 
+ ["test_testsuite_fakeserver_imapd_gmail.js"]
+ 
+ ["test_testsuite_fakeserver_imapd_list-extended.js"]
+ 
+ ["test_threadMsgCounts.js"]
+ tags = ["virtualfolders"]
+ 
++["test_viewSenderNameCache.js"]
++
+ ["test_viewSortByAddresses.js"]
+ 
+ ["test_virtualFolders1.js"]
+ tags = ["virtualfolders"]
+ 
+ ["test_virtualFolders2.js"]
+ tags = ["virtualfolders"]
+ 
+

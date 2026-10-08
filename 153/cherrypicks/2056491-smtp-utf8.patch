@@ -1,0 +1,768 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1791489012 -7200
+# Node ID 75977b75cb662017f8fd90d32715f15d29fbd70f
+# Parent  cc01f1105926be2ae42a86ebd5229a95c4e052cf
+Bug 2056491 - SMTP username in account authentication not encoded in UTF-8. r=jtracey
+
+Two bugs really: not encoding properly, and not storing the username pref value the right way.
+
+Differential Revision: https://phabricator.services.mozilla.com/D319892
+
+diff --git a/mail/base/test/unit/test_migrateSmtpUsername.js b/mail/base/test/unit/test_migrateSmtpUsername.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/unit/test_migrateSmtpUsername.js
+@@ -0,0 +1,96 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Test migrating Latin-1 encoded SMTP usernames to UTF-8.
++ */
++
++var { MailMigrator } = ChromeUtils.importESModule(
++  "resource:///modules/MailMigrator.sys.mjs"
++);
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++var { localAccountUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/LocalAccountUtils.sys.mjs"
++);
++
++// [raw bytes stored by the old code, expected username after migration]
++var gUsernames = [
++  ["ascii", "ascii"],
++  // "üser" in Latin-1, which the migration can recover.
++  ["\xfcser", "üser"],
++  // "påss€" as the old code stored it: the euro sign didn't fit into Latin-1
++  // and was truncated to U+00AC on write, so it is already lost. The migration
++  // can only preserve what is there.
++  ["p\xe5ss\xac", "påss¬"],
++  // Already UTF-8, so must be left alone.
++  ["\xc3\xbcser\xe2\x82\xac", "üser€"],
++];
++
++var gServerKeys = [];
++
++add_setup(async () => {
++  for (let i = 0; i < gUsernames.length; i++) {
++    const server = localAccountUtils.create_outgoing_server(
++      "smtp",
++      "placeholder",
++      "password",
++      { port: 1234 + i, hostname: `smtp${i}.invalid` }
++    );
++    gServerKeys.push(server.key);
++    // Write the raw bytes the way the old code did, bypassing the setter.
++    Services.prefs.setCharPref(
++      `mail.smtpserver.${server.key}.username`,
++      gUsernames[i][0]
++    );
++  }
++});
++
++/**
++ * Without the migration the Latin-1 bytes don't survive being read as UTF-8,
++ * which is what makes the migration necessary.
++ */
++add_task(async function test_unmigratedUsernameIsBroken() {
++  const server = MailServices.outgoingServer.getServerByKey(gServerKeys[1]);
++  Assert.notEqual(
++    server.username,
++    "üser",
++    "Latin-1 username should not read back correctly before migrating"
++  );
++});
++
++add_task(async function test_migrateSmtpUsername() {
++  Services.prefs.setIntPref("mail.ui-rdf.version", 62);
++  MailMigrator._migrateUI();
++
++  for (let i = 0; i < gServerKeys.length; i++) {
++    const server = MailServices.outgoingServer.getServerByKey(gServerKeys[i]);
++    Assert.equal(
++      server.username,
++      gUsernames[i][1],
++      `username of server ${i} should be readable as UTF-8 after migration`
++    );
++  }
++});
++
++/**
++ * Running the migration again must not double encode anything.
++ */
++add_task(async function test_migrateSmtpUsernameIdempotent() {
++  const before = gServerKeys.map(key =>
++    Services.prefs.getCharPref(`mail.smtpserver.${key}.username`)
++  );
++
++  Services.prefs.setIntPref("mail.ui-rdf.version", 62);
++  MailMigrator._migrateUI();
++
++  for (let i = 0; i < gServerKeys.length; i++) {
++    Assert.equal(
++      Services.prefs.getCharPref(`mail.smtpserver.${gServerKeys[i]}.username`),
++      before[i],
++      `username of server ${i} should be unchanged by a second migration`
++    );
++  }
++});
+diff --git a/mail/base/test/unit/xpcshell.toml b/mail/base/test/unit/xpcshell.toml
+--- a/mail/base/test/unit/xpcshell.toml
++++ b/mail/base/test/unit/xpcshell.toml
+@@ -41,8 +41,10 @@ tags = ["dataadapter"]
+ skip-if = [
+   "os == 'win' && msix", # MSIX has a distribution.ini and it's unwritable. Tests fail.
+ ]
+ 
++["test_migrateSmtpUsername.js"]
++
+ ["test_migrateTryStartTLS.js"]
+ 
+ ["test_mozIconUtils.js"]
+ 
+diff --git a/mail/modules/MailMigrator.sys.mjs b/mail/modules/MailMigrator.sys.mjs
+--- a/mail/modules/MailMigrator.sys.mjs
++++ b/mail/modules/MailMigrator.sys.mjs
+@@ -28,9 +28,9 @@ export var MailMigrator = {
+    */
+   _migrateUI() {
+     // The code for this was ported from
+     // mozilla/browser/components/nsBrowserGlue.js
+-    const UI_VERSION = 62;
++    const UI_VERSION = 63;
+     const UI_VERSION_PREF = "mail.ui-rdf.version";
+     let currentUIVersion = Services.prefs.getIntPref(UI_VERSION_PREF, 0);
+ 
+     if (currentUIVersion >= UI_VERSION) {
+@@ -503,8 +503,12 @@ export var MailMigrator = {
+           updateCollapsedValue(url, "mail-bar3");
+         }
+       }
+ 
++      if (currentUIVersion < 63) {
++        this._migrateSmtpUsernamesToUtf8();
++      }
++
+       // Migration tasks that may take a long time are not run immediately, but
+       // added to the MigrationTasks object then run at the end.
+       //
+       // See the documentation on MigrationTask and MigrationTasks for how to
+@@ -527,8 +531,37 @@ export var MailMigrator = {
+     }
+   },
+ 
+   /**
++   * The SMTP server username pref used to be written as raw bytes, so a
++   * non-ASCII username ended up Latin-1 encoded. It is now written and read as
++   * UTF-8, so rewrite the values which aren't valid UTF-8 already.
++   */
++  _migrateSmtpUsernamesToUtf8() {
++    const keys = Services.prefs
++      .getCharPref("mail.smtpservers", "")
++      .split(",")
++      .filter(Boolean);
++    for (const key of keys) {
++      const prefName = `mail.smtpserver.${key}.username`;
++      // Read the raw bytes, one per code unit.
++      const raw = Services.prefs.getCharPref(prefName, "");
++      if (!raw) {
++        continue;
++      }
++      try {
++        new TextDecoder("utf-8", { fatal: true }).decode(
++          Uint8Array.from(raw, c => c.charCodeAt(0))
++        );
++      } catch (e) {
++        // Not UTF-8, so the bytes are Latin-1. Writing the string back stores
++        // it as UTF-8.
++        Services.prefs.setStringPref(prefName, raw);
++      }
++    }
++  },
++
++  /**
+    * Migrate incoming server to using OAuth2 as authMethod.
+    *
+    * @param {string} hostnameHint - What the hostname should end with.
+    */
+diff --git a/mailnews/base/src/MailAuthenticator.sys.mjs b/mailnews/base/src/MailAuthenticator.sys.mjs
+--- a/mailnews/base/src/MailAuthenticator.sys.mjs
++++ b/mailnews/base/src/MailAuthenticator.sys.mjs
+@@ -34,8 +34,60 @@ class MailAuthenticator {
+     );
+   }
+ 
+   /**
++   * Get the UTF-8 ByteString form of the username, as needed by the SASL
++   * mechanisms which base64 encode it.
++   *
++   * @returns {string}
++   */
++  getByteStringUsername() {
++    return MailStringUtils.stringToByteString(this.username);
++  }
++
++  /**
++   * Base64 encode a username or password for the LOGIN auth mechanism. Unlike
++   * PLAIN auth, the payload of LOGIN auth is not standardized. When
++   * `mail.smtp_login_pop3_user_pass_auth_is_latin1` is true, a credential which
++   * fits into Latin-1 is encoded as is. Anything else is converted to a UTF-8
++   * ByteString first, which btoa() requires anyway.
++   *
++   * @param {string} credential - The username or password to encode.
++   * @returns {string}
++   */
++  _getLoginToken(credential) {
++    if (
++      Services.prefs.getBoolPref(
++        "mail.smtp_login_pop3_user_pass_auth_is_latin1",
++        true
++      ) &&
++      /^[\x00-\xFF]*$/.test(credential) // eslint-disable-line no-control-regex
++    ) {
++      return btoa(credential);
++    }
++    return btoa(MailStringUtils.stringToByteString(credential));
++  }
++
++  /**
++   * Get the base64 encoded username for the LOGIN auth mechanism.
++   *
++   * @returns {string}
++   */
++  getLoginUsernameToken() {
++    return this._getLoginToken(this.username);
++  }
++
++  /**
++   * Get the base64 encoded password for the LOGIN auth mechanism.
++   *
++   * @param {string} password - The password to encode.
++   * @returns {string}
++   */
++  getLoginPasswordToken(password) {
++    return this._getLoginToken(password);
++  }
++
++  /**
+    * Forget cached password.
+    */
+   forgetPassword() {
+     throw Components.Exception(
+@@ -72,9 +124,9 @@ class MailAuthenticator {
+     // Get the hex form of the signature.
+     const hex = [...signature]
+       .map(x => x.toString(16).padStart(2, "0"))
+       .join("");
+-    return btoa(`${this.username} ${hex}`);
++    return btoa(`${this.getByteStringUsername()} ${hex}`);
+   }
+ 
+   /**
+    * Get the OAuth token for a connection.
+@@ -270,11 +322,13 @@ export class SmtpAuthenticator extends M
+    *
+    * @returns {string}
+    */
+   getPlainToken() {
+-    // According to rfc4616#section-2, password should be UTF-8 BinaryString
+-    // before base64 encoded.
+-    return btoa("\0" + this.username + "\0" + this.getByteStringPassword());
++    // According to rfc4616#section-2, username and password should be UTF-8
++    // BinaryString before base64 encoded.
++    return btoa(
++      "\0" + this.getByteStringUsername() + "\0" + this.getByteStringPassword()
++    );
+   }
+ 
+   getOAuthModule() {
+     const oauth2Module = new OAuth2Module();
+@@ -351,12 +405,15 @@ class IncomingServerAuthenticator extend
+    *
+    * @returns {string}
+    */
+   async getPlainToken() {
+-    // According to rfc4616#section-2, password should be UTF-8 BinaryString
+-    // before base64 encoded.
++    // According to rfc4616#section-2, username and password should be UTF-8
++    // BinaryString before base64 encoded.
+     return btoa(
+-      "\0" + this.username + "\0" + (await this.getByteStringPassword())
++      "\0" +
++        this.getByteStringUsername() +
++        "\0" +
++        (await this.getByteStringPassword())
+     );
+   }
+ 
+   async getOAuthToken() {
+diff --git a/mailnews/base/src/OAuth2Module.sys.mjs b/mailnews/base/src/OAuth2Module.sys.mjs
+--- a/mailnews/base/src/OAuth2Module.sys.mjs
++++ b/mailnews/base/src/OAuth2Module.sys.mjs
+@@ -1,8 +1,9 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { MailStringUtils } from "resource:///modules/MailStringUtils.sys.mjs";
+ import { OAuth2 } from "resource:///modules/OAuth2.sys.mjs";
+ import { OAuth2Providers } from "resource:///modules/OAuth2Providers.sys.mjs";
+ import { enforcePrimaryPassword } from "resource:///modules/PrimaryPassword.sys.mjs";
+ 
+@@ -457,9 +458,11 @@ OAuth2Module.prototype = {
+             if (shouldMakeSaslToken) {
+               // Pre-format the return value for an SASL XOAUTH2 client response
+               // if that's what the consumer is expecting.
+               retval = btoa(
+-                `user=${this._username}\x01auth=Bearer ${retval}\x01\x01`
++                MailStringUtils.stringToByteString(
++                  `user=${this._username}\x01auth=Bearer ${retval}\x01\x01`
++                )
+               );
+             }
+ 
+             listener.onSuccess(retval);
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -1102,9 +1102,9 @@ export class SmtpClient {
+       return;
+     }
+     this.logger.debug("AUTH LOGIN USER");
+     this._currentAction = this._actionAUTH_LOGIN_PASS;
+-    this._sendCommand(btoa(this._authenticator.username), true);
++    this._sendCommand(this._authenticator.getLoginUsernameToken(), true);
+   }
+ 
+   /**
+    * Process the response to AUTH LOGIN with a username. If successful, expects
+@@ -1122,23 +1122,12 @@ export class SmtpClient {
+       return;
+     }
+     this.logger.debug("AUTH LOGIN PASS");
+     this._currentAction = this._actionAUTHComplete;
+-    let password = this._getPassword();
+-    if (
+-      !Services.prefs.getBoolPref(
+-        "mail.smtp_login_pop3_user_pass_auth_is_latin1",
+-        true
+-      ) ||
+-      !/^[\x00-\xFF]+$/.test(password) // eslint-disable-line no-control-regex
+-    ) {
+-      // Unlike PLAIN auth, the payload of LOGIN auth is not standardized. When
+-      // `mail.smtp_login_pop3_user_pass_auth_is_latin1` is true, we apply
+-      // base64 encoding directly. Otherwise, we convert it to UTF-8
+-      // BinaryString first.
+-      password = MailStringUtils.stringToByteString(password);
+-    }
+-    this._sendCommand(btoa(password), true);
++    this._sendCommand(
++      this._authenticator.getLoginPasswordToken(this._getPassword()),
++      true
++    );
+   }
+ 
+   /**
+    * Response to AUTH CRAM, if successful expects base64 encoded challenge.
+diff --git a/mailnews/compose/src/SmtpServer.sys.mjs b/mailnews/compose/src/SmtpServer.sys.mjs
+--- a/mailnews/compose/src/SmtpServer.sys.mjs
++++ b/mailnews/compose/src/SmtpServer.sys.mjs
+@@ -156,18 +156,18 @@ export class SmtpServer {
+     return `${this.hostname}` + (this.port ? `:${this.port}` : "");
+   }
+ 
+   get username() {
+-    return this._prefs.getCharPref("username", "");
++    return this._prefs.getStringPref("username", "");
+   }
+ 
+   set username(value) {
+     if (value != this.username) {
+       // Reset password so that users are prompted for new password for the new
+       // username.
+       this.forgetPassword();
+     }
+-    this._setCharPref("username", value);
++    this._setStringPref("username", value);
+     // Void out the cached URI so that the next access to `this.serverURI`
+     // regenerates the nsIURI.
+     this._uri = null;
+   }
+@@ -488,8 +488,22 @@ export class SmtpServer {
+     }
+   }
+ 
+   /**
++   * Set or clear a UTF-8 encoded string preference.
++   *
++   * @param {string} name - The preference name.
++   * @param {string} value - The preference value.
++   */
++  _setStringPref(name, value) {
++    if (value) {
++      this._prefs.setStringPref(name, value);
++    } else {
++      this._prefs.clearUserPref(name);
++    }
++  }
++
++  /**
+    * Get the value of a char preference from this or default SMTP server.
+    *
+    * @param {string} name - The preference name.
+    * @param {number} [defaultValue=""] - The default value to return.
+diff --git a/mailnews/compose/test/unit/test_smtpAuthenticator.js b/mailnews/compose/test/unit/test_smtpAuthenticator.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/compose/test/unit/test_smtpAuthenticator.js
+@@ -0,0 +1,118 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that non-ASCII user names and passwords end up UTF-8 encoded in the
++ * SASL tokens we send, see rfc4616#section-2.
++ */
++
++const { SmtpAuthenticator } = ChromeUtils.importESModule(
++  "resource:///modules/MailAuthenticator.sys.mjs"
++);
++
++// "u<U+00FC>ser<U+20AC>" and "p<U+00E4>ss<U+20AC>", the euro sign making them
++// unrepresentable in Latin-1.
++const kUsername = "üser€";
++const kPassword = "päss€";
++const kUsernameUtf8 = "\xc3\xbcser\xe2\x82\xac";
++const kPasswordUtf8 = "p\xc3\xa4ss\xe2\x82\xac";
++// Same, but representable in Latin-1.
++const kLatin1Username = "üser";
++const kLatin1Password = "päss";
++
++function createAuthenticator(username, password) {
++  const server = getBasicSmtpServer();
++  server.username = username;
++  server.password = password;
++  return new SmtpAuthenticator(server);
++}
++
++registerCleanupFunction(() => {
++  Services.prefs.clearUserPref("mail.smtp_login_pop3_user_pass_auth_is_latin1");
++});
++
++add_task(function testPlainToken() {
++  const authenticator = createAuthenticator(kUsername, kPassword);
++  Assert.equal(
++    authenticator.getPlainToken(),
++    btoa(`\0${kUsernameUtf8}\0${kPasswordUtf8}`),
++    "AUTH PLAIN should send the user name and password as UTF-8"
++  );
++});
++
++add_task(function testCramMd5TokenUserName() {
++  const authenticator = createAuthenticator(kUsername, kPassword);
++  const token = authenticator.getCramMd5Token(
++    kPassword,
++    btoa("<1234@localhost>")
++  );
++  Assert.equal(
++    atob(token).split(" ")[0],
++    kUsernameUtf8,
++    "AUTH CRAM-MD5 should send the user name as UTF-8"
++  );
++});
++
++/**
++ * LOGIN auth is not standardized, so
++ * `mail.smtp_login_pop3_user_pass_auth_is_latin1` keeps sending Latin-1 for
++ * credentials which fit into Latin-1.
++ */
++add_task(function testLoginTokenLatin1() {
++  Services.prefs.setBoolPref(
++    "mail.smtp_login_pop3_user_pass_auth_is_latin1",
++    true
++  );
++  const authenticator = createAuthenticator(kLatin1Username, kLatin1Password);
++  Assert.equal(
++    authenticator.getLoginUsernameToken(),
++    btoa("\xfcser"),
++    "AUTH LOGIN should send the Latin-1 user name as Latin-1"
++  );
++  Assert.equal(
++    authenticator.getLoginPasswordToken(kLatin1Password),
++    btoa("p\xe4ss"),
++    "AUTH LOGIN should send the Latin-1 password as Latin-1"
++  );
++});
++
++add_task(function testLoginTokenLatin1PrefOff() {
++  Services.prefs.setBoolPref(
++    "mail.smtp_login_pop3_user_pass_auth_is_latin1",
++    false
++  );
++  const authenticator = createAuthenticator(kLatin1Username, kLatin1Password);
++  Assert.equal(
++    authenticator.getLoginUsernameToken(),
++    btoa("\xc3\xbcser"),
++    "AUTH LOGIN should send the user name as UTF-8"
++  );
++  Assert.equal(
++    authenticator.getLoginPasswordToken(kLatin1Password),
++    btoa("p\xc3\xa4ss"),
++    "AUTH LOGIN should send the password as UTF-8"
++  );
++});
++
++/**
++ * Credentials which don't fit into Latin-1 must be sent as UTF-8 regardless of
++ * the pref, since there is no other way to encode them.
++ */
++add_task(function testLoginTokenNonLatin1() {
++  Services.prefs.setBoolPref(
++    "mail.smtp_login_pop3_user_pass_auth_is_latin1",
++    true
++  );
++  const authenticator = createAuthenticator(kUsername, kPassword);
++  Assert.equal(
++    authenticator.getLoginUsernameToken(),
++    btoa(kUsernameUtf8),
++    "AUTH LOGIN should send the non-Latin-1 user name as UTF-8"
++  );
++  Assert.equal(
++    authenticator.getLoginPasswordToken(kPassword),
++    btoa(kPasswordUtf8),
++    "AUTH LOGIN should send the non-Latin-1 password as UTF-8"
++  );
++});
+diff --git a/mailnews/compose/test/unit/test_smtpClient.js b/mailnews/compose/test/unit/test_smtpClient.js
+--- a/mailnews/compose/test/unit/test_smtpClient.js
++++ b/mailnews/compose/test/unit/test_smtpClient.js
+@@ -101,8 +101,67 @@ add_task(async function testClientIdenti
+   ]);
+ });
+ 
+ /**
++ * Test that a non-ASCII username and password reach the server UTF-8 encoded.
++ */
++add_task(async function testNonAsciiAuth() {
++  const kUsername = "üser€";
++  const kPassword = "päss€";
++
++  for (const scheme of ["PLAIN", "LOGIN", "CRAM-MD5"]) {
++    const authServer = setupServerDaemon(d => {
++      const handler = new SMTP_RFC2821_handler(d);
++      handler.kUsername = kUsername;
++      handler.kPassword = kPassword;
++      handler.kAuthRequired = true;
++      handler.kAuthSchemes = [scheme];
++      return handler;
++    });
++    authServer.start();
++
++    const smtpServer = getBasicSmtpServer(authServer.port);
++    smtpServer.authMethod =
++      scheme == "CRAM-MD5"
++        ? Ci.nsMsgAuthMethod.passwordEncrypted
++        : Ci.nsMsgAuthMethod.passwordCleartext;
++    smtpServer.username = kUsername;
++    smtpServer.password = kPassword;
++    const identity = getSmtpIdentity("identity@foo.invalid", smtpServer);
++
++    const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
++    smtpServer.sendMailMessage(
++      do_get_file("data/message1.eml"),
++      MailServices.headerParser.parseEncodedHeaderW("to@foo.invalid"),
++      [],
++      identity,
++      "from@foo.invalid",
++      null,
++      null,
++      false,
++      `<${scheme}@foo.invalid>`,
++      listener
++    );
++
++    await listener.promise;
++
++    // Reaching DATA means the server accepted the credentials it decoded.
++    do_check_transaction(authServer.playTransaction(), [
++      "EHLO test",
++      scheme == "PLAIN"
++        ? `AUTH PLAIN ${AuthPLAIN.encodeLine(kUsername, kPassword)}`
++        : `AUTH ${scheme}`,
++      "MAIL FROM:<from@foo.invalid> BODY=8BITMIME SIZE=159",
++      "RCPT TO:<to@foo.invalid>",
++      "DATA",
++    ]);
++
++    smtpServer.closeCachedConnections();
++    authServer.stop();
++  }
++});
++
++/**
+  * Test that when To and Cc/Bcc contain the same address, should send only
+  * one RCPT TO per address.
+  */
+ add_task(async function testDeduplicateRecipients() {
+diff --git a/mailnews/local/src/Pop3Client.sys.mjs b/mailnews/local/src/Pop3Client.sys.mjs
+--- a/mailnews/local/src/Pop3Client.sys.mjs
++++ b/mailnews/local/src/Pop3Client.sys.mjs
+@@ -8,9 +8,8 @@ import { AppConstants } from "resource:/
+ import { CommonUtils } from "resource://services-common/utils.sys.mjs";
+ import { CryptoUtils } from "moz-src:///services/crypto/modules/utils.sys.mjs";
+ import { LineReader } from "resource:///modules/LineReader.sys.mjs";
+ import { MailServices } from "resource:///modules/MailServices.sys.mjs";
+-import { MailStringUtils } from "resource:///modules/MailStringUtils.sys.mjs";
+ import { Pop3Authenticator } from "resource:///modules/MailAuthenticator.sys.mjs";
+ 
+ const lazy = {};
+ ChromeUtils.defineLazyGetter(lazy, "localStrings", () =>
+@@ -1019,9 +1018,9 @@ export class Pop3Client {
+     // Note: The res.statusText here will be base64 "Username:" and is not
+     // verified.
+     this._nextAction = this._actionAuthLoginPass;
+     this._logger.debug("Sending username for AUTH LOGIN");
+-    await this._send(btoa(this._authenticator.username), true);
++    await this._send(this._authenticator.getLoginUsernameToken(), true);
+   };
+ 
+   /**
+    * This is the third step of LOGIN auth. Handle the response to send of
+@@ -1049,23 +1048,14 @@ export class Pop3Client {
+     // the server. Note: The res.statusText here will be base64 "Password:"
+     // and is not verified.
+     this._nextAction = this._actionAuthResponse;
+     this._logger.debug("Sending password for AUTH LOGIN");
+-    let password = await this._authenticator.getPassword();
+-    if (
+-      !Services.prefs.getBoolPref(
+-        "mail.smtp_login_pop3_user_pass_auth_is_latin1",
+-        true
+-      ) ||
+-      !/^[\x00-\xFF]+$/.test(password) // eslint-disable-line no-control-regex
+-    ) {
+-      // Unlike PLAIN auth, the payload of LOGIN auth is not standardized.
+-      // When `mail.smtp_login_pop3_user_pass_auth_is_latin1` is true, we
+-      // apply base64 encoding directly. Otherwise, we convert it to UTF-8
+-      // BinaryString first, to make it work with btoa().
+-      password = MailStringUtils.stringToByteString(password);
+-    }
+-    await this._send(btoa(password), true);
++    await this._send(
++      this._authenticator.getLoginPasswordToken(
++        await this._authenticator.getPassword()
++      ),
++      true
++    );
+   };
+ 
+   /**
+    * The second step of CRAM-MD5 auth, send a HMAC-MD5 signature to the server.
+diff --git a/mailnews/test/fakeserver/Auth.sys.mjs b/mailnews/test/fakeserver/Auth.sys.mjs
+--- a/mailnews/test/fakeserver/Auth.sys.mjs
++++ b/mailnews/test/fakeserver/Auth.sys.mjs
+@@ -13,8 +13,37 @@
+  * @author Ben Bucksch <ben.bucksch beonex.com>
+  */
+ 
+ /**
++ * Base64 decode a credential. RFC 4616 mandates UTF-8, but the LOGIN mechanism
++ * is not standardized and clients may send Latin-1 there, so accept both like a
++ * lenient real world server would.
++ *
++ * @param {string} line - The base64 encoded credential.
++ * @returns {string} The decoded credential.
++ */
++function decodeCredential(line) {
++  const byteString = atob(line);
++  try {
++    return new TextDecoder("utf-8", { fatal: true }).decode(
++      Uint8Array.from(byteString, c => c.charCodeAt(0))
++    );
++  } catch (e) {
++    return byteString;
++  }
++}
++
++/**
++ * UTF-8 encode a credential, so that it can be base64 encoded.
++ *
++ * @param {string} credential - The credential to encode.
++ * @returns {string} The credential as a ByteString.
++ */
++function encodeCredential(credential) {
++  return String.fromCharCode(...new TextEncoder().encode(credential));
++}
++
++/**
+  * Implements AUTH PLAIN
+  *
+  * @see RFC 4616
+  */
+@@ -29,9 +58,9 @@ export var AuthPLAIN = {
+    * @throws {Error} error to return to client
+    */
+   decodeLine(line) {
+     dump("AUTH PLAIN line -" + line + "-\n");
+-    line = atob(line); // base64 decode
++    line = decodeCredential(line); // base64 decode
+     const aap = line.split("\u0000"); // 0-charater is delimiter
+     if (aap.length != 3) {
+       throw new Error("Expected three parts");
+     }
+@@ -63,10 +92,10 @@ export var AuthPLAIN = {
+    * Create an AUTH PLAIN line, to allow a client to authenticate to a server.
+    * Useful for tests.
+    */
+   encodeLine(username, password) {
+-    username = username.substring(0, 255);
+-    password = password.substring(0, 255);
++    username = encodeCredential(username.substring(0, 255));
++    password = encodeCredential(password.substring(0, 255));
+     return btoa("\u0000" + username + "\u0000" + password); // base64 encode
+   },
+ };
+ 
+@@ -80,10 +109,11 @@ export var AuthLOGIN = {
+    * @returns {string} base64 decoded line
+    * @throws {Error} on decoding errors
+    */
+   decodeLine(line) {
+-    dump("AUTH LOGIN -" + atob(line) + "-\n");
+-    return atob(line); // base64 decode
++    const credential = decodeCredential(line); // base64 decode
++    dump("AUTH LOGIN -" + credential + "-\n");
++    return credential;
+   },
+ };
+ 
+ /**
+@@ -124,9 +154,9 @@ export var AuthCRAM = {
+    * @returns {string} object.digest
+    */
+   decodeLine(line) {
+     dump("AUTH CRAM-MD5 line -" + line + "-\n");
+-    line = atob(line);
++    line = decodeCredential(line);
+     dump("base64 decoded -" + line + "-\n");
+     var sp = line.split(" ");
+     if (sp.length != 2) {
+       throw new Error("Expected one space");
+@@ -148,9 +178,10 @@ export var AuthCRAM = {
+     // const kHashLen = 16;
+     const kInnerPad = 0x36; // per spec
+     const kOuterPad = 0x5c;
+ 
+-    key = this.textToNumberArray(key);
++    // The password is the HMAC-MD5 secret, and is UTF-8 encoded.
++    key = this.textToNumberArray(encodeCredential(key));
+     text = this.textToNumberArray(text);
+     // Make sure key is exactly kDigestLen bytes long. Algo per spec.
+     if (key.length > kInputLen) {
+       // (results in kHashLen)
