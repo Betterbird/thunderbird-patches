@@ -1,0 +1,229 @@
+
+# HG changeset patch
+# User Mirko Kerezovic <mirko@kerezovic.de>
+# Date 1791973385 -10800
+# Node ID 9f836403f5455839814fd34bebdf7a7a67fabe75
+# Parent  a21fe03be98199c9cfa3cff36691b1363ed7563f
+Bug 391717 - Match empty senders for address book searches. r=tobyp
+
+Differential Revision: https://phabricator.services.mozilla.com/D332677
+
+
+diff --git a/mailnews/search/src/nsMsgSearchTerm.cpp b/mailnews/search/src/nsMsgSearchTerm.cpp
+--- a/mailnews/search/src/nsMsgSearchTerm.cpp
++++ b/mailnews/search/src/nsMsgSearchTerm.cpp
+@@ -1114,16 +1114,34 @@ NS_IMETHODIMP nsMsgSearchTerm::MatchRfc8
+   // applicable to any other search type.
+   if (m_operator == nsMsgSearchOp::Contains)
+     return MatchRfc2047String(string, charset, false, pResult);
+ 
+   nsTArray<nsString> names, addresses;
+   ExtractAllAddresses(EncodedHeader(string, charset), names, addresses);
+   uint32_t count = names.Length();
+ 
++  bool hasAddress = false;
++  for (const auto& address : addresses) {
++    if (!address.IsEmpty()) {
++      hasAddress = true;
++      break;
++    }
++  }
++
++  // An empty sender or recipient cannot be in the address book, but empty
++  // component headers in an AllAddresses search must not count as matches.
++  if (!hasAddress &&
++      (m_attribute == nsMsgSearchAttrib::Sender ||
++       m_attribute == nsMsgSearchAttrib::To) &&
++      m_operator == nsMsgSearchOp::IsntInAB) {
++    *pResult = true;
++    return NS_OK;
++  }
++
+   nsresult rv = NS_OK;
+   for (uint32_t i = 0; i < count && result == boolContinueLoop; i++) {
+     if (m_operator == nsMsgSearchOp::IsInAB ||
+         m_operator == nsMsgSearchOp::IsntInAB) {
+       rv = MatchInAddressBook(addresses[i], &result);
+     } else {
+       rv = MatchString(names[i], &result);
+       if (boolContinueLoop == result) rv = MatchString(addresses[i], &result);
+diff --git a/mailnews/search/test/unit/test_searchAddressInAb.js b/mailnews/search/test/unit/test_searchAddressInAb.js
+--- a/mailnews/search/test/unit/test_searchAddressInAb.js
++++ b/mailnews/search/test/unit/test_searchAddressInAb.js
+@@ -330,11 +330,91 @@ function testAbSearch() {
+       localAccountUtils.inboxFolder,
+       test.value,
+       test.attrib,
+       test.op,
+       test.count,
+       testAbSearch
+     );
+   } else {
+-    do_test_finished();
++    copyEmptyAddressMessages();
+   }
+ }
++
++const EmptyAddressFiles = [
++  "../../../data/bugmail9",
++  "../../../data/bugmail391717-malformed-from",
++  "../../../data/bugmail391717-missing-from",
++  "../../../data/bugmail391717-empty-to",
++  "../../../data/bugmail391717-missing-to",
++];
++
++function copyEmptyAddressMessages() {
++  const fileName = EmptyAddressFiles.shift();
++  if (!fileName) {
++    testEmptyAddresses();
++    return;
++  }
++
++  MailServices.copy.copyFileMessage(
++    do_get_file(fileName),
++    localAccountUtils.inboxFolder,
++    null,
++    false,
++    0,
++    "",
++    {
++      onStartCopy() {},
++      onProgress() {},
++      setMessageKey() {},
++      getMessageId() {
++        return null;
++      },
++      onStopCopy() {
++        copyEmptyAddressMessages();
++      },
++    },
++    null
++  );
++}
++
++function testEmptyAddresses() {
++  new TestSearch(
++    localAccountUtils.inboxFolder,
++    ABUri,
++    Sender,
++    IsntInAB,
++    8,
++    () =>
++      new TestSearch(
++        localAccountUtils.inboxFolder,
++        ABUri,
++        Sender,
++        IsInAB,
++        5,
++        () =>
++          new TestSearch(
++            localAccountUtils.inboxFolder,
++            ABUri,
++            To,
++            IsntInAB,
++            7,
++            () =>
++              new TestSearch(
++                localAccountUtils.inboxFolder,
++                ABUri,
++                To,
++                IsInAB,
++                7,
++                () =>
++                  new TestSearch(
++                    localAccountUtils.inboxFolder,
++                    ABUri,
++                    AllAddresses,
++                    IsntInAB,
++                    7,
++                    do_test_finished
++                  )
++              )
++          )
++      )
++  );
++}
+diff --git a/mailnews/test/data/bugmail391717-empty-to b/mailnews/test/data/bugmail391717-empty-to
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/bugmail391717-empty-to
+@@ -0,0 +1,12 @@
++From - Sat Oct 10 11:58:00 2026
++X-Mozilla-Status: 0001
++X-Mozilla-Status2: 00000000
++Date: Sat, 10 Oct 2026 11:58:00 +0200
++Message-Id: <bug391717-empty-to@example.invalid>
++From: PrimaryEmail1@test.invalid
++To: <>
++Subject: Bug 391717 empty recipient test
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++
++Bug 391717 test message with an empty To address.
+diff --git a/mailnews/test/data/bugmail391717-malformed-from b/mailnews/test/data/bugmail391717-malformed-from
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/bugmail391717-malformed-from
+@@ -0,0 +1,12 @@
++From - Sat Oct 10 11:56:00 2026
++X-Mozilla-Status: 0001
++X-Mozilla-Status2: 00000000
++Date: Sat, 10 Oct 2026 11:56:00 +0200
++Message-Id: <bug391717-malformed-from@example.invalid>
++From: "faysmakeyouqte" <>
++To: PrimaryEmail1@test.invalid
++Subject: Bug 391717 malformed sender test
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++
++Bug 391717 test message with the originally reported malformed From value.
+diff --git a/mailnews/test/data/bugmail391717-missing-from b/mailnews/test/data/bugmail391717-missing-from
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/bugmail391717-missing-from
+@@ -0,0 +1,11 @@
++From - Sat Oct 10 11:57:00 2026
++X-Mozilla-Status: 0001
++X-Mozilla-Status2: 00000000
++Date: Sat, 10 Oct 2026 11:57:00 +0200
++Message-Id: <bug391717-missing-from@example.invalid>
++To: PrimaryEmail1@test.invalid
++Subject: Bug 391717 missing sender test
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++
++Bug 391717 test message with no From header.
+diff --git a/mailnews/test/data/bugmail391717-missing-to b/mailnews/test/data/bugmail391717-missing-to
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/bugmail391717-missing-to
+@@ -0,0 +1,11 @@
++From - Sat Oct 10 11:59:00 2026
++X-Mozilla-Status: 0001
++X-Mozilla-Status2: 00000000
++Date: Sat, 10 Oct 2026 11:59:00 +0200
++Message-Id: <bug391717-missing-to@example.invalid>
++From: PrimaryEmail1@test.invalid
++Subject: Bug 391717 missing recipient test
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++
++Bug 391717 test message with no To header.
+diff --git a/mailnews/test/data/bugmail9 b/mailnews/test/data/bugmail9
+new file mode 100644
+--- /dev/null
++++ b/mailnews/test/data/bugmail9
+@@ -0,0 +1,12 @@
++From - Sat Oct 10 11:55:00 2026
++X-Mozilla-Status: 0001
++X-Mozilla-Status2: 00000000
++Date: Sat, 10 Oct 2026 11:55:00 +0200
++Message-Id: <bug391717-test@example.invalid>
++From: <>
++To: PrimaryEmail1@test.invalid
++Subject: Bug 391717 empty sender test
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++
++Bug 391717 test message with an empty From address.
+

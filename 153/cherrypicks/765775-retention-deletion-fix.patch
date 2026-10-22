@@ -1,0 +1,127 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1791839614 0
+# Node ID 8c81fadfdd612ba124346633842ad0e8d6516093
+# Parent  603110b61e4daa391f1f186fc0f0f6d86e6dbcbb
+Bug 765775 - Use date for retention policy "Delete all but the most recent". r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D332573
+
+
+diff --git a/mailnews/base/test/unit/test_retention.js b/mailnews/base/test/unit/test_retention.js
+--- a/mailnews/base/test/unit/test_retention.js
++++ b/mailnews/base/test/unit/test_retention.js
+@@ -65,8 +65,34 @@ add_task(function test_retention() {
+     Ci.nsIMsgRetentionSettings.nsMsgRetainByNumHeaders;
+   folderSettings.numHeadersToKeep = 8;
+   folderSettings.useServerDefaults = false;
+   gTestFolder.retentionSettings = folderSettings;
+   gTestFolder.applyRetentionSettings();
+   // no retention settings, so we should have the same number of messages.
+   Assert.equal(8, gTestFolder.msgDatabase.dBFolderInfo.numMessages);
+ });
++
++add_task(async function test_retention_keeps_newest_by_date() {
++  // Simulate insertion order diverging from message date.
++  const folder = await messageInjection.makeEmptyFolder();
++  const messages = [1, 10, 200, 300].map(days =>
++    gMessageGenerator.makeMessage({ age: { days } })
++  );
++  await messageInjection.addSetsToFolders(
++    [folder],
++    [new SyntheticMessageSet(messages)]
++  );
++
++  const settings = folder.retentionSettings;
++  settings.retainByPreference =
++    Ci.nsIMsgRetentionSettings.nsMsgRetainByNumHeaders;
++  settings.numHeadersToKeep = 2;
++  settings.useServerDefaults = false;
++  folder.retentionSettings = settings;
++  folder.applyRetentionSettings();
++
++  Assert.deepEqual(
++    [...folder.msgDatabase.enumerateMessages()].map(hdr => hdr.subject).sort(),
++    [messages[0].subject, messages[1].subject].sort(),
++    "the two newest messages by date should be kept"
++  );
++});
+diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+--- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
++++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+@@ -4655,48 +4655,62 @@ nsresult nsMsgDatabase::FindMessagesOlde
+ }
+ 
+ nsresult nsMsgDatabase::FindExcessMessages(
+     uint32_t numHeadersToKeep, bool applyToFlaggedMessages,
+     nsTArray<RefPtr<nsIMsgDBHdr>>& hdrsToDelete) {
+   nsresult rv = NS_OK;
+   hdrsToDelete.Clear();
+ 
+-  nsCOMPtr<nsIMsgEnumerator> hdrs;
+-  rv = EnumerateMessages(getter_AddRefs(hdrs));
+-  NS_ENSURE_SUCCESS(rv, rv);
+-
+   mdb_count numHdrs = 0;
+   if (m_mdbAllMsgHeadersTable) {
+     m_mdbAllMsgHeadersTable->GetCount(GetEnv(), &numHdrs);
+   } else {
+     return NS_ERROR_NULL_POINTER;
+   }
+-
++  if (numHdrs <= numHeadersToKeep) {
++    return NS_OK;
++  }
++
++  nsCOMPtr<nsIMsgEnumerator> hdrs;
++  rv = EnumerateMessages(getter_AddRefs(hdrs));
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsTArray<std::pair<PRTime, nsMsgKey>> candidates;
+   bool hasMore = false;
+   while (NS_SUCCEEDED(rv = hdrs->HasMoreElements(&hasMore)) && hasMore) {
+     nsCOMPtr<nsIMsgDBHdr> msg;
+     rv = hdrs->GetNext(getter_AddRefs(msg));
+     NS_ASSERTION(NS_SUCCEEDED(rv), "nsMsgDBEnumerator broken");
+     NS_ENSURE_SUCCESS(rv, rv);
+ 
+     if (!applyToFlaggedMessages) {
+       uint32_t flags;
+       (void)msg->GetFlags(&flags);
+       if (flags & nsMsgMessageFlags::Marked) {
+         continue;
+       }
+     }
+ 
+-    // this isn't quite right - we want to prefer unread messages (keep all of
+-    // those we can)
+-    if (numHdrs > numHeadersToKeep) {
+-      numHdrs--;
+-      hdrsToDelete.AppendElement(msg);
+-    }
++    PRTime date;
++    msg->GetDate(&date);
++    nsMsgKey key;
++    msg->GetMessageKey(&key);
++    candidates.EmplaceBack(date, key);
++  }
++  NS_ENSURE_SUCCESS(rv, rv);
++  candidates.Sort();
++
++  size_t numToDelete =
++      std::min<size_t>(numHdrs - numHeadersToKeep, candidates.Length());
++  for (const auto& candidate : Span(candidates).First(numToDelete)) {
++    nsCOMPtr<nsIMsgDBHdr> msg;
++    rv = GetMsgHdrForKey(candidate.second, getter_AddRefs(msg));
++    NS_ENSURE_SUCCESS(rv, rv);
++    hdrsToDelete.AppendElement(msg);
+   }
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMPL_ISUPPORTS(nsMsgRetentionSettings, nsIMsgRetentionSettings)
+ 
+ // Initialise the member variables to reasonable defaults.
+
