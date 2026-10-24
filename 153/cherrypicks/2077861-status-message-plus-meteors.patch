@@ -1,0 +1,152 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792859740 -7200
+# Node ID 39bd7301f232e13d4266dc249c8dcd5864af4561
+# Parent  748d542b793767bcce22ef7ddec7028e2c324ee2
+Bug 2077861 - Handle meteors requests that come with a status message. r=arschmitz
+
+The "message" listener in mailWindow.js only processed progress and meteors
+when there was no status message, so a status update combined with
+start-meteors or stop-meteors (folder reparse, compaction, Exchange) never
+reached startMeteors()/stopMeteors().
+
+The subscribe dialog broadcast its start-meteors to all windows through the
+feedback service, but only stops them once populating is done. Closing the
+dialog before that left the meteors in the main window spinning, which was
+previously hidden by the start request being dropped. Make the subscribe
+dialog use its own status feedback again, like it did before bug 1985780.
+
+Differential Revision: https://phabricator.services.mozilla.com/D334825
+
+diff --git a/mail/base/content/mailWindow.js b/mail/base/content/mailWindow.js
+--- a/mail/base/content/mailWindow.js
++++ b/mail/base/content/mailWindow.js
+@@ -355,17 +355,16 @@ function nsMsgStatusFeedback() {
+ 
+   window.addEventListener("message", event => {
+     if (event.data.statusMessage) {
+       this.showStatusString(event.data.statusMessage);
+-    } else {
+-      if (event.data.progress) {
+-        this.showProgress(event.data.progress);
+-      }
+-      if (event.data.meteors == "start-meteors") {
+-        this.startMeteors();
+-      } else if (event.data.meteors == "stop-meteors") {
+-        this.stopMeteors();
+-      }
++    }
++    if (event.data.progress) {
++      this.showProgress(event.data.progress);
++    }
++    if (event.data.meteors == "start-meteors") {
++      this.startMeteors();
++    } else if (event.data.meteors == "stop-meteors") {
++      this.stopMeteors();
+     }
+   });
+ }
+ 
+diff --git a/mail/base/test/browser/browser_statusFeedback.js b/mail/base/test/browser/browser_statusFeedback.js
+--- a/mail/base/test/browser/browser_statusFeedback.js
++++ b/mail/base/test/browser/browser_statusFeedback.js
+@@ -157,4 +157,35 @@ add_task(async function testManyStatuses
+     },
+     () => statusText.value == ""
+   );
+ });
++
++add_task(async function test_statusWithMeteors() {
++  const status = window.MsgStatusFeedback;
++  await TestUtils.waitForCondition(
++    () => !status._statusQueue.length && !status._meteorsSpinning,
++    "waiting for status bar to be idle"
++  );
++
++  MailServices.feedback.reportStatus("Working…", "start-meteors");
++  await TestUtils.waitForCondition(
++    () => status._meteorsSpinning,
++    "meteors should start spinning"
++  );
++  await BrowserTestUtils.waitForMutationCondition(
++    statusText,
++    {
++      attributes: true,
++      attributeFilter: ["value"],
++    },
++    () => statusText.value == "Working…",
++    { msg: "status message should be shown" }
++  );
++  Assert.equal(status._startRequests, 1, "should have one start request");
++
++  MailServices.feedback.reportStatus("Done.", "stop-meteors");
++  await TestUtils.waitForCondition(
++    () => !status._meteorsSpinning,
++    "meteors should stop spinning"
++  );
++  Assert.equal(status._startRequests, 0, "should have no start requests");
++});
+diff --git a/mailnews/base/content/subscribe.js b/mailnews/base/content/subscribe.js
+--- a/mailnews/base/content/subscribe.js
++++ b/mailnews/base/content/subscribe.js
+@@ -3,11 +3,8 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ /* globals msgWindow, nsMsgStatusFeedback */ // From mailWindow.js
+ 
+-var { MailServices } = ChromeUtils.importESModule(
+-  "resource:///modules/MailServices.sys.mjs"
+-);
+ var { MailUtils } = ChromeUtils.importESModule(
+   "resource:///modules/MailUtils.sys.mjs"
+ );
+ var { TreeDataAdapter, TreeDataRow } = ChromeUtils.importESModule(
+@@ -79,9 +76,9 @@ function onServerClick(aFolder) {
+ }
+ 
+ var MySubscribeListener = {
+   async OnDonePopulating() {
+-    MailServices.feedback.reportStatus("", "stop-meteors");
++    gStatusFeedback.stopMeteors();
+     document.getElementById("stopButton").disabled = true;
+     document.getElementById("refreshButton").disabled = false;
+     document.getElementById("currentListTab").disabled = false;
+     document.getElementById("newGroupsTab").disabled = false;
+@@ -110,28 +107,25 @@ function SetUpTree(forceToServer, getOnl
+     document.getElementById("currentListTab").disabled = true;
+     document.getElementById("newGroupsTab").disabled = true;
+     document.getElementById("refreshButton").disabled = true;
+ 
+-    MailServices.feedback.reportStatus(
+-      gSubscribeBundle.getString("pleaseWaitString"),
+-      "start-meteors"
+-    );
++    const waitString = gSubscribeBundle.getString("pleaseWaitString");
++    gStatusFeedback?.showStatusString(waitString);
++    gStatusFeedback?.startMeteors();
+     document.getElementById("stopButton").disabled = false;
+ 
+     gSubscribableServer.startPopulating(msgWindow, forceToServer, getOnlyNew);
+   } catch (e) {
+     if (e.result == 0x80550014) {
+       // NS_MSG_ERROR_OFFLINE
+-      MailServices.feedback.reportStatus(
+-        gSubscribeBundle.getString("offlineState"),
+-        "stop-meteors"
+-      );
++      const offlineString = gSubscribeBundle.getString("offlineState");
++      gStatusFeedback?.showStatusString(offlineString);
++      gStatusFeedback?.stopMeteors();
+     } else {
+       console.error("Failed to populate subscribe tree", e);
+-      MailServices.feedback.reportStatus(
+-        gSubscribeBundle.getString("errorPopulating"),
+-        "stop-meteors"
+-      );
++      const errorString = gSubscribeBundle.getString("errorPopulating");
++      gStatusFeedback?.showStatusString(errorString);
++      gStatusFeedback?.stopMeteors();
+     }
+     Stop();
+   }
+ }
