@@ -1,0 +1,320 @@
+
+# HG changeset patch
+# User Masayuki Nakano <masayuki@d-toybox.com>
+# Date 1792766435 0
+# Node ID a511a74f9db8dddffd128cbe881291cef92a4384
+# Parent  b265f86b00846fd1afbbbf20b2e979c592166575
+Bug 2074786 - Make `HTMLEditor::HandleInsertText` not delete unnecessary `<br>` immediately before `<span _moz_quote="true">`  a=dmeehan DONTBUILD
+
+It's unnecessary for the layout, but it's necessary for the serializer.
+Therefore, it's actually necessary one for plain email composer.
+
+Original Revision: https://phabricator.services.mozilla.com/D330087
+
+Differential Revision: https://phabricator.services.mozilla.com/D332620
+
+
+diff --git a/editor/libeditor/HTMLEditSubActionHandler.cpp b/editor/libeditor/HTMLEditSubActionHandler.cpp
+--- a/editor/libeditor/HTMLEditSubActionHandler.cpp
++++ b/editor/libeditor/HTMLEditSubActionHandler.cpp
+@@ -1357,17 +1357,19 @@ Result<EditActionResult, nsresult> HTMLE
+     if (!isWhiteSpaceCollapsible || IsPlaintextMailComposer()) {
+       if (!aInsertionString.IsEmpty()) [[likely]] {
+         // If the inserting string is not empty, we need to delete padding
+         // line break after the insertion point first because X (Twitter)
+         // expects that character data change will be notified at last.
+         const WSScanResult nextThing = HTMLEditUtils::
+             ScanInclusiveNextThingWithIgnoringUnnecessaryLineBreak(
+                 currentPoint, PaddingForEmptyBlock::Unnecessary, *editingHost);
+-        if (nextThing.MaybeIgnoredLineBreak().isSome()) {
++        if (nextThing.MaybeIgnoredLineBreak().isSome() &&
++            !(IsPlaintextMailComposer() &&
++              nextThing.IgnoredLineBreakIsRequiredInPlaintextMailComposer())) {
+           const EditorLineBreak& lineBreak =
+               nextThing.MaybeIgnoredLineBreak().ref();
+           // When user inserting content, the web app may expect that nothing
+           // extant content will be deleted. Therefore, we should preserve
+           // preformatted linefeed at least. However, we should delete it if
+           // it's a padding for empty block for the compatibility with the other
+           // browsers.
+           if (lineBreak.IsHTMLBRElement() ||
+diff --git a/editor/libeditor/HTMLEditor.cpp b/editor/libeditor/HTMLEditor.cpp
+--- a/editor/libeditor/HTMLEditor.cpp
++++ b/editor/libeditor/HTMLEditor.cpp
+@@ -4443,61 +4443,36 @@ Result<CreateLineBreakResult, nsresult> 
+ 
+ nsresult HTMLEditor::EnsureNoFollowingUnnecessaryLineBreak(
+     const EditorDOMPoint& aNextOrAfterModifiedPoint,
+     PreservePreformattedLineBreak aPreservePreformattedLineBreak,
+     PaddingForEmptyBlock aPaddingForEmptyBlock, const Element& aEditingHost) {
+   MOZ_ASSERT(aNextOrAfterModifiedPoint.IsInContentNode());
+   MOZ_ASSERT(aNextOrAfterModifiedPoint.IsSetAndValid());
+ 
+-  // If the point is in a mailcite in plaintext mail composer (it is a <span>
+-  // styled as block), we should not treat its padding <br> as unnecessary
+-  // because it's required by the serializer to give next content of the
+-  // mailcite has its own line.
+-  if (IsPlaintextMailComposer()) {
+-    const Element* const blockElement =
+-        HTMLEditUtils::GetInclusiveAncestorElement(
+-            *aNextOrAfterModifiedPoint.ContainerAs<nsIContent>(),
+-            HTMLEditUtils::ClosestEditableBlockElement,
+-            BlockInlineCheck::UseComputedDisplayStyle);
+-    if (blockElement && HTMLEditUtils::IsMailCiteElement(*blockElement) &&
+-        HTMLEditUtils::IsInlineContent(*blockElement,
+-                                       BlockInlineCheck::UseHTMLDefaultStyle)) {
+-      return NS_OK;
+-    }
+-  }
+-
+   const bool isWhiteSpacePreformatted = EditorUtils::IsWhiteSpacePreformatted(
+       *aNextOrAfterModifiedPoint.ContainerAs<nsIContent>());
+   const DebugOnly<bool> isNewLinePreformatted =
+       EditorUtils::IsNewLinePreformatted(
+           *aNextOrAfterModifiedPoint.ContainerAs<nsIContent>());
+ 
+   const WSScanResult nextThing =
+       HTMLEditUtils::ScanInclusiveNextThingWithIgnoringUnnecessaryLineBreak(
+           aNextOrAfterModifiedPoint, aPaddingForEmptyBlock, aEditingHost);
+   const Maybe<EditorLineBreak>& unnecessaryLineBreak =
+       nextThing.MaybeIgnoredLineBreak();
+   if (unnecessaryLineBreak.isNothing() ||
+       !unnecessaryLineBreak->IsInclusiveDescendantOf(aEditingHost) ||
+-      !unnecessaryLineBreak->IsDeletableFromComposedDoc()) [[likely]] {
++      !unnecessaryLineBreak->IsDeletableFromComposedDoc() ||
++      (IsPlaintextMailComposer() &&
++       nextThing.IgnoredLineBreakIsRequiredInPlaintextMailComposer()))
++      [[likely]] {
+     return NS_OK;
+   }
+   if (unnecessaryLineBreak->IsHTMLBRElement()) {
+-    // If the found unnecessary <br> is a preceding one of a mailcite which is a
+-    // <span> styled as block, we need to preserve the <br> element for the
+-    // serializer to cause a line break before the mailcite.
+-    if (IsPlaintextMailComposer()) {
+-      if (nextThing.ReachedOtherBlockElement() &&
+-          HTMLEditUtils::IsMailCiteElement(*nextThing.ElementPtr()) &&
+-          HTMLEditUtils::IsInlineContent(
+-              *nextThing.ElementPtr(), BlockInlineCheck::UseHTMLDefaultStyle)) {
+-        return NS_OK;
+-      }
+-    }
+     // If the invisible break is a placeholder of ancestor inline elements, we
+     // should not delete it to allow users to insert text with the format
+     // specified by them.
+     if (HTMLEditUtils::GetMostDistantAncestorEditableEmptyInlineElement(
+             unnecessaryLineBreak->BRElementRef(),
+             BlockInlineCheck::UseComputedDisplayStyle)) {
+       return NS_OK;
+     }
+diff --git a/editor/libeditor/WSRunScanner.h b/editor/libeditor/WSRunScanner.h
+--- a/editor/libeditor/WSRunScanner.h
++++ b/editor/libeditor/WSRunScanner.h
+@@ -638,16 +638,45 @@ class MOZ_STACK_CLASS WSScanResult final
+    * Return a reference to editor line break which was ignored at scanning.
+    * If there is, it means that the line break is unnecessary. Note that the
+    * invisible line break may be outside the editing host.
+    */
+   [[nodiscard]] const Maybe<EditorLineBreak>& MaybeIgnoredLineBreak() const {
+     return mIgnoredLineBreak;
+   }
+ 
++  /**
++   * Return true if the ignored line break is required in the plaintext mail
++   * composer.
++   */
++  [[nodiscard]] bool IgnoredLineBreakIsRequiredInPlaintextMailComposer() const {
++    if (!mIgnoredLineBreak || !mIgnoredLineBreak->IsHTMLBRElement()) {
++      return false;
++    }
++    // <br> before the mailcite <span> is required by the serializer.
++    if (ReachedOtherBlockElement() &&
++        HTMLEditUtils::IsMailCiteElement(*ElementPtr()) &&
++        HTMLEditUtils::IsInlineContent(*ElementPtr(),
++                                       BlockInlineCheck::UseHTMLDefaultStyle)) {
++      return true;
++    }
++    // <br> in the mailcite <span> is required by the serializer too.
++    const Element* const blockElement = HTMLEditUtils::GetAncestorElement(
++        mIgnoredLineBreak->BRElementRef(),
++        HTMLEditUtils::ClosestEditableBlockElement,
++        BlockInlineCheck::UseComputedDisplayStyle);
++    if (blockElement && HTMLEditUtils::IsMailCiteElement(*blockElement) &&
++        HTMLEditUtils::IsInlineContent(*blockElement,
++                                       BlockInlineCheck::UseHTMLDefaultStyle)) {
++      return true;
++    }
++    // Otherwise, the <br> is not required even in the plaintext mail composer.
++    return false;
++  }
++
+   friend std::ostream& operator<<(std::ostream& aStream,
+                                   const ScanDirection& aDirection) {
+     return aStream << (aDirection == ScanDirection::Backward
+                            ? "ScanDirection::Backward"
+                            : "ScanDirection::Forward");
+   }
+ 
+   friend std::ostream& operator<<(std::ostream& aStream,
+diff --git a/editor/libeditor/tests/mochitest.toml b/editor/libeditor/tests/mochitest.toml
+--- a/editor/libeditor/tests/mochitest.toml
++++ b/editor/libeditor/tests/mochitest.toml
+@@ -523,16 +523,21 @@ skip-if = [
+ 
+ ["test_label_contenteditable.html"]
+ 
+ ["test_mailcite_backspace_at_end_of_inline_reply.html"]
+ skip-if = [
+   "xorigin", # Testing internal API for comm-central
+ ]
+ 
++["test_mailcite_insert_text_after_split.html"]
++skip-if = [
++  "xorigin", # Testing internal API for comm-central
++]
++
+ ["test_mailcite_keep_preceding_br_after_insert.html"]
+ skip-if = [
+   "xorigin", # Testing internal API for comm-central
+ ]
+ 
+ ["test_mailcite_keep_trailing_br_after_delete.html"]
+ skip-if = [
+   "xorigin", # Testing internal API for comm-central
+diff --git a/editor/libeditor/tests/test_mailcite_insert_text_after_split.html b/editor/libeditor/tests/test_mailcite_insert_text_after_split.html
+new file mode 100644
+--- /dev/null
++++ b/editor/libeditor/tests/test_mailcite_insert_text_after_split.html
+@@ -0,0 +1,131 @@
++<!doctype html>
++<html>
++<head>
++<meta charset="utf-8">
++<title></title>
++<script src="/tests/SimpleTest/SimpleTest.js"></script>
++<script src="/tests/SimpleTest/EventUtils.js"></script>
++<link rel="stylesheet" href="/tests/SimpleTest/test.css">
++<script>
++"use strict";
++
++SimpleTest.waitForExplicitFinish();
++SimpleTest.waitForFocus(async () => {
++  const iframe = document.querySelector("iframe");
++  await new Promise(resolve => {
++    if (iframe.contentDocument?.readyState == "complete") {
++      resolve();
++      return;
++    }
++    iframe.addEventListener("load", resolve, {once: true});
++  });
++
++  const win = iframe.contentWindow;
++  getEditor(win).flags |=
++    SpecialPowers.Ci.nsIEditor.eEditorMailMask | SpecialPowers.Ci.nsIEditor.eEditorPlaintextMask;
++  const doc = iframe.contentDocument;
++  doc.execCommand("defaultParagraphSeparator", false, "br");
++  const mailEditor = getEditorMailSupport(win);
++  win.focus();
++  doc.body.focus();
++  const mailciteStyle = "white-space: pre-wrap; display: block; width: 98vw;";
++  mailEditor.insertAsCitedQuotation("This is line 1\n\nThis is line 3", "", false);
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br>&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "nsIEditorMailSupport.insertAsCitedQuotation() should insert a mailcite span"
++  );
++
++  const firstLineBreak = doc.querySelector("br");
++  const firstLineText = firstLineBreak.previousSibling;
++  doc.getSelection().collapse(firstLineText, firstLineText.length);
++  synthesizeKey("KEY_Enter");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `<span style="${mailciteStyle}">&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing Enter at end of the first line should split the quotation"
++  );
++  synthesizeKey("KEY_Enter");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `<br>` +
++    `<span style="${mailciteStyle}">&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing Enter again should insert another empty line between the quotations"
++  );
++  synthesizeKey("A");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `A<br>` +
++    `<span style="${mailciteStyle}">&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing A should insert A to the second line without deleting the <br> immediately before the next quotation"
++  );
++  synthesizeKey("B");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `AB<br>` +
++    `<span style="${mailciteStyle}">&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing B should insert B to the second line without deleting the <br> immediately before the next quotation"
++  );
++  synthesizeKey("C");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `ABC<br>` +
++    `<span style="${mailciteStyle}">&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing C should insert C to the second line without deleting the <br> immediately before the next quotation"
++  );
++  synthesizeKey("D");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `ABCD<br>` +
++    `<span style="${mailciteStyle}">&gt; <br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing D should insert D to the second line without deleting the <br> immediately before the next quotation"
++  );
++  synthesizeKey("KEY_ArrowDown"); // <span>&gt; []<br>
++  synthesizeKey("KEY_Backspace");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `ABCD<br>` +
++    `<span style="${mailciteStyle}">&gt;<br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing Backspace after moving caret to end of the next line should delete the space"
++  );
++  synthesizeKey("KEY_Backspace");
++  is(
++    doc.body.innerHTML,
++    `<span style="${mailciteStyle}">&gt; This is line 1<br></span>` +
++    `<br>` +
++    `ABCD<br>` +
++    `<span style="${mailciteStyle}"><br>&gt; This is line 3<br><br></span><br><br>`,
++    "Typing Backspace again should delete the remaining quotation mark"
++  );
++
++  SimpleTest.finish();
++});
++
++function getEditor(aWindow) {
++  const editingSession = SpecialPowers.wrap(aWindow).docShell.editingSession;
++  return editingSession.getEditorForWindow(aWindow);
++}
++
++function getEditorMailSupport(aWindow) {
++  return getEditor(aWindow).QueryInterface(SpecialPowers.Ci.nsIEditorMailSupport);
++}
++</script>
++</head>
++<body>
++  <iframe srcdoc="<body contenteditable style='white-space: pre-wrap'><br><br></body>"></iframe>
++</body>
++</html>
+

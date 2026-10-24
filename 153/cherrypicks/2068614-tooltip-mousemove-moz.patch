@@ -1,0 +1,79 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792848483 0
+# Node ID 30fd0333e01f037a85f7a07711e305d5708a9a9a
+# Parent  c349721fea9bf1a7baff2781219896a03964f90e
+Bug 2068614 - Set mSourceNode after hiding the previous tooltip in MouseMove.  a=dmeehan DONTBUILD
+
+Follow-up to https://hg.mozilla.org/mozilla-central/rev/3bfa78cb60f7
+
+comm/mail/components/im/test/browser/browser_tooltips.js regressed on
+bug 2001695 and passes again with this: its second task moves the mouse into a
+fresh conversation browser while a node from the first task is still tracked.
+
+nsXULTooltipListener::MouseMove() recorded mSourceNode and ran
+CheckTreeBodyMove() before hiding the tooltip of the node the mouse just left.
+Both of those HideTooltip() paths end in DestroyTooltip(), which clears
+mSourceNode, so the timer armed a few lines later fired into a ShowTooltip()
+with no source node: GetTooltipFor(nullptr) fails and no tooltip is shown for
+the new node, ever.
+
+Move the mSourceNode assignment and CheckTreeBodyMove() call to after the teardown,
+so the source survives for the timer callback.
+
+Original Revision: https://phabricator.services.mozilla.com/D322942
+
+Differential Revision: https://phabricator.services.mozilla.com/D336493
+
+
+diff --git a/layout/xul/nsXULTooltipListener.cpp b/layout/xul/nsXULTooltipListener.cpp
+--- a/layout/xul/nsXULTooltipListener.cpp
++++ b/layout/xul/nsXULTooltipListener.cpp
+@@ -149,35 +149,40 @@ void nsXULTooltipListener::MouseMove(Eve
+           kTooltipMouseMoveTolerance) {
+     return;
+   }
+   mMouseScreenPoint = newMouseScreenPoint;
+   mPreviousMouseMoveTarget = do_GetWeakReference(mouseMoveTarget);
+ 
+   auto* const sourceContent =
+       nsIContent::FromEventTargetOrNull(aEvent->GetCurrentTarget());
+-  mSourceNode = do_GetWeakReference(sourceContent);
+-  mIsSourceTree = sourceContent->IsXULElement(nsGkAtoms::treechildren);
+-  if (mIsSourceTree) {
+-    CheckTreeBodyMove(mouseEvent);
+-  }
+ 
+   // as the mouse moves, we want to make sure we reset the timer to show it,
+   // so that the delay is from when the mouse stops moving, not when it enters
+   // the node.
+   KillTooltipTimer();
+ 
+   // Hide the current tooltip if we change target nodes. If the new target
+   // has the same tooltip, we will open it again. We cannot compare
+   // the targets' tooltips because popupshowing events can set the tooltip.
+   if (!isSameTarget) {
+     HideTooltip();
+     mTooltipShownOnce = false;
+   }
+ 
++  mIsSourceTree = sourceContent->IsXULElement(nsGkAtoms::treechildren);
++  // Record the source only once the tooltip that was showing has been torn
++  // down: HideTooltip() runs DestroyTooltip(), which clears mSourceNode, and
++  // ShowTooltip() needs it when the timer armed below fires.
++  // CheckTreeBodyMove() needs it too.
++  mSourceNode = do_GetWeakReference(sourceContent);
++  if (mIsSourceTree) {
++    CheckTreeBodyMove(mouseEvent);
++  }
++
+   // If the mouse moves while the tooltip is up, hide it. If nothing is
+   // showing and the tooltip hasn't been displayed since the mouse entered
+   // the node, then start the timer to show the tooltip.
+   // If we have moved to a different target, we need to display the new tooltip,
+   // as the previous target's tooltip will have just been hidden.
+   if ((!currentTooltip && !mTooltipShownOnce) || !isSameTarget) {
+     // don't show tooltips attached to elements outside of a menu popup
+     // when hovering over an element inside it. The popupsinherittooltip
+
