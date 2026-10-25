@@ -187,3 +187,9 @@ echo "  .accesskey = c"                                                     >> l
 echo "start-in-tray-label ="                                                >> localization/en-GB/messenger/preferences/preferences.ftl
 echo "  .label = Start { -brand-short-name } in the tray"                   >> localization/en-GB/messenger/preferences/preferences.ftl
 echo "  .accesskey = S"                                                     >> localization/en-GB/messenger/preferences/preferences.ftl
+
+echo "system-tray-menuitem-quit ="                 >> localization/en-GB/messenger/menubar.ftl
+echo "    { PLATFORM() ->"                         >> localization/en-GB/messenger/menubar.ftl
+echo "        [windows] Exit { -brand-full-name }" >> localization/en-GB/messenger/menubar.ftl
+echo "        *[other] Quit { -brand-full-name }"  >> localization/en-GB/messenger/menubar.ftl
+echo "    }"                                       >> localization/en-GB/messenger/menubar.ftl
