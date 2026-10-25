@@ -1,0 +1,216 @@
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1792881839 -7200
+# Node ID f697ce4205addfbbbeef220b7f2a7c7b10d67756
+# Parent  6416d94c0ba383d364a30abfb26004626dd7fbac
+Bug 2071123 - Avoid startup hangs when restoring IMAP tabs. r=BenC
+
+Differential Revision: https://phabricator.services.mozilla.com/D325267
+
+diff --git a/mail/base/test/browser/browser_restartRestoreImapPdfTabs.js b/mail/base/test/browser/browser_restartRestoreImapPdfTabs.js
+new file mode 100644
+--- /dev/null
++++ b/mail/base/test/browser/browser_restartRestoreImapPdfTabs.js
+@@ -0,0 +1,90 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++const { IMAPServer } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/IMAPServer.sys.mjs"
++);
++const { MessageGenerator } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++);
++
++const tabmail = document.getElementById("tabmail");
++
++function loaded(tab) {
++  if (tab.mode.name == "contentTab") {
++    // pdf.js sets this after reading its view history from session storage.
++    return !!tab.browser.contentWindow?.wrappedJSObject.PDFViewerApplication
++      ?.store;
++  }
++  return !!tab.chromeBrowser.contentWindow?.msgLoaded;
++}
++
++add_task(async function testRestoreImapTabsOnRestart() {
++  const imapServer = new IMAPServer();
++  const account = MailServices.accounts.createAccount();
++  account.addIdentity(MailServices.accounts.createIdentity());
++  account.incomingServer = MailServices.accounts.createIncomingServer(
++    "user",
++    "localhost",
++    "imap"
++  );
++  account.incomingServer.port = imapServer.port;
++  account.incomingServer.password = "password";
++  const inbox = account.incomingServer.rootFolder.getFolderWithFlags(
++    Ci.nsMsgFolderFlags.Inbox
++  );
++
++  const pdf = await IOUtils.read(getTestFilePath("files/pdfsel.pdf"));
++  const generator = new MessageGenerator();
++  await imapServer.addMessages(inbox, [
++    generator.makeMessage({
++      attachments: [
++        {
++          body: btoa(String.fromCharCode(...pdf)),
++          contentType: "application/pdf",
++          encoding: "base64",
++          filename: "attachment.pdf",
++        },
++      ],
++    }),
++    ...generator.makeMessages({ count: 10 }),
++  ]);
++  const [pdfMessage, ...messages] = [...inbox.messages];
++
++  // The tabs as session.json stores them.
++  const session = {
++    tabs: [
++      {
++        mode: "contentTab",
++        state: {
++          tabURI: `imap://user@localhost:${imapServer.port}/fetch%3EUID%3E/INBOX%3E${pdfMessage.messageKey}?part=1.2&type=application/pdf&filename=attachment.pdf`,
++        },
++      },
++      ...messages.map(message => ({
++        mode: "mailMessageTab",
++        state: { messageURI: inbox.getUriForMsg(message) },
++      })),
++    ],
++  };
++
++  // As after a restart: no IMAP connection and nothing in the memory cache.
++  account.incomingServer.closeCachedConnections();
++  Services.cache2.clear();
++
++  tabmail.restoreTabs(session);
++  await TestUtils.waitForCondition(
++    () => tabmail.tabInfo.slice(1).every(loaded),
++    "the restored tabs should load"
++  );
++  Assert.equal(tabmail.tabInfo.length, 1 + session.tabs.length);
++
++  for (const tab of tabmail.tabInfo.slice(1)) {
++    tabmail.closeTab(tab);
++  }
++
++  await promiseServerIdle(account.incomingServer);
++  MailServices.accounts.removeAccount(account, false);
++});
+diff --git a/mailnews/base/src/nsNewMailnewsURI.cpp b/mailnews/base/src/nsNewMailnewsURI.cpp
+--- a/mailnews/base/src/nsNewMailnewsURI.cpp
++++ b/mailnews/base/src/nsNewMailnewsURI.cpp
+@@ -45,9 +45,9 @@ nsresult NS_NewMailnewsURI(nsIURI** aURI
+     rv = aBaseURI->GetScheme(scheme);
+     if (NS_FAILED(rv)) return rv;
+   }
+ 
+-  // Creating IMAP/mailbox URIs off the main thread can lead to crashes.
++  // Creating mailbox URIs off the main thread can lead to crashes.
+   // Seems to happen when viewing PDFs.
+   if (scheme.EqualsLiteral("mailbox") ||
+       scheme.EqualsLiteral("mailbox-message")) {
+     if (NS_IsMainThread()) {
+@@ -66,18 +66,9 @@ nsresult NS_NewMailnewsURI(nsIURI** aURI
+   // URL because it parses extra query parameters such as filename= into values
+   // that are used when saving inline attachments via the m-c HTML5 rendering
+   // code.
+   if (scheme.EqualsLiteral("imap") || scheme.EqualsLiteral("imap-message")) {
+-    if (NS_IsMainThread()) {
+-      return nsImapService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+-    }
+-    auto NewURI = [&aSpec, &aCharset, &aBaseURI, aURI, &rv]() -> auto {
+-      rv = nsImapService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+-    };
+-    nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction("NewURI", NewURI);
+-    mozilla::SyncRunnable::DispatchToThread(
+-        mozilla::GetMainThreadSerialEventTarget(), task);
+-    return rv;
++    return nsImapService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+   }
+   if (scheme.EqualsLiteral("smtp") || scheme.EqualsLiteral("smtps")) {
+     return nsSmtpUrl::NewSmtpURI(aSpec, aBaseURI, aURI);
+   }
+diff --git a/mailnews/imap/src/nsImapService.cpp b/mailnews/imap/src/nsImapService.cpp
+--- a/mailnews/imap/src/nsImapService.cpp
++++ b/mailnews/imap/src/nsImapService.cpp
+@@ -2180,8 +2180,27 @@ nsresult nsImapService::NewURI(const nsA
+   }
+ 
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
++  // we got an imap url, so be sure to return it...
++  nsCOMPtr<nsIURI> imapUri = do_QueryInterface(aImapUrl);
++
++  imapUri.forget(aRetVal);
++
++  return NS_OK;
++}
++
++// NewURI() only parses the spec, because URIs must be creatable on any thread:
++// Gecko creates them off the main thread, e.g. when PBackground validates a
++// principal, and PBackground must not wait for the main thread. Running a URL
++// needs its server and folder, which are only available on the main thread, so
++// a URL created from a spec is associated with them when a channel is opened.
++nsresult nsImapService::AssociateUrlWithFolder(nsIImapUrl* aImapUrl) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  nsresult rv;
++  nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl = do_QueryInterface(aImapUrl);
++
+   nsCString folderName;
+   // if we can't get a folder name out of the url then I think this is an error
+   aImapUrl->CreateCanonicalSourceFolderPathString(folderName);
+   if (folderName.IsEmpty()) {
+@@ -2234,13 +2253,8 @@ nsresult nsImapService::NewURI(const nsA
+       }
+     }
+   }
+ 
+-  // we got an imap url, so be sure to return it...
+-  nsCOMPtr<nsIURI> imapUri = do_QueryInterface(aImapUrl);
+-
+-  imapUri.forget(aRetVal);
+-
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsImapService::NewChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo,
+@@ -2252,10 +2266,17 @@ NS_IMETHODIMP nsImapService::NewChannel(
+ 
+   nsresult rv;
+   nsCOMPtr<nsIImapUrl> imapUrl = do_QueryInterface(aURI, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+-  nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl = do_QueryInterface(imapUrl, &rv);
+-  NS_ENSURE_SUCCESS(rv, rv);
++
++  // URLs created by NewURI() have no folder yet.
++  nsCOMPtr<nsIMsgMailNewsUrl> mailnewsUrl = do_QueryInterface(aURI);
++  nsCOMPtr<nsIMsgFolder> folder;
++  mailnewsUrl->GetFolder(getter_AddRefs(folder));
++  if (!folder) {
++    rv = AssociateUrlWithFolder(imapUrl);
++    NS_ENSURE_SUCCESS(rv, rv);
++  }
+ 
+   // imap can't open and return a channel right away...the url needs to go in
+   // the imap url queue until we find a connection which can run the url..in
+   // order to satisfy necko, we're going to return a mock imap channel....
+diff --git a/mailnews/imap/src/nsImapService.h b/mailnews/imap/src/nsImapService.h
+--- a/mailnews/imap/src/nsImapService.h
++++ b/mailnews/imap/src/nsImapService.h
+@@ -84,8 +84,9 @@ class nsImapService : public nsIImapServ
+                                        nsISupports* aConsumer, nsIURI** aURL);
+ 
+   static nsresult SetImapUrlSink(nsIMsgFolder* aMsgFolder,
+                                  nsIImapUrl* aImapUrl);
++  static nsresult AssociateUrlWithFolder(nsIImapUrl* aImapUrl);
+ 
+   nsresult FetchMimePartInternal(nsIImapUrl* aImapUrl,
+                                  nsIMsgFolder* aImapMailFolder,
+                                  nsIImapMessageSink* aImapMessage,
