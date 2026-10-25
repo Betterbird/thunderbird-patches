@@ -1,0 +1,284 @@
+# HG changeset patch
+# User ndo84bw <ndo84bw@gmx.de>
+# Date 1792923310 -3600
+# Node ID e7a71821da43da00d84990b3b415c136b33c24ca
+# Parent  3a78a324330bcf3ff2ce95b1517bad229fccad9e
+Bug 2076478 - Show check marks again in calendar menus. r=mkmelin
+
+Since bug 2010038 menu items no longer take their checked state from their
+command. Copy it from the command when a menu opens, and set the checked state
+of the task priority and progress items on the items themselves. The "None"
+status item now carries its own hidden state.
+
+Differential Revision: https://phabricator.services.mozilla.com/D329878
+
+diff --git a/calendar/base/content/calendar-chrome-startup.js b/calendar/base/content/calendar-chrome-startup.js
+--- a/calendar/base/content/calendar-chrome-startup.js
++++ b/calendar/base/content/calendar-chrome-startup.js
+@@ -357,9 +357,11 @@ function calendarOnToolbarsPopupShowing(
+  */
+ function initViewCalendarPaneMenu() {
+   const calSidebar = document.getElementById("calSidebar");
+ 
+-  document.getElementById("calViewCalendarPane").toggleAttribute("checked", !calSidebar.collapsed);
++  document
++    .getElementById("calendar_toggle_calendarsidebar_command")
++    .toggleAttribute("checked", !calSidebar.collapsed);
+ 
+   if (document.getElementById("appmenu_calViewCalendarPane")) {
+     document.getElementById("appmenu_calViewCalendarPane").checked = !calSidebar.collapsed;
+   }
+diff --git a/calendar/base/content/calendar-commands.inc.xhtml b/calendar/base/content/calendar-commands.inc.xhtml
+--- a/calendar/base/content/calendar-commands.inc.xhtml
++++ b/calendar/base/content/calendar-commands.inc.xhtml
+@@ -49,9 +49,9 @@
+   <command id="calendar_publish_selected_events_command" oncommand="goDoCommand('calendar_publish_selected_events_command')"/>
+ 
+   <command id="calendar_reload_remote_calendars" oncommand="goDoCommand('calendar_reload_remote_calendars')"/>
+ 
+-  <command id="calendar_show_unifinder_command" oncommand="goDoCommand('calendar_show_unifinder_command')"/>
++  <command id="calendar_show_unifinder_command" checked="checked" oncommand="goDoCommand('calendar_show_unifinder_command')"/>
+   <!-- The dash instead of the underscore is intended. the 'xxx-view' part should be the id of the view in the deck -->
+   <command id="calendar_day-view_command" oncommand="goDoCommand('calendar_day-view_command')"/>
+   <command id="calendar_week-view_command" oncommand="goDoCommand('calendar_week-view_command')"/>
+   <command id="calendar_multiweek-view_command" oncommand="goDoCommand('calendar_multiweek-view_command')"/>
+diff --git a/calendar/base/content/calendar-menus.js b/calendar/base/content/calendar-menus.js
+--- a/calendar/base/content/calendar-menus.js
++++ b/calendar/base/content/calendar-menus.js
+@@ -30,38 +30,33 @@
+ 
+   /**
+    * Updates the 'checked' state of menu items so they reflect the state of the relevant task(s),
+    * for example, tasks currently selected in the task list, or a task being edited in the
+-   * current tab. It operates on commands that are named using the following pattern:
++   * current tab. It operates on menu items whose commands are named using the following pattern:
+    *
+    *   `calendar_${propertyKey}-${propertyValue}_command`
+    *
+    * When the propertyValue part of a command's name matches the propertyValue of the tasks,
+-   * set the command to checked as long as the tasks all have the same propertyValue.
++   * set the menu item to checked as long as the tasks all have the same propertyValue.
+    *
+    * @param {Element} parent - Parent element that contains the menu items as direct children.
+    * @param {string} propertyKey - The property key, for example "priority" or "percentComplete".
+    */
+   const updateMenuItemsState = (parent, propertyKey) => {
+-    for (const command of [...parent.children]
+-      .map(e => e.getAttribute("command"))
+-      .filter(Boolean)
+-      .map(cId => document.getElementById(cId))) {
+-      command.checked = false;
+-    }
+-
+     const inSingleTaskTab =
+       gTabmail && gTabmail.currentTabInfo && gTabmail.currentTabInfo.mode.type == "calendarTask";
+ 
+     const propertyValue = inSingleTaskTab
+       ? gConfig[propertyKey]
+       : getPropertyValue(propertyKey, getSelectedTasks());
+ 
++    let checkedCommand = null;
+     if (propertyValue || propertyValue === 0) {
+-      const command = document.getElementById(`calendar_${propertyKey}-${propertyValue}_command`);
+-      if (command) {
+-        command.toggleAttribute("checked", true);
+-      }
++      checkedCommand = `calendar_${propertyKey}-${propertyValue}_command`;
++    }
++    for (const item of parent.querySelectorAll(":scope > menuitem[command]")) {
++      const isChecked = item.getAttribute("command") == checkedCommand;
++      item.toggleAttribute("checked", isChecked);
+     }
+   };
+ 
+   /**
+diff --git a/calendar/base/content/calendar-tab-panels.inc.xhtml b/calendar/base/content/calendar-tab-panels.inc.xhtml
+--- a/calendar/base/content/calendar-tab-panels.inc.xhtml
++++ b/calendar/base/content/calendar-tab-panels.inc.xhtml
+@@ -641,13 +641,13 @@
+ <!-- Menus -->
+ 
+ <menupopup id="calControlBarMenuPopup"
+            class="gutter-popup"
+-           position="bottomleft topleft">
++           position="bottomleft topleft"
++           onpopupshowing="syncCheckedFromCommands(event);">
+   <menuitem id="findEventsButton"
+             data-l10n-id="calendar-find-events-menu-option"
+             type="checkbox"
+-            checked=""
+             command="calendar_show_unifinder_command"/>
+   <menuseparator id="separatorBeforeHideWeekends"/>
+   <menuitem id="hideWeekendsButton"
+             data-l10n-id="calendar-hide-weekends-option"
+diff --git a/calendar/base/content/calendar-ui-utils.js b/calendar/base/content/calendar-ui-utils.js
+--- a/calendar/base/content/calendar-ui-utils.js
++++ b/calendar/base/content/calendar-ui-utils.js
+@@ -7,9 +7,9 @@
+  *          appendCalendarItems, checkRadioControl,
+  *          checkRadioControlAppmenu,
+  *          updateUnitLabelPlural, updateMenuLabelsPlural,
+  *          getOptimalMinimumWidth, getOptimalMinimumHeight,
+- *          setupAttendanceMenu
++ *          setupAttendanceMenu, syncCheckedFromCommands
+  */
+ 
+ /* import-globals-from ../../../mail/base/content/globalOverlay.js */
+ /* import-globals-from ../../../mail/base/content/utilityOverlay.js */
+@@ -184,8 +184,21 @@ function addMenuItem(aParent, aLabel, aV
+   return item;
+ }
+ 
+ /**
++ * Copy the checked state of each command to the menu items that use it, in
++ * the popup that is opening.
++ *
++ * @param {Event} event - The popupshowing event.
++ */
++function syncCheckedFromCommands(event) {
++  for (const item of event.target.querySelectorAll(":scope > menuitem[command]")) {
++    const command = document.getElementById(item.getAttribute("command"));
++    item.toggleAttribute("checked", command.hasAttribute("checked"));
++  }
++}
++
++/**
+  * Update the given unit label to show the correct plural form.
+  *
+  * @param {string} aLengthFieldId - The ID of the element containing the number.
+  * @param {string} aLabelId - The ID of the label to update.
+diff --git a/calendar/base/content/calendar-view-menu.inc.xhtml b/calendar/base/content/calendar-view-menu.inc.xhtml
+--- a/calendar/base/content/calendar-view-menu.inc.xhtml
++++ b/calendar/base/content/calendar-view-menu.inc.xhtml
+@@ -6,9 +6,9 @@
+                class="hide-when-calendar-deactivated"/>
+ <menu id="calTodayPaneMenu"
+       class="hide-when-calendar-deactivated"
+       data-l10n-id="calendar-context-today-pane">
+-  <menupopup id="calTodayPaneMenuPopup">
++  <menupopup id="calTodayPaneMenuPopup" onpopupshowing="syncCheckedFromCommands(event);">
+     <menuitem id="calShowTodayPane-2"
+               label="&todaypane.showTodayPane.label;"
+               accesskey="&todaypane.showTodayPane.accesskey;"
+               type="checkbox"
+@@ -42,9 +42,9 @@
+       class="hide-when-calendar-deactivated"
+       observes="calendar_in_foreground"
+       label="&lightning.menu.view.calendar.label;"
+       accesskey="&lightning.menu.view.calendar.accesskey;">
+-  <menupopup id="calCalendarMenuPopup">
++  <menupopup id="calCalendarMenuPopup" onpopupshowing="syncCheckedFromCommands(event);">
+     <menuitem id="calChangeViewDay"
+               label="&lightning.toolbar.day.label;"
+               accesskey="&lightning.toolbar.day.accesskey;"
+               type="radio"
+diff --git a/calendar/base/content/dialogs/calendar-event-dialog.xhtml b/calendar/base/content/dialogs/calendar-event-dialog.xhtml
+--- a/calendar/base/content/dialogs/calendar-event-dialog.xhtml
++++ b/calendar/base/content/dialogs/calendar-event-dialog.xhtml
+@@ -107,14 +107,9 @@
+         />
+         <command id="cmd_customize" oncommand="onCommandCustomize()" />
+ 
+         <!-- status -->
+-        <command
+-          id="cmd_status_none"
+-          oncommand="editStatus(event.target)"
+-          hidden="hidden"
+-          value="NONE"
+-        />
++        <command id="cmd_status_none" oncommand="editStatus(event.target)" value="NONE" />
+         <command id="cmd_status_tentative" oncommand="editStatus(event.target)" value="TENTATIVE" />
+         <command id="cmd_status_confirmed" oncommand="editStatus(event.target)" value="CONFIRMED" />
+         <command id="cmd_status_cancelled" oncommand="editStatus(event.target)" value="CANCELLED" />
+ 
+@@ -364,9 +359,9 @@
+               id="options-menu"
+               label="&event.menu.options.label;"
+               accesskey="&event.menu.options.accesskey;"
+             >
+-              <menupopup id="options-menupopup">
++              <menupopup id="options-menupopup" onpopupshowing="syncCheckedFromCommands(event);">
+                 <menuitem
+                   id="options-attendees-menuitem"
+                   label="&event.menu.options.attendees.label;"
+                   accesskey="&event.menu.options.attendees.accesskey;"
+@@ -486,8 +481,9 @@
+                       id="options-status-none-menuitem"
+                       label="&newevent.eventStatus.none.label;"
+                       accesskey="&newevent.eventStatus.none.accesskey;"
+                       type="radio"
++                      hidden="hidden"
+                       command="cmd_status_none"
+                       disable-on-readonly="true"
+                     />
+                     <menuitem
+diff --git a/calendar/base/content/item-editing/calendar-item-panel.inc.xhtml b/calendar/base/content/item-editing/calendar-item-panel.inc.xhtml
+--- a/calendar/base/content/item-editing/calendar-item-panel.inc.xhtml
++++ b/calendar/base/content/item-editing/calendar-item-panel.inc.xhtml
+@@ -30,9 +30,8 @@
+ 
+           <!-- status -->
+           <command id="cmd_status_none"
+                    oncommand="editStatus(event.target)"
+-                   hidden="hidden"
+                    value="NONE"/>
+           <command id="cmd_status_tentative"
+                    oncommand="editStatus(event.target)"
+                    value="TENTATIVE"/>
+diff --git a/calendar/base/content/item-editing/calendar-item-panel.js b/calendar/base/content/item-editing/calendar-item-panel.js
+--- a/calendar/base/content/item-editing/calendar-item-panel.js
++++ b/calendar/base/content/item-editing/calendar-item-panel.js
+@@ -111,9 +111,11 @@ function receiveMessage(aEvent) {
+     case "closeWindowOrTab":
+       closeWindowOrTab(aEvent.data.iframeId);
+       break;
+     case "showCmdStatusNone":
+-      document.getElementById("cmd_status_none").removeAttribute("hidden");
++      for (const item of document.querySelectorAll(`menuitem[command="cmd_status_none"]`)) {
++        item.removeAttribute("hidden");
++      }
+       break;
+     case "updateTitle":
+       updateTitle(aEvent.data.prefix, aEvent.data.title);
+       break;
+diff --git a/calendar/base/content/item-editing/calendar-item-toolbar.inc.xhtml b/calendar/base/content/item-editing/calendar-item-toolbar.inc.xhtml
+--- a/calendar/base/content/item-editing/calendar-item-toolbar.inc.xhtml
++++ b/calendar/base/content/item-editing/calendar-item-toolbar.inc.xhtml
+@@ -79,9 +79,9 @@
+                  wantdropmarker="true"
+                  disable-on-readonly="true"
+                  label="&event.menu.options.priority2.label;"
+                  tooltiptext="&event.toolbar.priority.tooltip;">
+-    <menupopup id="event-priority-menupopup">
++    <menupopup id="event-priority-menupopup" onpopupshowing="syncCheckedFromCommands(event);">
+       <menuitem id="event-priority-none-menuitem"
+                 name="event-priority-group"
+                 label="&event.menu.options.priority.notspecified.label;"
+                 type="radio"
+@@ -110,13 +110,14 @@
+                  wantdropmarker="true"
+                  disable-on-readonly="true"
+                  label="&newevent.status.label;"
+                  tooltiptext="&event.toolbar.status.tooltip;">
+-    <menupopup id="event-status-menupopup">
++    <menupopup id="event-status-menupopup" onpopupshowing="syncCheckedFromCommands(event);">
+       <menuitem id="event-status-none-menuitem"
+                 name="event-status-group"
+                 label="&newevent.eventStatus.none.label;"
+                 type="radio"
++                hidden="hidden"
+                 command="cmd_status_none"/>
+       <menuitem id="event-status-tentative-menuitem"
+                 name="event-status-group"
+                 label="&newevent.status.tentative.label;"
+@@ -141,9 +142,9 @@
+                  wantdropmarker="true"
+                  disable-on-readonly="true"
+                  label="&event.menu.options.show.time.label;"
+                  tooltiptext="&event.toolbar.freebusy.tooltip;">
+-    <menupopup id="event-freebusy-menupopup">
++    <menupopup id="event-freebusy-menupopup" onpopupshowing="syncCheckedFromCommands(event);">
+       <menuitem id="event-freebusy-busy-menuitem"
+                 name="event-freebusy-group"
+                 label="&event.menu.options.show.time.busy.label;"
+                 type="radio"
