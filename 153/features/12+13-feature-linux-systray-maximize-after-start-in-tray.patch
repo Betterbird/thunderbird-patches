@@ -1,0 +1,97 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>, DeepSeek, Martin F. Schumann <github@mfs.name> and Kilo Code
+# Date 1793046328 -3600
+# Parent  03b0b64e7ff2e18db34c588db4733ddc50a83ae4
+Feature: Linux systray: Restore maximized state when starting minimized to tray.
+
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -10,22 +10,26 @@
+ #include "nsString.h"
+ #include <gtk/gtk.h>
+ #include "../../../third_party/appindicator/ayatana-appindicator.h"
+ #include "mozilla/Components.h"
++#include "mozilla/dom/Document.h"
+ #include "mozilla/intl/Localization.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+ #include "mozIDOMWindow.h"
+ #include "nsIAppStartup.h"
++#include "nsIAppWindow.h"
+ #include "nsIBaseWindow.h"
+ #include "nsIDocShell.h"
++#include "nsIInterfaceRequestor.h"
+ #include "nsIObserverService.h"
+ #include "nsIPrefService.h"
+ #include "nsISupportsPrimitives.h"
+ #include "nsIWidget.h"
+ #include "nsIWindowMediator.h"
+ #include "nsMsgUtils.h"
+ #include "nsPIDOMWindow.h"
++#include "nsGkAtoms.h"
+ #include "mozilla/WidgetUtilsGtk.h"
+ #include <time.h>
+ 
+ #define SHOW_TRAY_ICON_PREF "mail.biff.show_tray_icon"
+@@ -461,8 +465,42 @@ nsMessengerUnixIntegration::UpdateUnread
+ 
+ NS_IMETHODIMP
+ nsMessengerUnixIntegration::OnExit() { return NS_OK; }
+ 
++// `aWindow` is the docshell tree owner of the window to hide. It can hand
++// out the app window it belongs to, which gives access to the window's
++// document. The sizemode attribute of the root element is kept in sync with
++// the actual window state by AppWindow.
++static bool windowSizemodeIsMaximized(nsIBaseWindow* aWindow) {
++  nsCOMPtr<nsIInterfaceRequestor> interfaceRequestor =
++      do_QueryInterface(aWindow);
++  if (!interfaceRequestor) {
++    return false;
++  }
++  nsCOMPtr<nsIAppWindow> appWindow;
++  interfaceRequestor->GetInterface(NS_GET_IID(nsIAppWindow),
++                                   getter_AddRefs(appWindow));
++  if (!appWindow) {
++    return false;
++  }
++  nsCOMPtr<nsIDocShell> docShell;
++  appWindow->GetDocShell(getter_AddRefs(docShell));
++  if (!docShell) {
++    return false;
++  }
++  nsCOMPtr<nsPIDOMWindowOuter> domWindow = docShell->GetWindow();
++  if (!domWindow) {
++    return false;
++  }
++  RefPtr<mozilla::dom::Document> doc = domWindow->GetDoc();
++  if (!doc || !doc->GetDocumentElement()) {
++    return false;
++  }
++  nsAutoString sizemode;
++  doc->GetDocumentElement()->GetAttr(nsGkAtoms::sizemode, sizemode);
++  return sizemode.EqualsLiteral("maximized");
++}
++
+ nsresult nsMessengerUnixIntegration::HideWindow(nsIBaseWindow* aWindow) {
+   NS_ENSURE_ARG(aWindow);
+   struct timespec now;
+   clock_gettime(CLOCK_MONOTONIC, &now);
+@@ -504,8 +542,17 @@ nsresult nsMessengerUnixIntegration::Hid
+       gtk_window_get_size(GTK_WINDOW(gtkWidget), &dims.w, &dims.h);
+       // A maximized window can't simply be moved back into place, see
+       // restoreGeometry().
+       dims.maximized = gtk_window_is_maximized(GTK_WINDOW(gtkWidget));
++      // When the window is hidden during startup, before it has ever been
++      // shown, GTK may not know yet that the window is supposed to be
++      // maximized: the initial maximize request is processed asynchronously
++      // by the window manager and the reply may not have arrived when we get
++      // here. Fall back to the sizemode attribute of the root element, which
++      // AppWindow keeps in sync with the actual window state.
++      if (!dims.maximized) {
++        dims.maximized = windowSizemodeIsMaximized(aWindow);
++      }
+ #ifdef DEBUG_RESTORE
+       fprintf(stderr, "=== Was at               %d %d %d %d, maximized %d\n",
+               dims.x, dims.y, dims.w, dims.h, dims.maximized);
+ #endif
