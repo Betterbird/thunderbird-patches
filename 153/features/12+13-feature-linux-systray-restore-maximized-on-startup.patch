@@ -1,0 +1,80 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1793040818 +0100
+Feature: Linux systray: Restore maximized state when starting minimized to tray.
+
+On Wayland a window that is hidden before it has ever been mapped never
+receives a window-state-event, so gtk_window_is_maximized() reports false
+even though the XUL window's sizemode attribute says "maximized". In that
+case restoreGeometry() unmaximized the window and resized it to the default
+geometry, which is why starting minimized to the tray produced a tiny window
+instead of a maximized one (Issue #627).
+
+diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+--- a/mailnews/base/src/nsMessengerUnixIntegration.cpp
++++ b/mailnews/base/src/nsMessengerUnixIntegration.cpp
+@@ -11,11 +11,15 @@
+ #include <gtk/gtk.h>
+ #include "../../../third_party/appindicator/ayatana-appindicator.h"
+ #include "mozilla/Components.h"
++#include "mozilla/dom/Document.h"
++#include "mozilla/dom/Element.h"
+ #include "mozilla/intl/Localization.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+ #include "mozIDOMWindow.h"
++#include "nsGkAtoms.h"
+ #include "nsIAppStartup.h"
++#include "nsIAppWindow.h"
+ #include "nsIBaseWindow.h"
+ #include "nsIDocShell.h"
+ #include "nsIObserverService.h"
+@@ -104,6 +108,33 @@
+   }
+ }
+ 
++static bool windowSizemodeIsMaximized(nsIBaseWindow* aWindow) {
++  nsCOMPtr<nsIAppWindow> appWindow = do_QueryInterface(aWindow);
++  if (!appWindow) {
++    return false;
++  }
++  nsCOMPtr<nsIDocShell> docShell;
++  appWindow->GetDocShell(getter_AddRefs(docShell));
++  if (!docShell) {
++    return false;
++  }
++  nsCOMPtr<nsPIDOMWindowOuter> domWindow = docShell->GetWindow();
++  if (!domWindow) {
++    return false;
++  }
++  RefPtr<dom::Document> doc = domWindow->GetDocument();
++  if (!doc) {
++    return false;
++  }
++  RefPtr<dom::Element> root = doc->GetDocumentElement();
++  if (!root) {
++    return false;
++  }
++  nsAutoString sizemode;
++  root->GetAttr(nsGkAtoms::sizemode, sizemode);
++  return sizemode.EqualsLiteral("maximized");
++}
++
+ // #define DEBUG_RESTORE 1
+ 
+ // Put a window back where it was. This MUST be called while the window is
+@@ -511,6 +542,14 @@
+ #endif
+     }
+   }
++  // gtk_window_is_maximized() only knows about the state reported by the
++  // window manager. If the window is hidden before it has ever been mapped
++  // (as happens when starting minimized to the tray on Wayland), GTK still
++  // considers it unmaximized. Consult the XUL window's sizemode attribute
++  // which AppWindow has already restored from the XUL store in that case.
++  if (!dims.maximized) {
++    dims.maximized = windowSizemodeIsMaximized(aWindow);
++  }
+   aWindow->SetVisibility(false);
+   sHiddenWindows.AppendElement(aWindow);
+   sHiddenWindowsDims.AppendElement(dims);
