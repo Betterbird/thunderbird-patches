@@ -1,0 +1,277 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1793476989 -7200
+# Parent  82f7c4cc755a200f9bf5dc2f638de1f33af8e3df
+Bug 2087795 - Don't reprompt for password if server misbehaves for other reasons (like maintenance). POP, SMTP and IMAP covered.
+
+diff --git a/mailnews/compose/src/SmtpClient.sys.mjs b/mailnews/compose/src/SmtpClient.sys.mjs
+--- a/mailnews/compose/src/SmtpClient.sys.mjs
++++ b/mailnews/compose/src/SmtpClient.sys.mjs
+@@ -66,8 +66,10 @@ export class SmtpClient {
+ 
+     this._server = server;
+     this._authenticator = new SmtpAuthenticator(server);
+     this._authenticating = false;
++    // Indicates if the credentials have been sent to the server.
++    this._credentialSent = false;
+     // A list of auth methods detected from the EHLO response.
+     this._supportedAuthMethods = [];
+     // A list of auth methods that worth a try.
+     this._possibleAuthMethods = [];
+@@ -175,8 +177,10 @@ export class SmtpClient {
+       this._numMessages = 0;
+       this._rcptCount = 0;
+     }
+     this._freed = false;
++    // Indicates if the credentials have been sent to the server.
++    this._credentialSent = false;
+   }
+ 
+   /**
+    * Sends QUIT.
+@@ -525,8 +529,13 @@ export class SmtpClient {
+       // Ignore socket errors if already freed.
+       return;
+     }
+ 
++    // `_onClose` should not run before `_onError` finishes, so it will wait
++    // for this promise.
++    const { promise, resolve } = Promise.withResolvers();
++    this._promiseErrorHandled = promise;
++
+     let nsError = Cr.NS_ERROR_FAILURE;
+     let secInfo = null;
+     if (TCPSocketErrorEvent.isInstance(event)) {
+       nsError = event.errorCode;
+@@ -547,8 +556,11 @@ export class SmtpClient {
+     // Use nsresult to integrate with other parts of sending process, e.g.
+     // MessageSend.sys.mjs will show an error message depending on the nsresult.
+     await this.onerror(nsError, "", secInfo);
+     this._free(true); // true => call quit() before freeing.
++
++    // Let `_onClose` continue.
++    resolve();
+   };
+ 
+   /**
+    * Error handler. Emits an nsresult value.
+@@ -596,17 +608,30 @@ export class SmtpClient {
+    * Callback from network signaling that the socket is now closed
+    *
+    * @param {boolean} [doFree = true] - Don't call _free when false.
+    */
+-  _onClose = (doFree = true) => {
++  _onClose = async (doFree = true) => {
++    // Wait for `_onError` to finish.
++    await this._promiseErrorHandled;
++    delete this._promiseErrorHandled;
++
+     this.logger.debug("Socket closed.");
+     this._clearQuitCloseTimer();
+     if (doFree) {
+       this._free();
+     }
+     if (this._authenticating) {
+-      // In some cases, socket is closed for invalid username/password.
+-      this._onAuthFailed({ data: "Socket closed." });
++      // In some cases, socket is closed for invalid username/password. Only
++      // treat the close as an auth failure if credentials have been sent,
++      // otherwise it's more likely a network problem.
++      if (this._credentialSent) {
++        this._onAuthFailed({ data: "Socket closed." });
++      } else {
++        this.logger.warn(
++          "The connection closed during authentication before credentials were sent."
++        );
++        this.onerror(Cr.NS_ERROR_NET_INTERRUPT, "");
++      }
+     }
+   };
+ 
+   /**
+@@ -771,8 +796,9 @@ export class SmtpClient {
+         // AUTH PLAIN is a 1 step authentication process
+         // C: AUTH PLAIN BASE64(\0 USER \0 PASS)
+         this.logger.debug("Authentication via AUTH PLAIN");
+         this._currentAction = this._actionAUTHComplete;
++        this._credentialSent = true;
+         this._sendCommand(
+           "AUTH PLAIN " + this._authenticator.getPlainToken(),
+           true
+         );
+@@ -792,8 +818,9 @@ export class SmtpClient {
+         // including the mandatory CRLF, while client responses following a
+         // server challenge are independent of that limit.
+         if (authCommand.length + 2 <= 512) {
+           this._currentAction = this._actionAUTH_XOAUTH2;
++          this._credentialSent = true;
+           this._sendCommand(authCommand, true);
+           return;
+         }
+         this._currentAction = command => {
+@@ -801,8 +828,9 @@ export class SmtpClient {
+             this._actionAUTHComplete(command);
+             return;
+           }
+           this._currentAction = this._actionAUTH_XOAUTH2;
++          this._credentialSent = true;
+           this._sendCommand(oauthToken, true);
+         };
+         this._sendCommand("AUTH XOAUTH2");
+         return;
+@@ -837,8 +865,9 @@ export class SmtpClient {
+           this.logger.error("Getting NTLM token FAILED!", e);
+           this._actionAUTHComplete({ success: false, data: "AUTH NTLM" });
+           return;
+         }
++        this._credentialSent = true;
+         this._sendCommand(`AUTH NTLM ${token}`, true);
+         return;
+       }
+     }
+@@ -1149,8 +1178,9 @@ export class SmtpClient {
+       return;
+     }
+     this.logger.debug("AUTH LOGIN PASS");
+     this._currentAction = this._actionAUTHComplete;
++    this._credentialSent = true;
+     this._sendCommand(
+       this._authenticator.getLoginPasswordToken(this._getPassword()),
+       true
+     );
+@@ -1166,8 +1196,9 @@ export class SmtpClient {
+       this._onNsError("smtpAuthFailure", command.data);
+       return;
+     }
+     this._currentAction = this._actionAUTHComplete;
++    this._credentialSent = true;
+     this._sendCommand(
+       this._authenticator.getCramMd5Token(this._getPassword(), command.data),
+       true
+     );
+@@ -1221,8 +1252,9 @@ export class SmtpClient {
+       this._actionAUTHComplete({ success: false, data: "AUTH GSSAPI" });
+       return;
+     }
+     this._currentAction = this._actionAUTH_GSSAPI;
++    this._credentialSent = true;
+     this._sendCommand(token, true);
+   }
+ 
+   /**
+@@ -1249,8 +1281,9 @@ export class SmtpClient {
+       this._actionAUTHComplete({ success: false, data: "AUTH NTLM" });
+       return;
+     }
+     this._currentAction = this._actionAUTH_NTLM;
++    this._credentialSent = true;
+     this._sendCommand(token, true);
+   }
+ 
+   /**
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -8678,11 +8678,13 @@ bool nsImapProtocol::TryToLogon() {
+         lastReportingErrors);  // restore error reports
+     loginSucceeded = NS_SUCCEEDED(rv);
+ 
+     if (!loginSucceeded) {
+-      if (NS_FAILED(GetConnectionStatus()) || DeathSignalReceived()) {
+-        // A transport failure is not an authentication rejection. The socket
+-        // layer preserves the error and may schedule one URL retry.
++      if (NS_FAILED(GetConnectionStatus()) || DeathSignalReceived() ||
++          !GetServerStateParser().Connected()) {
++        // A connection failure or server disconnect (e.g. BYE) is not an
++        // authentication rejection. The socket layer preserves the error and
++        // may schedule one URL retry.
+         break;
+       }
+ 
+       // If server gave reason for authentication failure as [UNAVAILABLE]
+diff --git a/mailnews/local/src/Pop3Client.sys.mjs b/mailnews/local/src/Pop3Client.sys.mjs
+--- a/mailnews/local/src/Pop3Client.sys.mjs
++++ b/mailnews/local/src/Pop3Client.sys.mjs
+@@ -158,8 +158,10 @@ export class Pop3Client {
+     this._socket.onopen = this._onOpen;
+     this._socket.onerror = this._onError;
+ 
+     this._authenticating = false;
++    // Indicates if the credentials have been sent to the server.
++    this._credentialSent = false;
+     // Indicates if the connection has been closed and can't be used anymore.
+     this._destroyed = false;
+     // Save the incomplete server payload, start parsing after seeing \r\n.
+     this._pendingPayload = "";
+@@ -468,10 +470,19 @@ export class Pop3Client {
+     this._logger.debug("Connection closed.");
+     this._server.serverBusy = false;
+     this._destroyed = true;
+     if (this._authenticating) {
+-      // In some cases, socket is closed for invalid username/password.
+-      this._actionAuthResponse({ success: false });
++      // In some cases, socket is closed for invalid username/password. Only
++      // treat the close as an auth failure if credentials have been sent,
++      // otherwise it's more likely a network problem.
++      if (this._credentialSent) {
++        this._actionAuthResponse({ success: false });
++      } else {
++        this._logger.warn(
++          "The connection closed during authentication before credentials were sent."
++        );
++        this._actionDone(Cr.NS_ERROR_NET_INTERRUPT);
++      }
+     } else if (!this._done) {
+       this._logger.warn(
+         "The connection closed unexpectedly while a command was active."
+       );
+@@ -835,8 +846,9 @@ export class Pop3Client {
+           MailStringUtils.stringToByteString(this._password);
+         const digest = CommonUtils.bytesAsHex(
+           CryptoUtils.digestBytes(data, hasher)
+         );
++        this._credentialSent = true;
+         await this._send(
+           `APOP ${this._authenticator.username} ${digest}`,
+           true
+         );
+@@ -973,8 +985,9 @@ export class Pop3Client {
+       this._actionError("pop3UsernameFailure", [], res.statusText);
+       return;
+     }
+     this._nextAction = this._actionAuthResponse;
++    this._credentialSent = true;
+     await this._send(
+       `PASS ${MailStringUtils.stringToByteString(this._password)}`,
+       true
+     );
+@@ -1007,8 +1020,9 @@ export class Pop3Client {
+     }
+     // AUTH PLAIN command succeeded. Obtain and send the plain auth token to the
+     // server.
+     this._nextAction = this._actionAuthResponse;
++    this._credentialSent = true;
+     await this._send(this._authenticator.getPlainToken(this._password), true);
+   };
+ 
+   /**
+@@ -1070,8 +1084,9 @@ export class Pop3Client {
+     // the server. Note: The res.statusText here will be base64 "Password:"
+     // and is not verified.
+     this._nextAction = this._actionAuthResponse;
+     this._logger.debug("Sending password for AUTH LOGIN");
++    this._credentialSent = true;
+     await this._send(
+       this._authenticator.getLoginPasswordToken(this._password),
+       true
+     );
+@@ -1087,8 +1102,9 @@ export class Pop3Client {
+       this._actionError("pop3UsernameFailure", [], res.statusText);
+       return;
+     }
+     this._nextAction = this._actionAuthResponse;
++    this._credentialSent = true;
+     await this._send(
+       this._authenticator.getCramMd5Token(this._password, res.statusText),
+       true
+     );
