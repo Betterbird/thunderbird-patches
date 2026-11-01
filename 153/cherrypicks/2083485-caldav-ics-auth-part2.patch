@@ -1,0 +1,72 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1793351451 -3600
+# Node ID b7a219737c3388afd9f3ed07e300eaa53c729588
+# Parent  461b5eefc85835b782991fb9c6893e57460f5a5f
+Bug 2083485 - Don't give calendar server credentials to an HTTP proxy in cal.auth.Prompt. r=tobyp
+
+cal.auth.Prompt took the origin from channel.URI. On a proxy challenge
+that URI is still the calendar server, so the server's saved password
+went to the proxy without asking.
+
+Refuse challenges flagged AUTH_PROXY. Proxies that ask for Basic or
+Digest credentials can't be used for calendars until proper proxy auth
+is added. NTLM and Negotiate proxies are answered by necko with the
+system credentials and are not affected.
+
+Differential Revision: https://phabricator.services.mozilla.com/D337947
+
+
+diff --git a/calendar/base/modules/utils/calAuthUtils.sys.mjs b/calendar/base/modules/utils/calAuthUtils.sys.mjs
+--- a/calendar/base/modules/utils/calAuthUtils.sys.mjs
++++ b/calendar/base/modules/utils/calAuthUtils.sys.mjs
+@@ -229,16 +229,24 @@ export var auth = {
+ 
+     /**
+      * @param {nsIChannel} aChannel
+      * @param {integer} aLevel
+      * @param {nsIAuthInformation} aAuthInfo
+      * @returns {boolean}
+      */
+     promptAuth(aChannel, aLevel, aAuthInfo) {
++      // The channel URI is the server, not the proxy, so everything below would
++      // pick the server's credentials.
++      // FIXME: Proxies that ask for Basic or Digest credentials can't be used
++      // for calendars. NTLM and Negotiate proxies are answered by necko with
++      // the system credentials and never get here.
++      if (aAuthInfo.flags & Ci.nsIAuthInformation.AUTH_PROXY) {
++        return false;
++      }
+       let finished = false;
+       let result = false;
+       this.#getPasswordInfo(aChannel, aAuthInfo)
+         .then(ok => (result = ok))
+         .finally(() => (finished = true));
+       Services.tm.spinEventLoopUntilOrQuit("calAuthUtils.sys.mjs:promptAuth", () => finished);
+ 
+       if (result) {
+@@ -364,16 +372,22 @@ export var auth = {
+      * @param {nsIChannel} aChannel
+      * @param {nsIAuthPromptCallback} aCallback
+      * @param {nsISupports} aContext
+      * @param {integer} aLevel
+      * @param {nsIAuthInformation} aAuthInfo
+      * @returns {nsICancelable} - not actually returned, bug 1965959.
+      */
+     asyncPromptAuth(aChannel, aCallback, aContext, aLevel, aAuthInfo) {
++      // See promptAuth.
++      if (aAuthInfo.flags & Ci.nsIAuthInformation.AUTH_PROXY) {
++        // This function must return before the callback is called.
++        Services.tm.dispatchToMainThread(() => aCallback.onAuthCancelled(aContext, true));
++        return;
++      }
+       this.#asyncPromptAuthInternal(aChannel, aCallback, aContext, aLevel, aAuthInfo);
+     }
+ 
+     async #asyncPromptAuthInternal(aChannel, aCallback, aContext, aLevel, aAuthInfo) {
+       if (await this.#getPasswordInfo(aChannel, aAuthInfo)) {
+         // This function must return before the callback is called.
+         Services.tm.dispatchToMainThread(() => aCallback.onAuthAvailable(aContext, aAuthInfo));
+         return;
+
