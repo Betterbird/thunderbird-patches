@@ -1,0 +1,420 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1793905985 -7200
+# Node ID ae6bd7d8dc1053184ef63bbc9eedaca3993b0675
+# Parent  13cad0e49808cf7ff7cb81c9324a0cd681b0b791
+Bug 2069949 - Don't throw when an outgoing server has no hostname. r=edicharry
+
+nsIMsgOutgoingServerService.createServer() appends the new key to
+mail.smtpservers before its caller has set a hostname, so an interrupted
+account setup can leave an SMTP server behind that has no hostname but does
+have a username or a port. SmtpServer builds its URI by handing
+"smtp://" + [user@] + hostname + [:port] to Services.io.newURI(), which
+rejects a spec with an empty host next to an authority, such as
+"smtp://user@" or "smtp://:587". A bare "smtp://" does parse, which is why
+only some profiles are affected.
+
+Bug 1882574 changed nsIMsgOutgoingServer.serverURI from a string into that
+parsed nsIURI and moved its consumers off the hostname and port prefs onto
+nsIURI.host and nsIURI.port, so every one of them now throws
+NS_ERROR_MALFORMED_URI on such a server:
+
+    checkOutgoingServerAlreadyExists() walks the whole outgoing server list, so account creation fails regardless of what the user enters or whether they are online (Bug 2069949).
+    loadSMTPServerList() throws out of the identity pane's onPreInit, leaving the identity fields blank and unable to keep changes (Bug 2069799).
+    The Outgoing Server pane, its deletion prompt and SmtpServerEdit fail too, so the offending server cannot even be inspected or removed.
+
+Fix this in the accessor rather than at each consumer: serverURI returns null
+for a server with no hostname, and for a hostname that yields no parseable
+URI, and nsIMsgOutgoingServer documents it as nullable. The consumers then
+read it plainly and fall back to smtpServerList-NotSpecified for display, so
+an unconfigured server stays listed, editable and deletable. findServer()
+already used optional chaining and needs no change.
+
+Removing such a server is not enough on its own: an identity whose
+smtpServerKey named it would resolve to no server at all rather than to the
+default, which makes MessageSend refuse to send. getServerByIdentity() now
+treats an unresolvable key like an absent one, which also covers the profiles
+whose users already removed the entry by hand from prefs.js, and the migration
+clears smtpServerKey on the identities that referenced what it removes, the
+way replaceWithDefaultSmtpServer() does for the Outgoing Server pane.
+
+Where it is cheap to do so, stop producing the state as well: SmtpServerEdit's
+accept handler removes the server it just created when saving fails, instead
+of only logging and still reporting success, and the Sync servers engine
+checks a record's location before creating anything from it. A UI version
+migration drops SMTP servers that have no hostname, so profiles that already
+hit this recover without hand-editing prefs.
+
+The EWS and Graph outgoing servers still throw from serverURI and username
+when their own prefs are missing, which is the same defect one protocol over;
+that is bug 2067724.
+
+Differential Revision: https://phabricator.services.mozilla.com/D325420
+
+diff --git a/mail/components/accountcreation/modules/CreateInBackend.sys.mjs b/mail/components/accountcreation/modules/CreateInBackend.sys.mjs
+--- a/mail/components/accountcreation/modules/CreateInBackend.sys.mjs
++++ b/mail/components/accountcreation/modules/CreateInBackend.sys.mjs
+@@ -191,13 +191,10 @@ async function createAccountInBackend(co
+     }
+ 
+     outServer.description = config.displayName;
+ 
+-    // If this is the first SMTP server, set it as default
+-    if (
+-      !MailServices.outgoingServer.defaultServer ||
+-      !MailServices.outgoingServer.defaultServer.serverURI.host
+-    ) {
++    // If there is no usable outgoing server set as default yet, use this one.
++    if (!MailServices.outgoingServer.defaultServer?.serverURI?.host) {
+       MailServices.outgoingServer.defaultServer = outServer;
+     }
+   }
+ 
+@@ -380,13 +377,18 @@ function checkIncomingServerAlreadyExist
+  */
+ function checkOutgoingServerAlreadyExists(config) {
+   lazy.AccountCreationUtils.assert(config instanceof lazy.AccountConfig);
+   for (const existingServer of MailServices.outgoingServer.servers) {
++    const existingURI = existingServer.serverURI;
++    if (!existingURI) {
++      // Not fully configured, so it can't be a match.
++      continue;
++    }
+     // TODO check username with full email address, too, like for incoming
+     if (
+       existingServer.type == config.outgoing.type &&
+-      existingServer.serverURI.host == config.outgoing.hostname &&
+-      existingServer.serverURI.port == config.outgoing.port &&
++      existingURI.host == config.outgoing.hostname &&
++      existingURI.port == config.outgoing.port &&
+       existingServer.username == config.outgoing.username
+     ) {
+       return existingServer;
+     }
+diff --git a/mail/modules/MailMigrator.sys.mjs b/mail/modules/MailMigrator.sys.mjs
+--- a/mail/modules/MailMigrator.sys.mjs
++++ b/mail/modules/MailMigrator.sys.mjs
+@@ -28,9 +28,9 @@ export var MailMigrator = {
+    */
+   _migrateUI() {
+     // The code for this was ported from
+     // mozilla/browser/components/nsBrowserGlue.js
+-    const UI_VERSION = 64;
++    const UI_VERSION = 65;
+     const UI_VERSION_PREF = "mail.ui-rdf.version";
+     let currentUIVersion = Services.prefs.getIntPref(UI_VERSION_PREF, 0);
+ 
+     if (currentUIVersion >= UI_VERSION) {
+@@ -516,8 +516,13 @@ export var MailMigrator = {
+           Services.prefs.getIntPref("mail.displayname.version", 0) + 1
+         );
+       }
+ 
++      if (currentUIVersion < 65) {
++        // Bug 2069949 - don't list half baked smtp servers.
++        this._removeUnconfiguredSmtpServers();
++      }
++
+       // Migration tasks that may take a long time are not run immediately, but
+       // added to the MigrationTasks object then run at the end.
+       //
+       // See the documentation on MigrationTask and MigrationTasks for how to
+@@ -540,8 +545,50 @@ export var MailMigrator = {
+     }
+   },
+ 
+   /**
++   * Interrupted account creation could leave behind an SMTP server with no
++   * hostname. Such a server holds no useful configuration and used to be
++   * impossible to remove through the UI, so drop them.
++   */
++  _removeUnconfiguredSmtpServers() {
++    const defaultServerKey = Services.prefs.getCharPref(
++      "mail.smtp.defaultserver",
++      ""
++    );
++    const removedKeys = [];
++    for (const server of [...MailServices.outgoingServer.servers]) {
++      // NOTE: A server with no hostname is invalid. An empty username is normal
++      // for Ci.nsMsgAuthMethod.none.
++      if (
++        server.type == "smtp" &&
++        !server.QueryInterface(Ci.nsISmtpServer).hostname
++      ) {
++        removedKeys.push(server.key);
++        server.clearAllValues();
++        MailServices.outgoingServer.deleteServer(server);
++      }
++    }
++    if (!removedKeys.length) {
++      return;
++    }
++
++    // Leave the identities that used one of these pointing at nothing, so they
++    // fall back to the default server instead of to a key that resolves to no
++    // server at all.
++    for (const identity of MailServices.accounts.allIdentities) {
++      if (removedKeys.includes(identity.smtpServerKey)) {
++        identity.smtpServerKey = "";
++      }
++    }
++    if (removedKeys.includes(defaultServerKey)) {
++      // Clearing the pref makes the service pick a new default from the
++      // servers that are left.
++      MailServices.outgoingServer.defaultServer = null;
++    }
++  },
++
++  /**
+    * The SMTP server username pref used to be written as raw bytes, so a
+    * non-ASCII username ended up Latin-1 encoded. It is now written and read as
+    * UTF-8, so rewrite the values which aren't valid UTF-8 already.
+    */
+diff --git a/mail/services/sync/modules/engines/servers.sys.mjs b/mail/services/sync/modules/engines/servers.sys.mjs
+--- a/mail/services/sync/modules/engines/servers.sys.mjs
++++ b/mail/services/sync/modules/engines/servers.sys.mjs
+@@ -119,9 +119,16 @@ ServerStore.prototype = {
+       );
+       return;
+     }
+ 
+-    const [, hostname, port] = /^(.*):(\d+)$/.exec(record.location);
++    const location = /^(.*):(\d+)$/.exec(record.location);
++    if (!location) {
++      this._log.warn(
++        `Skipping creation of ${record.id}: unusable location "${record.location}"`
++      );
++      return;
++    }
++    const [, hostname, port] = location;
+ 
+     if (record.type == "smtp") {
+       const smtpServer = MailServices.outgoingServer.createServer("smtp");
+       smtpServer.QueryInterface(Ci.nsISmtpServer);
+diff --git a/mailnews/base/prefs/content/SmtpServerEdit.js b/mailnews/base/prefs/content/SmtpServerEdit.js
+--- a/mailnews/base/prefs/content/SmtpServerEdit.js
++++ b/mailnews/base/prefs/content/SmtpServerEdit.js
+@@ -45,17 +45,30 @@ function onAccept(event) {
+   }
+ 
+   // If we didn't have an SMTP server to initialize with,
+   // we must be creating one.
++  let newServer = null;
+   try {
+     if (!gSmtpServer) {
+-      gSmtpServer = MailServices.outgoingServer.createServer("smtp");
++      newServer = MailServices.outgoingServer.createServer("smtp");
++      gSmtpServer = newServer;
+       window.arguments[0].addSmtpServer = gSmtpServer.key;
+     }
+ 
+     saveSmtpSettings(gSmtpServer);
+   } catch (ex) {
+     console.error("Error saving smtp server: ", ex);
++    if (newServer) {
++      // createServer() already persisted the server, so drop it again rather
++      // than leaving an unconfigured one behind.
++      newServer.clearAllValues();
++      MailServices.outgoingServer.deleteServer(newServer);
++      gSmtpServer = null;
++      window.arguments[0].addSmtpServer = null;
++    }
++    window.arguments[0].result = false;
++    event.preventDefault();
++    return;
+   }
+ 
+   window.arguments[0].result = true;
+ }
+@@ -115,9 +128,9 @@ function initSmtpSettings(server) {
+     onLockPreference();
+   }
+ 
+   // Hide OAuth2 option if we can't use it.
+-  const details = server
++  const details = server?.serverURI
+     ? OAuth2Providers.getHostnameDetails(server.serverURI.host, "smtp")
+     : null;
+   document.getElementById("authMethod-oauth2").hidden = !details;
+ 
+diff --git a/mailnews/base/prefs/content/am-identity-edit.js b/mailnews/base/prefs/content/am-identity-edit.js
+--- a/mailnews/base/prefs/content/am-identity-edit.js
++++ b/mailnews/base/prefs/content/am-identity-edit.js
+@@ -529,11 +529,15 @@ function loadSMTPServerList() {
+       serverName = server.description + " - ";
+     } else if (server.username) {
+       serverName = server.username + " - ";
+     }
+-    serverName += server.serverURI.host;
++    serverName +=
++      server.serverURI?.host ||
++      document
++        .getElementById("bundle_messenger")
++        .getString("smtpServerList-NotSpecified");
+ 
+-    if (defaultServer.key == server.key) {
++    if (defaultServer?.key == server.key) {
+       serverName +=
+         " " +
+         document
+           .getElementById("bundle_messenger")
+diff --git a/mailnews/base/prefs/content/am-smtp.js b/mailnews/base/prefs/content/am-smtp.js
+--- a/mailnews/base/prefs/content/am-smtp.js
++++ b/mailnews/base/prefs/content/am-smtp.js
+@@ -58,9 +58,12 @@ var gSmtpServerListWindow = {
+       window,
+       this.mBundle.getString("smtpServers-confirmServerDeletionTitle"),
+       this.mBundle.getFormattedString(
+         "smtpServers-confirmServerDeletion",
+-        [server.serverURI.host],
++        [
++          server.serverURI?.host ||
++            this.mBundle.getString("smtpServerList-NotSpecified"),
++        ],
+         1
+       ),
+       Services.prompt.STD_YES_NO_BUTTONS,
+       null,
+@@ -79,9 +82,9 @@ var gSmtpServerListWindow = {
+       }
+ 
+       // If this was the default server, reset it to the first
+       // available server.
+-      if (MailServices.outgoingServer.defaultServer.key === server.key) {
++      if (MailServices.outgoingServer.defaultServer?.key === server.key) {
+         // If there are other servers available, choose the first one as default.
+         if (MailServices.outgoingServer.servers.length >= 2) {
+           const newDefault = MailServices.outgoingServer.servers.find(
+             x => x.key != server.key
+@@ -151,33 +154,36 @@ var gSmtpServerListWindow = {
+       // display the raw server type.
+       serverType = aServer.type;
+     }
+ 
++    const serverURI = aServer.serverURI;
++
+     document.getElementById("typeValue").textContent = serverType;
+-    document.getElementById("nameValue").textContent = aServer.serverURI.host;
++    document.getElementById("nameValue").textContent =
++      serverURI?.host || noneSelected;
+     document.getElementById("descriptionValue").textContent =
+       aServer.description || noneSelected;
+     // `nsIURI` uses -1 as the port when it's left to the default value.
+     document.getElementById("portValue").textContent =
+-      aServer.serverURI.port > 0 ? aServer.serverURI.port : noneSelected;
++      serverURI?.port > 0 ? serverURI.port : noneSelected;
+     document.getElementById("userNameValue").textContent =
+       aServer.username || noneSelected;
+     document.getElementById("useSecureConnectionValue").textContent =
+       this.mBundle.getString(
+         "smtpServer-ConnectionSecurityType-" + aServer.socketType
+       );
+-    if (aServer.socketType != Ci.nsMsgSocketType.plain) {
+-      let port = aServer.serverURI.port;
+-      if (port == -1 && aServer.serverURI.schemeIs("https")) {
++    if (serverURI && aServer.socketType != Ci.nsMsgSocketType.plain) {
++      let port = serverURI.port;
++      if (port == -1 && serverURI.schemeIs("https")) {
+         port = 443;
+       }
+       if (port != -1) {
+         const certCheck = document.createElement("certificate-check");
+         document
+           .getElementById("useSecureConnectionValue")
+           .appendChild(certCheck);
+         certCheck.init(
+-          aServer.serverURI.host,
++          serverURI.host,
+           port,
+           aServer.type,
+           aServer.socketType == Ci.nsMsgSocketType.alwaysSTARTTLS
+         );
+@@ -259,9 +265,11 @@ var gSmtpServerListWindow = {
+     } else if (aServer.username) {
+       serverName = aServer.username + " - ";
+     }
+ 
+-    serverName += aServer.serverURI.host;
++    serverName +=
++      aServer.serverURI?.host ||
++      this.mBundle.getString("smtpServerList-NotSpecified");
+ 
+     if (aIsDefault) {
+       serverName += " " + this.mBundle.getString("defaultServerTag");
+       listitem.setAttribute("default", "true");
+diff --git a/mailnews/compose/public/nsIMsgOutgoingServer.idl b/mailnews/compose/public/nsIMsgOutgoingServer.idl
+--- a/mailnews/compose/public/nsIMsgOutgoingServer.idl
++++ b/mailnews/compose/public/nsIMsgOutgoingServer.idl
+@@ -116,9 +116,10 @@ interface nsIMsgOutgoingServer : nsISupp
+    */
+   attribute nsMsgSocketTypeValue socketType;
+ 
+   /**
+-   * Returns the URI of the server.
++   * Returns the URI of the server, or null if the server is not configured
++   * enough to have one, e.g. because it has no hostname yet.
+    */
+   readonly attribute nsIURI serverURI;
+ 
+   /**
+diff --git a/mailnews/compose/src/MimeMessageUtils.sys.mjs b/mailnews/compose/src/MimeMessageUtils.sys.mjs
+--- a/mailnews/compose/src/MimeMessageUtils.sys.mjs
++++ b/mailnews/compose/src/MimeMessageUtils.sys.mjs
+@@ -823,9 +823,9 @@ export var MsgUtils = {
+    */
+   formatStringWithSMTPHostName(userIdentity, composeBundle, errorName) {
+     const smtpServer =
+       MailServices.outgoingServer.getServerByIdentity(userIdentity);
+-    const smtpHostname = smtpServer.serverURI.host;
++    const smtpHostname = smtpServer?.serverURI?.host ?? "";
+     return composeBundle.formatStringFromName(errorName, [smtpHostname]);
+   },
+ 
+   /**
+diff --git a/mailnews/compose/src/OutgoingServerService.sys.mjs b/mailnews/compose/src/OutgoingServerService.sys.mjs
+--- a/mailnews/compose/src/OutgoingServerService.sys.mjs
++++ b/mailnews/compose/src/OutgoingServerService.sys.mjs
+@@ -64,11 +64,13 @@ export class OutgoingServerService {
+   /**
+    * @see nsIMsgOutgoingServerService
+    */
+   getServerByIdentity(userIdentity) {
+-    return userIdentity.smtpServerKey
+-      ? this.getServerByKey(userIdentity.smtpServerKey)
+-      : this.defaultServer;
++    return (
++      (userIdentity.smtpServerKey &&
++        this.getServerByKey(userIdentity.smtpServerKey)) ||
++      this.defaultServer
++    );
+   }
+ 
+   /**
+    * @see nsIMsgOutgoingServerService
+diff --git a/mailnews/compose/src/SmtpServer.sys.mjs b/mailnews/compose/src/SmtpServer.sys.mjs
+--- a/mailnews/compose/src/SmtpServer.sys.mjs
++++ b/mailnews/compose/src/SmtpServer.sys.mjs
+@@ -232,10 +232,22 @@ export class SmtpServer {
+     // information from the SMTP client (which MessageSend then uses to
+     // propagate to the console and user). This would not work if we were
+     // recreating the nsIURI on each access.
+     if (!this._uri) {
++      if (!this.hostname) {
++        // Looks like we're not fully set up yet. There's no URI to hand out.
++        return null;
++      }
+       const spec = this._getServerURISpec(true, true);
+-      this._uri = Services.io.newURI(spec);
++      try {
++        this._uri = Services.io.newURI(spec);
++      } catch (e) {
++        // The stored hostname doesn't produce a parseable URI. Don't throw:
++        // one unusable server must not break every consumer walking the
++        // server list, or the server can no longer even be deleted.
++        console.error(`Ignoring unusable outgoing server URI ${spec}:`, e);
++        return null;
++      }
+     }
+ 
+     return this._uri;
+   }

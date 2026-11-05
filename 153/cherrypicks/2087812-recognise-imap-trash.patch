@@ -1,0 +1,150 @@
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1793908810 -7200
+# Node ID a95e750a6301a814059bd245c2ccb38ef9e9ba50
+# Parent  f29cdd6883b8f9e3958eb5c63aa79bd6a7b9214a
+Bug 2087812 - Recognize existing IMAP Trash folders with namespace prefixes. r=nursoda,mkmelin
+
+Resolve relative Trash paths using the server and canonical path conversions
+before comparing them with discovered mailboxes. Refresh the Trash existence
+state after the fallback LIST so an existing folder is not created again.
+
+Add regression coverage for namespace prefixes, custom paths, subscriptions,
+server directories, non-ASCII names, SPECIAL-USE flags, and missing Trash.
+
+Differential Revision: https://phabricator.services.mozilla.com/D338704
+
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -923,8 +923,9 @@ nsresult nsImapProtocol::SetupWithUrl(ns
+       m_useIdle = false;
+     imapServer->GetFetchByChunks(&m_fetchByChunks);
+     imapServer->GetSendID(&m_sendID);
+ 
++    m_canonicalTrashFolderPath.Truncate();
+     nsAutoCString trashFolderPath;
+     if (NS_SUCCEEDED(imapServer->GetTrashFolderName(trashFolderPath))) {
+       if (m_allowUTF8Accept)
+         m_trashFolderPath = trashFolderPath;
+@@ -5147,44 +5148,40 @@ void nsImapProtocol::DiscoverMailboxSpec
+       if (ns &&
+           nsPrefix)  // if no personal namespace, there can be no Trash folder
+       {
+         bool onlineTrashFolderExists = false;
+-        if (m_hostSessionList) {
+-          if (adoptedBoxSpec->mBoxFlags & (kImapTrash | kImapXListTrash)) {
+-            m_hostSessionList->SetOnlineTrashFolderExistsForHost(
+-                GetImapServerKey(), true);
+-            onlineTrashFolderExists = true;
+-          } else {
+-            m_hostSessionList->GetOnlineTrashFolderExistsForHost(
+-                GetImapServerKey(), onlineTrashFolderExists);
+-          }
++        if (adoptedBoxSpec->mBoxFlags & (kImapTrash | kImapXListTrash)) {
++          m_hostSessionList->SetOnlineTrashFolderExistsForHost(
++              GetImapServerKey(), true);
++          onlineTrashFolderExists = true;
++        } else {
++          m_hostSessionList->GetOnlineTrashFolderExistsForHost(
++              GetImapServerKey(), onlineTrashFolderExists);
+         }
+ 
+         // Don't set the Trash flag if not using the Trash model
+-        if (GetDeleteIsMoveToTrash() && !onlineTrashFolderExists &&
+-            FindInReadable(m_trashFolderPath,
+-                           adoptedBoxSpec->mAllocatedPathName,
+-                           nsCaseInsensitiveCStringComparator)) {
+-          bool trashExists = false;
+-          if (StringBeginsWith(m_trashFolderPath, "INBOX/"_ns,
+-                               nsCaseInsensitiveCStringComparator)) {
+-            nsAutoCString pathName(adoptedBoxSpec->mAllocatedPathName.get() +
+-                                   6);
+-            trashExists =
+-                StringBeginsWith(
+-                    adoptedBoxSpec->mAllocatedPathName, m_trashFolderPath,
+-                    nsCaseInsensitiveCStringComparator) && /* "INBOX/" */
+-                pathName.Equals(Substring(m_trashFolderPath, 6),
+-                                nsCaseInsensitiveCStringComparator);
+-          } else
++        if (GetDeleteIsMoveToTrash() && !onlineTrashFolderExists) {
++          bool trashExists = adoptedBoxSpec->mAllocatedPathName.Equals(
++              m_trashFolderPath, nsCaseInsensitiveCStringComparator);
++          if (!trashExists) {
++            if (m_canonicalTrashFolderPath.IsEmpty()) {
++              // Resolve a relative path as LIST and CREATE do, then use the
++              // same canonical form as the discovered mailbox.
++              nsAutoCString onlineTrashName;
++              m_runningUrl->AllocateServerPath(
++                  m_trashFolderPath, ns->GetDelimiter(), onlineTrashName);
++              m_runningUrl->AllocateCanonicalPath(onlineTrashName,
++                                                  ns->GetDelimiter(),
++                                                  m_canonicalTrashFolderPath);
++            }
+             trashExists = adoptedBoxSpec->mAllocatedPathName.Equals(
+-                m_trashFolderPath, nsCaseInsensitiveCStringComparator);
+-
+-          if (m_hostSessionList)
++                m_canonicalTrashFolderPath, nsCaseInsensitiveCStringComparator);
++          }
++          if (trashExists) {
+             m_hostSessionList->SetOnlineTrashFolderExistsForHost(
+-                GetImapServerKey(), trashExists);
+-
+-          if (trashExists) adoptedBoxSpec->mBoxFlags |= kImapTrash;
++                GetImapServerKey(), true);
++            adoptedBoxSpec->mBoxFlags |= kImapTrash;
++          }
+         }
+       }
+ 
+       // Discover the folder (shuttle over to libmsg, yay)
+@@ -5205,11 +5202,10 @@ void nsImapProtocol::DiscoverMailboxSpec
+           if (newFolder) SetMailboxDiscoveryStatus(eContinueNew);
+ 
+           bool useSubscription = false;
+ 
+-          if (m_hostSessionList)
+-            m_hostSessionList->GetHostIsUsingSubscription(GetImapServerKey(),
+-                                                          useSubscription);
++          m_hostSessionList->GetHostIsUsingSubscription(GetImapServerKey(),
++                                                        useSubscription);
+ 
+           if ((GetMailboxDiscoveryStatus() != eContinue) &&
+               (GetMailboxDiscoveryStatus() != eContinueNew) &&
+               (GetMailboxDiscoveryStatus() != eListMyChildren)) {
+@@ -7435,8 +7431,9 @@ void nsImapProtocol::DiscoverAllAndSubsc
+ // expanding a host in the folder pane.  This is not used for the subscribe
+ // pane.
+ // DiscoverMailboxList() also gets the ACLs for each newly discovered folder
+ void nsImapProtocol::DiscoverMailboxList() {
++  m_canonicalTrashFolderPath.Truncate();
+   bool usingSubscription = false;
+ 
+   m_hostSessionList->GetHostIsUsingSubscription(GetImapServerKey(),
+                                                 usingSubscription);
+@@ -7628,8 +7625,10 @@ void nsImapProtocol::MailboxDiscoveryFin
+       if (personalDir) {
+         m_hierarchyNameState = kDiscoverTrashFolderInProgress;
+         List(m_trashFolderPath.get(), true);
+         m_hierarchyNameState = kNoOperationInProgress;
++        m_hostSessionList->GetOnlineTrashFolderExistsForHost(GetImapServerKey(),
++                                                             trashFolderExists);
+       }
+     }
+ 
+     // There is no Trash folder (either LIST'd or LSUB'd), and we're using the
+diff --git a/mailnews/imap/src/nsImapProtocol.h b/mailnews/imap/src/nsImapProtocol.h
+--- a/mailnews/imap/src/nsImapProtocol.h
++++ b/mailnews/imap/src/nsImapProtocol.h
+@@ -393,8 +393,10 @@ class nsImapProtocol : public nsIImapPro
+   nsCString m_serverKey;
+   char* m_dataOutputBuf;
+   RefPtr<nsMsgLineStreamBuffer> m_inputStreamBuffer;
+   nsCString m_trashFolderPath;
++  // Resolved lazily and reset for each URL or mailbox discovery.
++  nsCString m_canonicalTrashFolderPath;
+ 
+   /** The socket connection to the IMAP server. */
+   nsCOMPtr<nsISocketTransport> m_transport;
+   nsCOMPtr<nsITransportSecurityInfo> m_securityInfo;
