@@ -193,3 +193,8 @@ echo "    { PLATFORM() ->"                         >> localization/en-GB/messeng
 echo "        [windows] Exit { -brand-full-name }" >> localization/en-GB/messenger/menubar.ftl
 echo "        *[other] Quit { -brand-full-name }"  >> localization/en-GB/messenger/menubar.ftl
 echo "    }"                                       >> localization/en-GB/messenger/menubar.ftl
+
+# Web Page Archive per message:
+echo "copy-attach-web-page-archive ="                                                             >> localization/en-GB/messenger/feeds.ftl
+echo "  .label = Attach Web Page Archive"                                                         >> localization/en-GB/messenger/feeds.ftl
+echo "  .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive" >> localization/en-GB/messenger/feeds.ftl

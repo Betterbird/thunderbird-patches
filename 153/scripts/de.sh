@@ -304,3 +304,11 @@ echo "  .label = { -brand-short-name } im Infobereich starten"                  
 echo "  .accesskey = I"                                                               >> localization/de/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = { -brand-full-name } beenden" >> localization/de/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                            >> localization/de/messenger/feeds.ftl
+echo "  .label = Archiv der Webseite anhängen"                                                   >> localization/de/messenger/feeds.ftl
+echo "  .tooltiptext = Kopie des selektierten Artikels anlegen und Archiv der Webseite anhängen" >> localization/de/messenger/feeds.ftl

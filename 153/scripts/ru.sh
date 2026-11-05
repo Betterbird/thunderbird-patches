@@ -301,3 +301,11 @@ echo "  .label = Запускать { -brand-short-name } в системном 
 echo "  .accesskey = З"                                                          >> localization/ru/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = Выйти из { -brand-full-name }" >> localization/ru/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                   >> localization/ru/messenger/feeds.ftl
+echo "  .label = Прикрепить архив веб-страницы"                                         >> localization/ru/messenger/feeds.ftl
+echo "  .tooltiptext = Создать копию выбранной статьи и прикрепить архив веб-страницы"  >> localization/ru/messenger/feeds.ftl

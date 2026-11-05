@@ -306,3 +306,11 @@ echo "general-folder-options-header = Opções de gestão de pastas" >> localiza
 echo "webext-install-suppressed-details-2 = Complementos com APIs legadas podem modificar cada parte do { -brand-product-name } e precisam ser atualizados, revisados e aprovados sempre que o próprio { -brand-product-name } mudar. Essas APIs legadas são suportadas somente pelo { -brand-product-name } ESR, que recebe menos alterações de código e permanece estável durante o ciclo ESR de 1 ano." >> localization/pt-BR/messenger/extensionsUI.ftl
 
 echo "system-tray-menuitem-quit = Sair do { -brand-full-name }" >> localization/pt-BR/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                           >> localization/pt-BR/messenger/feeds.ftl
+echo "  .label = Anexar arquivo da página web"                                                  >> localization/pt-BR/messenger/feeds.ftl
+echo "  .tooltiptext = Criar uma cópia do artigo selecionado e anexar o arquivo da página web"  >> localization/pt-BR/messenger/feeds.ftl

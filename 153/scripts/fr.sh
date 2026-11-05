@@ -301,3 +301,11 @@ echo "  .label = Démarrer { -brand-short-name } dans la barre de notification" 
 echo "  .accesskey = D"                                                                            >> localization/fr/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = Quitter { -brand-full-name }" >> localization/fr/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                                 >> localization/fr/messenger/feeds.ftl
+echo "  .label = Joindre l’archive de la page Web"                                                    >> localization/fr/messenger/feeds.ftl
+echo "  .tooltiptext = Créer une copie de l’article sélectionné et joindre l’archive de la page Web"  >> localization/fr/messenger/feeds.ftl

@@ -309,3 +309,11 @@ echo "    { PLATFORM() ->"                             >> localization/es-ES/mes
 echo "        [windows] Salir de { -brand-full-name }" >> localization/es-ES/messenger/menubar.ftl
 echo "       *[other] Cerrar { -brand-full-name }"     >> localization/es-ES/messenger/menubar.ftl
 echo "    }"                                           >> localization/es-ES/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                                     >> localization/es-ES/messenger/feeds.ftl
+echo "  .label = Adjuntar el archivo de la página web"                                                    >> localization/es-ES/messenger/feeds.ftl
+echo "  .tooltiptext = Crear una copia del artículo seleccionado y adjuntar el archivo de la página web"  >> localization/es-ES/messenger/feeds.ftl

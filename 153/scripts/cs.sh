@@ -305,3 +305,11 @@ echo "  .label = Spustit { -brand-short-name } v oznamovací oblasti"           
 echo "  .accesskey = S"                                                                >> localization/cs/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = Ukončit { -brand-full-name }" >> localization/cs/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                     >> localization/cs/messenger/feeds.ftl
+echo "  .label = Připojit archiv webové stránky"                                          >> localization/cs/messenger/feeds.ftl
+echo "  .tooltiptext = Vytvořit kopii vybraného článku a připojit archiv webové stránky"  >> localization/cs/messenger/feeds.ftl

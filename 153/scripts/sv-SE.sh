@@ -301,3 +301,11 @@ echo "  .label = Starta { -brand-short-name } i aktivitetsfältet"              
 echo "  .accesskey = S"                                                            >> localization/sv-SE/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = Avsluta { -brand-full-name }" >> localization/sv-SE/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                         >> localization/sv-SE/messenger/feeds.ftl
+echo "  .label = Bifoga arkiv av webbsidan"                                                   >> localization/sv-SE/messenger/feeds.ftl
+echo "  .tooltiptext = Skapa en kopia av den valda artikeln och bifoga arkivet av webbsidan"  >> localization/sv-SE/messenger/feeds.ftl

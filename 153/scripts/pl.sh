@@ -301,3 +301,11 @@ echo "  .label = Uruchamiaj program { -brand-short-name } w obszarze powiadomie�
 echo "  .accesskey = U"                                                                 >> localization/pl/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = Zakończ program { -brand-full-name }" >> localization/pl/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                          >> localization/pl/messenger/feeds.ftl
+echo "  .label = Dołącz archiwum strony internetowej"                                          >> localization/pl/messenger/feeds.ftl
+echo "  .tooltiptext = Utwórz kopię wybranego artykułu i dołącz archiwum strony internetowej"  >> localization/pl/messenger/feeds.ftl

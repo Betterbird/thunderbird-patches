@@ -301,3 +301,11 @@ echo "  .label = { -brand-short-name } in de systeembalk starten"               
 echo "  .accesskey = s"                                                                     >> localization/nl/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = { -brand-full-name } afsluiten" >> localization/nl/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                                            >> localization/nl/messenger/feeds.ftl
+echo "  .label = Archief van de webpagina bijvoegen"                                                             >> localization/nl/messenger/feeds.ftl
+echo "  .tooltiptext = Een kopie maken van het geselecteerde artikel en het archief van de webpagina bijvoegen"  >> localization/nl/messenger/feeds.ftl

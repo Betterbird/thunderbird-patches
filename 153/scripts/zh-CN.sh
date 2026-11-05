@@ -301,3 +301,11 @@ echo "  .label = 在系统托盘启动 { -brand-short-name }"  >> localization/z
 echo "  .accesskey = s"                               >> localization/zh-CN/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = 退出 { -brand-full-name }" >> localization/zh-CN/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                >> localization/zh-CN/messenger/feeds.ftl
+echo "  .label = 附加网页存档"                         >> localization/zh-CN/messenger/feeds.ftl
+echo "  .tooltiptext = 创建所选文章的副本并附加网页存档"  >> localization/zh-CN/messenger/feeds.ftl

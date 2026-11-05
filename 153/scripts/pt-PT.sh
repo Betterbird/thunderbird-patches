@@ -304,3 +304,11 @@ echo "  .label = Iniciar o { -brand-short-name } na bandeja"                    
 echo "  .accesskey = I"                                                              >> localization/pt-PT/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = Sair do { -brand-full-name }" >> localization/pt-PT/messenger/menubar.ftl
+
+# Web Page Archive per message:
+# copy-attach-web-page-archive =
+#   .label = Attach Web Page Archive
+#   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
+echo "copy-attach-web-page-archive ="                                                           >> localization/pt-PT/messenger/feeds.ftl
+echo "  .label = Anexar arquivo da página web"                                                  >> localization/pt-PT/messenger/feeds.ftl
+echo "  .tooltiptext = Criar uma cópia do artigo selecionado e anexar o arquivo da página web"  >> localization/pt-PT/messenger/feeds.ftl
