@@ -1,0 +1,361 @@
+# HG changeset patch
+# User Jari Jalkanen <jjalkanen@mozilla.com>
+# Date 1793911707 -7200
+# Node ID e4973e1bed5236007e7afa65316f10b49c4cf14b
+# Parent  ca6f352cccf018c356097b214a4af63c1d472514
+Bug 2067502: Tolerate orphaned extension origins during temporary storage initialization. r=dom-storage-reviewers,asuth
+
+Orphaned moz-extension storage directories left behind after extension
+uninstall could fatally block QuotaManager temporary storage initialization.
+
+This also addresses the remaining concerns of bug 1521541. Thanks to Tom Tung
+for the original work there.
+
+Differential Revision: https://phabricator.services.mozilla.com/D330095
+
+diff --git a/dom/indexedDB/ActorsParent.cpp b/dom/indexedDB/ActorsParent.cpp
+--- a/dom/indexedDB/ActorsParent.cpp
++++ b/dom/indexedDB/ActorsParent.cpp
+@@ -115,8 +115,9 @@
+ #include "mozilla/dom/indexedDB/PBackgroundIDBTransactionParent.h"
+ #include "mozilla/dom/indexedDB/PBackgroundIDBVersionChangeTransactionParent.h"
+ #include "mozilla/dom/indexedDB/PBackgroundIndexedDBUtilsParent.h"
+ #include "mozilla/dom/ipc/IdType.h"
++#include "mozilla/dom/quota/ArtificialFailure.h"
+ #include "mozilla/dom/quota/Assertions.h"
+ #include "mozilla/dom/quota/CachingDatabaseConnection.h"
+ #include "mozilla/dom/quota/Client.h"
+ #include "mozilla/dom/quota/ClientDirectoryLock.h"
+@@ -5921,8 +5922,11 @@ nsresult RemoveDatabaseFilesAndDirectory
+   MOZ_ASSERT(!aDatabaseFilenameBase.IsEmpty());
+ 
+   AUTO_PROFILER_LABEL("RemoveDatabaseFilesAndDirectory", DOM);
+ 
++  QM_TRY(ArtificialFailure(
++      nsIQuotaArtificialFailure::CATEGORY_REMOVE_DATABASE_FILES));
++
+   QM_TRY_UNWRAP(auto markerFile,
+                 CreateMarkerFile(aBaseDirectory, aDatabaseFilenameBase));
+ 
+   // The database file counts towards quota.
+@@ -12621,14 +12625,18 @@ nsresult QuotaClient::GetUsageForOriginI
+   QM_TRY_UNWRAP((auto [subdirsToProcess, databaseFilenames, obsoleteFilenames]),
+                 GetDatabaseFilenames<ObsoleteFilenamesHandling::Include>(
+                     *directory, aCanceled));
+ 
++  // Databases whose removal failed. Their remaining files still count towards
++  // quota, so that the removal retried later subtracts only what was added.
++  nsTHashSet<nsString> leftoverFilenames;
++
+   if (aInitializing) {
+     QM_TRY(CollectEachInRange(
+         subdirsToProcess,
+         [&directory, &obsoleteFilenames = obsoleteFilenames,
+-         &databaseFilenames = databaseFilenames, aPersistenceType,
+-         &aOriginMetadata](
++         &databaseFilenames = databaseFilenames, &leftoverFilenames,
++         aPersistenceType, &aOriginMetadata](
+             const nsAString& subdirName) -> Result<Ok, nsresult> {
+           // The directory must have the correct suffix.
+           nsDependentSubstring subdirNameBase;
+           QM_TRY(QM_OR_ELSE_WARN(
+@@ -12652,15 +12660,16 @@ nsresult QuotaClient::GetUsageForOriginI
+                      })),
+                  Ok{});
+ 
+           if (obsoleteFilenames.Contains(subdirNameBase)) {
+-            // If this fails, it probably means we are in a serious situation.
+-            // e.g. Filesystem corruption. Will handle this in bug 1521541.
+-            QM_TRY(MOZ_TO_RESULT(RemoveDatabaseFilesAndDirectory(
+-                       *directory, subdirNameBase, /* aQuotaManager */ nullptr,
+-                       aPersistenceType, aOriginMetadata,
+-                       /* aDatabaseName */ u""_ns)),
+-                   Err(NS_ERROR_UNEXPECTED));
++            QM_WARNONLY_TRY(
++                MOZ_TO_RESULT(RemoveDatabaseFilesAndDirectory(
++                    *directory, subdirNameBase, /* aQuotaManager */ nullptr,
++                    aPersistenceType, aOriginMetadata,
++                    /* aDatabaseName */ u""_ns)),
++                ([&leftoverFilenames, &subdirNameBase](const auto&) {
++                  leftoverFilenames.Insert(subdirNameBase);
++                }));
+ 
+             databaseFilenames.Remove(subdirNameBase);
+             return Ok{};
+           }
+@@ -12752,8 +12761,44 @@ nsresult QuotaClient::GetUsageForOriginI
+       }
+     }
+   }
+ 
++  if (aUsageInfo) {
++    for (const auto& leftoverFilename : leftoverFilenames) {
++      if (aCanceled) {
++        break;
++      }
++
++      for (const auto& suffix : {kSQLiteSuffix, kSQLiteWALSuffix}) {
++        QM_TRY_INSPECT(
++            const auto& file,
++            CloneFileAndAppend(*directory, leftoverFilename + suffix));
++
++        QM_TRY_INSPECT(const int64_t& fileSize,
++                       QM_OR_ELSE_LOG_VERBOSE_IF(
++                           // Expression.
++                           MOZ_TO_RESULT_INVOKE_MEMBER(file, GetFileSize),
++                           // Predicate.
++                           IsFileNotFoundError,
++                           // Fallback.
++                           (ErrToOk<0, int64_t>)));
++        MOZ_ASSERT(fileSize >= 0);
++
++        *aUsageInfo += DatabaseUsageType(Some(uint64_t(fileSize)));
++      }
++
++      QM_TRY_INSPECT(
++          const auto& fmDirectory,
++          CloneFileAndAppend(
++              *directory, leftoverFilename + kFileManagerDirectoryNameSuffix));
++
++      QM_TRY_INSPECT(const auto& fileUsage,
++                     DatabaseFileManager::GetUsage(fmDirectory));
++
++      *aUsageInfo += fileUsage;
++    }
++  }
++
+   return NS_OK;
+ }
+ 
+ void QuotaClient::OnOriginClearCompleted(
+diff --git a/dom/indexedDB/test/unit/test_obsoleteDatabaseRemovalFailure.js b/dom/indexedDB/test/unit/test_obsoleteDatabaseRemovalFailure.js
+new file mode 100644
+--- /dev/null
++++ b/dom/indexedDB/test/unit/test_obsoleteDatabaseRemovalFailure.js
+@@ -0,0 +1,111 @@
++/**
++ * Any copyright is dedicated to the Public Domain.
++ * http://creativecommons.org/publicdomain/zero/1.0/
++ */
++
++const { PrincipalUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/dom/quota/test/modules/PrincipalUtils.sys.mjs"
++);
++const { QuotaUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/dom/quota/test/modules/QuotaUtils.sys.mjs"
++);
++const { IndexedDBUtils } = ChromeUtils.importESModule(
++  "resource://testing-common/dom/indexedDB/test/modules/IndexedDBUtils.sys.mjs"
++);
++
++async function resetAndInitTemporaryStorage() {
++  let request = Services.qms.reset();
++  await QuotaUtils.requestFinished(request);
++
++  request = Services.qms.init();
++  await QuotaUtils.requestFinished(request);
++
++  request = Services.qms.initTemporaryStorage();
++  await QuotaUtils.requestFinished(request);
++}
++
++async function getCachedUsage(principal) {
++  const request = Services.qms.getCachedUsageForPrincipal(principal);
++  return QuotaUtils.requestFinished(request);
++}
++
++function getDatabaseFilenameBase(idbDirectory) {
++  for (const file of idbDirectory.directoryEntries) {
++    if (file.leafName.endsWith(".sqlite")) {
++      return file.leafName.slice(0, -".sqlite".length);
++    }
++  }
++  return null;
++}
++
++/**
++ * This test verifies that a failure to remove an obsolete database (one with
++ * an idb-deleting- marker file) doesn't fail temporary storage initialization,
++ * that the files left behind still count towards the origin usage, and that
++ * removing them later doesn't make the usage drift.
++ */
++
++/* exported testSteps */
++async function testSteps() {
++  const principal = PrincipalUtils.createPrincipal("https://example.com");
++  const name = "obsoleteDatabaseRemovalFailure";
++
++  info("Creating database");
++
++  {
++    const request = indexedDB.openForPrincipal(principal, name);
++    request.onupgradeneeded = function (event) {
++      const objectStore = event.target.result.createObjectStore("store");
++      objectStore.add(new Blob([new Uint8Array(100000)]), 1);
++    };
++    const database = await IndexedDBUtils.requestFinished(request);
++    database.close();
++  }
++
++  await resetAndInitTemporaryStorage();
++
++  const usageBefore = await getCachedUsage(principal);
++  Assert.greater(usageBefore, 0, "Origin has usage");
++
++  info("Marking database as obsolete");
++
++  const idbDirectory = getRelativeFile(
++    "storage/default/https+++example.com/idb"
++  );
++  const filenameBase = getDatabaseFilenameBase(idbDirectory);
++  Assert.ok(filenameBase, "Found database file");
++
++  const markerFile = idbDirectory.clone();
++  markerFile.append("idb-deleting-" + filenameBase);
++  markerFile.create(Ci.nsIFile.NORMAL_FILE_TYPE, 0o644);
++
++  info("Initializing temporary storage with failing database removal");
++
++  await QuotaUtils.withArtificialFailures(
++    Ci.nsIQuotaArtificialFailure.CATEGORY_REMOVE_DATABASE_FILES,
++    /* probability */ 100,
++    Cr.NS_ERROR_FILE_ACCESS_DENIED,
++    resetAndInitTemporaryStorage
++  );
++
++  Assert.ok(markerFile.exists(), "Marker file still exists");
++
++  const usageWithLeftovers = await getCachedUsage(principal);
++  Assert.equal(
++    usageWithLeftovers,
++    usageBefore,
++    "Leftover database files count towards usage"
++  );
++
++  info("Deleting database");
++
++  {
++    const request = indexedDB.deleteForPrincipal(principal, name);
++    await IndexedDBUtils.requestFinished(request);
++  }
++
++  Assert.ok(!markerFile.exists(), "Marker file was removed");
++
++  const usageAfter = await getCachedUsage(principal);
++  Assert.equal(usageAfter, 0, "Removing leftovers didn't make usage drift");
++}
+diff --git a/dom/indexedDB/test/unit/xpcshell-parent-process.toml b/dom/indexedDB/test/unit/xpcshell-parent-process.toml
+--- a/dom/indexedDB/test/unit/xpcshell-parent-process.toml
++++ b/dom/indexedDB/test/unit/xpcshell-parent-process.toml
+@@ -110,8 +110,14 @@ prefs = ["security.storage.encryption.sq
+ ["test_mutableFileUpgrade.js"]
+ # Bug 1996558: migrates a plaintext profile fixture that obfsvfs cannot read; runs with SQLite encryption off.
+ prefs = ["security.storage.encryption.sqlite.enabled=false"]
+ 
++["test_obsoleteDatabaseRemovalFailure.js"]
++prefs = [
++  "dom.quotaManager.loadQuotaFromCache=false",
++  "dom.quotaManager.loadQuotaFromSecondaryCache=false",
++]
++
+ ["test_obsoleteOriginAttributesUpgrade.js"]
+ # Bug 1996558: migrates a plaintext profile fixture that obfsvfs cannot read; runs with SQLite encryption off.
+ prefs = ["security.storage.encryption.sqlite.enabled=false"]
+ 
+diff --git a/dom/quota/ActorsParent.cpp b/dom/quota/ActorsParent.cpp
+--- a/dom/quota/ActorsParent.cpp
++++ b/dom/quota/ActorsParent.cpp
+@@ -3939,24 +3939,29 @@ Result<Ok, nsresult> QuotaManager::Initi
+     const nsCOMPtr<nsIFile>& aChildDirectory, const nsAutoString& aLeafName,
+     PersistenceType aPersistenceType,
+     nsTArray<RenameAndInitInfo>& aRenameAndInitInfos,
+     OriginFunc&& aOriginFunc) {
+-  QM_TRY_UNWRAP(auto maybeMetadata,
+-                QM_OR_ELSE_WARN_IF(
+-                    // Expression
+-                    LoadFullOriginMetadataWithRestore(aChildDirectory)
+-                        .map([](auto metadata) -> Maybe<FullOriginMetadata> {
+-                          return Some(std::move(metadata));
+-                        }),
+-                    // Predicate.
+-                    IsSpecificError<NS_ERROR_MALFORMED_URI>,
+-                    // Fallback.
+-                    ErrToDefaultOk<Maybe<FullOriginMetadata>>));
++  QM_TRY_UNWRAP(
++      auto maybeMetadata,
++      QM_OR_ELSE_WARN_IF(
++          // Expression
++          LoadFullOriginMetadataWithRestore(aChildDirectory)
++              .map([](FullOriginMetadata&& metadata)
++                       -> Maybe<FullOriginMetadata> {
++                return Some(std::move(metadata));
++              }),
++          // Predicate.
++          IsSpecificError<NS_ERROR_MALFORMED_URI>,
++          // Fallback. The origin is permanently unresolvable
++          // (e.g. an orphaned moz-extension directory whose
++          // extension has been uninstalled), so remove it.
++          ([&aChildDirectory](
++               const nsresult) -> Result<Maybe<FullOriginMetadata>, nsresult> {
++            QM_TRY(MOZ_TO_RESULT(aChildDirectory->Remove(true)));
++            return Maybe<FullOriginMetadata>{};
++          })));
+ 
+   if (!maybeMetadata) {
+-    // Unknown directories during initialization are
+-    // allowed. Just warn if we find them.
+-    UNKNOWN_FILE_WARNING(aLeafName);
+     return Ok{};
+   }
+ 
+   auto metadata = maybeMetadata.extract();
+@@ -6407,10 +6412,8 @@ QuotaManager::EnsurePersistentOriginIsIn
+           // Get the metadata. We only use the timestamp.
+           QM_TRY_INSPECT(const auto& metadata,
+                          LoadFullOriginMetadataWithRestore(directory));
+ 
+-          MOZ_ASSERT(metadata.mLastAccessTime <= PR_Now());
+-
+           return metadata;
+         }()));
+ 
+     QM_TRY(MOZ_TO_RESULT(InitializeOrigin(directory, fullOriginMetadata)));
+diff --git a/dom/quota/OriginOperations.cpp b/dom/quota/OriginOperations.cpp
+--- a/dom/quota/OriginOperations.cpp
++++ b/dom/quota/OriginOperations.cpp
+@@ -1023,9 +1023,8 @@ class EstimateOp final : public OpenStor
+ class ListOriginsOp final
+     : public OpenStorageDirectoryHelper<
+           ResolvableNormalOriginOp<CStringArray, /* IsExclusive */ true>>,
+       public TraverseRepositoryHelper {
+-  // XXX Bug 1521541 will make each origin has it's own state.
+   nsTArray<nsCString> mOrigins;
+ 
+  public:
+   explicit ListOriginsOp(MovingNotNull<RefPtr<QuotaManager>> aQuotaManager);
+diff --git a/dom/quota/QuotaCommon.h b/dom/quota/QuotaCommon.h
+--- a/dom/quota/QuotaCommon.h
++++ b/dom/quota/QuotaCommon.h
+@@ -1642,9 +1642,10 @@ auto ReduceEachFileAtomicCancelable(nsIF
+       std::move(aInit), aBody);
+ }
+ 
+ constexpr bool IsDatabaseCorruptionError(const nsresult aRv) {
+-  return aRv == NS_ERROR_FILE_CORRUPTED || aRv == NS_ERROR_STORAGE_IOERR;
++  return aRv == NS_ERROR_FILE_CORRUPTED || aRv == NS_ERROR_STORAGE_IOERR ||
++         aRv == NS_ERROR_MALFORMED_URI;
+ }
+ 
+ template <typename Func>
+ auto CallWithDelayedRetriesIfAccessDenied(Func&& aFunc, uint32_t aMaxRetries,
+diff --git a/dom/quota/nsIQuotaArtificialFailure.idl b/dom/quota/nsIQuotaArtificialFailure.idl
+--- a/dom/quota/nsIQuotaArtificialFailure.idl
++++ b/dom/quota/nsIQuotaArtificialFailure.idl
+@@ -11,6 +11,7 @@ interface nsIQuotaArtificialFailure : ns
+     CATEGORY_NONE = 0,
+     CATEGORY_INITIALIZE_ORIGIN = 1 << 0,
+     CATEGORY_OPEN_CLIENT_DIRECTORY = 1 << 1,
+     CATEGORY_CREATE_DIRECTORY_METADATA2 = 1 << 2,
++    CATEGORY_REMOVE_DATABASE_FILES = 1 << 3,
+   };
+ };
