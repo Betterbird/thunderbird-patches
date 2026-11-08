@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu>
 # Date 1794067459 -7200
-# Parent  f0ab68c6aaeac1b3eb4c04d0bd5a374b1042c181
+# Parent  66166d53f3a76b234705e9a91fb1c64fdf5202eb
 Fix feed vandalization - make logging useful again
 * * *
 Fix feed vandalization, Part I - folder/icon css
@@ -269,6 +269,11 @@ Feed Enhancements
 2. Enhance web page archive; add downloaded date.
 3. Add forgotten Open Feed Message (from View) to header toolbar More Actions.
 4. Remove deprecated Atom_03 code.
+5. Use a randomUUID for rss2.0 feeds with no guid or reasonable id.
+6. Implement function to remove feedItem entries based on msgHdr.messageId and ensure
+   the messageId is a valid key.
+* * *
+Remove two items from previous update:
 5. Use a randomUUID for rss2.0 feeds with no guid or reasonable id.
 6. Implement function to remove feedItem entries based on msgHdr.messageId and ensure
    the messageId is a valid key.
@@ -2031,7 +2036,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
  
  export function FeedItem() {
    this.mDate = lazy.FeedUtils.getValidRFC5322Date();
-@@ -69,25 +71,78 @@ FeedItem.prototype = {
+@@ -69,25 +71,79 @@ FeedItem.prototype = {
      return this.mDate;
    },
  
@@ -2112,14 +2117,15 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 -    lazy.FeedUtils.log.trace(
 -      "FeedItem.normalizeMessageID: messageID - " + messageID
 -    );
-+    messageID = (messageID || crypto.randomUUID()) + "@localhost.localdomain";
++    messageID =
++      "<" + (messageID || crypto.randomUUID()) + "@localhost.localdomain>";
 +
 +    this.feed.addLog("log", `normalizeMessageID: ${messageID}`);
      return messageID;
    },
  
    get contentBase() {
-@@ -102,9 +157,9 @@ FeedItem.prototype = {
+@@ -102,9 +158,9 @@ FeedItem.prototype = {
     * Writes the item to the folder as a message and updates the feeditems db.
     *
     * @returns {void}
@@ -2130,14 +2136,10 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
      // this.mUrl and this.contentBase contain plain text.
  
      let stored = false;
-@@ -120,14 +175,14 @@ FeedItem.prototype = {
-         lastSeenTime: 0,
-         valid: false,
+@@ -122,12 +178,11 @@ FeedItem.prototype = {
          stored: false,
        };
--      ds.data[this.id] = resource;
-+      // The feedItems.json entry keys are in the form of a RFC5322 Message-Id.
-+      ds.data[this.normalizeMessageID(this.id)] = resource;
+       ds.data[this.id] = resource;
        if (!this.content) {
 -        lazy.FeedUtils.log.trace(
 -          "FeedItem.store: " +
@@ -2192,8 +2194,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
      }
  
      const ds = lazy.FeedUtils.getItemsDS(server);
--    const item = ds.data[this.id];
-+    const item = ds.data[this.normalizeMessageID(this.id)];
+     const item = ds.data[this.id];
      if (!item || !item.stored) {
 -      lazy.FeedUtils.log.trace("FeedItem.findStoredResource: not stored");
 +      this.feed.addLog(
@@ -2268,7 +2269,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
      const keywordsStr = this.createHeaderStrFromArray(
        "Keywords: ",
        this.keywords
-@@ -251,17 +302,18 @@ FeedItem.prototype = {
+@@ -251,16 +302,17 @@ FeedItem.prototype = {
        "X-Mozilla-Status2: 00000000\n" +
        "X-Mozilla-Keys: " +
        tagKeys.padEnd(80, " ") +
@@ -2281,16 +2282,13 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 -      this.mDate +
 +      this.date +
        "\n" +
--      "Message-Id: " +
+       "Message-Id: " +
 -      this.normalizeMessageID(this.id) +
--      "\n" +
-+      "Message-Id: <" +
 +      messageID +
-+      ">\n" +
+       "\n" +
        fromStr +
        "MIME-Version: 1.0\n" +
        "Subject: " +
-       this.title +
 @@ -270,11 +322,13 @@ FeedItem.prototype = {
        keywordsStr +
        "Content-Transfer-Encoding: 8bit\n" +
@@ -2361,7 +2359,7 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +    const str =
 +      `Resent-Date: ${this.validateDate(this.updated)}\n` +
 +      `Resent-${fromStr}` +
-+      `Resent-Message-ID: <${messageID}>\n`;
++      `Resent-Message-ID: ${messageID}\n`;
 +    return str;
 +  },
 +
@@ -2375,8 +2373,8 @@ diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions
 +    }
 +    const inReplyToMessageID = this.normalizeMessageID(this.inReplyTo);
 +    const str =
-+      `References: <${inReplyToMessageID}>\n` +
-+      `In-Reply-To: <${inReplyToMessageID}>\n`;
++      `References: ${inReplyToMessageID}\n` +
++      `In-Reply-To: ${inReplyToMessageID}\n`;
 +    return str;
 +  },
 +
@@ -2766,7 +2764,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
  
      for (const itemNode of itemNodes) {
        if (!itemNode.childElementCount) {
-@@ -230,31 +253,24 @@ FeedParser.prototype = {
+@@ -230,11 +253,11 @@ FeedParser.prototype = {
        item.description = this.getNodeValueFormatted(tags ? tags[0] : null);
        tags = this.childrenByTagNameNS(itemNode, nsURI, "title");
        item.title = this.getNodeValue(tags ? tags[0] : null);
@@ -2781,24 +2779,9 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
          continue;
        }
  
-       if (!item.id) {
--        // At this point, if there is no guid, uniqueness cannot be guaranteed
--        // by any of link or date (optional) or title (optional unless there
--        // is no description). Use a big chunk of description; minimize dupes
--        // with url and title if present.
--        item.id =
--          (item.url || item.feed.url) +
--          "#" +
--          item.title +
--          "#" +
--          (this.stripTags(
--            item.description ? item.description.substr(0, 150) : null
--          ) || item.title);
--        item.id = item.id.replace(/[\n\r\t\s]+/g, " ");
-+        // At this point, if there is no guid, uniqueness will be guaranteed
-+        // by adding a random uuid to either the item url (may be null) or the
-+        // feed url.
-+        item.id = (item.url || item.feed.url) + "#" + crypto.randomUUID();
+@@ -253,8 +276,10 @@ FeedParser.prototype = {
+           ) || item.title);
+         item.id = item.id.replace(/[\n\r\t\s]+/g, " ");
        }
  
 +      aFeed.addLog("groupCollapsed", `parseAsRSS2: parsing item.id ${item.id}`);
@@ -2807,7 +2790,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        // values. If the title is used as content, it will remain escaped; if
        // it is used as the title, it will be unescaped upon store. Bug 1240603.
        // The <description> tag must follow escaping examples found in
-@@ -276,28 +292,17 @@ FeedParser.prototype = {
+@@ -276,28 +301,17 @@ FeedParser.prototype = {
            "creator"
          );
        }
@@ -2837,7 +2820,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
          itemNode,
          lazy.FeedUtils.RSS_CONTENT_NS,
          "encoded"
-@@ -371,10 +376,15 @@ FeedParser.prototype = {
+@@ -371,10 +385,15 @@ FeedParser.prototype = {
          }
        }
  
@@ -2853,7 +2836,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
    },
  
    /**
-@@ -425,11 +435,11 @@ FeedParser.prototype = {
+@@ -425,11 +444,11 @@ FeedParser.prototype = {
      );
      feed.link = this.validLink(this.getNodeValue(linkNode)) || feed.url;
  
@@ -2868,7 +2851,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        feed.onParseError(feed);
        return [];
      }
-@@ -445,9 +455,12 @@ FeedParser.prototype = {
+@@ -445,9 +464,12 @@ FeedParser.prototype = {
  
      // Now process all the individual items in the feed.
      let itemNodes = doc.getElementsByTagNameNS(lazy.FeedUtils.RSS_NS, "item");
@@ -2882,7 +2865,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        const item = new lazy.FeedItem();
        item.feed = feed;
  
-@@ -462,8 +475,10 @@ FeedParser.prototype = {
+@@ -462,8 +484,10 @@ FeedParser.prototype = {
        );
        item.id = this.getNodeValue(itemLinkNode) || itemURI;
        item.url = this.validLink(item.id);
@@ -2893,7 +2876,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
          itemNode,
          lazy.FeedUtils.RSS_NS,
          "description"
-@@ -486,12 +501,11 @@ FeedParser.prototype = {
+@@ -486,12 +510,11 @@ FeedParser.prototype = {
        if (!item.title && item.description) {
          item.title = this.stripTags(item.description).substr(0, 150);
        }
@@ -2909,7 +2892,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
          continue;
        }
  
-@@ -509,9 +523,9 @@ FeedParser.prototype = {
+@@ -509,9 +532,9 @@ FeedParser.prototype = {
        let author =
          this.getNodeValue(authorNode) ||
          this.getNodeValue(channelCreatorNode) ||
@@ -2920,7 +2903,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
  
        const dateNode = this.childByTagNameNS(
          itemNode,
-@@ -527,222 +541,15 @@ FeedParser.prototype = {
+@@ -527,222 +550,15 @@ FeedParser.prototype = {
        );
        item.content = this.getNodeValueFormatted(contentNode);
  
@@ -3147,7 +3130,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
    },
  
    parseAsAtomIETF(aFeed, aDOM) {
-@@ -793,13 +600,17 @@ FeedParser.prototype = {
+@@ -793,13 +609,17 @@ FeedParser.prototype = {
        contentBase = aFeed.link;
      }
  
@@ -3169,7 +3152,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
  
      if (!aFeed.parseItems) {
        return [];
-@@ -813,12 +624,12 @@ FeedParser.prototype = {
+@@ -813,12 +633,12 @@ FeedParser.prototype = {
        lazy.FeedUtils.ATOM_IETF_NS,
        "entry"
      );
@@ -3185,7 +3168,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        if (!itemNode.childElementCount) {
          continue;
        }
-@@ -889,15 +700,20 @@ FeedParser.prototype = {
+@@ -889,15 +709,20 @@ FeedParser.prototype = {
            (item.description ? item.description.substr(0, 150) : null)
        );
        if (!item.title || !item.id) {
@@ -3209,7 +3192,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        tags = this.childrenByTagNameNS(
          itemNode,
          lazy.FeedUtils.ATOM_IETF_NS,
-@@ -934,9 +750,9 @@ FeedParser.prototype = {
+@@ -934,9 +759,9 @@ FeedParser.prototype = {
            "email"
          );
          let email = this.getNodeValue(tags ? tags[0] : null);
@@ -3220,7 +3203,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
              if (!email.match(/^<.*>$/)) {
                email = " <" + email + ">";
              }
-@@ -959,37 +775,37 @@ FeedParser.prototype = {
+@@ -959,37 +784,37 @@ FeedParser.prototype = {
            lazy.FeedUtils.DC_NS,
            "publisher"
          );
@@ -3271,7 +3254,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        tags = this.childrenByTagNameNS(
          itemNode,
          lazy.FeedUtils.ATOM_IETF_NS,
-@@ -1016,9 +832,10 @@ FeedParser.prototype = {
+@@ -1016,9 +841,10 @@ FeedParser.prototype = {
        }
  
        item.xmlContentBase = this.validLink(item.xmlContentBase);
@@ -3283,7 +3266,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
          itemNode,
          lazy.FeedUtils.ATOM_IETF_NS,
          "link"
-@@ -1046,8 +863,23 @@ FeedParser.prototype = {
+@@ -1046,8 +872,23 @@ FeedParser.prototype = {
            }
          }
        }
@@ -3307,7 +3290,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
          itemNode,
          lazy.FeedUtils.FEEDBURNER_NS,
          "origEnclosureLink"
-@@ -1096,14 +928,223 @@ FeedParser.prototype = {
+@@ -1096,14 +937,223 @@ FeedParser.prototype = {
            }
          }
        }
@@ -3531,7 +3514,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
      // If subscribing to a new feed, do not check redirect tags.
      if (!aFeed.downloadCallback || aFeed.downloadCallback.mSubscribeMode) {
        return false;
-@@ -1135,29 +1176,23 @@ FeedParser.prototype = {
+@@ -1135,29 +1185,23 @@ FeedParser.prototype = {
        return false;
      }
  
@@ -3571,7 +3554,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
        aFeed.onUrlChange(aFeed, oldUrl);
        return true;
      }
-@@ -1225,27 +1260,26 @@ FeedParser.prototype = {
+@@ -1225,27 +1269,26 @@ FeedParser.prototype = {
  
    /**
     * Return a cleaned up author name value.
@@ -3603,7 +3586,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
      return author;
    },
  
-@@ -1431,13 +1465,14 @@ FeedParser.prototype = {
+@@ -1431,13 +1474,14 @@ FeedParser.prototype = {
        lazy.FeedUtils.RSS_SY_NS,
        "updateBase"
      );
@@ -3623,7 +3606,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
  
      if (updatePeriod) {
        if (lazy.FeedUtils.RSS_SY_UNITS.includes(updatePeriod.toLowerCase())) {
-@@ -1463,8 +1498,61 @@ FeedParser.prototype = {
+@@ -1463,8 +1507,61 @@ FeedParser.prototype = {
      options.updates.updateBase = updateBase;
      aFeed.options = options;
    },
@@ -3685,7 +3668,7 @@ diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensio
     * Remove unprintable ascii, particularly CR/LF, for non formatted tag values.
     *
     * @param {string} s - String to clean.
-@@ -1502,28 +1590,5 @@ FeedParser.prototype = {
+@@ -1502,28 +1599,5 @@ FeedParser.prototype = {
      s = s.replace(/>/g, "&gt;");
      s = s.replace(/</g, "&lt;");
      return s;
@@ -5039,63 +5022,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
     */
    Mixins: {
      meld(source, keep, replace) {
-@@ -1525,8 +1676,55 @@ export var FeedUtils = {
-     return ds;
-   },
- 
-   /**
-+   * Remove an entry in feedItems.json corresponding to a downloaded feed
-+   * article; this will allow redownload of the article.
-+   *
-+   * @param {nsIMsgDBHdr|nsIMsgDBHdr[]} msgHdrs - The message(s).
-+   */
-+  removeStoredResource(msgHdrs) {
-+    if (!Array.isArray(msgHdrs)) {
-+      msgHdrs = [msgHdrs];
-+    }
-+    for (const msgHdr of msgHdrs) {
-+      if (!this.isFeedMessage(msgHdr)) {
-+        this.log.debug(`removeStoredResource: not a feed message, id ${id}`);
-+        continue;
-+      }
-+      const id = msgHdr.messageId;
-+      if (!this.isFeedFolder(msgHdr.folder)) {
-+        this.log.debug(
-+          `removeStoredResource: not a feed account folder for message, id ${id}`
-+        );
-+        continue;
-+      }
-+      const server = msgHdr.folder.server;
-+      const ds = this.getItemsDS(server);
-+      if (!ds) {
-+        this.log.debug(
-+          `removeStoredResource: no feedItems file found in account for message, id ${id}`
-+        );
-+        continue;
-+      }
-+
-+      const item = ds?.data[id];
-+      if (!item || !item.stored) {
-+        this.log.debug(
-+          `removeStoredResource: resource not stored for message, id ${id}`
-+        );
-+        continue;
-+      }
-+
-+      delete ds.data[id];
-+      ds.saveSoon();
-+      this.log.debug(
-+        `removeStoredResource: resource removed for message, id ${id}`
-+      );
-+    }
-+  },
-+
-+  /**
-    * Dragging something from somewhere.  It may be a nice x-moz-url or from a
-    * browser or app that provides a less nice dataTransfer object in the event.
-    * Extract the url and if it passes the scheme test, try to subscribe.
-    *
-@@ -1543,46 +1741,29 @@ export var FeedUtils = {
+@@ -1543,46 +1694,29 @@ export var FeedUtils = {
      if (dt.getData(types[0])) {
        // The url is the data.
        uri = Services.io.newURI(dt.mozGetDataAt(types[0], 0));
@@ -5149,7 +5076,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
          if (validUri) {
            break;
          }
-@@ -1592,8 +1773,113 @@ export var FeedUtils = {
+@@ -1592,8 +1726,113 @@ export var FeedUtils = {
      return validUri ? uri : null;
    },
  
@@ -5263,7 +5190,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
     *
     * @param {XMLHTTPRequest} xhr - The xhr request.
     *
-@@ -1615,9 +1901,9 @@ export var FeedUtils = {
+@@ -1615,9 +1854,9 @@ export var FeedUtils = {
        // getErrorClass()) will throw a generic NS_ERROR_FAILURE if the error
        // code is somehow not in the set of covered errors.
        try {
@@ -5274,7 +5201,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
          errorClass = "SecurityProtocol";
        }
  
-@@ -1729,9 +2015,9 @@ export var FeedUtils = {
+@@ -1729,9 +1968,9 @@ export var FeedUtils = {
    isValidScheme(aUri) {
      if (!(aUri instanceof Ci.nsIURI)) {
        try {
@@ -5285,7 +5212,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
        }
      }
  
-@@ -1810,32 +2096,34 @@ export var FeedUtils = {
+@@ -1810,32 +2049,34 @@ export var FeedUtils = {
  
    /**
     * Date validator for feeds.
@@ -5335,7 +5262,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
      return lazy.jsmime.headeremitter
        .emitStructuredHeader("Date", d, {})
        .substring(6)
-@@ -1891,41 +2179,43 @@ export var FeedUtils = {
+@@ -1891,41 +2132,43 @@ export var FeedUtils = {
       * @param {boolean} aDisable - If true, disable/pause the feed.
       * @returns {void}
       */
@@ -5401,7 +5328,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
            // Non success.  Remove intermediate traces from the feeds database.
            FeedUtils.deleteFeed(feed);
          }
-@@ -1952,9 +2242,9 @@ export var FeedUtils = {
+@@ -1952,9 +2195,9 @@ export var FeedUtils = {
            }
  
            feed.options = options;
@@ -5412,7 +5339,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
              Services.prefs.getBoolPref("rss.disable_feeds_on_update_failure")
            ) {
              // Do not keep retrying feeds with error states. Set persisted state
-@@ -1967,15 +2257,13 @@ export var FeedUtils = {
+@@ -1967,15 +2210,13 @@ export var FeedUtils = {
  
              feed.options = options;
              FeedUtils.setStatus(feed.folder, feed.url, "enabled", false);
@@ -5432,7 +5359,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
            }
          }
  
-@@ -1991,10 +2279,10 @@ export var FeedUtils = {
+@@ -1991,10 +2232,10 @@ export var FeedUtils = {
              // This feed may belong to a folder with multiple other feeds, some
              // of which may not yet be finished, so free only if the folder is
              // no longer busy.
@@ -5445,7 +5372,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
            }
          }
        }
-@@ -2017,56 +2305,58 @@ export var FeedUtils = {
+@@ -2017,56 +2258,58 @@ export var FeedUtils = {
            message = FeedUtils.strings.formatStringFromName(
              "newsblog-feedNotValid",
              [feed.url]
@@ -5514,7 +5441,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
          // Should we do this on a timer so the text sticks around for a little
          // while?  It doesn't look like we do it on a timer for newsgroups so
          // we'll follow that model.  Don't clear the status text if we just
-@@ -2141,11 +2431,14 @@ export var FeedUtils = {
+@@ -2141,11 +2384,14 @@ export var FeedUtils = {
      },
    },
  };
@@ -5530,7 +5457,7 @@ diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extension
    });
  });
  
-@@ -2159,4 +2452,28 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
+@@ -2159,4 +2405,28 @@ ChromeUtils.defineLazyGetter(FeedUtils, 
    return Services.strings.createBundle(
      "chrome://messenger/locale/prefs.properties"
    );
