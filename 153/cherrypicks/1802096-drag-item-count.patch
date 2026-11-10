@@ -1,0 +1,631 @@
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1794266063 -7200
+# Node ID bb1e61b410a1be385980450efb34de6441eb1e1d
+# Parent  130a410d00bbb80f23354b96431db0cd5ec9a866
+Bug 1802096 - Show item counts when dragging multiple attachments or messages. r=aleca
+
+Render a system-colored, high-DPI-aware stack and count badge for multi-item
+drags in the reader, composer, message list, and Search Messages. Retain
+existing single-item feedback.
+
+Consolidate attachment transfer setup and file promises in DragUtils. Give
+each drag its own attachment map and macOS duplicate-save tracking, adapt
+composer attachments for saving, and honor the exported filename. Use the
+default isTmp flag so saved attachments appear in Downloads.
+
+Use the current database-view selection API in Search Messages so dragging
+exports the selected results.
+
+Add browser coverage for preview counts and scaling, skipped and deleted
+attachments, search results, and real promised-file saves, including filename
+collisions and repeated drags.
+
+Validation: commlint and headless preview and reader attachment tests pass.
+The existing composer drag test is skipped on Linux.
+
+Differential Revision: https://phabricator.services.mozilla.com/D336767
+
+diff --git a/mail/base/content/SearchDialog.js b/mail/base/content/SearchDialog.js
+--- a/mail/base/content/SearchDialog.js
++++ b/mail/base/content/SearchDialog.js
+@@ -15,8 +15,9 @@ ChromeUtils.importESModule("chrome://mes
+   global: "current",
+ });
+ ChromeUtils.defineESModuleGetters(this, {
+   DBViewWrapper: "resource:///modules/DBViewWrapper.sys.mjs",
++  DragUtils: "moz-src:///comm/mail/modules/DragUtils.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   TagUtils: "resource:///modules/TagUtils.sys.mjs",
+   ThreadPaneColumns: "chrome://messenger/content/ThreadPaneColumns.mjs",
+   TreeSelection: "chrome://messenger/content/TreeSelection.mjs",
+@@ -1417,9 +1418,14 @@ function MsgOpenSelectedMessages() {
+     document.getElementById("tabmail")
+   );
+ }
+ 
+-// This code is used when dragging a message from a "Search Messages" panel.
++/**
++ * Export selected search results for dragging, with a count preview for
++ * multiple messages.
++ *
++ * @param {DragEvent} aEvent - The dragstart event.
++ */
+ function ThreadPaneOnDragStart(aEvent) {
+   if (aEvent.target.localName != "treechildren") {
+     return;
+   }
+@@ -1512,8 +1518,9 @@ function ThreadPaneOnDragStart(aEvent) {
+     );
+   }
+   aEvent.dataTransfer.effectAllowed = "copyMove";
+   aEvent.dataTransfer.addElement(aEvent.target);
++  DragUtils.setMultiDragImage(aEvent, messageUris.length);
+ }
+ 
+ function ThreadPaneOnClick(event) {
+   // We only care about button 0 (left click) events.
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -53,8 +53,9 @@ ChromeUtils.defineESModuleGetters(
+ ChromeUtils.defineESModuleGetters(this, {
+   AccountColorUtils: "moz-src:///comm/mail/modules/AccountColorUtils.sys.mjs",
+   AttachmentInfo: "resource:///modules/AttachmentInfo.sys.mjs",
+   CalMetronome: "resource:///modules/CalMetronome.sys.mjs",
++  DragUtils: "moz-src:///comm/mail/modules/DragUtils.sys.mjs",
+   FolderPaneUtils: "resource:///modules/FolderPaneUtils.sys.mjs",
+   FolderTreeProperties: "resource:///modules/FolderTreeProperties.sys.mjs",
+   FolderUtils: "resource:///modules/FolderUtils.sys.mjs",
+   Gloda: "resource:///modules/gloda/GlodaPublic.sys.mjs",
+@@ -5535,14 +5536,16 @@ var threadPane = {
+       );
+     }
+ 
+     event.dataTransfer.effectAllowed = "copyMove";
+-    const bcr = row.getBoundingClientRect();
+-    event.dataTransfer.setDragImage(
+-      row,
+-      event.clientX - bcr.x,
+-      event.clientY - bcr.y
+-    );
++    if (!DragUtils.setMultiDragImage(event, messageURIs.length)) {
++      const bcr = row.getBoundingClientRect();
++      event.dataTransfer.setDragImage(
++        row,
++        event.clientX - bcr.x,
++        event.clientY - bcr.y
++      );
++    }
+   },
+ 
+   /**
+    * Handle threadPane dragover events.
+diff --git a/mail/base/content/mailCore.js b/mail/base/content/mailCore.js
+--- a/mail/base/content/mailCore.js
++++ b/mail/base/content/mailCore.js
+@@ -15,9 +15,8 @@
+ /* import-globals-from customizeToolbar.js */
+ /* import-globals-from utilityOverlay.js */
+ 
+ /* globals gChatTab */ // From globals chat-messenger.js
+-/* globals currentAttachments */ // From msgHdrView.js
+ 
+ var { openLinkExternally } = ChromeUtils.importESModule(
+   "resource:///modules/LinkHelper.sys.mjs"
+ );
+@@ -848,73 +847,8 @@ function SanitizeAttachmentDisplayName(a
+   return displayName.replace(/(.)\1{9,}/g, "$1…$1");
+ }
+ 
+ /**
+- * Appends a dataTransferItem to the associated event for message attachments,
+- * either from the message reader or the composer.
+- *
+- * @param {Event} event - The associated event.
+- * @param {nsIMsgAttachment[]} attachments - The attachments to setup
+- */
+-function setupDataTransfer(event, attachments) {
+-  let index = 0;
+-  for (const attachment of attachments) {
+-    if (attachment.contentType == "text/x-moz-deleted") {
+-      return;
+-    }
+-
+-    const name = attachment.name || attachment.displayName;
+-
+-    if (!attachment.url || !name) {
+-      continue;
+-    }
+-
+-    // Only add type/filename info for non-file URLs that don't already
+-    // have it.
+-    const info = [];
+-    if (/(^file:|&filename=)/.test(attachment.url)) {
+-      info.push(attachment.url);
+-    } else {
+-      info.push(
+-        attachment.url +
+-          "&type=" +
+-          attachment.contentType +
+-          "&filename=" +
+-          encodeURIComponent(name)
+-      );
+-    }
+-    info.push(name, attachment.size, attachment.contentType, attachment.uri);
+-    if (attachment.sendViaCloud) {
+-      info.push(attachment.cloudFileAccountKey, attachment.cloudPartHeaderData);
+-    }
+-
+-    event.dataTransfer.mozSetDataAt("text/x-moz-url", info.join("\n"), index);
+-    event.dataTransfer.mozSetDataAt(
+-      "text/x-moz-url-data",
+-      attachment.url,
+-      index
+-    );
+-    event.dataTransfer.mozSetDataAt("text/x-moz-url-desc", name, index);
+-    event.dataTransfer.mozSetDataAt(
+-      "application/x-moz-file-promise-url",
+-      attachment.url,
+-      index
+-    );
+-    event.dataTransfer.mozSetDataAt(
+-      "application/x-moz-file-promise",
+-      new FlavorDataProvider(),
+-      index
+-    );
+-    event.dataTransfer.mozSetDataAt(
+-      "application/x-moz-file-promise-dest-filename",
+-      name.replace(/(.{74}).*(.{10})$/u, "$1...$2"),
+-      index
+-    );
+-    index++;
+-  }
+-}
+-
+-/**
+  * Checks if Thunderbird was launched in safe mode and updates the menu items.
+  */
+ function updateTroubleshootMenuItem() {
+   if (Services.appinfo.inSafeMode) {
+@@ -929,90 +863,4 @@ function updateTroubleshootMenuItem() {
+       );
+     }
+   }
+ }
+-
+-/**
+- * @implements {nsIFlavorDataProvider}
+- */
+-class FlavorDataProvider {
+-  QueryInterface = ChromeUtils.generateQI(["nsIFlavorDataProvider"]);
+-
+-  /**
+-   * Retrieve the data from this data provider.
+-   *
+-   * @param {nsITransferable} transferable - Transferable we're being called for.
+-   * @param {string} flavor - The flavor of data to retrieve.
+-   * @param {nsISupports} data - Out param. The data. Some variant of class in
+-   *   nsISupportsPrimitives...
+-   */
+-  getFlavorData(transferable, flavor, data) {
+-    if (flavor != "application/x-moz-file-promise") {
+-      return;
+-    }
+-
+-    // Get the url for the attachment.
+-    const urlPrimitive = {};
+-    transferable.getTransferData(
+-      "application/x-moz-file-promise-url",
+-      urlPrimitive
+-    );
+-    const srcUrlPrimitive = urlPrimitive.value.QueryInterface(
+-      Ci.nsISupportsString
+-    );
+-
+-    // Get the destination file location.
+-    const dirPrimitive = {};
+-    transferable.getTransferData(
+-      "application/x-moz-file-promise-dir",
+-      dirPrimitive
+-    );
+-    const destDirectory = dirPrimitive.value.QueryInterface(Ci.nsIFile);
+-
+-    // Save the attachment to the specified location
+-    // We need more information than just the attachment url to save it,
+-    // fortunately, we have an array of all the current attachments so we can
+-    // cheat and scan through them
+-
+-    const attachment = currentAttachments.find(a => a.url == srcUrlPrimitive);
+-    if (!attachment) {
+-      return;
+-    }
+-
+-    const destFile = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+-    destFile.initWithPath(destDirectory.path);
+-    destFile.append(attachment.name.replace(/(.{74}).*(.{10})$/u, "$1...$2"));
+-
+-    // Check to see if we've already saved this attachment to the requested
+-    // destination and skip saving if we have.
+-    //
+-    // On MacOS, a save operation is triggered once for each item selected as part
+-    // of a drag operation. However, the `nsITransferable` API groups all items
+-    // together into a single transfer request that the attachment save code
+-    // invokes for every attachment in the file, thus leading to 2^n files saved
+-    // for any request saving n >= 2 attachments. Saving is an async operation, so
+-    // to work around this, we avoid saving attachments to the same path multiple
+-    // times.
+-    //
+-    // For relevant related code, see `provideDataForType` in
+-    // widget/cocoa/nsCocoaWindow.mm and `nsDragSession::InvokeDragSessionImpl` in
+-    // widget/cocoa/nsDragService.mm.
+-    if (AppConstants.platform == "macosx") {
+-      if (
+-        attachment.lastSavedPath &&
+-        attachment.lastSavedPath == destFile.path
+-      ) {
+-        return;
+-      }
+-
+-      attachment.lastSavedPath = destFile.path;
+-    }
+-
+-    // Save the attachment.
+-    destFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
+-    data.value = destFile.QueryInterface(Ci.nsISupports);
+-
+-    // `saveToFile` is async. We call it in a fire-and-forget manner here
+-    // so we can return while it runs in the background.
+-    attachment.saveToFile(destFile.path, attachment.uri);
+-  }
+-}
+diff --git a/mail/base/content/msgHdrView.js b/mail/base/content/msgHdrView.js
+--- a/mail/base/content/msgHdrView.js
++++ b/mail/base/content/msgHdrView.js
+@@ -29,8 +29,9 @@ var { MailServices } = ChromeUtils.impor
+ );
+ 
+ ChromeUtils.defineESModuleGetters(this, {
+   AttachmentInfo: "resource:///modules/AttachmentInfo.sys.mjs",
++  DragUtils: "moz-src:///comm/mail/modules/DragUtils.sys.mjs",
+   Gloda: "resource:///modules/gloda/GlodaPublic.sys.mjs",
+   GlodaUtils: "resource:///modules/gloda/GlodaUtils.sys.mjs",
+   MailUtils: "resource:///modules/MailUtils.sys.mjs",
+   MessageArchiver: "resource:///modules/MessageArchiver.sys.mjs",
+@@ -2561,18 +2562,20 @@ const attachmentListDNDObserver = {
+       const attachments = Array.from(
+         document.querySelectorAll("#attachmentList .attachmentItem[selected]"),
+         item => item.attachment
+       );
+-      setupDataTransfer(event, attachments);
++      DragUtils.setupAttachmentDataTransfer(event, attachments);
+     }
+     event.stopPropagation();
+   },
+ };
+ 
+ const attachmentNameDNDObserver = {
+   onDragStart(event) {
+     const attachmentList = document.getElementById("attachmentList");
+-    setupDataTransfer(event, [attachmentList.getItemAtIndex(0).attachment]);
++    DragUtils.setupAttachmentDataTransfer(event, [
++      attachmentList.getItemAtIndex(0).attachment,
++    ]);
+     event.stopPropagation();
+   },
+ };
+ 
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -90,8 +90,9 @@ XPCOMUtils.defineLazyScriptGetter(
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+   ComposeUtils: "resource:///modules/ComposeUtils.sys.mjs",
++  DragUtils: "moz-src:///comm/mail/modules/DragUtils.sys.mjs",
+   MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
+   makeMozIconImageSet: "resource:///modules/MozIconUtils.mjs",
+   QuoteSanitizer: "resource:///modules/QuoteSanitizer.sys.mjs",
+ });
+@@ -10612,9 +10613,9 @@ const attachmentBucketDNDObserver = {
+       const attachments = Array.from(
+         gAttachmentBucket.querySelectorAll(".attachmentItem[selected]"),
+         item => item.attachment
+       );
+-      setupDataTransfer(event, attachments);
++      lazy.DragUtils.setupAttachmentDataTransfer(event, attachments);
+     }
+     event.stopPropagation();
+   },
+ };
+diff --git a/mail/modules/AttachmentInfo.sys.mjs b/mail/modules/AttachmentInfo.sys.mjs
+--- a/mail/modules/AttachmentInfo.sys.mjs
++++ b/mail/modules/AttachmentInfo.sys.mjs
+@@ -100,16 +100,17 @@ export class AttachmentInfo {
+ 
+     // Remove [?&]part= from remote urls, after getting the partID.
+     // Remote urls, unlike non external mail part urls, may also contain query
+     // strings starting with ?; PART_RE does not handle this.
+-    if (this.isLinkAttachment || this.isFileAttachment) {
+-      let match = url.match(/[?&]part=[^&]+$/);
+-      match = match && match[0];
+-      this.partID = match && match.split("part=")[1];
+-      this.url = url.replace(match, "");
+-    } else {
+-      const match = lazy.GlodaUtils.PART_RE.exec(url);
+-      this.partID = match && match[1];
++    const linkOrFile = this.isLinkAttachment || this.isFileAttachment;
++    const match = linkOrFile
++      ? /[?&]part=([^&]+)$/.exec(url)
++      : lazy.GlodaUtils.PART_RE.exec(url);
++
++    this.partID = match?.[1] ?? null;
++
++    if (linkOrFile && match) {
++      this.url = url.slice(0, match.index);
+     }
+   }
+ 
+   /**
+diff --git a/mail/modules/DragUtils.sys.mjs b/mail/modules/DragUtils.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/modules/DragUtils.sys.mjs
+@@ -0,0 +1,243 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
++const lazy = {};
++ChromeUtils.defineESModuleGetters(lazy, {
++  AttachmentInfo: "resource:///modules/AttachmentInfo.sys.mjs",
++});
++
++/** Helpers for exporting dragged attachments and drawing drag feedback. */
++export const DragUtils = {
++  /**
++   * Export attachments from the reader or composer and set a count preview
++   * for multiple items. Skip attachments without a URL or name, and stop at
++   * deleted attachments. File promises retain the exported attachments for
++   * the lifetime of this drag.
++   *
++   * @param {DragEvent} event - The dragstart event.
++   * @param {Array<AttachmentInfo|nsIMsgAttachment>} attachments - The selected
++   *   attachments to export.
++   */
++  setupAttachmentDataTransfer(event, attachments) {
++    const attachmentsByURL = new Map();
++    const provider = new AttachmentFlavorDataProvider(attachmentsByURL);
++    let index = 0;
++    for (const attachment of attachments) {
++      if (attachment.contentType == "text/x-moz-deleted") {
++        break;
++      }
++
++      const name = attachment.name || attachment.displayName;
++
++      if (!attachment.url || !name) {
++        continue;
++      }
++
++      const filename = name.replace(/^(.{60}).{4,}(.{22})$/su, "$1...$2");
++      attachmentsByURL.set(
++        attachment.url,
++        attachment instanceof lazy.AttachmentInfo
++          ? attachment
++          : new lazy.AttachmentInfo({
++              contentType: attachment.contentType,
++              url: attachment.url,
++              name,
++              uri: attachment.msgUri,
++              isExternalAttachment: /^(?:file|https?):/.test(attachment.url),
++            })
++      );
++
++      // Only add type/filename info for non-file URLs that don't already
++      // have it.
++      const info = [];
++      if (/(^file:|&filename=)/.test(attachment.url)) {
++        info.push(attachment.url);
++      } else {
++        info.push(
++          attachment.url +
++            "&type=" +
++            attachment.contentType +
++            "&filename=" +
++            encodeURIComponent(name)
++        );
++      }
++      info.push(name, attachment.size, attachment.contentType, attachment.uri);
++      if (attachment.sendViaCloud) {
++        info.push(
++          attachment.cloudFileAccountKey,
++          attachment.cloudPartHeaderData
++        );
++      }
++
++      event.dataTransfer.mozSetDataAt("text/x-moz-url", info.join("\n"), index);
++      event.dataTransfer.mozSetDataAt(
++        "text/x-moz-url-data",
++        attachment.url,
++        index
++      );
++      event.dataTransfer.mozSetDataAt("text/x-moz-url-desc", name, index);
++      event.dataTransfer.mozSetDataAt(
++        "application/x-moz-file-promise-url",
++        attachment.url,
++        index
++      );
++      event.dataTransfer.mozSetDataAt(
++        "application/x-moz-file-promise",
++        provider,
++        index
++      );
++      event.dataTransfer.mozSetDataAt(
++        "application/x-moz-file-promise-dest-filename",
++        filename,
++        index
++      );
++      index++;
++    }
++    this.setMultiDragImage(event, index);
++  },
++
++  /**
++   * Set a stack of documents with a count badge as the drag image when more
++   * than one item is exported. Single-item drags keep their existing image.
++   *
++   * @param {DragEvent} event - The dragstart event.
++   * @param {number} count - The number of exported items.
++   * @returns {boolean} Whether a custom drag image was set.
++   */
++  setMultiDragImage(event, count) {
++    if (count < 2) {
++      return false;
++    }
++
++    const document = event.target.ownerDocument;
++    const scale = document.defaultView.devicePixelRatio;
++    const canvas = document.createElementNS(
++      "http://www.w3.org/1999/xhtml",
++      "canvas"
++    );
++    const context = canvas.getContext("2d");
++    const font = "bold 12px sans-serif";
++    const label = count.toLocaleString();
++    context.font = font;
++    const badgeWidth = Math.max(
++      24,
++      Math.ceil(context.measureText(label).width) + 12
++    );
++    const width = 28 + badgeWidth;
++    // Gecko uses device pixels for canvas drag images and CSS pixels for offsets.
++    canvas.width = Math.ceil(width * scale);
++    canvas.height = Math.ceil(48 * scale);
++    context.scale(scale, scale);
++
++    context.lineWidth = 1;
++    for (const offset of [8, 4, 0]) {
++      context.beginPath();
++      context.roundRect(2.5 + offset, 2.5 + offset, 26, 32, 3);
++      context.fillStyle = "Canvas";
++      context.fill();
++      context.strokeStyle = "CanvasText";
++      context.stroke();
++    }
++    context.beginPath();
++    for (const y of [11.5, 17.5, 23.5]) {
++      context.moveTo(8, y);
++      context.lineTo(23, y);
++    }
++    context.stroke();
++
++    context.beginPath();
++    context.roundRect(26, 26, badgeWidth, 20, 10);
++    context.fillStyle = "SelectedItem";
++    context.fill();
++    context.strokeStyle = "CanvasText";
++    context.stroke();
++    context.font = font;
++    context.textAlign = "center";
++    context.textBaseline = "middle";
++    context.fillStyle = "SelectedItemText";
++    context.fillText(label, 26 + badgeWidth / 2, 36);
++
++    event.dataTransfer.setDragImage(canvas, 12, 12);
++    return true;
++  },
++};
++
++/**
++ * Save promised attachment files using the attachments captured for one drag.
++ *
++ * @implements {nsIFlavorDataProvider}
++ */
++class AttachmentFlavorDataProvider {
++  QueryInterface = ChromeUtils.generateQI(["nsIFlavorDataProvider"]);
++
++  /** @type {Map<string, AttachmentInfo>} */
++  #attachments;
++
++  /** @type {Map<string, nsIFile>} */
++  #savedFiles = new Map();
++
++  /**
++   * @param {Map<string, AttachmentInfo>} attachments - The exported attachments,
++   *   keyed by source URL.
++   */
++  constructor(attachments) {
++    this.#attachments = attachments;
++  }
++
++  /**
++   * Reserve a unique destination file and start saving its attachment.
++   * On macOS, reuse the file for repeated requests within this drag.
++   *
++   * @param {nsITransferable} transferable - The source URL, destination filename,
++   *   and destination folder.
++   * @param {string} flavor - The requested transfer flavor.
++   * @param {{value?: nsISupports}} data - Receives the reserved destination file.
++   */
++  getFlavorData(transferable, flavor, data) {
++    if (flavor != "application/x-moz-file-promise") {
++      return;
++    }
++
++    const source = {};
++    transferable.getTransferData("application/x-moz-file-promise-url", source);
++    const url = source.value.QueryInterface(Ci.nsISupportsString).data;
++    const attachment = this.#attachments.get(url);
++    if (!attachment) {
++      return;
++    }
++
++    const filename = {};
++    transferable.getTransferData(
++      "application/x-moz-file-promise-dest-filename",
++      filename
++    );
++    const directory = {};
++    transferable.getTransferData(
++      "application/x-moz-file-promise-dir",
++      directory
++    );
++    const file = directory.value.QueryInterface(Ci.nsIFile).clone();
++    file.append(filename.value.QueryInterface(Ci.nsISupportsString).data);
++    const key = JSON.stringify([url, file.path]);
++
++    // macOS can request the same file repeatedly while processing a multi-item
++    // drag. Share these reservations across all items, but only for this drag.
++    if (AppConstants.platform == "macosx" && this.#savedFiles.has(key)) {
++      data.value = this.#savedFiles.get(key);
++      return;
++    }
++
++    file.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
++    data.value = file;
++    if (AppConstants.platform == "macosx") {
++      this.#savedFiles.set(key, file);
++    }
++    attachment.saveToFile(file.path).catch(error => {
++      this.#savedFiles.delete(key);
++      console.error(error);
++    });
++  }
++}
+diff --git a/mail/modules/moz.build b/mail/modules/moz.build
+--- a/mail/modules/moz.build
++++ b/mail/modules/moz.build
+@@ -4,8 +4,9 @@
+ 
+ MOZ_SRC_FILES += [
+     "AccountColorUtils.sys.mjs",
+     "AccountManagerUtils.sys.mjs",
++    "DragUtils.sys.mjs",
+     "QRExport.sys.mjs",
+ ]
+ 
+ EXTRA_JS_MODULES += [

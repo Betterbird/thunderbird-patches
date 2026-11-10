@@ -1,0 +1,287 @@
+
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1781225986 -43200
+# Node ID 09563820b7b29f4d75cde98b2e1818a57de1479f
+# Parent  b7d9fd5f5c11c2191e507fe8a720e893d2d44367
+Bug 2047462 - Prevent removal of special-use folder flags set by an IMAP server. r=BenC
+
+Differential Revision: https://phabricator.services.mozilla.com/D306647
+
+diff --git a/mailnews/base/src/nsMsgDBFolder.cpp b/mailnews/base/src/nsMsgDBFolder.cpp
+--- a/mailnews/base/src/nsMsgDBFolder.cpp
++++ b/mailnews/base/src/nsMsgDBFolder.cpp
+@@ -4004,16 +4004,20 @@ NS_IMETHODIMP nsMsgDBFolder::SetFlag(uin
+   if (!dbWasOpen && mDatabase) {
+     SetMsgDatabase(nullptr);
+   }
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::ClearFlag(uint32_t flag) {
++  if (flag & mLockedFlags) {
++    return NS_OK;
++  }
++
+   // If calling this function causes us to open the db (i.e., it was not
+   // open before), we're going to close the db before returning.
+   bool dbWasOpen = mDatabase != nullptr;
+ 
+   // OnFlagChange can be expensive, so don't call it if we don't need to
+   bool flagSet;
+   nsresult rv;
+ 
+@@ -4032,16 +4036,20 @@ NS_IMETHODIMP nsMsgDBFolder::ClearFlag(u
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::GetFlag(uint32_t flag, bool* _retval) {
+   *_retval = ((mFlags & flag) != 0);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::ToggleFlag(uint32_t flag) {
++  if (flag & mLockedFlags) {
++    return NS_OK;
++  }
++
+   mFlags ^= flag;
+   OnFlagChange(flag);
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::OnFlagChange(uint32_t flag) {
+   nsresult rv = NS_OK;
+@@ -4064,16 +4072,18 @@ NS_IMETHODIMP nsMsgDBFolder::OnFlagChang
+       bool newValue = mFlags & nsMsgFolderFlags::Elided;
+       rv = NotifyBoolPropertyChanged(kOpen, !!newValue, !newValue);
+     }
+   }
+   return rv;
+ }
+ 
+ NS_IMETHODIMP nsMsgDBFolder::SetFlags(uint32_t aFlags) {
++  aFlags |= mLockedFlags;
++
+   if (mFlags != aFlags) {
+     uint32_t changedFlags = aFlags ^ mFlags;
+     mFlags = aFlags;
+     OnFlagChange(changedFlags);
+   }
+   return NS_OK;
+ }
+ 
+diff --git a/mailnews/base/src/nsMsgDBFolder.h b/mailnews/base/src/nsMsgDBFolder.h
+--- a/mailnews/base/src/nsMsgDBFolder.h
++++ b/mailnews/base/src/nsMsgDBFolder.h
+@@ -232,16 +232,20 @@ class nsMsgDBFolder : public nsSupportsW
+    * End of offline message tracking vars
+    */
+ 
+   nsCOMPtr<nsIMsgRetentionSettings> m_retentionSettings;
+   nsCOMPtr<nsIMsgDownloadSettings> m_downloadSettings;
+   static nsrefcnt mInstanceCount;
+ 
+   uint32_t mFlags;
++  // Flags that cannot be cleared. These are set if the server says the
++  // mailbox has one or more special folder flags.
++  uint32_t mLockedFlags{0};
++
+   uint32_t mUserSortOrder;    // Sort order among sibling folders.
+   nsWeakPtr mParent;          // This won't be refcounted for ownership reasons.
+   int32_t mNumUnreadMessages; /* count of unread messages (-1 means unknown; -2
+                                  means unknown but we already tried to find
+                                  out.) */
+   int32_t mNumTotalMessages;  /* count of existing messages. */
+   bool mNotifyCountChanges;
+   int64_t mExpungedBytes;
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -1158,16 +1158,17 @@ NS_IMETHODIMP nsImapMailFolder::SetBoxFl
+       }
+     }
+   }
+   // Treat the GMail all mail folder as the archive folder.
+   if (m_boxFlags & kImapAllMail)
+     newFlags |= nsMsgFolderFlags::Archive | nsMsgFolderFlags::AllMail;
+   if (m_boxFlags & kImapArchive) newFlags |= nsMsgFolderFlags::Archive;
+ 
++  mLockedFlags = newFlags & nsMsgFolderFlags::SpecialUse;
+   SetFlags(newFlags);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsImapMailFolder::GetBoxFlags(int32_t* aBoxFlags) {
+   NS_ENSURE_ARG_POINTER(aBoxFlags);
+   *aBoxFlags = m_boxFlags;
+   return NS_OK;
+diff --git a/mailnews/imap/test/unit/test_lockedFlagsImap.js b/mailnews/imap/test/unit/test_lockedFlagsImap.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/imap/test/unit/test_lockedFlagsImap.js
+@@ -0,0 +1,140 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests folders with special use flags prevent removal of those flags, if the
++ * flags come from an IMAP server.
++ */
++
++const { IMAPServer } = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/IMAPServer.sys.mjs"
++);
++
++add_task(async function () {
++  const server = new IMAPServer();
++  server.daemon.createMailbox("Trash", {
++    flags: ["\\Trash"],
++    subscribed: true,
++  });
++  server.daemon.createMailbox("Sent", { flags: ["\\Sent"], subscribed: true });
++  server.daemon.createMailbox("Drafts", {
++    flags: ["\\Drafts"],
++    subscribed: true,
++  });
++  server.daemon.createMailbox("Spam", { flags: ["\\Spam"], subscribed: true });
++  server.daemon.createMailbox("Archives", {
++    flags: ["\\Archive"],
++    subscribed: true,
++  });
++  server.daemon.createMailbox("Not Special", { subscribed: true });
++
++  const account = MailServices.accounts.createAccount();
++  account.addIdentity(MailServices.accounts.createIdentity());
++  account.incomingServer = MailServices.accounts.createIncomingServer(
++    "user",
++    "localhost",
++    "imap"
++  );
++  account.incomingServer.password = "password";
++  account.incomingServer.port = server.port;
++
++  const rootFolder = account.incomingServer.rootFolder;
++  const listener = new PromiseTestUtils.PromiseUrlListener();
++  MailServices.imap.discoverAllFolders(rootFolder, listener, null);
++  await listener.promise;
++
++  const inboxFolder = rootFolder.getChildNamed("INBOX");
++  testLockedFlag(inboxFolder, "Inbox");
++  testUnlockedFlag(inboxFolder);
++
++  const sentFolder = rootFolder.getChildNamed("Sent");
++  testLockedFlag(sentFolder, "SentMail");
++  testUnlockedFlag(sentFolder);
++
++  const draftsFolder = rootFolder.getChildNamed("Drafts");
++  testLockedFlag(draftsFolder, "Drafts");
++  testUnlockedFlag(draftsFolder);
++
++  const trashFolder = rootFolder.getChildNamed("Trash");
++  testLockedFlag(trashFolder, "Trash");
++  testUnlockedFlag(trashFolder);
++
++  const spamFolder = rootFolder.getChildNamed("Spam");
++  testLockedFlag(spamFolder, "Junk");
++  testUnlockedFlag(spamFolder);
++
++  const archivesFolder = rootFolder.getChildNamed("Archives");
++  testLockedFlag(archivesFolder, "Archive");
++  testUnlockedFlag(archivesFolder);
++
++  const notSpecialFolder = rootFolder.getChildNamed("Not Special");
++  testUnlockedFlag(notSpecialFolder);
++  testUnlockedFlag(notSpecialFolder, "SentMail");
++  testUnlockedFlag(notSpecialFolder, "Archive");
++});
++
++function testLockedFlag(folder, flagName) {
++  info(`checking the locked functions with ${flagName} flag on ${folder.URI}`);
++  const flag = Ci.nsMsgFolderFlags[flagName];
++  const initialFlags = folder.flags;
++  Assert.ok(initialFlags & flag, "folder had flag to begin with");
++
++  folder.clearFlag(flag);
++  Assert.equal(
++    folder.flags.toString(16),
++    initialFlags.toString(16),
++    "flags are unchanged after clearFlag"
++  );
++
++  folder.toggleFlag(flag);
++  Assert.equal(
++    folder.flags.toString(16),
++    initialFlags.toString(16),
++    "flags are unchanged after toggleFlag"
++  );
++
++  folder.flags &= ~flag;
++  Assert.equal(
++    folder.flags.toString(16),
++    initialFlags.toString(16),
++    "flags are unchanged after setFlags"
++  );
++}
++
++function testUnlockedFlag(folder, flagName = "Unused4") {
++  info(
++    `checking the unlocked functions with ${flagName} flag on ${folder.URI}`
++  );
++  const flag = Ci.nsMsgFolderFlags[flagName];
++  const initialFlags = folder.flags;
++  Assert.ok(!(initialFlags & flag), "folder did not have flag to begin with");
++
++  folder.setFlag(flag);
++  Assert.equal(
++    folder.flags.toString(16),
++    (initialFlags | flag).toString(16),
++    "flag is added by setFlag"
++  );
++
++  folder.clearFlag(flag);
++  Assert.equal(
++    folder.flags.toString(16),
++    initialFlags.toString(16),
++    "flag is removed by clearFlag"
++  );
++
++  folder.toggleFlag(flag);
++  Assert.equal(
++    folder.flags.toString(16),
++    (initialFlags | flag).toString(16),
++    "flag is added by toggleFlag"
++  );
++
++  folder.flags &= ~flag;
++  Assert.equal(
++    folder.flags.toString(16),
++    initialFlags.toString(16),
++    "flag is removed by setFlags"
++  );
++}
+diff --git a/mailnews/imap/test/unit/xpcshell-shared.toml b/mailnews/imap/test/unit/xpcshell-shared.toml
+--- a/mailnews/imap/test/unit/xpcshell-shared.toml
++++ b/mailnews/imap/test/unit/xpcshell-shared.toml
+@@ -101,16 +101,18 @@ run-if = [
+ ["test_listClosesDB.js"]
+ 
+ ["test_listSubscribed.js"]
+ 
+ ["test_localToImapFilter.js"]
+ 
+ ["test_localToImapFilterQuarantine.js"]
+ 
++["test_lockedFlagsImap.js"]
++
+ ["test_lsub.js"]
+ 
+ ["test_mailboxes.js"]
+ 
+ ["test_missingDateUsesReceived.js"]
+ 
+ ["test_multiFolderMove.js"]
+ 
+

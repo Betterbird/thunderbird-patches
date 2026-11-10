@@ -1,0 +1,137 @@
+
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1793990839 -7200
+# Node ID b9c8f915d6a5740202fbdf02ebf9fe2f5db8e2c3
+# Parent  cb765e2852916e62064eaac0fcdad7e71232e3ec
+Bug 2088411 - Only consider CardDAV directories when checking for existing address books in the Account Hub. r=freaktechnik
+
+Differential Revision: https://phabricator.services.mozilla.com/D339476
+
+
+diff --git a/mail/components/accountcreation/modules/RemoteAddressBookUtils.sys.mjs b/mail/components/accountcreation/modules/RemoteAddressBookUtils.sys.mjs
+--- a/mail/components/accountcreation/modules/RemoteAddressBookUtils.sys.mjs
++++ b/mail/components/accountcreation/modules/RemoteAddressBookUtils.sys.mjs
+@@ -28,16 +28,20 @@ const existingCardDAVBooks = {
+    */
+   _isObserving: false,
+   /**
+    * Update the list of URLs in _list from the current address books.
+    */
+   updateExistingAddressBooks() {
+     this._list = new Set(
+       lazy.MailServices.ab.directories
++        .filter(
++          directory =>
++            directory.dirType == Ci.nsIAbManager.CARDDAV_DIRECTORY_TYPE
++        )
+         .map(directory => directory.getStringValue("carddav.url", ""))
+         .filter(Boolean)
+     );
+   },
+   /**
+    * Make sure _list is set and this is subscribed to address book observer
+    * notifications.
+    */
+diff --git a/mail/components/accountcreation/test/xpcshell/test_remoteAddressBookUtils.js b/mail/components/accountcreation/test/xpcshell/test_remoteAddressBookUtils.js
+--- a/mail/components/accountcreation/test/xpcshell/test_remoteAddressBookUtils.js
++++ b/mail/components/accountcreation/test/xpcshell/test_remoteAddressBookUtils.js
+@@ -3,16 +3,20 @@
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ "use strict";
+ 
+ const { RemoteAddressBookUtils } = ChromeUtils.importESModule(
+   "resource:///modules/accountcreation/RemoteAddressBookUtils.sys.mjs"
+ );
+ 
++const { AddrBookDirectory } = ChromeUtils.importESModule(
++  "resource:///modules/AddrBookDirectory.sys.mjs"
++);
++
+ const { CardDAVServer } = ChromeUtils.importESModule(
+   "resource://testing-common/CardDAVServer.sys.mjs"
+ );
+ 
+ const { FeedUtils } = ChromeUtils.importESModule(
+   "resource:///modules/FeedUtils.sys.mjs"
+ );
+ 
+@@ -38,23 +42,23 @@ add_setup(async () => {
+   do_get_profile();
+   // Initialize the AB manager.
+   MailServices.ab.directories;
+   // Port 9999 is special and makes this work with an email account.
+   CardDAVServer.open("test@test.invalid", "bob", 9999);
+   const uid = MailServices.ab.newAddressBook(
+     "test",
+     null,
+-    Ci.nsIBackgroundTasksManager.CARDDAV_DIRECTORY_TYPE,
++    Ci.nsIAbManager.CARDDAV_DIRECTORY_TYPE,
+     null
+   );
+   const book = MailServices.ab.getDirectoryFromId(uid);
+ 
+   book.setStringValue("carddav.url", CardDAVServer.url);
+-  book.setStringValue(CardDAVServer.username, "bob");
++  book.setStringValue("carddav.username", CardDAVServer.username);
+   const login = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(
+     Ci.nsILoginInfo
+   );
+   login.init(
+     CardDAVServer.origin,
+     null,
+     "test",
+     CardDAVServer.username,
+@@ -186,16 +190,50 @@ add_task(function test_markExistingAddre
+     Assert.equal(
+       book.existing,
+       book._expectExisting,
+       `Book ${book.name} existing flag should match expected state`
+     );
+   }
+ });
+ 
++add_task(function test_markExistingAddressBooks_noDirPrefId() {
++  /**
++   * Mirrors the relevant parts of ExtSearchBook in ext-addressBook.js, which
++   * registers directories without a dirPrefId.
++   */
++  class NoPrefDirectory extends AddrBookDirectory {
++    constructor() {
++      super();
++      this._dirName = "no pref";
++      this._uid = "no-pref-directory";
++      this._uri = `searchaddr://${this._uid}`;
++      this._dirPrefId = "";
++      this.isMailList = false;
++    }
++    get dirType() {
++      return Ci.nsIAbManager.ASYNC_DIRECTORY_TYPE;
++    }
++  }
++  const directory = new NoPrefDirectory();
++  directory.init();
++  MailServices.ab.addAddressBook(directory);
++
++  try {
++    const books = [{ name: "existing book", url: new URL(CardDAVServer.url) }];
++    RemoteAddressBookUtils.markExistingAddressBooks(books);
++    Assert.ok(
++      books[0].existing,
++      "Existing book should be detected despite a directory without dirPrefId"
++    );
++  } finally {
++    MailServices.ab.deleteAddressBook(directory.URI);
++  }
++});
++
+ add_task(async function test_getAddressBooksForAccount_badURLs() {
+   await Assert.rejects(
+     RemoteAddressBookUtils.getAddressBooksForAccount(
+       CardDAVServer.username,
+       "bob",
+       "mochi.test:8888"
+     ),
+     /NS_NOINTERFACE/
+

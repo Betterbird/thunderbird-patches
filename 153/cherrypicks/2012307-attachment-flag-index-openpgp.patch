@@ -1,0 +1,166 @@
+
+# HG changeset patch
+# User Welpy-cw <58345540+Welpy-cw@users.noreply.github.com>
+# Date 1793990873 -7200
+# Node ID dccff3e755602af67c7ce8b23431a216242f521f
+# Parent  b9c8f915d6a5740202fbdf02ebf9fe2f5db8e2c3
+Bug 2012307 - Preserve attachment flags when indexing OpenPGP messages. r=mkmelin
+
+Mark multipart/encrypted MIME containers as encrypted so Gloda preserves
+attachment flags discovered when previewing decrypted messages.
+
+Add regression coverage for top-level and nested encrypted content across
+the local and IMAP indexing variants.
+
+Differential Revision: https://phabricator.services.mozilla.com/D339901
+
+
+diff --git a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs b/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
+--- a/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
++++ b/mailnews/db/gloda/components/MimeMessageEmitter.sys.mjs
+@@ -132,16 +132,17 @@ MimeMessageEmitter.prototype = {
+       //  content-type needs to get clobbered by the actual content-type of
+       //  the enclosed message.
+       this._writeBody = false;
+       return;
+     } else if (contentTypeNoParams.startsWith("multipart/")) {
+       // this is going to fall-down with TNEF encapsulation and such, we really
+       // need to just be consuming the object model.
+       this._curPart = new this._mimeMsg.MimeContainer(contentTypeNoParams);
++      this._curPart.isEncrypted = contentTypeNoParams == "multipart/encrypted";
+       this._writeBody = false;
+     } else {
+       this._curPart = new this._mimeMsg.MimeUnknown(contentTypeNoParams);
+       this._writeBody = false;
+     }
+     // put the full content-type in the headers and normalize out any newlines
+     this._curPart.headers["content-type"] = [
+       aContentType.replace(deathToNewlines, ""),
+diff --git a/mailnews/db/gloda/test/unit/base_index_messages.js b/mailnews/db/gloda/test/unit/base_index_messages.js
+--- a/mailnews/db/gloda/test/unit/base_index_messages.js
++++ b/mailnews/db/gloda/test/unit/base_index_messages.js
+@@ -54,20 +54,24 @@ var {
+   "resource://testing-common/gloda/GlodaTestHelperFunctions.sys.mjs"
+ );
+ var { PromiseTestUtils } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+ );
+ var { MessageInjection } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/MessageInjection.sys.mjs"
+ );
+-var { SyntheticMessageSet, SyntheticPartMultiMixed, SyntheticPartLeaf } =
+-  ChromeUtils.importESModule(
+-    "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+-  );
++var {
++  SyntheticMessageSet,
++  SyntheticPartMulti,
++  SyntheticPartMultiMixed,
++  SyntheticPartLeaf,
++} = ChromeUtils.importESModule(
++  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
++);
+ var { TagNoun } = ChromeUtils.importESModule(
+   "resource:///modules/gloda/NounTag.sys.mjs"
+ );
+ 
+ // Whether we can expect fulltext results
+ var expectFulltextResults = true;
+ 
+ /**
+@@ -492,16 +496,76 @@ function verify_attachment_flag(smsg, gm
+     Assert.equal(gmsg.attachmentNames.length, 0);
+     Assert.equal(gmsg.attachmentInfos.length, 0);
+     Assert.equal(
+       false,
+       gmsg.folderMessage.flags & Ci.nsMsgMessageFlags.Attachment
+     );
+   }
+ }
++
++async function test_encrypted_attachment_flag() {
++  const encryptedPart = new SyntheticPartMulti(
++    [
++      new SyntheticPartLeaf("Version: 1\r\n", {
++        contentType: "application/pgp-encrypted",
++      }),
++      new SyntheticPartLeaf("opaque encrypted payload", {
++        contentType: "application/octet-stream",
++      }),
++    ],
++    {
++      contentType: 'multipart/encrypted; protocol="application/pgp-encrypted"',
++    }
++  );
++  const msgSet = new SyntheticMessageSet(
++    [
++      encryptedPart,
++      new SyntheticPartMultiMixed([
++        new SyntheticPartLeaf("Unencrypted text"),
++        encryptedPart,
++      ]),
++    ].map(bodyPart => msgGen.makeMessage({ bodyPart }))
++  );
++  const folder = await messageInjection.makeEmptyFolder();
++
++  configureGlodaIndexing({ event: false });
++  await messageInjection.addSetsToFolders([folder], [msgSet]);
++  for (let i = 0; i < msgSet.synMessages.length; i++) {
++    // Simulate the attachment flag set by previewing the decrypted message.
++    msgSet.getMsgHdr(i).markHasAttachments(true);
++  }
++  configureGlodaIndexing({ event: true });
++
++  if (goOffline) {
++    await waitForGlodaIndexer();
++    Assert.ok(...assertExpectedMessagesIndexed([msgSet]));
++    await messageInjection.makeFolderAndContentsOffline(folder);
++  }
++
++  await waitForGlodaIndexer();
++  Assert.ok(
++    ...assertExpectedMessagesIndexed([msgSet], {
++      verifier(smsg, gmsg) {
++        Assert.ok(
++          gmsg.folderMessage.flags & Ci.nsMsgMessageFlags.Attachment,
++          "Indexing should preserve the attachment flag for encrypted content"
++        );
++        if (expectFulltextResults) {
++          Assert.ok(gmsg.isEncrypted, "The message should be marked encrypted");
++          Assert.equal(
++            gmsg.attachmentInfos.length,
++            0,
++            "The indexer should not see inside the encrypted content"
++          );
++        }
++      },
++    })
++  );
++}
+ /* ===== Fundamental Attributes (per GlodaFundAttr.sys.mjs) ===== */
+ 
+ /**
+  * Save the synthetic message created in test_attributes_fundamental for the
+  *  benefit of test_attributes_fundamental_from_disk.
+  */
+ var fundamentalSyntheticMessage;
+ var fundamentalFolderHandle;
+@@ -1445,16 +1509,17 @@ var base_index_messages_tests = [
+   test_pending_commit_causes_msgdb_commit,
+   test_indexing_sweep,
+   test_event_driven_indexing_does_not_mess_with_filthy_folders,
+ 
+   test_threading_direct_reply,
+   test_threading_missing_intermediary,
+   test_threading_siblings_missing_parent,
+   test_attachment_flag,
++  test_encrypted_attachment_flag,
+   test_attributes_fundamental,
+   test_moved_message_attributes,
+   test_attributes_fundamental_from_disk,
+   test_attributes_explicit,
+   test_attributes_cant_query,
+ 
+   test_people_in_addressbook,
+ 
+
