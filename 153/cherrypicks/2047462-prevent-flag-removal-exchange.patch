@@ -1,0 +1,150 @@
+
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1794332129 -7200
+# Node ID 674ca3f737cfef25cdd6c613d9a6848f9d70549c
+# Parent  9eaa7728c20e72da8cec98b60e5935a912a0c176
+Bug 2047462 - Prevent removal of special-use folder flags set by an Exchange server. r=BenC
+
+Differential Revision: https://phabricator.services.mozilla.com/D307177
+
+diff --git a/mailnews/protocols/exchange/src/ExchangeFolder.cpp b/mailnews/protocols/exchange/src/ExchangeFolder.cpp
+--- a/mailnews/protocols/exchange/src/ExchangeFolder.cpp
++++ b/mailnews/protocols/exchange/src/ExchangeFolder.cpp
+@@ -168,8 +168,32 @@ ExchangeFolder::ExchangeFolder()
+     : mHasLoadedSubfolders(false), mExchangeProtocol("") {}
+ 
+ ExchangeFolder::~ExchangeFolder() = default;
+ 
++NS_IMETHODIMP
++ExchangeFolder::SetStringProperty(const char* propertyName,
++                                  const nsACString& propertyValue) {
++  if (!strcmp(propertyName, kExchangeIdProperty)) {
++    // See EXCHANGE_DISTINGUISHED_IDS.
++    mLockedFlags = 0;
++    if (propertyValue.EqualsLiteral("inbox"))
++      mLockedFlags |= nsMsgFolderFlags::Inbox;
++    if (propertyValue.EqualsLiteral("deleteditems"))
++      mLockedFlags |= nsMsgFolderFlags::Trash;
++    if (propertyValue.EqualsLiteral("drafts"))
++      mLockedFlags |= nsMsgFolderFlags::Drafts;
++    if (propertyValue.EqualsLiteral("outbox"))
++      mLockedFlags |= nsMsgFolderFlags::Queue;
++    if (propertyValue.EqualsLiteral("sentitems"))
++      mLockedFlags |= nsMsgFolderFlags::SentMail;
++    if (propertyValue.EqualsLiteral("junkemail"))
++      mLockedFlags |= nsMsgFolderFlags::Junk;
++    if (propertyValue.EqualsLiteral("archive"))
++      mLockedFlags |= nsMsgFolderFlags::Archive;
++  }
++  return nsMsgDBFolder::SetStringProperty(propertyName, propertyValue);
++}
++
+ nsresult ExchangeFolder::CreateBaseMessageURI(const nsACString& aURI) {
+   nsCOMPtr<nsIURI> folderUri;
+   nsresult rv =
+       NS_NewURI(getter_AddRefs(folderUri), PromiseFlatCString(aURI).Data());
+@@ -1315,26 +1339,15 @@ nsresult ExchangeFolder::GetProtocolClie
+ }
+ 
+ nsresult ExchangeFolder::GetTrashFolder(nsIMsgFolder** result) {
+   NS_ENSURE_ARG_POINTER(result);
+-  nsCOMPtr<nsIMsgFolder> rootFolder;
+ 
+-  nsresult rv = GetRootFolder(getter_AddRefs(rootFolder));
++  nsCOMPtr<nsIMsgIncomingServer> server;
++  nsresult rv = GetServer(getter_AddRefs(server));
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+-  nsCOMPtr<nsIMsgFolder> trashFolder;
+-  rootFolder->GetFolderWithFlags(nsMsgFolderFlags::Trash,
+-                                 getter_AddRefs(trashFolder));
+-
+-  // `GetFolderWithFlags()` returns NS_OK even if no folder was found, so we
+-  // need to check whether it returned it returned a valid folder.
+-  if (!trashFolder) {
+-    return NS_ERROR_FAILURE;
+-  }
+-
+-  trashFolder.forget(result);
+-
+-  return NS_OK;
++  nsCOMPtr<IExchangeIncomingServer> exchangeServer(do_QueryInterface(server));
++  return exchangeServer->GetTrashFolder(result);
+ }
+ 
+ nsresult ExchangeFolder::SyncMessages(nsIMsgWindow* window,
+                                       nsIUrlListener* urlListener) {
+diff --git a/mailnews/protocols/exchange/src/ExchangeFolder.h b/mailnews/protocols/exchange/src/ExchangeFolder.h
+--- a/mailnews/protocols/exchange/src/ExchangeFolder.h
++++ b/mailnews/protocols/exchange/src/ExchangeFolder.h
+@@ -45,8 +45,10 @@ class ExchangeFolder : public nsMsgDBFol
+   nsresult GetExchangeId(nsACString& exchangeId);
+ 
+  public:
+   // The XPCOM interface(s).
++  NS_IMETHOD SetStringProperty(const char* propertyName,
++                               const nsACString& propertyValue) override;
+   NS_IMETHOD CreateStorageIfMissing(nsIUrlListener* urlListener) override;
+   NS_IMETHOD CreateSubfolder(const nsACString& folderName,
+                              nsIMsgWindow* msgWindow) override;
+   NS_IMETHOD CopyFileMessage(nsIFile* aFile, nsIMsgDBHdr* msgToReplace,
+diff --git a/mailnews/protocols/exchange/src/ExchangeIncomingServer.cpp b/mailnews/protocols/exchange/src/ExchangeIncomingServer.cpp
+--- a/mailnews/protocols/exchange/src/ExchangeIncomingServer.cpp
++++ b/mailnews/protocols/exchange/src/ExchangeIncomingServer.cpp
+@@ -723,9 +723,10 @@ NS_IMETHODIMP ExchangeIncomingServer::Ge
+ 
+   return NS_OK;
+ }
+ 
+-nsresult ExchangeIncomingServer::GetTrashFolder(nsIMsgFolder** trashFolder) {
++NS_IMETHODIMP
++ExchangeIncomingServer::GetTrashFolder(nsIMsgFolder** trashFolder) {
+   NS_ENSURE_ARG_POINTER(trashFolder);
+ 
+   *trashFolder = nullptr;
+ 
+diff --git a/mailnews/protocols/exchange/src/ExchangeIncomingServer.h b/mailnews/protocols/exchange/src/ExchangeIncomingServer.h
+--- a/mailnews/protocols/exchange/src/ExchangeIncomingServer.h
++++ b/mailnews/protocols/exchange/src/ExchangeIncomingServer.h
+@@ -82,13 +82,8 @@ class ExchangeIncomingServer : public ns
+   nsresult SyncAllFolders(nsIMsgWindow* aMsgWindow,
+                           nsIUrlListener* urlListener);
+ 
+   /**
+-   * Retrieve the trash folder using the path stored in the server's prefs.
+-   */
+-  nsresult GetTrashFolder(nsIMsgFolder** trashFolder);
+-
+-  /**
+    * Set the trash folder flag to the folder which path is stored in the
+    * relevant pref.
+    */
+   nsresult UpdateTrashFolder();
+diff --git a/mailnews/protocols/exchange/src/IExchangeIncomingServer.idl b/mailnews/protocols/exchange/src/IExchangeIncomingServer.idl
+--- a/mailnews/protocols/exchange/src/IExchangeIncomingServer.idl
++++ b/mailnews/protocols/exchange/src/IExchangeIncomingServer.idl
+@@ -5,8 +5,9 @@
+ #include "nsISupports.idl"
+ 
+ interface IExchangeClient;
+ interface IExchangeSimpleOperationListener;
++interface nsIMsgFolder;
+ interface nsIMsgWindow;
+ 
+ /**
+  * IExchangeIncomingServer is intended as a workaround for limitations in the folder
+@@ -46,8 +47,13 @@ interface IExchangeIncomingServer : nsIS
+    * new one if one hasn't already been created.
+    */
+   IExchangeClient getProtocolClient();
+ 
++  /**
++   * Retrieve the trash folder using the path stored in the server's prefs.
++   */
++  readonly attribute nsIMsgFolder trashFolder;
++
+   /** The URL for the Exchange Server */
+   attribute AUTF8String exchangeUrl;
+ 
+   /** Whether or not to override default OAuth issuer details. */
