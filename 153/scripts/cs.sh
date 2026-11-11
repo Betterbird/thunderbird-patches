@@ -313,3 +313,9 @@ echo "system-tray-menuitem-quit = Ukončit { -brand-full-name }" >> localization
 echo "copy-attach-web-page-archive ="                                                     >> localization/cs/messenger/feeds.ftl
 echo "  .label = Připojit archiv webové stránky"                                          >> localization/cs/messenger/feeds.ftl
 echo "  .tooltiptext = Vytvořit kopii vybraného článku a připojit archiv webové stránky"  >> localization/cs/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders ="      >> localization/cs/messenger/messenger.ftl
+echo "    .label = Sbalit všechny složky" >> localization/cs/messenger/messenger.ftl

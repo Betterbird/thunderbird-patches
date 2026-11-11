@@ -309,3 +309,9 @@ echo "system-tray-menuitem-quit = 退出 { -brand-full-name }" >> localization/z
 echo "copy-attach-web-page-archive ="                >> localization/zh-CN/messenger/feeds.ftl
 echo "  .label = 附加网页存档"                         >> localization/zh-CN/messenger/feeds.ftl
 echo "  .tooltiptext = 创建所选文章的副本并附加网页存档"  >> localization/zh-CN/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders =" >> localization/zh-CN/messenger/messenger.ftl
+echo "    .label = 折叠所有文件夹"     >> localization/zh-CN/messenger/messenger.ftl

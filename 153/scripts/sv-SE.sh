@@ -309,3 +309,9 @@ echo "system-tray-menuitem-quit = Avsluta { -brand-full-name }" >> localization/
 echo "copy-attach-web-page-archive ="                                                         >> localization/sv-SE/messenger/feeds.ftl
 echo "  .label = Bifoga arkiv av webbsidan"                                                   >> localization/sv-SE/messenger/feeds.ftl
 echo "  .tooltiptext = Skapa en kopia av den valda artikeln och bifoga arkivet av webbsidan"  >> localization/sv-SE/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders ="      >> localization/sv-SE/messenger/messenger.ftl
+echo "    .label = Fäll ihop alla mappar" >> localization/sv-SE/messenger/messenger.ftl

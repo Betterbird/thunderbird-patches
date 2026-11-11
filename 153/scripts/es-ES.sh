@@ -317,3 +317,9 @@ echo "    }"                                           >> localization/es-ES/mes
 echo "copy-attach-web-page-archive ="                                                                     >> localization/es-ES/messenger/feeds.ftl
 echo "  .label = Adjuntar el archivo de la página web"                                                    >> localization/es-ES/messenger/feeds.ftl
 echo "  .tooltiptext = Crear una copia del artículo seleccionado y adjuntar el archivo de la página web"  >> localization/es-ES/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders ="            >> localization/es-ES/messenger/messenger.ftl
+echo "    .label = Contraer todas las carpetas" >> localization/es-ES/messenger/messenger.ftl

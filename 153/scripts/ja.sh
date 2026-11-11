@@ -309,3 +309,9 @@ echo "system-tray-menuitem-quit = { -brand-full-name } を終了" >> localizatio
 echo "copy-attach-web-page-archive ="                               >> localization/ja/messenger/feeds.ftl
 echo "  .label = ウェブページのアーカイブを添付"                               >> localization/ja/messenger/feeds.ftl
 echo "  .tooltiptext = 選択した記事のコピーを作成し、ウェブページのアーカイブを添付する"  >> localization/ja/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders ="    >> localization/ja/messenger/messenger.ftl
+echo "    .label = すべてのフォルダーを折りたたむ" >> localization/ja/messenger/messenger.ftl

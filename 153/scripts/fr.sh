@@ -309,3 +309,9 @@ echo "system-tray-menuitem-quit = Quitter { -brand-full-name }" >> localization/
 echo "copy-attach-web-page-archive ="                                                                 >> localization/fr/messenger/feeds.ftl
 echo "  .label = Joindre l’archive de la page Web"                                                    >> localization/fr/messenger/feeds.ftl
 echo "  .tooltiptext = Créer une copie de l’article sélectionné et joindre l’archive de la page Web"  >> localization/fr/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders ="          >> localization/fr/messenger/messenger.ftl
+echo "    .label = Réduire tous les dossiers" >> localization/fr/messenger/messenger.ftl

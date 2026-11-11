@@ -198,3 +198,7 @@ echo "    }"                                       >> localization/en-GB/messeng
 echo "copy-attach-web-page-archive ="                                                             >> localization/en-GB/messenger/feeds.ftl
 echo "  .label = Attach Web Page Archive"                                                         >> localization/en-GB/messenger/feeds.ftl
 echo "  .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive" >> localization/en-GB/messenger/feeds.ftl
+
+# Collapse All Folders
+echo "folder-collapse-all-folders ="     >> localization/en-GB/messenger/messenger.ftl
+echo "    .label = Collapse All Folders" >> localization/en-GB/messenger/messenger.ftl

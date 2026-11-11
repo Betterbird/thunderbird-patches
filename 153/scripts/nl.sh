@@ -309,3 +309,9 @@ echo "system-tray-menuitem-quit = { -brand-full-name } afsluiten" >> localizatio
 echo "copy-attach-web-page-archive ="                                                                            >> localization/nl/messenger/feeds.ftl
 echo "  .label = Archief van de webpagina bijvoegen"                                                             >> localization/nl/messenger/feeds.ftl
 echo "  .tooltiptext = Een kopie maken van het geselecteerde artikel en het archief van de webpagina bijvoegen"  >> localization/nl/messenger/feeds.ftl
+
+# Collapse All Folders
+# folder-collapse-all-folders =
+#     .label = Collapse All Folders
+echo "folder-collapse-all-folders ="        >> localization/nl/messenger/messenger.ftl
+echo "    .label = Alle mappen samenvouwen" >> localization/nl/messenger/messenger.ftl
