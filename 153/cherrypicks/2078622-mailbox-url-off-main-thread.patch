@@ -1,0 +1,70 @@
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1794594938 -7200
+# Node ID bd47d698ec571a81d567d47eb28712906fc3bb31
+# Parent  206c5664b13248ddfd538f0969b45ab931db82f7
+Bug 2078622 - Avoid startup hangs when restoring local folder tabs. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D335134
+
+diff --git a/mailnews/base/src/nsNewMailnewsURI.cpp b/mailnews/base/src/nsNewMailnewsURI.cpp
+--- a/mailnews/base/src/nsNewMailnewsURI.cpp
++++ b/mailnews/base/src/nsNewMailnewsURI.cpp
+@@ -45,22 +45,11 @@ nsresult NS_NewMailnewsURI(nsIURI** aURI
+     rv = aBaseURI->GetScheme(scheme);
+     if (NS_FAILED(rv)) return rv;
+   }
+ 
+-  // Creating mailbox URIs off the main thread can lead to crashes.
+-  // Seems to happen when viewing PDFs.
+   if (scheme.EqualsLiteral("mailbox") ||
+       scheme.EqualsLiteral("mailbox-message")) {
+-    if (NS_IsMainThread()) {
+-      return nsMailboxService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+-    }
+-    auto NewURI = [&aSpec, &aCharset, &aBaseURI, aURI, &rv]() -> auto {
+-      rv = nsMailboxService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+-    };
+-    nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction("NewURI", NewURI);
+-    mozilla::SyncRunnable::DispatchToThread(
+-        mozilla::GetMainThreadSerialEventTarget(), task);
+-    return rv;
++    return nsMailboxService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+   }
+ 
+   // If the scheme is one of the IMAP URL schemes, we need to use a mailnews
+   // URL because it parses extra query parameters such as filename= into values
+diff --git a/mailnews/local/src/nsMailboxUrl.cpp b/mailnews/local/src/nsMailboxUrl.cpp
+--- a/mailnews/local/src/nsMailboxUrl.cpp
++++ b/mailnews/local/src/nsMailboxUrl.cpp
+@@ -27,8 +27,9 @@
+ // then grab it and use it on the other side
+ #include "nsCOMPtr.h"
+ #include "nsMsgUtils.h"
+ #include "mozilla/Components.h"
++#include "mozilla/SyncRunnable.h"
+ 
+ #include "nsIMsgAccountManager.h"
+ 
+ // helper function for parsing the search field of a url
+@@ -116,11 +117,18 @@ NS_IMETHODIMP nsMailboxUrl::GetNormalize
+   // Strip any query part beginning with ? or /;
+   MsgRemoveQueryPart(spec);
+ 
+   // Check for format lacking absolute path.
+-  if (spec.Find("///") == kNotFound) {
++  if (spec.Find("///") == kNotFound && m_baseURL->SchemeIs("mailbox")) {
+     nsCString folderPath;
+-    nsresult rv = nsLocalURI2Path(kMailboxRootURI, spec.get(), folderPath);
++    nsresult rv = NS_ERROR_FAILURE;
++    // Translating the server needs the account manager, which is main-thread
++    // only. URLs with an absolute path can be created on any thread.
++    mozilla::SyncRunnable::DispatchToThread(
++        mozilla::GetMainThreadSerialEventTarget(),
++        NS_NewRunnableFunction("nsMailboxUrl::GetNormalizedSpec", [&]() {
++          rv = nsLocalURI2Path(kMailboxRootURI, spec.get(), folderPath);
++        }));
+     if (NS_SUCCEEDED(rv)) {
+       nsAutoCString buf;
+       MsgEscapeURL(
+           folderPath,
