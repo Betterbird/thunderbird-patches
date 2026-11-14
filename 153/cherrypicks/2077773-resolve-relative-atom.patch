@@ -1,0 +1,107 @@
+
+# HG changeset patch
+# User Mirko Kerezovic <mirko@kerezovic.de>
+# Date 1794522036 0
+# Node ID b8e987b58d5cea164ac401d9d38486436dfcadca
+# Parent  e01399eee12817a8cd3baf6479c933b5341bd186
+Bug 2077773 - Resolve relative Atom enclosure URLs against the feed URL r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D341917
+* * *
+Bug 2077773 follow-up - Lint test_feedparser.js. rs=linting
+
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -1032,8 +1032,22 @@ FeedParser.prototype = {
+           let url =
+             tag.getAttribute("rel") == "enclosure"
+               ? (tag.getAttribute("href") || "").trim()
+               : null;
++          if (url) {
++            // Resolve Atom enclosure IRIs before validating their schemes.
++            // Without xml:base, the feed retrieval URL is the base URI.
++            const baseURI =
++              tag.getAttribute("xml:base") ||
++              itemNode.getAttribute("xml:base") ||
++              channel.getAttribute("xml:base") ||
++              aFeed.url;
++            try {
++              url = Services.io.newURI(baseURI).resolve(url);
++            } catch (ex) {
++              url = null;
++            }
++          }
+           url = this.validLink(url);
+           if (url && !encUrls.has(url)) {
+             const type = this.removeUnprintableASCII(tag.getAttribute("type"));
+             const length = this.removeUnprintableASCII(
+diff --git a/mailnews/extensions/newsblog/test/unit/resources/atom_relative_enclosures.xml b/mailnews/extensions/newsblog/test/unit/resources/atom_relative_enclosures.xml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/resources/atom_relative_enclosures.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<feed xmlns="http://www.w3.org/2005/Atom">
++  <title>Enclosures</title>
++  <id>https://example.com/feed.xml</id>
++  <updated>2026-11-11T00:00:00Z</updated>
++  <entry>
++    <title>Episode</title>
++    <id>https://example.com/episode</id>
++    <updated>2026-11-11T00:00:00Z</updated>
++    <link rel="alternate" href="https://example.com/episode"/>
++    <link rel="enclosure" href="podcast/notes.txt" type="text/plain"/>
++    <link rel="enclosure" href="https://example.com/podcast/notes.txt"/>
++    <link rel="enclosure" href="javascript:alert(1)"/>
++  </entry>
++  <entry xml:base="https://cdn.example.net/media/">
++    <title>Episode with xml:base</title>
++    <id>https://example.com/episode2</id>
++    <updated>2026-11-11T00:00:00Z</updated>
++    <link rel="alternate" href="https://example.com/episode2"/>
++    <link rel="enclosure" href="audio.mp3" type="audio/mpeg"/>
++  </entry>
++</feed>
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedparser.js b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feedparser.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+@@ -25,8 +25,38 @@ function assertItemsEqual(got, expected)
+     }
+   }
+ }
+ 
++// Atom enclosure hrefs are IRI references resolved against the feed retrieval
++// URL when there is no xml:base. Unsupported schemes must still be rejected.
++add_task(async function test_atom_relative_enclosures() {
++  const account = FeedUtils.createRssAccount("test_atom_relative_enclosures");
++  const folder = account.incomingServer.rootMsgFolder
++    .QueryInterface(Ci.nsIMsgLocalMailFolder)
++    .createLocalSubfolder("atomrelativeenclosures");
++  const doc = await do_parse_document(
++    "resources/atom_relative_enclosures.xml",
++    "text/xml"
++  );
++  const feed = new Feed("https://example.com/feed.xml", folder);
++  feed.parseItems = true;
++  feed.onParseError = function () {
++    throw new Error("PARSE ERROR");
++  };
++  const items = new FeedParser().parseAsAtomIETF(feed, doc);
++  Assert.equal(items.length, 2);
++  Assert.equal(items[0].enclosures.length, 1);
++  Assert.equal(
++    items[0].enclosures[0].mURL,
++    "https://example.com/podcast/notes.txt"
++  );
++  Assert.equal(items[1].enclosures.length, 1);
++  Assert.equal(
++    items[1].enclosures[0].mURL,
++    "https://cdn.example.net/media/audio.mp3"
++  );
++});
++
+ // Test the rss1 feed parser
+ add_task(async function test_rss1() {
+   // Boilerplate.
+   const account = FeedUtils.createRssAccount("test_rss1");
