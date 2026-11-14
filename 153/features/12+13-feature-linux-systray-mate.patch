@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Betterbird <betterbird@betterbird.eu> and DeepSeek
 # Date 1787993534 -7200
-# Parent  c9be04bc0a2d422be6984340911cbdc02f251a09
+# Parent  1263f995c0ff2835337ab27330295b377a148419
 Feature: Linux systray. Implement support for Mate desktop.
 
   The current integrated copy of libayatana-appindicator
@@ -120,7 +120,7 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
  
    // No minimized window, bring the most recent 3pane window to the front.
    if (sHiddenWindows.Length() == 0) {
-@@ -198,8 +239,12 @@ static void activated(AppIndicator* self
+@@ -198,8 +239,37 @@ static void activated(AppIndicator* self
    // so we ignore that for some milliseconds.
    clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
  }
@@ -129,11 +129,36 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
 +  activated(NULL, 0, 0, aData);
 +}
 +
++static bool sniSupported() {
++  GError* error = NULL;
++  GDBusConnection* connection = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
++  if (!connection) {
++    if (error) {
++      g_error_free(error);
++    }
++    return false;
++  }
++  GError* callError = NULL;
++  GVariant* result = g_dbus_connection_call_sync(
++      connection, "org.freedesktop.DBus", "/org/freedesktop/DBus",
++      "org.freedesktop.DBus", "GetNameOwner",
++      g_variant_new("(s)", "org.kde.StatusNotifierWatcher"),
++      G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &callError);
++  if (result) {
++    g_variant_unref(result);
++  }
++  if (callError) {
++    g_error_free(callError);
++  }
++  g_object_unref(connection);
++  return result != NULL;
++}
++
  NS_IMETHODIMP
  nsMessengerUnixIntegration::UpdateUnreadCount(uint32_t unreadCount,
                                                const nsAString& unreadTooltip) {
    sLastUnreadCount = unreadCount;
-@@ -210,9 +255,9 @@ nsMessengerUnixIntegration::UpdateUnread
+@@ -210,18 +280,28 @@ nsMessengerUnixIntegration::UpdateUnread
  
    static char icon_path0[PATH_MAX + 100];
    static char icon_pathN[PATH_MAX + 100];
@@ -144,20 +169,27 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
      if (desktop.IsEmpty()) {
        desktop = mozilla::widget::GetDesktopEnvironmentIdentifier();
        if (desktop.IsEmpty()) desktop = "no-DE";
-@@ -230,8 +275,12 @@ nsMessengerUnixIntegration::UpdateUnread
-     // Gnome has no tooltips and the tooltip call crashes.
-     mozilla::Preferences::GetCString("mail.systemTrayNoTooltip", prefValue);
-     useTooltip = !FindInReadable(desktop, prefValue);
+     }
+     fprintf(stderr, "Betterbird: Detected desktop environment %s.\n\n", desktop.get());
  
-+    // Workout whether the desktop supports SNI.
++    // Work out whether the desktop supports SNI.
++    nsAutoCString prefValue;
 +    mozilla::Preferences::GetCString("mail.systemTrayNoSniSupport", prefValue);
 +    noSniSupport = FindInReadable(desktop, prefValue);
++    if (!noSniSupport && !sniSupported()) {
++      fprintf(stderr, "Betterbird: Your desktop environment %s does not have SNI support.\n", desktop.get());
++      fprintf(stderr, "            Known desktops without SNI support are: %s.\n", prefValue.get());
++      fprintf(stderr, "            For a functioning system tray, add %s to preference\n", desktop.get());
++      fprintf(stderr, "            mail.systemTrayNoSniSupport.\n\n");
++    }
 +
- #ifdef FLATPAK_COMPILE
-     // The FlatPak folks do their own icon magic.
-     strcpy(icon_path0, "eu.betterbird.Betterbird-default");
-     strcpy(icon_pathN, "eu.betterbird.Betterbird-newmail");
-@@ -245,14 +294,27 @@ nsMessengerUnixIntegration::UpdateUnread
+     // Work out which activation call we should use.
+-    nsAutoCString prefValue;
+     mozilla::Preferences::GetCString("mail.minimizeToTray.desktopsGtkWindowPresentWithTime", prefValue);
+     useWithTime = FindInReadable(desktop, prefValue);
+ #ifdef DEBUG_RESTORE
+     fprintf(stderr, "=== Desktop is %s, %susing GtkWindowPresentWithTime\n", desktop.get(), useWithTime ? "" : "not ");
+@@ -245,14 +325,27 @@ nsMessengerUnixIntegration::UpdateUnread
      strcat(icon_path0, "/chrome/icons/default/default.svg");
      strcat(icon_pathN, "/chrome/icons/default/newmail.svg");
  #endif
@@ -191,7 +223,7 @@ diff --git a/mailnews/base/src/nsMessengerUnixIntegration.cpp b/mailnews/base/sr
      // Initialise to something non-zero, subtract a second
      // so it predates any mimizing via "startup minimized".
      clock_gettime(CLOCK_MONOTONIC, &sTimeActivated);
-@@ -262,29 +324,21 @@ nsMessengerUnixIntegration::UpdateUnread
+@@ -262,29 +355,21 @@ nsMessengerUnixIntegration::UpdateUnread
    if (unreadCount > 0) {
      const nsCString& tooltip = NS_ConvertUTF16toUTF8(unreadTooltip);
      // Set both title and tooltip. It appears that some platforms do
