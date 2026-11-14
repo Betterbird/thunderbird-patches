@@ -1,0 +1,107 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792019071 25200
+#      Wed Oct 14 16:04:31 2026 -0700
+# Node ID e2670a8a0fd613378e5ba6d9b5cd0f6b55928034
+# Parent  49f000f9bc4eab6b56e6308e3c0e16140e92248e
+Bug 2077925 - Use a null-prototype object for the feed item cache. r=jtracey
+
+Fix: the cache is now created with a null prototype through JSONFile's dataPostProcessor, which runs on every load path.
+Every GUID, including __proto__, constructor and similar, is now stored as an ordinary key and survives a save/reload round trip
+
+Differential Revision: https://phabricator.services.mozilla.com/D332406
+
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -1499,22 +1499,20 @@ export var FeedUtils = {
+     }
+ 
+     const rssServer = aServer.QueryInterface(Ci.nsIRssIncomingServer);
+     const itemsFile = rssServer.feedItemsPath; // Path to feeditems.json
+-    const exists = itemsFile.exists();
+     const ds = new lazy.JSONFile({
+       path: itemsFile.path,
+       backupTo: itemsFile.path + ".backup",
++      // Item ids come from the feed, so keys like __proto__ must stay own
++      // properties.
++      dataPostProcessor: data => Object.assign(Object.create(null), data),
+     });
+     ds.ensureDataReady();
+     if (!this[aServer.serverURI]) {
+       this[aServer.serverURI] = {};
+     }
+     this[aServer.serverURI].FeedItemsDS = ds;
+-    if (!exists) {
+-      // No feeditems.json, need to initialise our data.
+-      ds.data = {};
+-    }
+     return ds;
+   },
+ 
+   /**
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feeditem.js b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feeditem.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+@@ -249,4 +249,61 @@ add_task(function test_content_cannot_in
+     ],
+     "message should only contain the content and the declared enclosure"
+   );
+ });
++
++add_task(async function test_proto_item_id_is_stored_as_own_key() {
++  const account = FeedUtils.createRssAccount("proto id account");
++  const server = account.incomingServer;
++  const rootFolder = server.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("proto id folder");
++  const feedURL = "https://example.invalid/proto.xml";
++
++  const item = new FeedItem();
++  item.feed = {
++    folder,
++    server,
++    url: feedURL,
++    name: folder.name,
++    options: { category: { enabled: false } },
++  };
++  item.id = "__proto__";
++  item.title = "Proto";
++  item.content = "\n<p>Proto</p>";
++  item.url = "https://example.invalid/proto";
++  Assert.ok(item.store(), "item should be stored");
++
++  let ds = FeedUtils.getItemsDS(server);
++  Assert.ok(
++    Object.hasOwn(ds.data, "__proto__"),
++    "__proto__ item id should be an own key of the item cache"
++  );
++  Assert.deepEqual(
++    Object.keys(ds.data),
++    ["__proto__"],
++    "item cache should only contain the stored item"
++  );
++
++  const feed = new Feed(feedURL, folder);
++  feed.invalidateItems();
++  feed.removeInvalidItems(false);
++  Assert.equal(
++    ds.data.__proto__.valid,
++    false,
++    "__proto__ item should have been invalidated"
++  );
++
++  await ds._save();
++  delete FeedUtils[server.serverURI].FeedItemsDS;
++  ds = FeedUtils.getItemsDS(server);
++  Assert.ok(
++    Object.hasOwn(ds.data, "__proto__"),
++    "__proto__ item id should be an own key after reloading the item cache"
++  );
++  Assert.deepEqual(
++    ds.data.__proto__.feedURLs,
++    [feedURL],
++    "reloaded __proto__ item should keep its feed URL"
++  );
++});

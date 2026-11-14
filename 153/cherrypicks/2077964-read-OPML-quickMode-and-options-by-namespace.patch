@@ -1,0 +1,286 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792019629 25200
+#      Wed Oct 14 16:13:49 2026 -0700
+# Node ID a107e939f5157885d94f8743b9917238bb549717
+# Parent  ffb0163021f745d1b4038157fee1967217c1a112
+Bug 2077964 - Read OPML fz:quickMode and fz:options by namespace on import. r=edicharry
+
+importOPMLOutlines looked the attributes up by their literal "fz:" qualified
+names, so an OPML file binding urn:forumzilla: to any other prefix lost its
+settings and got the account defaults instead. A feed exported as paused would
+then be re-enabled and fetched. Use getAttributeNS with FeedUtils.FZ_NS.
+
+Differential Revision: https://phabricator.services.mozilla.com/D332434
+
+diff --git a/mailnews/extensions/newsblog/feed-subscriptions.js b/mailnews/extensions/newsblog/feed-subscriptions.js
+--- a/mailnews/extensions/newsblog/feed-subscriptions.js
++++ b/mailnews/extensions/newsblog/feed-subscriptions.js
+@@ -2603,9 +2603,13 @@ var FeedSubscriptions = {
+     if (this.mRSSServer.rootFolder.hasSubFolders) {
+       const opmlDoc = document.implementation.createDocument("", "opml", null);
+       const opmlRoot = opmlDoc.documentElement;
+       opmlRoot.setAttribute("version", "1.0");
+-      opmlRoot.setAttribute("xmlns:fz", "urn:forumzilla:");
++      opmlRoot.setAttributeNS(
++        "http://www.w3.org/2000/xmlns/",
++        "xmlns:fz",
++        FeedUtils.FZ_NS
++      );
+ 
+       this.generatePPSpace(opmlRoot, SPACES2);
+ 
+       // Make the <head> element.
+@@ -2774,10 +2778,14 @@ var FeedSubscriptions = {
+     outRv.setAttribute("type", "rss");
+     outRv.setAttribute("title", aFeed.title);
+     outRv.setAttribute("text", aFeed.title);
+     outRv.setAttribute("version", "RSS");
+-    outRv.setAttribute("fz:quickMode", aFeed.quickMode);
+-    outRv.setAttribute("fz:options", JSON.stringify(aFeed.options));
++    outRv.setAttributeNS(FeedUtils.FZ_NS, "fz:quickMode", aFeed.quickMode);
++    outRv.setAttributeNS(
++      FeedUtils.FZ_NS,
++      "fz:options",
++      JSON.stringify(aFeed.options)
++    );
+     outRv.setAttribute("xmlUrl", aFeed.url);
+     outRv.setAttribute("htmlUrl", aFeed.link);
+     return outRv;
+   },
+@@ -2984,12 +2992,12 @@ var FeedSubscriptions = {
+             folder = rssServer.rootFolder;
+           }
+ 
+           // Create the feed.
+-          let quickMode = outline.hasAttribute("fz:quickMode")
+-            ? outline.getAttribute("fz:quickMode") == "true"
++          let quickMode = outline.hasAttributeNS(FeedUtils.FZ_NS, "quickMode")
++            ? outline.getAttributeNS(FeedUtils.FZ_NS, "quickMode") == "true"
+             : rssServer.getBoolValue("quickMode");
+-          let options = outline.getAttribute("fz:options");
++          let options = outline.getAttributeNS(FeedUtils.FZ_NS, "options");
+           options = options ? JSON.parse(options) : null;
+ 
+           if (firstFeedInFolderQuickMode === null) {
+             // The summary/web page pref applies to all feeds in a folder,
+diff --git a/mailnews/extensions/newsblog/test/browser/browser.toml b/mailnews/extensions/newsblog/test/browser/browser.toml
+--- a/mailnews/extensions/newsblog/test/browser/browser.toml
++++ b/mailnews/extensions/newsblog/test/browser/browser.toml
+@@ -18,4 +18,6 @@ prefs = [
+ subsuite = "thunderbird"
+ support-files = ["data/**"]
+ 
+ ["browser_feedDisplay.js"]
++
++["browser_opmlImport.js"]
+diff --git a/mailnews/extensions/newsblog/test/browser/browser_opmlImport.js b/mailnews/extensions/newsblog/test/browser/browser_opmlImport.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/browser/browser_opmlImport.js
+@@ -0,0 +1,175 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
++
++var { Feed } = ChromeUtils.importESModule("resource:///modules/Feed.sys.mjs");
++var { FeedUtils } = ChromeUtils.importESModule(
++  "resource:///modules/FeedUtils.sys.mjs"
++);
++var { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++var { MockFilePicker } = SpecialPowers;
++
++const server = MailServices.accounts.getAccount("account1").incomingServer;
++const rootFolder = server.rootFolder;
++
++add_setup(() => {
++  MockFilePicker.init(window.browsingContext);
++  registerCleanupFunction(() => {
++    MockFilePicker.cleanup();
++    for (const prefix of ["fz", "tb"]) {
++      const folder = rootFolder.getChildNamed(`Prefix ${prefix} Feed`);
++      if (folder) {
++        FeedUtils.deleteFeed(new Feed(feedURL(prefix), folder));
++        rootFolder.propagateDelete(folder, true);
++      }
++    }
++  });
++});
++
++function feedURL(prefix) {
++  return `https://example.org/browser/comm/mailnews/extensions/newsblog/test/browser/data/rss.xml?${prefix}`;
++}
++
++/**
++ * Open the feed subscriptions dialog with the account selected.
++ *
++ * @returns {Promise<Window>}
++ */
++async function openSubscriptionsDialog() {
++  const dialogPromise = BrowserTestUtils.domWindowOpenedAndLoaded(
++    null,
++    win =>
++      win.location.href ==
++      "chrome://messenger-newsblog/content/feed-subscriptions.xhtml"
++  );
++  window.openDialog(
++    "chrome://messenger-newsblog/content/feed-subscriptions.xhtml",
++    "",
++    "centerscreen,chrome,dialog=no,resizable",
++    { folder: rootFolder }
++  );
++  const dialogWindow = await dialogPromise;
++  await TestUtils.waitForCondition(
++    () =>
++      dialogWindow.FeedSubscriptions.mView.currentItem?.folder == rootFolder,
++    "waiting for the account to be selected"
++  );
++  return dialogWindow;
++}
++
++async function closeSubscriptionsDialog(dialogWindow) {
++  const closedPromise = BrowserTestUtils.domWindowClosed(dialogWindow);
++  dialogWindow.close();
++  await closedPromise;
++}
++
++/**
++ * Import an OPML file through the feed subscriptions dialog.
++ *
++ * @param {string} prefix - The namespace prefix used in the OPML file.
++ */
++async function importOPML(prefix) {
++  const dialogWindow = await openSubscriptionsDialog();
++  const { FeedSubscriptions } = dialogWindow;
++
++  MockFilePicker.setFiles([
++    new FileUtils.File(getTestFilePath(`data/opml-prefix-${prefix}.opml`)),
++  ]);
++  MockFilePicker.returnValue = MockFilePicker.returnOK;
++  const importButton = dialogWindow.document.getElementById("importOPML");
++  EventUtils.synthesizeMouseAtCenter(importButton, {}, dialogWindow);
++  await TestUtils.waitForCondition(
++    () =>
++      FeedUtils.feedAlreadyExists(feedURL(prefix), server) &&
++      FeedSubscriptions.mActionMode === null,
++    "waiting for the import to finish"
++  );
++
++  await closeSubscriptionsDialog(dialogWindow);
++}
++
++/**
++ * Check that the feed imported from the given OPML file kept the settings
++ * from the file.
++ *
++ * @param {string} prefix - The namespace prefix used in the OPML file.
++ */
++function checkImportedFeed(prefix) {
++  const url = feedURL(prefix);
++  Assert.ok(
++    FeedUtils.feedAlreadyExists(url, server),
++    `feed from the ${prefix}: file should be subscribed`
++  );
++  Assert.ok(
++    FeedUtils.getSubscriptionAttr(url, server, "quickMode", false),
++    `feed from the ${prefix}: file should be in summary mode`
++  );
++  const options = FeedUtils.getSubscriptionAttr(url, server, "options", null);
++  Assert.equal(
++    options?.updates.enabled,
++    false,
++    `feed from the ${prefix}: file should be paused`
++  );
++  Assert.equal(
++    options?.updates.updateMinutes,
++    7,
++    `feed from the ${prefix}: file should keep its update interval`
++  );
++}
++
++add_task(async function testImportStandardPrefix() {
++  await importOPML("fz");
++  checkImportedFeed("fz");
++});
++
++add_task(async function testImportOtherPrefix() {
++  await importOPML("tb");
++  checkImportedFeed("tb");
++});
++
++add_task(async function testExport() {
++  const dialogWindow = await openSubscriptionsDialog();
++  const exportPath = PathUtils.join(PathUtils.tempDir, "opml-export.opml");
++  registerCleanupFunction(() => IOUtils.remove(exportPath));
++
++  MockFilePicker.setFiles([new FileUtils.File(exportPath)]);
++  MockFilePicker.returnValue = MockFilePicker.returnOK;
++  const exportButton = dialogWindow.document.getElementById("exportOPML");
++  EventUtils.synthesizeMouseAtCenter(exportButton, {}, dialogWindow);
++  await TestUtils.waitForCondition(
++    () => IOUtils.exists(exportPath),
++    "waiting for the export to be written"
++  );
++  await closeSubscriptionsDialog(dialogWindow);
++
++  const text = await IOUtils.readUTF8(exportPath);
++  Assert.equal(
++    text.match(/xmlns:fz=/g)?.length,
++    1,
++    "export should declare the fz namespace once"
++  );
++  const doc = new DOMParser().parseFromString(text, "application/xml");
++  Assert.equal(
++    doc.documentElement.lookupNamespaceURI("fz"),
++    FeedUtils.FZ_NS,
++    "export should declare the fz namespace on the root"
++  );
++  for (const prefix of ["fz", "tb"]) {
++    const outline = doc.querySelector(`outline[xmlUrl="${feedURL(prefix)}"]`);
++    Assert.equal(
++      outline?.getAttributeNS(FeedUtils.FZ_NS, "quickMode"),
++      "true",
++      `exported ${prefix}: feed should be in summary mode`
++    );
++    const options = JSON.parse(
++      outline.getAttributeNS(FeedUtils.FZ_NS, "options")
++    );
++    Assert.equal(
++      options.updates.enabled,
++      false,
++      `exported ${prefix}: feed should be paused`
++    );
++  }
++});
+diff --git a/mailnews/extensions/newsblog/test/browser/data/opml-prefix-fz.opml b/mailnews/extensions/newsblog/test/browser/data/opml-prefix-fz.opml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/browser/data/opml-prefix-fz.opml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<opml version="2.0" xmlns:fz="urn:forumzilla:">
++  <head/>
++  <body>
++    <outline text="Prefix fz Feed" type="rss"
++      xmlUrl="https://example.org/browser/comm/mailnews/extensions/newsblog/test/browser/data/rss.xml?fz"
++      fz:quickMode="true"
++      fz:options="{&quot;version&quot;:2,&quot;updates&quot;:{&quot;enabled&quot;:false,&quot;updateMinutes&quot;:7,&quot;updateUnits&quot;:&quot;min&quot;,&quot;lastUpdateTime&quot;:0,&quot;lastDownloadTime&quot;:null,&quot;updatePeriod&quot;:&quot;&quot;,&quot;updateFrequency&quot;:&quot;&quot;,&quot;updateBase&quot;:&quot;&quot;},&quot;category&quot;:{&quot;enabled&quot;:false,&quot;prefixEnabled&quot;:false,&quot;prefix&quot;:&quot;&quot;}}"/>
++  </body>
++</opml>
+diff --git a/mailnews/extensions/newsblog/test/browser/data/opml-prefix-tb.opml b/mailnews/extensions/newsblog/test/browser/data/opml-prefix-tb.opml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/browser/data/opml-prefix-tb.opml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<opml version="2.0" xmlns:tb="urn:forumzilla:">
++  <head/>
++  <body>
++    <outline text="Prefix tb Feed" type="rss"
++      xmlUrl="https://example.org/browser/comm/mailnews/extensions/newsblog/test/browser/data/rss.xml?tb"
++      tb:quickMode="true"
++      tb:options="{&quot;version&quot;:2,&quot;updates&quot;:{&quot;enabled&quot;:false,&quot;updateMinutes&quot;:7,&quot;updateUnits&quot;:&quot;min&quot;,&quot;lastUpdateTime&quot;:0,&quot;lastDownloadTime&quot;:null,&quot;updatePeriod&quot;:&quot;&quot;,&quot;updateFrequency&quot;:&quot;&quot;,&quot;updateBase&quot;:&quot;&quot;},&quot;category&quot;:{&quot;enabled&quot;:false,&quot;prefixEnabled&quot;:false,&quot;prefix&quot;:&quot;&quot;}}"/>
++  </body>
++</opml>

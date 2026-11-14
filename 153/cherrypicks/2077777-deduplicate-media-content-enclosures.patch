@@ -1,0 +1,79 @@
+# HG changeset patch
+# User Mirko Kerezovic <mirko@kerezovic.de>
+# Date 1792087539 25200
+#      Thu Oct 15 11:05:39 2026 -0700
+# Node ID 5855b0635f595c805e24acbb96829d86ac20cc26
+# Parent  58477e1d5341badb17deb3284be974cd1957d3b7
+Bug 2077777 - Deduplicate media content enclosures. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D334023
+
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -331,8 +331,9 @@ FeedParser.prototype = {
+             const fileSize = this.removeUnprintableASCII(
+               tag.getAttribute("fileSize")
+             );
+             item.enclosures.push(new lazy.FeedEnclosure(url, type, fileSize));
++            encUrls.push(url);
+           }
+         }
+       }
+ 
+diff --git a/mailnews/extensions/newsblog/test/unit/resources/rss2_media_duplicate.xml b/mailnews/extensions/newsblog/test/unit/resources/rss2_media_duplicate.xml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/resources/rss2_media_duplicate.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0"?>
++<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
++  <channel>
++    <title>Media duplicate test</title>
++    <link>https://example.com/</link>
++    <description>Repeated media content URL</description>
++    <item>
++      <title>Media item</title>
++      <link>https://example.com/item</link>
++      <media:content url="https://example.com/audio.mp3" type="audio/mpeg" fileSize="123"/>
++      <media:content url="https://example.com/audio.mp3" type="audio/mpeg" fileSize="123"/>
++    </item>
++  </channel>
++</rss>
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedparser.js b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feedparser.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+@@ -203,8 +203,33 @@ add_task(async function test_download_pa
+     "the feed should be downloadable again after a parser exception"
+   );
+ });
+ 
++add_task(async function test_rss2_duplicate_media_content() {
++  const account = FeedUtils.createRssAccount(
++    "test_rss2_duplicate_media_content"
++  );
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("duplicate-media-content");
++
++  const doc = await do_parse_document(
++    "resources/rss2_media_duplicate.xml",
++    "application/xml"
++  );
++  const feed = new Feed("https://example.com/feed.xml", folder);
++  feed.parseItems = true;
++  feed.onParseError = function () {
++    throw new Error("PARSE ERROR");
++  };
++
++  const items = new FeedParser().parseAsRSS2(feed, doc);
++  Assert.equal(items.length, 1);
++  Assert.equal(items[0].enclosures.length, 1);
++  Assert.equal(items[0].enclosures[0].mURL, "https://example.com/audio.mp3");
++});
++
+ // Test feed downloading.
+ // Mainly checking that it doesn't crash and that the right feed parser is used.
+ add_task(async function test_download() {
+   // Boilerplate

@@ -1,0 +1,180 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1793038768 -7200
+#      Mon Oct 26 20:19:28 2026 +0200
+# Node ID 73942a72d6af103c73a09939dcc9d08282634f11
+# Parent  7bb55ae4c59ac49409b59128978a89ea59ee03f9
+Bug 2081766 - Use a Set for RSS and Atom enclosure duplicate checks. r=tobyp
+
+FeedParser checked each enclosure URL against an array of earlier URLs with
+includes(), which made parsing quadratic in the number of enclosures in an item.
+
+Differential Revision: https://phabricator.services.mozilla.com/D336251
+
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -306,34 +306,34 @@ FeedParser.prototype = {
+ 
+       // Handle <enclosures> and <media:content>, which may be in a
+       // <media:group> (if present).
+       tags = this.childrenByTagNameNS(itemNode, nsURI, "enclosure");
+-      const encUrls = [];
++      const encUrls = new Set();
+       if (tags) {
+         for (const tag of tags) {
+           const url = this.validLink(tag.getAttribute("url"));
+-          if (url && !encUrls.includes(url)) {
++          if (url && !encUrls.has(url)) {
+             const type = this.removeUnprintableASCII(tag.getAttribute("type"));
+             const length = this.removeUnprintableASCII(
+               tag.getAttribute("length")
+             );
+             item.enclosures.push(new lazy.FeedEnclosure(url, type, length));
+-            encUrls.push(url);
++            encUrls.add(url);
+           }
+         }
+       }
+ 
+       tags = itemNode.getElementsByTagNameNS(lazy.FeedUtils.MRSS_NS, "content");
+       if (tags) {
+         for (const tag of tags) {
+           const url = this.validLink(tag.getAttribute("url"));
+-          if (url && !encUrls.includes(url)) {
++          if (url && !encUrls.has(url)) {
+             const type = this.removeUnprintableASCII(tag.getAttribute("type"));
+             const fileSize = this.removeUnprintableASCII(
+               tag.getAttribute("fileSize")
+             );
+             item.enclosures.push(new lazy.FeedEnclosure(url, type, fileSize));
+-            encUrls.push(url);
++            encUrls.add(url);
+           }
+         }
+       }
+ 
+@@ -1023,17 +1023,17 @@ FeedParser.prototype = {
+         itemNode,
+         lazy.FeedUtils.ATOM_IETF_NS,
+         "link"
+       );
+-      const encUrls = [];
++      const encUrls = new Set();
+       if (tags) {
+         for (const tag of tags) {
+           let url =
+             tag.getAttribute("rel") == "enclosure"
+               ? (tag.getAttribute("href") || "").trim()
+               : null;
+           url = this.validLink(url);
+-          if (url && !encUrls.includes(url)) {
++          if (url && !encUrls.has(url)) {
+             const type = this.removeUnprintableASCII(tag.getAttribute("type"));
+             const length = this.removeUnprintableASCII(
+               tag.getAttribute("length")
+             );
+@@ -1042,9 +1042,9 @@ FeedParser.prototype = {
+             );
+             item.enclosures.push(
+               new lazy.FeedEnclosure(url, type, length, title)
+             );
+-            encUrls.push(url);
++            encUrls.add(url);
+           }
+         }
+       }
+ 
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedparser.js b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feedparser.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+@@ -228,8 +228,89 @@ add_task(async function test_rss2_duplic
+   Assert.equal(items[0].enclosures.length, 1);
+   Assert.equal(items[0].enclosures[0].mURL, "https://example.com/audio.mp3");
+ });
+ 
++// Test that a large number of enclosures is deduplicated, keeping order.
++add_task(async function test_many_enclosures() {
++  const account = FeedUtils.createRssAccount("test_many_enclosures");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("many-enclosures");
++  const count = 20000;
++  const urls = Array.from(
++    { length: count },
++    (_, i) => `https://example.com/enc${i}.mp3`
++  );
++  const expected = [...urls, urls[0]];
++
++  const rss = `<?xml version="1.0"?>
++    <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
++      <channel>
++        <title>Many enclosures</title>
++        <link>https://example.com/</link>
++        <item>
++          <title>Item</title>
++          <link>https://example.com/item</link>
++          ${expected.map(u => `<enclosure url="${u}" type="audio/mpeg" length="1"/>`).join("")}
++          ${expected.map(u => `<media:content url="${u}" type="audio/mpeg"/>`).join("")}
++        </item>
++      </channel>
++    </rss>`;
++  const feed = new Feed("https://example.com/rss.xml", folder);
++  feed.parseItems = true;
++  feed.onParseError = function () {
++    throw new Error("PARSE ERROR");
++  };
++  let items = new FeedParser().parseAsRSS2(
++    feed,
++    new DOMParser().parseFromString(rss, "application/xml")
++  );
++  Assert.equal(items.length, 1, "there should be one RSS item");
++  Assert.equal(
++    items[0].enclosures.length,
++    count,
++    "RSS duplicate enclosures should be dropped"
++  );
++  Assert.ok(
++    items[0].enclosures.every((e, i) => e.mURL == urls[i]),
++    "RSS enclosures should be in document order"
++  );
++
++  const atom = `<?xml version="1.0"?>
++    <feed xmlns="http://www.w3.org/2005/Atom">
++      <id>urn:many-enclosures</id>
++      <title>Many enclosures</title>
++      <updated>2026-01-01T00:00:00Z</updated>
++      <entry>
++        <id>urn:many-enclosures:1</id>
++        <title>Entry</title>
++        <updated>2026-01-01T00:00:00Z</updated>
++        <link href="https://example.com/entry"/>
++        ${expected.map(u => `<link rel="enclosure" href="${u}" type="audio/mpeg" length="1"/>`).join("")}
++      </entry>
++    </feed>`;
++  const atomFeed = new Feed("https://example.com/atom.xml", folder);
++  atomFeed.parseItems = true;
++  atomFeed.onParseError = function () {
++    throw new Error("PARSE ERROR");
++  };
++  items = new FeedParser().parseAsAtomIETF(
++    atomFeed,
++    new DOMParser().parseFromString(atom, "application/xml")
++  );
++  Assert.equal(items.length, 1, "there should be one Atom entry");
++  Assert.equal(
++    items[0].enclosures.length,
++    count,
++    "Atom duplicate enclosures should be dropped"
++  );
++  Assert.ok(
++    items[0].enclosures.every((e, i) => e.mURL == urls[i]),
++    "Atom enclosures should be in document order"
++  );
++});
++
+ // Test feed downloading.
+ // Mainly checking that it doesn't crash and that the right feed parser is used.
+ add_task(async function test_download() {
+   // Boilerplate

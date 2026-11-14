@@ -1,0 +1,159 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792019683 25200
+#      Wed Oct 14 16:14:43 2026 -0700
+# Node ID 50f5218c2379fcdcf836bfc3f553aa4ed4140dc4
+# Parent  a107e939f5157885d94f8743b9917238bb549717
+Bug 2077934 - Don't leave a feed busy when parsing it throws. r=edicharry
+
+parseAsAtomIETF() indexed the result of childrenByTagNameNS() before checking
+it, so an Atom-namespace document whose root was not <feed> threw a TypeError.
+That bypassed onParseError() and left the feed URL busy for the rest of the
+session.
+
+Check the result before indexing it. Also catch exceptions from parseFeed()
+in Feed.parse() and report them as an invalid feed, so any other parser error
+also releases the feed.
+
+Differential Revision: https://phabricator.services.mozilla.com/D332412
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -459,9 +459,16 @@ Feed.prototype = {
+ 
+   parse() {
+     // Create a feed parser which will parse the feed.
+     let parser = new lazy.FeedParser();
+-    this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
++    try {
++      this.itemsToStore = parser.parseFeed(this, this.request.responseXML);
++    } catch (ex) {
++      lazy.FeedUtils.log.error("Feed.parse: error - " + ex);
++      if (!this.mInvalidFeed) {
++        this.onParseError(this);
++      }
++    }
+     parser = null;
+ 
+     if (this.mInvalidFeed) {
+       this.request = null;
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -750,9 +750,9 @@ FeedParser.prototype = {
+     const channel = this.childrenByTagNameNS(
+       aDOM,
+       lazy.FeedUtils.ATOM_IETF_NS,
+       "feed"
+-    )[0];
++    )?.[0];
+     if (!channel) {
+       aFeed.onParseError(aFeed);
+       return [];
+     }
+diff --git a/mailnews/extensions/newsblog/test/unit/resources/README.md b/mailnews/extensions/newsblog/test/unit/resources/README.md
+--- a/mailnews/extensions/newsblog/test/unit/resources/README.md
++++ b/mailnews/extensions/newsblog/test/unit/resources/README.md
+@@ -21,4 +21,8 @@ Data files for unit testing the feeds co
+ - `feeds-*/`
+   Test cases for migrating legacy .rdf config files to
+   the new json ones. The .rdf files are the old data,
+   and the .json files are the expected results.
++
++- `atom_entry_root.xml`
++  Atom 1.0 document with an <entry> root instead of <feed>.
++  It should be rejected as an invalid feed (see Bug 2077934).
+diff --git a/mailnews/extensions/newsblog/test/unit/resources/atom_entry_root.xml b/mailnews/extensions/newsblog/test/unit/resources/atom_entry_root.xml
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/resources/atom_entry_root.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<entry xmlns="http://www.w3.org/2005/Atom">
++  <title>Not a feed</title>
++  <link href="http://example.com/entry"/>
++  <id>http://example.com/entry</id>
++  <updated>2026-05-19T22:43:20+00:00</updated>
++</entry>
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedparser.js b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feedparser.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feedparser.js
+@@ -134,8 +134,77 @@ add_task(async function test_atom03_date
+     },
+   ]);
+ });
+ 
++// Test that an Atom 1.0 document without a <feed> root is rejected.
++add_task(async function test_atom_entry_root() {
++  const account = FeedUtils.createRssAccount("test_atom_entry_root");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("atomentryroot");
++
++  const doc = await do_parse_document(
++    "resources/atom_entry_root.xml",
++    "text/xml"
++  );
++  const feed = new Feed("https://example.com/atom_entry_root.xml", folder);
++  feed.parseItems = true;
++  let parseErrors = 0;
++  feed.onParseError = function () {
++    parseErrors++;
++  };
++  const parser = new FeedParser();
++  const items = parser.parseFeed(feed, doc);
++
++  Assert.equal(feed.mFeedType, "ATOM_IETF", "feed type should be Atom 1.0");
++  Assert.equal(items.length, 0, "there should be no items");
++  Assert.equal(parseErrors, 1, "onParseError should be called once");
++});
++
++// Test that an exception thrown while parsing a downloaded feed is reported
++// as an invalid feed and doesn't leave the feed busy.
++add_task(async function test_download_parse_exception() {
++  const account = FeedUtils.createRssAccount("test_parse_exception");
++  const rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++  const folder = rootFolder.createLocalSubfolder("parseexception");
++  const url = "http://localhost:" + SERVER_PORT + "/rss2_example.xml";
++
++  const download = () =>
++    new Promise(resolve => {
++      new Feed(url, folder).download(true, {
++        downloaded(feed, error) {
++          resolve(error);
++        },
++        onProgress() {},
++      });
++    });
++
++  const originalParseFeed = FeedParser.prototype.parseFeed;
++  FeedParser.prototype.parseFeed = function () {
++    throw new Error("Simulated parser failure");
++  };
++  let error;
++  try {
++    error = await download();
++  } finally {
++    FeedParser.prototype.parseFeed = originalParseFeed;
++  }
++  Assert.equal(
++    error,
++    FeedUtils.kNewsBlogInvalidFeed,
++    "a parser exception should be reported as an invalid feed"
++  );
++
++  Assert.equal(
++    await download(),
++    FeedUtils.kNewsBlogSuccess,
++    "the feed should be downloadable again after a parser exception"
++  );
++});
++
+ // Test feed downloading.
+ // Mainly checking that it doesn't crash and that the right feed parser is used.
+ add_task(async function test_download() {
+   // Boilerplate

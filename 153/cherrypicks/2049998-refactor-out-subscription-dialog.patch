@@ -1,0 +1,844 @@
+# HG changeset patch
+# User Geoff Lankow <geoff@darktrojan.net>
+# Date 1783072430 0
+#      Fri Jul 03 09:53:50 2026 +0000
+# Node ID 238bc5f93e6cb42dfb142e040db18a7ee2021a9d
+# Parent  f584b290d167f48e64144bd5814ea635bc827d7f
+Bug 2049998 - Refactor out subscription dialog handling to its own module. r=freaktechnik
+
+Differential Revision: https://phabricator.services.mozilla.com/D308496
+
+diff --git a/mail/base/content/about3Pane.js b/mail/base/content/about3Pane.js
+--- a/mail/base/content/about3Pane.js
++++ b/mail/base/content/about3Pane.js
+@@ -44,8 +44,9 @@ ChromeUtils.defineESModuleGetters(
+   this,
+   {
+     FolderReorderListener:
+       "chrome://messenger/content/FolderReorderListener.mjs",
++    SubscribeCommands: "chrome://messenger/content/SubscribeCommands.mjs",
+     UserFeedbackListener: "chrome://messenger/content/UserFeedbackListener.mjs",
+   },
+   { global: "current" }
+ );
+@@ -244,8 +245,9 @@ var folderPaneContextMenu = {
+    *
+    * @type {object} - An object {Object.<string, string>}
+    */
+   _commands: {
++    "folderPaneContext-subscribe": "cmd_subscribe",
+     "folderPaneContext-new": "cmd_newFolder",
+     "folderPaneContext-remove": "cmd_deleteFolder",
+     "folderPaneContext-rename": "cmd_renameFolder",
+     "folderPaneContext-compact": "cmd_compactFolder",
+@@ -644,8 +646,14 @@ var folderPaneContextMenu = {
+           )
+         );
+     }
+ 
++    if (serverType == "nntp") {
++      // There's already newsUnsubscribe, we don't need this (which does the
++      // same thing) as well.
++      this._showMenuItem("folderPaneContext-remove", false);
++    }
++
+     this._showMenuItem(
+       "folderPaneContext-markMailFolderAllRead",
+       !isServer &&
+         !isSmartTagsFolder &&
+@@ -929,13 +937,10 @@ var folderPaneContextMenu = {
+         break;
+       case "folderPaneContext-searchMessages":
+         topChromeWindow.searchAllMessages(folder);
+         break;
+-      case "folderPaneContext-subscribe":
+-        topChromeWindow.MsgSubscribe(folder);
+-        break;
+       case "folderPaneContext-newsUnsubscribe":
+-        topChromeWindow.MsgUnsubscribe([folder]);
++        SubscribeCommands.MsgUnsubscribe(folder);
+         break;
+       case "folderPaneContext-markMailFolderAllRead":
+       case "folderPaneContext-markNewsgroupAllRead":
+         if (folder.flags & Ci.nsMsgFolderFlags.Virtual) {
+@@ -3948,9 +3953,9 @@ var folderPane = {
+     if (
+       folder.server.type == "nntp" &&
+       !folder.getFlag(Ci.nsMsgFolderFlags.Virtual)
+     ) {
+-      top.MsgUnsubscribe([folder]);
++      SubscribeCommands.MsgUnsubscribe(folder);
+       return;
+     }
+ 
+     if (!folder.deletable) {
+@@ -6960,8 +6965,13 @@ var folderListener = {
+ };
+ 
+ /* Commands Controller */
+ commandController.registerCallback(
++  "cmd_subscribe",
++  (folder = gFolder) => SubscribeCommands.MsgSubscribe(folder),
++  () => SubscribeCommands.IsSubscribeEnabled(gFolder)
++);
++commandController.registerCallback(
+   "cmd_newFolder",
+   (folder = gFolder) => folderPane.newFolder(folder),
+   () => folderPaneContextMenu.getCommandState("cmd_newFolder")
+ );
+diff --git a/mail/base/content/mail3PaneWindowCommands.js b/mail/base/content/mail3PaneWindowCommands.js
+--- a/mail/base/content/mail3PaneWindowCommands.js
++++ b/mail/base/content/mail3PaneWindowCommands.js
+@@ -31,9 +31,8 @@ var DefaultController = {
+       case "cmd_undoCloseTab":
+       case "cmd_undo":
+       case "cmd_redo":
+       case "cmd_sendUnsentMsgs":
+-      case "cmd_subscribe":
+       case "cmd_getNewMessages":
+       case "cmd_getMsgsForAuthAccounts":
+       case "cmd_getNextNMessages":
+       case "cmd_settingsOffline":
+@@ -76,10 +75,8 @@ var DefaultController = {
+       case "cmd_redo":
+         return SetupUndoRedoCommand(command);
+       case "cmd_sendUnsentMsgs":
+         return IsSendUnsentMsgsEnabled(null);
+-      case "cmd_subscribe":
+-        return IsSubscribeEnabled();
+       case "cmd_getNewMessages":
+       case "cmd_getMsgsForAuthAccounts":
+         return IsGetNewMessagesEnabled();
+       case "cmd_getNextNMessages":
+@@ -141,11 +138,8 @@ var DefaultController = {
+         } else {
+           MailOfflineMgr.goOnlineToSendMessages(msgWindow);
+         }
+         return;
+-      case "cmd_subscribe":
+-        MsgSubscribe();
+-        return;
+       case "cmd_stop":
+         document.getElementById("tabmail").currentTabInfo.chromeBrowser.stop();
+         return;
+       case "cmd_viewAllHeader":
+@@ -251,30 +245,8 @@ function IsSendUnsentMsgsEnabled(unsentM
+   return hasUnsentMessages;
+ }
+ 
+ /**
+- * Determine whether there exists any server for which to show the Subscribe dialog.
+- */
+-function IsSubscribeEnabled() {
+-  // If there are any IMAP or News servers, we can show the dialog any time and
+-  // it will properly show those.
+-  for (const server of MailServices.accounts.allServers) {
+-    if (server.type == "imap" || server.type == "nntp") {
+-      return true;
+-    }
+-  }
+-
+-  // RSS accounts use a separate Subscribe dialog that we can only show when
+-  // such an account is selected.
+-  const preselectedFolder = GetFirstSelectedMsgFolder();
+-  if (preselectedFolder && preselectedFolder.server.type == "rss") {
+-    return true;
+-  }
+-
+-  return false;
+-}
+-
+-/**
+  * Cycle through the various panes in the 3pane window.
+  *
+  * @param {Event} event - The keypress DOMEvent.
+  */
+diff --git a/mail/base/content/mailCommands.js b/mail/base/content/mailCommands.js
+--- a/mail/base/content/mailCommands.js
++++ b/mail/base/content/mailCommands.js
+@@ -451,50 +451,8 @@ async function ComposeMessage(
+       }
+   }
+ }
+ 
+-function Subscribe(preselectedMsgFolder) {
+-  window.openDialog(
+-    "chrome://messenger/content/subscribe.xhtml",
+-    "subscribe",
+-    "chrome,modal,titlebar,resizable=yes",
+-    {
+-      folder: preselectedMsgFolder,
+-      okCallback: SubscribeOKCallback,
+-    }
+-  );
+-}
+-
+-function SubscribeOKCallback(changeTable) {
+-  for (var serverURI in changeTable) {
+-    var folder = MailUtils.getExistingFolder(serverURI);
+-    var server = folder.server;
+-    var subscribableServer = server.QueryInterface(Ci.nsISubscribableServer);
+-
+-    for (var name in changeTable[serverURI]) {
+-      if (changeTable[serverURI][name]) {
+-        try {
+-          subscribableServer.subscribe(name);
+-        } catch (ex) {
+-          dump("failed to subscribe to " + name + ": " + ex + "\n");
+-        }
+-      } else if (!changeTable[serverURI][name]) {
+-        try {
+-          subscribableServer.unsubscribe(name);
+-        } catch (ex) {
+-          dump("failed to unsubscribe to " + name + ": " + ex + "\n");
+-        }
+-      }
+-    }
+-
+-    try {
+-      subscribableServer.commitSubscribeChanges();
+-    } catch (ex) {
+-      dump("failed to commit the changes: " + ex + "\n");
+-    }
+-  }
+-}
+-
+ /**
+  * Save as file.
+  *
+  * @param {string[]} uris - URIs of files to save.
+diff --git a/mail/base/content/mailWindowOverlay.js b/mail/base/content/mailWindowOverlay.js
+--- a/mail/base/content/mailWindowOverlay.js
++++ b/mail/base/content/mailWindowOverlay.js
+@@ -1109,62 +1109,8 @@ function MsgNewMessage(event) {
+     );
+   }
+ }
+ 
+-/** Open subscribe window. */
+-function MsgSubscribe(folder) {
+-  var preselectedFolder = folder || GetFirstSelectedMsgFolder();
+-
+-  if (FeedUtils.isFeedFolder(preselectedFolder)) {
+-    // Open feed subscription dialog.
+-    openSubscriptionsDialog(preselectedFolder);
+-  } else {
+-    // Open IMAP/NNTP subscription dialog.
+-    Subscribe(preselectedFolder);
+-  }
+-}
+-
+-/**
+- * Show a confirmation dialog - check if the user really want to unsubscribe
+- * from the given newsgroup/s.
+- *
+- * @param {nsIMsgFolder[]} folders - Newsgroup folders to unsubscribe from.
+- * @returns {boolean} true if the user said it's ok to unsubscribe
+- */
+-function ConfirmUnsubscribe(folders) {
+-  var bundle = document.getElementById("bundle_messenger");
+-  var titleMsg = bundle.getString("confirmUnsubscribeTitle");
+-  var dialogMsg =
+-    folders.length == 1
+-      ? bundle.getFormattedString(
+-          "confirmUnsubscribeText",
+-          [folders[0].localizedName],
+-          1
+-        )
+-      : bundle.getString("confirmUnsubscribeManyText");
+-
+-  return Services.prompt.confirm(window, titleMsg, dialogMsg);
+-}
+-
+-/**
+- * Unsubscribe from selected or passed in newsgroup/s.
+- *
+- * @param {nsIMsgFolder[]} folders - The folders to unsubscribe.
+- */
+-function MsgUnsubscribe(folders) {
+-  if (!ConfirmUnsubscribe(folders)) {
+-    return;
+-  }
+-
+-  for (let i = 0; i < folders.length; i++) {
+-    const subscribableServer = folders[i].server.QueryInterface(
+-      Ci.nsISubscribableServer
+-    );
+-    subscribableServer.unsubscribe(folders[i].name);
+-    subscribableServer.commitSubscribeChanges();
+-  }
+-}
+-
+ function MsgOpenNewWindowForFolder(folderURI, msgKeyToSelect) {
+   window.openDialog(
+     "chrome://messenger/content/messenger.xhtml",
+     "_blank",
+diff --git a/mail/base/content/modules/SubscribeCommands.mjs b/mail/base/content/modules/SubscribeCommands.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/base/content/modules/SubscribeCommands.mjs
+@@ -0,0 +1,154 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++const { MailServices } = ChromeUtils.importESModule(
++  "resource:///modules/MailServices.sys.mjs"
++);
++
++const lazy = {};
++ChromeUtils.defineESModuleGetters(lazy, {
++  FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
++  MailUtils: "resource:///modules/MailUtils.sys.mjs",
++});
++
++/**
++ * Determine whether the Subscribe... menu item can be enabled.
++ *
++ * @param {nsIMsgFolder} selectedFolder
++ * @returns {boolean}
++ */
++function IsSubscribeEnabled(selectedFolder) {
++  // If there are any IMAP or News servers, we can show the dialog any time and
++  // it will properly show those.
++  for (const server of MailServices.accounts.allServers) {
++    if (server.type == "imap" || server.type == "nntp") {
++      return true;
++    }
++  }
++
++  // RSS accounts use a separate Subscribe dialog that we can only show when
++  // such an account is selected.
++  if (lazy.FeedUtils.isFeedFolder(selectedFolder)) {
++    return true;
++  }
++
++  return false;
++}
++
++/**
++ * Open subscribe window.
++ *
++ * @param {nsIMsgFolder} selectedFolder
++ */
++function MsgSubscribe(selectedFolder) {
++  if (lazy.FeedUtils.isFeedFolder(selectedFolder)) {
++    // Open feed subscription dialog.
++    openSubscriptionsDialog(selectedFolder);
++  } else {
++    // Open IMAP/NNTP subscription dialog.
++    top.openDialog(
++      "chrome://messenger/content/subscribe.xhtml",
++      "subscribe",
++      "chrome,modal,titlebar,resizable=yes",
++      {
++        folder: selectedFolder,
++        okCallback: SubscribeOKCallback,
++      }
++    );
++  }
++}
++
++/**
++ * @param {nsIMsgFolder} selectedFolder
++ */
++function openSubscriptionsDialog(selectedFolder) {
++  // Check for an existing feed subscriptions window and focus it.
++  const subscriptionsWindow = Services.wm.getMostRecentWindow(
++    "Mail:News-BlogSubscriptions"
++  );
++
++  if (subscriptionsWindow) {
++    subscriptionsWindow.FeedSubscriptions.selectFolder(selectedFolder);
++    subscriptionsWindow.FeedSubscriptions.mView.tree.ensureRowIsVisible(
++      subscriptionsWindow.FeedSubscriptions.mView.selection.currentIndex
++    );
++
++    subscriptionsWindow.focus();
++  } else {
++    top.openDialog(
++      "chrome://messenger-newsblog/content/feed-subscriptions.xhtml",
++      "",
++      "centerscreen,chrome,dialog=no,resizable",
++      { folder: selectedFolder }
++    );
++  }
++}
++
++/**
++ * @param {string} serverURI
++ * @param {Record<string, boolean>} changes - Each entry is a change to make,
++ *   keys are paths to [un]subscribe. A true value means the path should be
++ *   subscribed, false means it should be unsubscribed.
++ */
++function SubscribeOKCallback(serverURI, changes) {
++  const folder = lazy.MailUtils.getExistingFolder(serverURI);
++  const server = folder.server;
++  const subscribableServer = server.QueryInterface(Ci.nsISubscribableServer);
++
++  for (const [path, subscribe] of Object.entries(changes)) {
++    if (subscribe) {
++      try {
++        subscribableServer.subscribe(path);
++      } catch (ex) {
++        console.error(`Failed to subscribe to ${path}:`, ex);
++      }
++    } else {
++      try {
++        subscribableServer.unsubscribe(path);
++      } catch (ex) {
++        console.error(`Failed to unsubscribe to ${path}:`, ex);
++      }
++    }
++  }
++
++  try {
++    subscribableServer.commitSubscribeChanges();
++  } catch (ex) {
++    console.error("Failed to commit the changes:", ex);
++  }
++}
++
++/**
++ * Unsubscribe from selected or passed in newsgroup.
++ *
++ * @param {nsIMsgFolder} folder - The folder to unsubscribe.
++ */
++function MsgUnsubscribe(folder) {
++  const bundle = Services.strings.createBundle(
++    "chrome://messenger/locale/messenger.properties"
++  );
++
++  // Show a confirmation dialog - check if the user really want to unsubscribe
++  // from the given newsgroup(s).
++  const titleMsg = bundle.GetStringFromName("confirmUnsubscribeTitle");
++  const dialogMsg = bundle.formatStringFromName("confirmUnsubscribeText", [
++    folder.localizedName,
++  ]);
++
++  if (!Services.prompt.confirm(top, titleMsg, dialogMsg)) {
++    return;
++  }
++
++  const subscribableServer = folder.server.QueryInterface(
++    Ci.nsISubscribableServer
++  );
++  subscribableServer.unsubscribe(folder.name);
++  subscribableServer.commitSubscribeChanges();
++}
++
++export const SubscribeCommands = {
++  IsSubscribeEnabled,
++  MsgSubscribe,
++  MsgUnsubscribe,
++};
+diff --git a/mail/base/jar.mn b/mail/base/jar.mn
+--- a/mail/base/jar.mn
++++ b/mail/base/jar.mn
+@@ -96,8 +96,9 @@ messenger.jar:
+     content/messenger/CustomElementUtils.mjs        (content/modules/CustomElementUtils.mjs)
+     content/messenger/DarkReader.mjs                (content/modules/DarkReader.mjs)
+     content/messenger/FolderReorderListener.mjs     (content/modules/FolderReorderListener.mjs)
+     content/messenger/FolderSelectionDataAdapter.mjs (content/modules/FolderSelectionDataAdapter.mjs)
++    content/messenger/SubscribeCommands.mjs         (content/modules/SubscribeCommands.mjs)
+     content/messenger/ThreadPaneColumns.mjs         (content/modules/ThreadPaneColumns.mjs)
+     content/messenger/TreeDataAdapter.mjs           (content/modules/TreeDataAdapter.mjs)
+     content/messenger/TreeSelection.mjs             (content/modules/TreeSelection.mjs)
+     content/messenger/UserFeedbackListener.mjs      (content/modules/UserFeedbackListener.mjs)
+diff --git a/mail/base/test/browser/browser_subscribe.js b/mail/base/test/browser/browser_subscribe.js
+--- a/mail/base/test/browser/browser_subscribe.js
++++ b/mail/base/test/browser/browser_subscribe.js
+@@ -439,8 +439,9 @@ add_task(async function testNNTPSubscrib
+   );
+   Assert.ok(!folderPane.getRowForFolder(`${nntpRootFolder.URI}/subscribe.foo`));
+ 
+   // Open the subscribe dialog a third time to test saving while filtered.
++
+   dialogPromise = BrowserTestUtils.promiseAlertDialog(
+     undefined,
+     "chrome://messenger/content/subscribe.xhtml",
+     {
+@@ -491,8 +492,9 @@ add_task(async function testNNTPSubscrib
+   await rightClickAndActivate(nntpRootFolder, "folderPaneContext-subscribe");
+   await dialogPromise;
+ 
+   // Check our subscriptions changed and subscribe.bar is now visible.
++
+   await TestUtils.waitForCondition(
+     () => nntpRootRow.querySelectorAll("li").length == 3,
+     "waiting for folder tree to update"
+   );
+@@ -502,8 +504,26 @@ add_task(async function testNNTPSubscrib
+   Assert.ok(
+     folderPane.getRowForFolder(`${nntpRootFolder.URI}/subscribe.baz.subbaz`)
+   );
+   Assert.ok(!folderPane.getRowForFolder(`${nntpRootFolder.URI}/subscribe.foo`));
++
++  // Unsubscribe using the context menu item.
++
++  const confirmPromise = BrowserTestUtils.promiseAlertDialog("accept");
++  await rightClickAndActivate(
++    nntpRootFolder.getChildNamed("subscribe.bar"),
++    "folderPaneContext-newsUnsubscribe"
++  );
++  await confirmPromise;
++
++  // Check our subscriptions changed and subscribe.bar no longer exists.
++
++  await TestUtils.waitForCondition(
++    () => nntpRootRow.querySelectorAll("li").length == 2,
++    "waiting for folder tree to update"
++  );
++
++  Assert.ok(!folderPane.getRowForFolder(`${nntpRootFolder.URI}/subscribe.bar`));
+ });
+ 
+ /**
+  * @param {nsIMsgFolder} folder
+diff --git a/mail/base/test/browser/menus/browser_fileMenu.js b/mail/base/test/browser/menus/browser_fileMenu.js
+--- a/mail/base/test/browser/menus/browser_fileMenu.js
++++ b/mail/base/test/browser/menus/browser_fileMenu.js
+@@ -1,8 +1,11 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++const { FeedUtils } = ChromeUtils.importESModule(
++  "resource:///modules/FeedUtils.sys.mjs"
++);
+ const { MessageGenerator } = ChromeUtils.importESModule(
+   "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+ );
+ const { MailUtils } = ChromeUtils.importESModule(
+@@ -44,21 +47,21 @@ const fileMenuData = {
+   menu_saveAs: {},
+   menu_saveAsFile: { disabled: ["mail3PaneTab", "contentTab"] },
+   menu_saveAsTemplate: { disabled: ["mail3PaneTab", "contentTab"] },
+   menu_getAllNewMsg: {},
+-  menu_getnewmsgs_all_accounts: { disabled: true },
+-  menu_getnewmsgs_current_account: { disabled: true },
++  menu_getnewmsgs_all_accounts: {},
++  menu_getnewmsgs_current_account: {},
+   menu_getnextnmsg: { hidden: true },
+   menu_sendunsentmsgs: { disabled: true },
+-  menu_subscribe: { disabled: true },
++  menu_subscribe: {
++    disabled: ["mailMessageTab", "mailMessageWindow", "contentTab"],
++  },
+   menu_deleteFolder: { disabled: true, hidden: ["mailMessageWindow"] },
+   menu_renameFolder: { disabled: true, hidden: ["mailMessageWindow"] },
+-  menu_compactFolder: {
++  menu_compactFolder: { hidden: true },
++  menu_compactFolderAll: {
+     disabled: ["mailMessageTab", "contentTab"],
+-    hidden: ["mailMessageWindow", "mail3PaneTab"],
+-  },
+-  menu_compactFolderAll: {
+-    hidden: ["mailMessageWindow", "mailMessageTab", "contentTab"],
++    hidden: ["mailMessageWindow"],
+   },
+   menu_emptyTrash: {
+     disabled: ["mailMessageTab", "contentTab"],
+     hidden: ["mailMessageWindow"],
+@@ -94,8 +97,9 @@ const nonMainWindowData = Object.fromEnt
+ const helper = new MenuTestHelper("menu_File", fileMenuData);
+ 
+ const tabmail = document.getElementById("tabmail");
+ let inboxFolder, plainFolder, rootFolder, testMessages, trashFolder;
++let imapRootFolder, nntpRootFolder, rssRootFolder;
+ 
+ add_setup(async function () {
+   document.getElementById("toolbar-menubar").removeAttribute("autohide");
+ 
+@@ -122,8 +126,27 @@ add_setup(async function () {
+     .createLocalSubfolder("file menu plain")
+     .QueryInterface(Ci.nsIMsgLocalMailFolder);
+   trashFolder = rootFolder.getFolderWithFlags(Ci.nsMsgFolderFlags.Trash);
+ 
++  const imapAccount = MailServices.accounts.createAccount();
++  imapAccount.incomingServer = MailServices.accounts.createIncomingServer(
++    `${imapAccount.key}user`,
++    "localhost",
++    "imap"
++  );
++  imapRootFolder = imapAccount.incomingServer.rootFolder;
++
++  const nntpAccount = MailServices.accounts.createAccount();
++  nntpAccount.incomingServer = MailServices.accounts.createIncomingServer(
++    `${nntpAccount.key}user`,
++    "localhost",
++    "nntp"
++  );
++  nntpRootFolder = nntpAccount.incomingServer.rootFolder;
++
++  const rssAccount = FeedUtils.createRssAccount("Test RSS Account");
++  rssRootFolder = rssAccount.incomingServer.rootFolder;
++
+   window.OpenMessageInNewTab(testMessages[0], { background: true });
+   await BrowserTestUtils.waitForEvent(
+     tabmail.tabInfo[1].chromeBrowser,
+     "MsgLoaded"
+@@ -136,8 +159,11 @@ add_setup(async function () {
+ 
+   registerCleanupFunction(() => {
+     tabmail.closeOtherTabs(0);
+     MailServices.accounts.removeAccount(account, false);
++    MailServices.accounts.removeAccount(imapAccount);
++    MailServices.accounts.removeAccount(nntpAccount);
++    MailServices.accounts.removeAccount(rssAccount);
+   });
+ });
+ 
+ add_task(async function test3PaneTab() {
+@@ -145,27 +171,63 @@ add_task(async function test3PaneTab() {
+   await helper.testAllItems("mail3PaneTab");
+ 
+   tabmail.currentAbout3Pane.displayFolder(inboxFolder);
+   await helper.testItems({
++    menu_subscribe: {},
+     menu_deleteFolder: { disabled: true },
+     menu_renameFolder: { disabled: true },
+-    menu_compactFolder: { disabled: false },
++    menu_compactFolder: {},
++    menu_compactFolderAll: { hidden: true },
+     menu_emptyTrash: {},
+   });
+ 
+   tabmail.currentAbout3Pane.displayFolder(plainFolder);
+   await helper.testItems({
+-    menu_deleteFolder: { disabled: false },
+-    menu_renameFolder: { disabled: false },
+-    menu_compactFolder: { disabled: false },
++    menu_subscribe: {},
++    menu_deleteFolder: {},
++    menu_renameFolder: {},
++    menu_compactFolder: {},
++    menu_compactFolderAll: { hidden: true },
+     menu_emptyTrash: {},
+   });
+ 
+   tabmail.currentAbout3Pane.displayFolder(trashFolder);
+   await helper.testItems({
++    menu_subscribe: {},
++    menu_deleteFolder: { disabled: true },
++    menu_renameFolder: { disabled: true },
++    menu_compactFolder: {},
++    menu_compactFolderAll: { hidden: true },
++    menu_emptyTrash: {},
++  });
++
++  tabmail.currentAbout3Pane.displayFolder(imapRootFolder);
++  await helper.testItems({
++    menu_subscribe: {},
+     menu_deleteFolder: { disabled: true },
+     menu_renameFolder: { disabled: true },
+-    menu_compactFolder: { disabled: false },
++    menu_compactFolder: { hidden: true },
++    menu_compactFolderAll: {},
++    menu_emptyTrash: {},
++  });
++
++  tabmail.currentAbout3Pane.displayFolder(nntpRootFolder);
++  await helper.testItems({
++    menu_subscribe: {},
++    menu_deleteFolder: { disabled: true },
++    menu_renameFolder: { disabled: true },
++    menu_compactFolder: { hidden: true },
++    menu_compactFolderAll: { disabled: true },
++    menu_emptyTrash: { disabled: true },
++  });
++
++  tabmail.currentAbout3Pane.displayFolder(rssRootFolder);
++  await helper.testItems({
++    menu_subscribe: {},
++    menu_deleteFolder: { disabled: true },
++    menu_renameFolder: { disabled: true },
++    menu_compactFolder: { hidden: true },
++    menu_compactFolderAll: {},
+     menu_emptyTrash: {},
+   });
+ });
+ 
+@@ -199,4 +261,69 @@ add_task(async function testMessageWindo
+   await windowTestHelper.testAllItems("mailMessageWindow");
+ 
+   await BrowserTestUtils.closeWindow(messageWindow);
+ });
++
++add_task(async function testSubscribe() {
++  tabmail.switchToTab(0);
++
++  // IMAP
++
++  tabmail.currentAbout3Pane.displayFolder(imapRootFolder);
++  let subscribePromise = BrowserTestUtils.promiseAlertDialogOpen(
++    undefined,
++    "chrome://messenger/content/subscribe.xhtml"
++  );
++
++  helper.activateItem("menu_subscribe");
++  let subscribeWindow = await subscribePromise;
++  await SimpleTest.promiseFocus(subscribeWindow);
++
++  let serverPicker = subscribeWindow.document.getElementById("serverMenu");
++  Assert.equal(
++    serverPicker.value,
++    imapRootFolder.URI,
++    "server should be selected in the server picker"
++  );
++
++  await BrowserTestUtils.closeWindow(subscribeWindow);
++  await SimpleTest.promiseFocus();
++  await promiseServerIdle(imapRootFolder.server);
++
++  // NNTP
++
++  tabmail.currentAbout3Pane.displayFolder(nntpRootFolder);
++  subscribePromise = BrowserTestUtils.promiseAlertDialogOpen(
++    undefined,
++    "chrome://messenger/content/subscribe.xhtml"
++  );
++
++  helper.activateItem("menu_subscribe");
++  subscribeWindow = await subscribePromise;
++  await SimpleTest.promiseFocus(subscribeWindow);
++
++  serverPicker = subscribeWindow.document.getElementById("serverMenu");
++  Assert.equal(
++    serverPicker.value,
++    nntpRootFolder.URI,
++    "server should be selected in the server picker"
++  );
++
++  await BrowserTestUtils.closeWindow(subscribeWindow);
++  await SimpleTest.promiseFocus();
++  await promiseServerIdle(nntpRootFolder.server);
++
++  // RSS
++
++  tabmail.currentAbout3Pane.displayFolder(rssRootFolder);
++  subscribePromise = BrowserTestUtils.promiseAlertDialogOpen(
++    undefined,
++    "chrome://messenger-newsblog/content/feed-subscriptions.xhtml"
++  );
++
++  helper.activateItem("menu_subscribe");
++  subscribeWindow = await subscribePromise;
++  await SimpleTest.promiseFocus(subscribeWindow);
++
++  await BrowserTestUtils.closeWindow(subscribeWindow);
++  await SimpleTest.promiseFocus();
++});
+diff --git a/mail/base/test/browser/menus/browser_folderPaneContext.js b/mail/base/test/browser/menus/browser_folderPaneContext.js
+--- a/mail/base/test/browser/menus/browser_folderPaneContext.js
++++ b/mail/base/test/browser/menus/browser_folderPaneContext.js
+@@ -31,9 +31,8 @@ const folderPaneContextData = {
+   "folderPaneContext-new": ["server", "rssRoot", ...realFolders],
+   "folderPaneContext-remove": [
+     "plain",
+     ...virtualFolders,
+-    "nntpGroup",
+     "rssFeed",
+     "multiselect-plain",
+   ],
+   "folderPaneContext-rename": ["plain", ...virtualFolders, "rssFeed"],
+diff --git a/mailnews/base/content/msgAccountCentral.js b/mailnews/base/content/msgAccountCentral.js
+--- a/mailnews/base/content/msgAccountCentral.js
++++ b/mailnews/base/content/msgAccountCentral.js
+@@ -11,8 +11,16 @@ var { MailServices } = ChromeUtils.impor
+ var { MailUtils } = ChromeUtils.importESModule(
+   "resource:///modules/MailUtils.sys.mjs"
+ );
+ 
++ChromeUtils.defineESModuleGetters(
++  this,
++  {
++    SubscribeCommands: "chrome://messenger/content/SubscribeCommands.mjs",
++  },
++  { global: "current" }
++);
++
+ ChromeUtils.defineESModuleGetters(this, {
+   UIDensity: "resource:///modules/UIDensity.sys.mjs",
+   UIFontSize: "resource:///modules/UIFontSize.sys.mjs",
+ });
+@@ -220,15 +228,9 @@ function createMsgFilters() {
+ function subscribe() {
+   if (!gSelectedServer) {
+     return;
+   }
+-  if (gSelectedServer.type == "rss") {
+-    window.browsingContext.topChromeWindow.openSubscriptionsDialog(
+-      gSelectedServer.rootFolder
+-    );
+-  } else {
+-    window.browsingContext.topChromeWindow.MsgSubscribe(gSelectedFolder);
+-  }
++  SubscribeCommands.MsgSubscribe(gSelectedFolder);
+ }
+ 
+ /**
+  * Open the target's url on an external browser.
+diff --git a/mailnews/base/content/subscribe.js b/mailnews/base/content/subscribe.js
+--- a/mailnews/base/content/subscribe.js
++++ b/mailnews/base/content/subscribe.js
+@@ -231,9 +231,9 @@ function subscribeOK() {
+     collectChanges(topRow);
+   }
+ 
+   if (top.okCallback) {
+-    top.okCallback({ [gServerURI]: changes });
++    top.okCallback(gServerURI, changes);
+   }
+   Stop();
+   if (gSubscribableServer) {
+     gSubscribableServer.subscribeCleanup();
+diff --git a/mailnews/extensions/newsblog/newsblogOverlay.js b/mailnews/extensions/newsblog/newsblogOverlay.js
+--- a/mailnews/extensions/newsblog/newsblogOverlay.js
++++ b/mailnews/extensions/newsblog/newsblogOverlay.js
+@@ -4,11 +4,8 @@
+ 
+ /* globals ReloadMessage, getMessagePaneBrowser, openContentTab,
+    gMessageNotificationBar */
+ 
+-var { XPCOMUtils } = ChromeUtils.importESModule(
+-  "resource://gre/modules/XPCOMUtils.sys.mjs"
+-);
+ var { MailServices } = ChromeUtils.importESModule(
+   "resource:///modules/MailServices.sys.mjs"
+ );
+ var { FeedUtils } = ChromeUtils.importESModule(
+@@ -248,33 +245,8 @@ var FeedMessageHandler = {
+     }
+   },
+ };
+ 
+-function openSubscriptionsDialog(aFolder) {
+-  // Check for an existing feed subscriptions window and focus it.
+-  const subscriptionsWindow = Services.wm.getMostRecentWindow(
+-    "Mail:News-BlogSubscriptions"
+-  );
+-
+-  if (subscriptionsWindow) {
+-    if (aFolder) {
+-      subscriptionsWindow.FeedSubscriptions.selectFolder(aFolder);
+-      subscriptionsWindow.FeedSubscriptions.mView.tree.ensureRowIsVisible(
+-        subscriptionsWindow.FeedSubscriptions.mView.selection.currentIndex
+-      );
+-    }
+-
+-    subscriptionsWindow.focus();
+-  } else {
+-    window.browsingContext.topChromeWindow.openDialog(
+-      "chrome://messenger-newsblog/content/feed-subscriptions.xhtml",
+-      "",
+-      "centerscreen,chrome,dialog=no,resizable",
+-      { folder: aFolder }
+-    );
+-  }
+-}
+-
+ // Special case attempts to reply/forward/edit as new RSS articles. For
+ // messages stored prior to Tb15, we are here only if the message's folder's
+ // account server is rss and feed messages moved to other types will have their
+ // summaries loaded, as viewing web pages only happened in an rss account.

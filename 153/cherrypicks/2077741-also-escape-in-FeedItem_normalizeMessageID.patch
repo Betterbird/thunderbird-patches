@@ -1,0 +1,76 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1791565983 -3600
+#      Fri Oct 09 18:13:03 2026 +0100
+# Node ID a5ccbedf087d106996378b215b9a4c39b0a7071b
+# Parent  c9772f80c31d4e2c3701144cf4c69200307cdc7c
+Bug 2077741 - Also escape % and whitespace in FeedItem.normalizeMessageID(). r=babolivier
+
+Ids with inner whitespace produced an invalid msg-id, and since % was not
+escaped, an id containing e.g. %40 collided with the same id containing @.
+Also skip whitespace-only in-reply-to refs instead of turning them into
+an empty <@localhost.localdomain> reference.
+
+Differential Revision: https://phabricator.services.mozilla.com/D331147
+
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -77,14 +77,14 @@ FeedItem.prototype = {
+     return this.feed.name + ": " + this.title + " (" + this.id + ")";
+   },
+ 
+   normalizeMessageID(messageID) {
+-    // Escape occurrences of message ID meta characters <, >, and @.
++    // Escape occurrences of message ID meta characters <, >, and @, as well
++    // as whitespace and the escape character % itself.
+     messageID = messageID
+-      .replace(/</g, "%3C")
+-      .replace(/>/g, "%3E")
+-      .replace(/@/g, "%40");
+-    messageID = "<" + messageID.trim() + "@localhost.localdomain>";
++      .trim()
++      .replace(/[%<>@\s]/g, c => encodeURIComponent(c));
++    messageID = "<" + messageID + "@localhost.localdomain>";
+ 
+     lazy.FeedUtils.log.trace(
+       "FeedItem.normalizeMessageID: messageID - " + messageID
+     );
+diff --git a/mailnews/extensions/newsblog/FeedParser.sys.mjs b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedParser.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedParser.sys.mjs
+@@ -1072,9 +1072,11 @@ FeedParser.prototype = {
+         "in-reply-to"
+       );
+       if (tags) {
+         for (const tag of tags) {
+-          const ref = this.removeUnprintableASCII(tag.getAttribute("ref"));
++          const ref = this.removeUnprintableASCII(
++            tag.getAttribute("ref")
++          ).trim();
+           if (ref) {
+             item.inReplyTo += item.normalizeMessageID(ref) + " ";
+           }
+         }
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feeditem.js b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feeditem.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+@@ -150,8 +150,18 @@ add_task(function test_normalizeMessageI
+     item.normalizeMessageID("<a@b><c@d>"),
+     "<%3Ca%40b%3E%3Cc%40d%3E@localhost.localdomain>",
+     "all occurrences of message ID meta characters should be escaped"
+   );
++  Assert.equal(
++    item.normalizeMessageID("foo bar\u00A0baz"),
++    "<foo%20bar%C2%A0baz@localhost.localdomain>",
++    "inner whitespace should be escaped"
++  );
++  Assert.notEqual(
++    item.normalizeMessageID("a%40b"),
++    item.normalizeMessageID("a@b"),
++    "an already escaped id should not collide with the unescaped one"
++  );
+ });
+ 
+ add_task(function test_message_id_header_escapes_item_id() {
+   const account = FeedUtils.createRssAccount("message id account");

@@ -1,0 +1,150 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792020584 25200
+#      Wed Oct 14 16:29:44 2026 -0700
+# Node ID 2ac50b603677901cbe541acb26a8b4e955d0ce47
+# Parent  33cf1c12a354ef99b6603ceb40747487594a16cf
+Bug 2077797 - Prevent FeedUtils.Mixins.meld() from walking into prototypes. r=edicharry
+
+Only iterate the source's own keys, skip prototype-related keys, and only recurse
+into or replace properties the target has itself.
+
+Differential Revision: https://phabricator.services.mozilla.com/D331949
+
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -1371,13 +1371,18 @@ export var FeedUtils = {
+    */
+   Mixins: {
+     meld(source, keep, replace) {
+       function meldin(meldSource, target, meldKeep, meldReplace) {
+-        for (const attribute in meldSource) {
++        for (const attribute of Object.keys(meldSource ?? {})) {
++          if (["__proto__", "constructor", "prototype"].includes(attribute)) {
++            continue;
++          }
+           // Recurse for objects.
+           if (
+             typeof meldSource[attribute] == "object" &&
+-            typeof target[attribute] == "object"
++            Object.hasOwn(target, attribute) &&
++            typeof target[attribute] == "object" &&
++            target[attribute] !== null
+           ) {
+             meldin(
+               meldSource[attribute],
+               target[attribute],
+@@ -1386,14 +1391,14 @@ export var FeedUtils = {
+             );
+           } else {
+             // Use attribute values from source for the target, unless
+             // replace is false.
+-            if (attribute in target && !meldReplace) {
++            if (Object.hasOwn(target, attribute) && !meldReplace) {
+               continue;
+             }
+             // Don't copy attribute from source to target if it is not in the
+             // target, unless keep is true.
+-            if (!(attribute in target) && !meldKeep) {
++            if (!Object.hasOwn(target, attribute) && !meldKeep) {
+               continue;
+             }
+ 
+             target[attribute] = meldSource[attribute];
+diff --git a/mailnews/extensions/newsblog/test/unit/test_newOptions.js b/mailnews/extensions/newsblog/test/unit/test_newOptions.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/test_newOptions.js
+@@ -0,0 +1,81 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that migrating old feed options doesn't pollute shared prototypes.
++ */
++add_task(function test_newOptions_prototype() {
++  const options = FeedUtils.newOptions(
++    JSON.parse(
++      '{"version":1,"__proto__":{"isPrototypeOf":"MARKER","toString":null},' +
++        '"constructor":{"prototype":{"valueOf":null}},' +
++        '"updates":{"updateMinutes":42,"__proto__":{"hasOwnProperty":null}}}'
++    )
++  );
++  Assert.equal(
++    typeof Object.prototype.isPrototypeOf,
++    "function",
++    "Object.prototype.isPrototypeOf should not be replaced"
++  );
++  Assert.equal(
++    typeof Object.prototype.toString,
++    "function",
++    "Object.prototype.toString should not be replaced"
++  );
++  Assert.equal(
++    typeof Object.prototype.valueOf,
++    "function",
++    "Object.prototype.valueOf should not be replaced"
++  );
++  Assert.equal(
++    typeof Object.prototype.hasOwnProperty,
++    "function",
++    "Object.prototype.hasOwnProperty should not be replaced"
++  );
++  Assert.equal(
++    Object.getPrototypeOf(options),
++    Object.getPrototypeOf(FeedUtils.newOptions(null)),
++    "migrated options should have the default prototype"
++  );
++  Assert.equal(
++    options.version,
++    FeedUtils._optionsDefault.version,
++    "migrated options should have the current version"
++  );
++  Assert.equal(
++    options.updates.updateMinutes,
++    42,
++    "user set updateMinutes should be preserved"
++  );
++  Assert.ok(
++    !Object.hasOwn(options, "constructor"),
++    "constructor should not be copied"
++  );
++});
++
++/**
++ * Tests that null values in the template or the old options are handled.
++ */
++add_task(function test_newOptions_nulls() {
++  const options = FeedUtils.newOptions({
++    version: 1,
++    updates: { lastUpdateTime: { bogus: 1 }, updateBase: 5 },
++    category: null,
++  });
++  Assert.deepEqual(
++    options.updates.lastUpdateTime,
++    { bogus: 1 },
++    "lastUpdateTime should be taken from the old options"
++  );
++  Assert.equal(
++    options.updates.updateBase,
++    5,
++    "updateBase should be taken from the old options"
++  );
++  Assert.deepEqual(
++    options.category,
++    FeedUtils._optionsDefault.category,
++    "category should keep the template values"
++  );
++});
+diff --git a/mailnews/extensions/newsblog/test/unit/xpcshell.toml b/mailnews/extensions/newsblog/test/unit/xpcshell.toml
+--- a/mailnews/extensions/newsblog/test/unit/xpcshell.toml
++++ b/mailnews/extensions/newsblog/test/unit/xpcshell.toml
+@@ -4,4 +4,6 @@ support-files = ["resources/*"]
+ 
+ ["test_feeditem.js"]
+ 
+ ["test_feedparser.js"]
++
++["test_newOptions.js"]

@@ -1,0 +1,185 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1793038819 -7200
+#      Mon Oct 26 20:20:19 2026 +0200
+# Node ID 60efba2d5821ee2c98bad612bb8a7aeed8999a2b
+# Parent  c09bc09c942cc6be9f8d752c5567871406732e9d
+Bug 2081766 - Avoid per-category tag service scans in FeedItem.getTagKeys(). r=tobyp
+
+getTagKeys() called getKeyForTag(), which scans every tag pref, for each
+category, and checked for duplicate keys with includes(). Look up existing tags
+in a map built once from getAllTags() and collect the keys in a Set.
+
+Only create the first FeedItem.MAX_NEW_TAGS_PER_ITEM (20) new tags
+per item. Existing tags are still applied, and the Keywords header still lists
+all categories.
+
+Differential Revision: https://phabricator.services.mozilla.com/D336253
+
+diff --git a/mailnews/extensions/newsblog/FeedItem.sys.mjs b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedItem.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedItem.sys.mjs
+@@ -33,8 +33,10 @@ FeedItem.prototype = {
+   inReplyTo: "",
+   keywords: [],
+   mURL: null,
+   characterSet: "UTF-8",
++  // Maximum number of tags created for the categories of a single item.
++  MAX_NEW_TAGS_PER_ITEM: 20,
+ 
+   ENCLOSURE_BOUNDARY_PREFIX: "--------------", // 14 dashes
+   ENCLOSURE_HEADER_BOUNDARY_PREFIX: "------------", // 12 dashes
+   MESSAGE_TEMPLATE:
+@@ -372,9 +374,10 @@ FeedItem.prototype = {
+     return headerStr;
+   },
+ 
+   /**
+-   * Create tags for feed categories and return their keys.
++   * Create tags for feed categories and return their keys. At most
++   * MAX_NEW_TAGS_PER_ITEM new tags are created; existing tags are always used.
+    *
+    * @param {string[]} aKeywords - Keywords (tags).
+    * @returns {string[]} The tag keys.
+    */
+@@ -386,25 +389,33 @@ FeedItem.prototype = {
+ 
+     const prefix = category.prefixEnabled ? category.prefix : "";
+     const rtl = Services.prefs.getIntPref("bidi.direction") == 2;
+ 
+-    const keys = [];
++    const keysForTags = new Map(
++      MailServices.tags.getAllTags().map(t => [t.tag, t.key.toLowerCase()])
++    );
++    const keys = new Set();
++    let newTags = 0;
+     for (let keyword of aKeywords) {
+       keyword = rtl ? keyword + prefix : prefix + keyword;
+-      let keyForTag = MailServices.tags.getKeyForTag(keyword);
++      let keyForTag = keysForTags.get(keyword);
+       if (!keyForTag) {
++        if (newTags >= this.MAX_NEW_TAGS_PER_ITEM) {
++          continue;
++        }
++        newTags++;
+         // Add the tag if it doesn't exist.
+         MailServices.tags.addTag(keyword, "", lazy.FeedUtils.AUTOTAG);
+         keyForTag = MailServices.tags.getKeyForTag(keyword);
++        keysForTags.set(keyword, keyForTag);
+       }
+ 
+-      // Add the tag key to the keys array.
+-      if (keyForTag && !keys.includes(keyForTag)) {
+-        keys.push(keyForTag);
++      if (keyForTag) {
++        keys.add(keyForTag);
+       }
+     }
+ 
+-    return keys;
++    return [...keys];
+   },
+ 
+   htmlEscape(s) {
+     s = s.replace(/&/g, "&amp;");
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feeditem.js b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+--- a/mailnews/extensions/newsblog/test/unit/test_feeditem.js
++++ b/mailnews/extensions/newsblog/test/unit/test_feeditem.js
+@@ -343,4 +343,97 @@ add_task(async function test_proto_item_
+     [feedURL],
+     "reloaded __proto__ item should keep its feed URL"
+   );
+ });
++
++add_task(function test_getTagKeys() {
++  const item = new FeedItem();
++  item.feed = {
++    options: {
++      category: {
++        enabled: true,
++        prefixEnabled: true,
++        prefix: "rss-",
++      },
++    },
++  };
++  const existingName = "rss-Existing";
++  const existingKey = "rss-existing-key";
++  MailServices.tags.addTagForKey(
++    existingKey,
++    existingName,
++    "",
++    FeedUtils.AUTOTAG
++  );
++  const newNames = ["rss-New 1", "rss-New 2"];
++  registerCleanupFunction(() => {
++    MailServices.tags.deleteKey(existingKey);
++    for (const name of newNames) {
++      MailServices.tags.deleteKey(MailServices.tags.getKeyForTag(name));
++    }
++  });
++
++  const keys = item.getTagKeys(["New 1", "Existing", "New 2", "New 1"]);
++  const newKeys = newNames.map(name => MailServices.tags.getKeyForTag(name));
++  Assert.ok(
++    newKeys.every(Boolean),
++    "tags should have been created for new categories"
++  );
++  Assert.deepEqual(
++    keys,
++    [newKeys[0], existingKey, newKeys[1]],
++    "tag keys should be unique, in category order, reusing existing tags"
++  );
++});
++
++add_task(function test_getTagKeys_limits_new_tags() {
++  const item = new FeedItem();
++  item.feed = {
++    options: {
++      category: {
++        enabled: true,
++        prefixEnabled: true,
++        prefix: "limit-",
++      },
++    },
++  };
++  const max = item.MAX_NEW_TAGS_PER_ITEM;
++  const existingKey = "limit-existing-key";
++  MailServices.tags.addTagForKey(
++    existingKey,
++    "limit-Existing",
++    "",
++    FeedUtils.AUTOTAG
++  );
++  const categories = Array.from({ length: max + 5 }, (_, i) => `New ${i}`);
++  registerCleanupFunction(() => {
++    MailServices.tags.deleteKey(existingKey);
++    for (const category of categories) {
++      const key = MailServices.tags.getKeyForTag(`limit-${category}`);
++      if (key) {
++        MailServices.tags.deleteKey(key);
++      }
++    }
++  });
++  const tagCount = MailServices.tags.getAllTags().length;
++
++  const keys = item.getTagKeys([...categories, "Existing"]);
++  Assert.equal(
++    MailServices.tags.getAllTags().length,
++    tagCount + max,
++    "only the maximum number of new tags should be created"
++  );
++  Assert.equal(
++    keys.length,
++    max + 1,
++    "keys should include the created tags and the existing tag"
++  );
++  Assert.equal(
++    keys.at(-1),
++    existingKey,
++    "existing tags should be used after the limit is reached"
++  );
++  Assert.ok(
++    !MailServices.tags.getKeyForTag(`limit-${categories.at(-1)}`),
++    "no tag should be created for categories past the limit"
++  );
++});

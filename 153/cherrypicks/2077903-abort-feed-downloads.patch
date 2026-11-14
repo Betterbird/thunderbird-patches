@@ -1,0 +1,248 @@
+# HG changeset patch
+# User Magnus Melin <mkmelin+mozilla@iki.fi>
+# Date 1792060911 0
+#      Thu Oct 15 10:41:51 2026 +0000
+# Node ID 8ae9bc4192d8c426f750b93df2ec75d0701354d7
+# Parent  28935b9f3ecd160fdb7c55f979a8f66f249673a3
+Bug 2077903 - Abort feed downloads that stop receiving data. r=thunderbird-back-end-reviewers,edicharry
+
+Once a feed response started loading, the request timeout was cleared so
+large feeds could complete. A server that sent a partial response and then
+stalled kept the request pending forever, holding the feed in FeedCache and
+blocking further subscriptions.
+
+Replace the cleared timeout with an inactivity timer that is reset on each
+progress event and aborts the request if no data arrives within
+FeedUtils.REQUEST_TIMEOUT.
+
+Differential Revision: https://phabricator.services.mozilla.com/D331127
+
+diff --git a/mailnews/extensions/newsblog/Feed.sys.mjs b/mailnews/extensions/newsblog/Feed.sys.mjs
+--- a/mailnews/extensions/newsblog/Feed.sys.mjs
++++ b/mailnews/extensions/newsblog/Feed.sys.mjs
+@@ -6,8 +6,10 @@ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+   FeedParser: "resource:///modules/FeedParser.sys.mjs",
+   FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
++  clearTimeout: "resource://gre/modules/Timer.sys.mjs",
++  setTimeout: "resource://gre/modules/Timer.sys.mjs",
+ });
+ 
+ // Cache for all of the feeds currently being downloaded, indexed by URL,
+ // so the load event listener can access the Feed objects after it finishes
+@@ -69,8 +71,9 @@ Feed.prototype = {
+   url: null,
+   description: null,
+   author: null,
+   request: null,
++  inactivityTimer: null,
+   server: null,
+   downloadCallback: null,
+   resource: null,
+   itemsToStore: [],
+@@ -183,21 +186,38 @@ Feed.prototype = {
+     this.request.onload = this.onDownloaded;
+     this.request.onreadystatechange = this.onReadyStateChange;
+     this.request.onerror = this.onDownloadError;
+     this.request.ontimeout = this.onDownloadError;
++    this.request.onabort = this.onDownloadError;
+     FeedCache.putFeed(this);
+     this.request.send(null);
+   },
+ 
+   onReadyStateChange(aEvent) {
+-    // Once a server responds with data, reset the timeout to allow potentially
+-    // large files to complete the download.
++    // Once a server responds with data, replace the timeout with an inactivity
++    // timeout to allow potentially large files to complete the download.
+     const request = aEvent.target;
+     if (request.timeout && request.readyState == request.LOADING) {
+       request.timeout = 0;
++      const feed = FeedCache.getFeed(request.channel.originalURI.spec);
++      feed?.resetInactivityTimer();
+     }
+   },
+ 
++  resetInactivityTimer() {
++    lazy.clearTimeout(this.inactivityTimer);
++    this.inactivityTimer = lazy.setTimeout(() => {
++      this.inactivityTimer = null;
++      lazy.FeedUtils.log.info(`No data received, aborting -  ${this.url}`);
++      this.request.abort();
++    }, lazy.FeedUtils.REQUEST_TIMEOUT);
++  },
++
++  clearInactivityTimer() {
++    lazy.clearTimeout(this.inactivityTimer);
++    this.inactivityTimer = null;
++  },
++
+   onDownloaded(aEvent) {
+     const request = aEvent.target;
+     const isHttp = request.channel.originalURI.scheme.startsWith("http");
+     const url = request.channel.originalURI.spec;
+@@ -217,8 +237,9 @@ Feed.prototype = {
+       throw new Error(
+         "Feed.onDownloaded: error - couldn't retrieve feed from cache"
+       );
+     }
++    feed.clearInactivityTimer();
+ 
+     // If the server sends a Last-Modified header, store the property on the
+     // feed so we can use it when making future requests, to avoid downloading
+     // and parsing feeds that have not changed.  Don't update if merely checking
+@@ -238,8 +259,11 @@ Feed.prototype = {
+   onProgress(aEvent) {
+     const request = aEvent.target;
+     const url = request.channel.originalURI.spec;
+     const feed = FeedCache.getFeed(url);
++    if (feed.inactivityTimer) {
++      feed.resetInactivityTimer();
++    }
+ 
+     if (feed.downloadCallback) {
+       feed.downloadCallback.onProgress(
+         feed,
+@@ -253,8 +277,9 @@ Feed.prototype = {
+   onDownloadError(aEvent) {
+     const request = aEvent.target;
+     const url = request.channel.originalURI.spec;
+     const feed = FeedCache.getFeed(url);
++    feed.clearInactivityTimer();
+     if (feed.downloadCallback) {
+       // Generic network or 'not found' error initially.
+       let error = lazy.FeedUtils.kNewsBlogRequestFailure;
+       // Certain errors should disable the feed.
+diff --git a/mailnews/extensions/newsblog/test/unit/test_feedDownloadTimeout.js b/mailnews/extensions/newsblog/test/unit/test_feedDownloadTimeout.js
+new file mode 100644
+--- /dev/null
++++ b/mailnews/extensions/newsblog/test/unit/test_feedDownloadTimeout.js
+@@ -0,0 +1,113 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Tests that a feed download is aborted when the server stops sending data,
++ * and that a slow but progressing download is allowed to complete.
++ */
++
++const { setTimeout } = ChromeUtils.importESModule(
++  "resource://gre/modules/Timer.sys.mjs"
++);
++
++const FEED_DOC = `<?xml version="1.0" encoding="UTF-8"?>
++<rss version="2.0">
++  <channel>
++    <title>Timeout test</title>
++    <link>http://localhost/</link>
++    <description>Timeout test</description>
++    <item>
++      <title>Item</title>
++      <link>http://localhost/item</link>
++      <guid>http://localhost/item</guid>
++    </item>
++  </channel>
++</rss>
++`;
++
++let rootFolder;
++const stalledResponses = [];
++
++add_setup(function () {
++  const originalTimeout = FeedUtils.REQUEST_TIMEOUT;
++  FeedUtils.REQUEST_TIMEOUT = 1000;
++
++  httpServer.registerPathHandler("/stalled.xml", (request, response) => {
++    response.processAsync();
++    response.setHeader("Content-Type", "application/rss+xml", false);
++    response.setHeader("Content-Length", String(FEED_DOC.length), false);
++    response.write(FEED_DOC.substring(0, 26));
++    stalledResponses.push(response);
++  });
++
++  httpServer.registerPathHandler("/trickle.xml", (request, response) => {
++    response.processAsync();
++    response.setHeader("Content-Type", "application/rss+xml", false);
++    response.setHeader("Content-Length", String(FEED_DOC.length), false);
++    const chunkSize = Math.ceil(FEED_DOC.length / 6);
++    let offset = 0;
++    const writeChunk = () => {
++      response.write(FEED_DOC.substring(offset, offset + chunkSize));
++      offset += chunkSize;
++      if (offset < FEED_DOC.length) {
++        // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
++        setTimeout(writeChunk, 400);
++      } else {
++        response.finish();
++      }
++    };
++    writeChunk();
++  });
++
++  const account = FeedUtils.createRssAccount("test_feed_download_timeout");
++  rootFolder = account.incomingServer.rootMsgFolder.QueryInterface(
++    Ci.nsIMsgLocalMailFolder
++  );
++
++  registerCleanupFunction(() => {
++    FeedUtils.REQUEST_TIMEOUT = originalTimeout;
++    for (const response of stalledResponses) {
++      response.finish();
++    }
++  });
++});
++
++function download(url, folderName) {
++  const feed = new Feed(url, rootFolder.createLocalSubfolder(folderName));
++  return new Promise(resolve => {
++    feed.download(true, {
++      downloaded(f, error) {
++        resolve(error);
++      },
++      onProgress() {},
++    });
++  });
++}
++
++add_task(async function test_stalled_partial_response() {
++  const url = `http://localhost:${SERVER_PORT}/stalled.xml`;
++  const error = await download(url, "stalled");
++  Assert.equal(
++    error,
++    FeedUtils.kNewsBlogRequestFailure,
++    "a stalled download should fail with a request failure"
++  );
++
++  const retryError = await download(url, "stalled2");
++  Assert.notEqual(
++    retryError,
++    FeedUtils.kNewsBlogFeedIsBusy,
++    "the stalled feed should no longer be busy"
++  );
++});
++
++add_task(async function test_slow_progressing_response() {
++  const url = `http://localhost:${SERVER_PORT}/trickle.xml`;
++  const error = await download(url, "trickle");
++  Assert.equal(
++    error,
++    FeedUtils.kNewsBlogSuccess,
++    "a slow download that keeps receiving data should succeed"
++  );
++});
+diff --git a/mailnews/extensions/newsblog/test/unit/xpcshell.toml b/mailnews/extensions/newsblog/test/unit/xpcshell.toml
+--- a/mailnews/extensions/newsblog/test/unit/xpcshell.toml
++++ b/mailnews/extensions/newsblog/test/unit/xpcshell.toml
+@@ -1,8 +1,10 @@
+ [DEFAULT]
+ head = "head_feeds.js"
+ support-files = ["resources/*"]
+ 
++["test_feedDownloadTimeout.js"]
++
+ ["test_feeditem.js"]
+ 
+ ["test_feedparser.js"]
+ 
