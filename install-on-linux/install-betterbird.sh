@@ -36,6 +36,15 @@ fi
 
 echoLog "Script started."
 
+if [ ! -d "$installDir" ]; then
+  mkdir -p "$installDir" 2>/dev/null
+  if [ $? -ne 0 ]; then
+    echo "Can't create install directory $installDir. Exiting."
+    exit 1
+  fi
+  echoLog "Created install directory $installDir."
+fi
+
 # Functions for installation steps
 checkIfBetterbirdIsRunning() {
   if pgrep -f betterbird-bin > /dev/null; then
