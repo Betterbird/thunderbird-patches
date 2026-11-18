@@ -1,0 +1,101 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu>
+# Date 1795043653 -7200
+# Parent  5edd19b8fa235f1e5693d0139f08e994db1416b8
+Bug 2065626 - Instrument sites where MSFs are deleted.
+
+diff --git a/mailnews/db/msgdb/src/nsMsgDatabase.cpp b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+--- a/mailnews/db/msgdb/src/nsMsgDatabase.cpp
++++ b/mailnews/db/msgdb/src/nsMsgDatabase.cpp
+@@ -1229,11 +1229,19 @@ nsresult nsMsgDatabase::CheckForErrors(n
+   }
+ 
+   if (deleteInvalidDB) {
+     // this will make the db folder info release its ref to the mail db...
++    bool folderInfoReadable = m_dbFolderInfo != nullptr;
+     m_dbFolderInfo = nullptr;
+     ForceClosed();
+     if (err == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE) {
++      nsCString msg = nsPrintfCString(
++          "Deleting message database %s, dbFolderInfo readable: %s",
++          summaryFile->HumanReadablePath().get(),
++          folderInfoReadable ? "yes" : "no");
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg), nsCString(__FILE__), __LINE__,
++                       folderInfoReadable ? nsIScriptError::warningFlag
++                                          : nsIScriptError::errorFlag);
+       summaryFile->Remove(false);
+     }
+   }
+   if (NS_FAILED(err) || newFile) {
+@@ -1245,8 +1253,14 @@ nsresult nsMsgDatabase::CheckForErrors(n
+       err = NS_MSG_ERROR_FOLDER_SUMMARY_MISSING;
+     } else if (NS_FAILED(err) &&
+                err != NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE) {
+       Close(false);
++      nsCString msg = nsPrintfCString(
++          "Deleting corrupt message database %s (error 0x%x)",
++          summaryFile->HumanReadablePath().get(),
++          static_cast<uint32_t>(err));
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg), nsCString(__FILE__), __LINE__,
++                       nsIScriptError::errorFlag);
+       summaryFile->Remove(false);  // blow away the db if it's corrupt.
+     }
+   }
+   if (aDBService && sync &&
+diff --git a/mailnews/imap/src/nsImapMailFolder.cpp b/mailnews/imap/src/nsImapMailFolder.cpp
+--- a/mailnews/imap/src/nsImapMailFolder.cpp
++++ b/mailnews/imap/src/nsImapMailFolder.cpp
+@@ -21,8 +21,10 @@
+ #include "nsMsgFolderFlags.h"
+ #include "nsIImapUrl.h"
+ #include "nsImapUtils.h"
+ #include "nsMsgUtils.h"
++#include "nsIScriptError.h"
++#include "nsPrintfCString.h"
+ #include "nsIMsgMailSession.h"
+ #include "nsITransactionManager.h"
+ #include "nsIMsgTransactionService.h"
+ #include "../public/nsIImapHostSessionList.h"
+@@ -2568,9 +2570,20 @@ NS_IMETHODIMP nsImapMailFolder::UpdateIm
+ 
+     nsCOMPtr<nsIFile> summaryFile;
+     rv = GetSummaryFileLocation(pathFile, getter_AddRefs(summaryFile));
+     // Remove summary file.
+-    if (NS_SUCCEEDED(rv) && summaryFile) summaryFile->Remove(false);
++    if (NS_SUCCEEDED(rv) && summaryFile) {
++      nsCString uri;
++      GetURI(uri);
++      nsCString msg = nsPrintfCString(
++          "Deleting message database for folder %s (IMAP UIDVALIDITY "
++          "changed), column layout %s",
++          uri.get(), transferInfo ? "preserved" : "LOST");
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg), nsCString(__FILE__), __LINE__,
++                       transferInfo ? nsIScriptError::warningFlag
++                                    : nsIScriptError::errorFlag);
++      summaryFile->Remove(false);
++    }
+ 
+     // Create a new summary file, update the folder message counts, and
+     // Close the summary file db.
+     rv = msgDBService->CreateNewDB(this, getter_AddRefs(mDatabase));
+diff --git a/mailnews/local/src/nsLocalMailFolder.cpp b/mailnews/local/src/nsLocalMailFolder.cpp
+--- a/mailnews/local/src/nsLocalMailFolder.cpp
++++ b/mailnews/local/src/nsLocalMailFolder.cpp
+@@ -466,8 +466,17 @@ NS_IMETHODIMP nsMsgLocalMailFolder::GetD
+       }
+       nsCOMPtr<nsIFile> summaryFile;
+       rv = GetSummaryFileLocation(pathFile, getter_AddRefs(summaryFile));
+       NS_ENSURE_SUCCESS(rv, rv);
++      nsCString uri;
++      GetURI(uri);
++      nsCString msg = nsPrintfCString(
++          "Deleting message database for folder %s to rebuild it, "
++          "column layout %s",
++          uri.get(), transferInfo ? "preserved" : "LOST");
++      MsgLogToConsole4(NS_ConvertUTF8toUTF16(msg), nsCString(__FILE__), __LINE__,
++                       transferInfo ? nsIScriptError::warningFlag
++                                    : nsIScriptError::errorFlag);
+       // Remove summary file.
+       summaryFile->Remove(false);
+ 
+       // if it's out of date then reopen with upgrade.
