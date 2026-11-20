@@ -1,0 +1,585 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeekSeek
+# Date 1795132485 -7200
+# Parent  77f8777a5510efcccf24c14f5db85edb499724bf
+Bug 1986636 and bug 2094855: Fix single message PGP pipeline.
+
+diff --git a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs
+@@ -5,9 +5,8 @@
+ /**
+  * Module for handling PGP/MIME encrypted messages.
+  */
+ 
+-import { MailServices } from "resource:///modules/MailServices.sys.mjs";
+ import { EnigmailSingletons } from "chrome://openpgp/content/modules/singletons.sys.mjs";
+ 
+ import { MimeParser } from "resource:///modules/mimeParser.sys.mjs";
+ 
+@@ -36,10 +35,8 @@ ChromeUtils.defineLazyGetter(lazy, "l10n
+ const ENCODING_DEFAULT = 0;
+ const ENCODING_BASE64 = 1;
+ const ENCODING_QP = 2;
+ 
+-const LAST_MSG = EnigmailSingletons.lastDecryptedMessage;
+-
+ export var EnigmailMimeDecrypt = {
+   /**
+    * Wrap the decrypted output into a message/rfc822 attachment
+    *
+@@ -101,9 +98,8 @@ export function MimeDecryptHandler() {
+   this.headerMode = 0;
+   this.xferEncoding = ENCODING_DEFAULT;
+   this.matchedPgpDelimiter = 0;
+   this.exitCode = null;
+-  this.msgUriSpec = null;
+   this.returnStatus = null;
+   this.proc = null;
+   this.statusDisplayed = false;
+   this.uri = null;
+@@ -151,9 +147,8 @@ MimeDecryptHandler.prototype = {
+ 
+     this.pipe = null;
+     this.closePipe = false;
+     this.exitCode = null;
+-    this.msgUriSpec = lazy.EnigmailVerify.lastMsgUri;
+ 
+     this.statusDisplayed = false;
+     this.returnStatus = null;
+     this.dataLength = 0;
+@@ -174,10 +169,12 @@ MimeDecryptHandler.prototype = {
+     const now = Date.now();
+     const timeoutReached =
+       EnigmailSingletons.lastMessageDecryptTime &&
+       now - EnigmailSingletons.lastMessageDecryptTime > 10000;
+-    if (timeoutReached || !this.isReloadingLastMessage()) {
+-      EnigmailSingletons.clearLastDecryptedMessage();
++    if (timeoutReached) {
++      EnigmailSingletons.clearDecryptedMessagesCache();
++    }
++    if (!this.isReloadingCachedMessage()) {
+       EnigmailSingletons.lastMessageDecryptTime = now;
+     }
+   },
+ 
+@@ -311,33 +308,23 @@ MimeDecryptHandler.prototype = {
+     }
+   },
+ 
+   /**
+-   * Determine if we are reloading the same message as the previous one.
++   * Determine if we have a cached decryption result for the message
++   * currently being processed.
+    *
+-   * @returns {boolean} true if we're reloading the same message.
++   * @returns {boolean} true if the cached result can be reused.
+    */
+-  isReloadingLastMessage() {
++  isReloadingCachedMessage() {
+     if (!this.uri) {
+       return false;
+     }
+-    if (!LAST_MSG.lastMessageURI) {
+-      return false;
+-    }
+-    if ("lastMessageData" in LAST_MSG && LAST_MSG.lastMessageData === "") {
+-      return false;
+-    }
+-
+     const currMsg = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
+-
+-    if (
+-      LAST_MSG.lastMessageURI.folder === currMsg.folder &&
+-      LAST_MSG.lastMessageURI.msgNum === currMsg.msgNum
+-    ) {
+-      return true;
+-    }
+-
+-    return false;
++    const entry = EnigmailSingletons.getDecryptedMessageCacheEntry(
++      currMsg.folder,
++      currMsg.msgNum
++    );
++    return !!entry?.lastMessageData;
+   },
+ 
+   /**
+    * @param {nsIRequest} request
+@@ -357,10 +344,8 @@ MimeDecryptHandler.prototype = {
+     if (this.dataIsBase64) {
+       this.processBase64Message();
+     }
+ 
+-    this.msgUriSpec = lazy.EnigmailVerify.lastMsgUri;
+-
+     const href = Services.wm.getMostRecentWindow(null)?.document?.location.href;
+ 
+     if (
+       href == "about:blank" ||
+@@ -371,53 +356,17 @@ MimeDecryptHandler.prototype = {
+ 
+     this.backgroundJob = false;
+ 
+     if (this.uri) {
+-      // return if not decrypting currently displayed message (except if
+-      // printing, replying, etc)
+-
+       this.backgroundJob =
+         this.uri.spec.search(/[&?]header=(print|quotebody)/) >= 0;
+ 
+-      try {
+-        let url = null;
+-        if (this.msgUriSpec) {
+-          const uri = this.msgUriSpec;
+-          url = MailServices.messageServiceFromURI(uri).getUrlForUri(uri);
+-        }
+-
+-        if (
+-          this.uri.spec.search(/[&?]header=[^&]+/) > 0 &&
+-          this.uri.spec.search(/[&?]examineEncryptedParts=true/) < 0
+-        ) {
+-          if (
+-            this.uri.spec.search(/[&?]header=(filter|enigmailFilter)(&.*)?$/) >
+-            0
+-          ) {
+-            return;
+-          }
+-        }
+-
+-        if (
+-          this.uri.spec.search(/[&?]header=[^&]+/) < 0 &&
+-          this.uri.spec.search(/[&?]part=[.0-9]+/) < 0 &&
+-          this.uri.spec.search(/[&?]examineEncryptedParts=true/) < 0
+-        ) {
+-          if (this.uri && url) {
+-            const fixedQueryRef = this.uri.pathQueryRef.replace(
+-              /&number=0$/,
+-              ""
+-            );
+-            if (
+-              url.host !== this.uri.host ||
+-              url.pathQueryRef !== fixedQueryRef
+-            ) {
+-              return;
+-            }
+-          }
+-        }
+-      } catch (ex) {
+-        lazy.log.warn(`Error processing ${this.msgUriSpec} FAILED.`, ex);
++      if (
++        this.uri.spec.search(/[&?]header=[^&]+/) > 0 &&
++        this.uri.spec.search(/[&?]examineEncryptedParts=true/) < 0 &&
++        this.uri.spec.search(/[&?]header=(filter|enigmailFilter)(&.*)?$/) > 0
++      ) {
++        return;
+       }
+     }
+ 
+     const spec = this.uri ? this.uri.spec : null;
+@@ -428,25 +377,23 @@ MimeDecryptHandler.prototype = {
+         spec,
+         false
+       )
+     ) {
+-      EnigmailSingletons.addUriWithNestedEncryptedPart(this.msgUriSpec);
++      EnigmailSingletons.addUriWithNestedEncryptedPart(spec);
+       // ignore, do not display
+-      lazy.log.debug(
+-        `Found uri with nested encrypted part: ${this.msgUriSpec}`
+-      );
++      lazy.log.debug(`Found uri with nested encrypted part: ${spec}`);
+       return;
+     }
+ 
+-    if (!this.isReloadingLastMessage()) {
++    if (!this.isReloadingCachedMessage()) {
+       if (this.xferEncoding == ENCODING_BASE64) {
+         this.outQueue = lazy.EnigmailData.decodeBase64(this.outQueue) + "\n";
+       }
+ 
+       // limit output to 100 times message size to avoid DoS attack
+       const maxOutput = this.outQueue.length * 100;
+ 
+-      lazy.log.debug(`Starting decryption: ${this.msgUriSpec}`);
++      lazy.log.debug(`Starting decryption: ${spec}`);
+       const options = { maxOutputLength: maxOutput };
+       if (mimeSvc.mailChannel) {
+         const { headerNames, headerValues } = mimeSvc.mailChannel;
+         for (var i = 0; i < headerNames.length; i++) {
+@@ -469,12 +416,20 @@ MimeDecryptHandler.prototype = {
+ 
+       // The processing of a contained signed message must be able to
+       // check that this parent object is encrypted. We set the msg ID
+       // early, despite the full results not yet being available.
+-      LAST_MSG.lastMessageURI = lazy.EnigmailURIs.msgIdentificationFromUrl(
+-        this.uri
++      const entry = {
++        lastMessageURI: lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri),
++        mimePartNumber: this.mimePartNumber,
++        lastMessageData: "",
++        lastStatus: null,
++        gossip: [],
++      };
++      EnigmailSingletons.setDecryptedMessageCacheEntry(
++        entry.lastMessageURI.folder,
++        entry.lastMessageURI.msgNum,
++        entry
+       );
+-      LAST_MSG.mimePartNumber = this.mimePartNumber;
+ 
+       options.noOutput = false;
+       options.verifyOnly = false;
+       options.uiFlags = lazy.EnigmailConstants.UI_PGP_MIME;
+@@ -534,25 +489,32 @@ MimeDecryptHandler.prototype = {
+           /^Content-Type:[\t ]+multipart\/encrypted/im
+         ) < 0 &&
+         !decError
+       ) {
+-        LAST_MSG.lastMessageData = this.decryptedData;
+-        LAST_MSG.lastStatus = this.returnStatus;
+-        LAST_MSG.lastStatus.decryptedHeaders = this.decryptedHeaders;
++        entry.lastMessageData = this.decryptedData;
++        entry.lastStatus = this.returnStatus;
++        entry.lastStatus.decryptedHeaders = this.decryptedHeaders;
+       } else {
+-        LAST_MSG.lastMessageURI = null;
+-        LAST_MSG.lastMessageData = "";
++        EnigmailSingletons.deleteDecryptedMessageCacheEntry(
++          entry.lastMessageURI.folder,
++          entry.lastMessageURI.msgNum
++        );
+       }
+ 
+       this.decryptedData = "";
+       this.proc = null;
+     } else {
+-      this.returnStatus = LAST_MSG.lastStatus;
+-      this.decryptedHeaders = LAST_MSG.lastStatus.decryptedHeaders;
+-      this.mimePartNumber = LAST_MSG.mimePartNumber;
++      const currMsg = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
++      const entry = EnigmailSingletons.getDecryptedMessageCacheEntry(
++        currMsg.folder,
++        currMsg.msgNum
++      );
++      this.returnStatus = entry.lastStatus;
++      this.decryptedHeaders = entry.lastStatus.decryptedHeaders;
++      this.mimePartNumber = entry.mimePartNumber;
+       this.exitCode = 0;
+       this.displayStatus(mimeSvc.mailChannel?.openpgpSink);
+-      this.returnData(mimeSvc, LAST_MSG.lastMessageData);
++      this.returnData(mimeSvc, entry.lastMessageData);
+     }
+   },
+ 
+   /**
+@@ -802,8 +764,16 @@ MimeDecryptHandler.prototype = {
+   /**
+    * Process the Autocrypt-Gossip header lines.
+    */
+   async extractAutocryptGossip() {
++    const currMsg = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
++    const entry = EnigmailSingletons.getDecryptedMessageCacheEntry(
++      currMsg.folder,
++      currMsg.msgNum
++    );
++    if (!entry) {
++      return;
++    }
+     const gossipHeaders =
+       // TODO: already available as this.decryptedHeaders.get("autocrypt-gossip")
+       MimeParser.extractHeaders(this.decryptedData).get("autocrypt-gossip") ||
+       [];
+@@ -812,9 +782,9 @@ MimeDecryptHandler.prototype = {
+         const keyData = atob(
+           MimeParser.getParameter(h.replace(/ /g, ""), "keydata")
+         );
+         if (keyData) {
+-          LAST_MSG.gossip.push(keyData);
++          entry.gossip.push(keyData);
+         }
+       } catch {}
+     }
+   },
+diff --git a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/mimeVerify.sys.mjs
+@@ -5,9 +5,8 @@
+ /**
+  * Module for handling PGP/MIME signed messages.
+  */
+ 
+-import { MailServices } from "resource:///modules/MailServices.sys.mjs";
+ import { EnigmailConstants } from "chrome://openpgp/content/modules/constants.sys.mjs";
+ 
+ const lazy = {};
+ ChromeUtils.defineESModuleGetters(lazy, {
+@@ -29,21 +28,16 @@ ChromeUtils.defineLazyGetter(lazy, "log"
+ });
+ 
+ export var EnigmailVerify = {
+   _initialized: false,
+-  lastMsgUri: null,
+ 
+   init() {
+     if (this._initialized) {
+       return;
+     }
+     this._initialized = true;
+   },
+ 
+-  setLastMsgUri(msgUriSpec) {
+-    this.lastMsgUri = msgUriSpec;
+-  },
+-
+   newVerifier(protocol) {
+     const v = new MimeVerify(protocol);
+     return v;
+   },
+@@ -74,9 +68,8 @@ function MimeVerify(protocol) {
+ MimeVerify.prototype = {
+   foundMsg: false,
+   startMsgStr: "",
+   window: null,
+-  msgUriSpec: null,
+   statusDisplayed: false,
+   inStream: null,
+   sigFile: null,
+   mimeSignatureData: "",
+@@ -103,9 +96,8 @@ MimeVerify.prototype = {
+ 
+   /** @param {nsIRequest} request */
+   onStartRequest(request) {
+     this.mimeSvc = request.QueryInterface(Ci.nsIPgpMimeProxy);
+-    this.msgUriSpec = EnigmailVerify.lastMsgUri;
+     this.mimePartNumber = this.mimeSvc.mimePart;
+     this.uri = this.mimeSvc.messageURI;
+     this.outputRaw = this.uri && /[&?]outputformat=raw/.test(this.uri.spec);
+ 
+@@ -351,9 +343,9 @@ MimeVerify.prototype = {
+ 
+       const currMsg = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
+       const parentToCheck = queryMimePartNumber == "1.1.1" ? "1.1" : "1";
+       if (
+-        lazy.EnigmailSingletons.isLastDecryptedMessagePart(
++        lazy.EnigmailSingletons.isDecryptedMessagePart(
+           currMsg.folder,
+           currMsg.msgNum,
+           parentToCheck
+         )
+@@ -376,9 +368,9 @@ MimeVerify.prototype = {
+ 
+       const currMsg = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
+       if (
+         queryMimePartNumber === msgPart + ".1.1" &&
+-        lazy.EnigmailSingletons.isLastDecryptedMessagePart(
++        lazy.EnigmailSingletons.isDecryptedMessagePart(
+           currMsg.folder,
+           currMsg.msgNum,
+           msgPart + ".1"
+         )
+@@ -392,9 +384,8 @@ MimeVerify.prototype = {
+ 
+   /** @param {nsIRequest} request */
+   onStopRequest(request) {
+     const mimeSvc = request.QueryInterface(Ci.nsIPgpMimeProxy);
+-    this.msgUriSpec = EnigmailVerify.lastMsgUri;
+ 
+     this.backgroundJob = false;
+ 
+     // don't try to verify if no message found
+@@ -456,48 +447,19 @@ MimeVerify.prototype = {
+         );
+       }
+     }
+ 
+-    if (!this.isAllowedSigPart(this.mimePartNumber, this.msgUriSpec)) {
+-      lazy.EnigmailSingletons.addUriWithNestedSignedPart(this.msgUriSpec);
++    if (!this.isAllowedSigPart(this.mimePartNumber, this.uri?.spec)) {
++      lazy.EnigmailSingletons.addUriWithNestedSignedPart(this.uri?.spec);
+       return;
+     }
+ 
+     if (this.uri) {
+-      // return if not decrypting currently displayed message (except if
+-      // printing, replying, etc)
+-
+       this.backgroundJob =
+         this.uri.spec.search(/[&?]header=(print|quotebody)/) >= 0;
+ 
+-      try {
+-        if (
+-          this.uri.spec.search(/[&?]header=[a-zA-Z0-9]*$/) < 0 &&
+-          this.uri.spec.search(/[&?]part=[.0-9]+/) < 0 &&
+-          this.uri.spec.search(/[&?]examineEncryptedParts=true/) < 0
+-        ) {
+-          if (this.uri.spec.search(/[&?]header=filter&.*$/) > 0) {
+-            return;
+-          }
+-
+-          const uri = this.msgUriSpec;
+-          if (uri) {
+-            const url =
+-              MailServices.messageServiceFromURI(uri).getUrlForUri(uri);
+-            const otherId = lazy.EnigmailURIs.msgIdentificationFromUrl(url);
+-            const thisId = lazy.EnigmailURIs.msgIdentificationFromUrl(this.uri);
+-
+-            if (
+-              url.host !== this.uri.host ||
+-              otherId.folder !== thisId.folder ||
+-              otherId.msgNum !== thisId.msgNum
+-            ) {
+-              return;
+-            }
+-          }
+-        }
+-      } catch (ex) {
+-        lazy.log.error(`Processing ${this.msgUriSpec} FAILED.`, ex);
++      if (this.uri.spec.search(/[&?]header=filter&.*$/) > 0) {
++        return;
+       }
+     }
+ 
+     if (this.protocol === "application/pgp-signature") {
+diff --git a/mail/extensions/openpgp/content/modules/singletons.sys.mjs b/mail/extensions/openpgp/content/modules/singletons.sys.mjs
+--- a/mail/extensions/openpgp/content/modules/singletons.sys.mjs
++++ b/mail/extensions/openpgp/content/modules/singletons.sys.mjs
+@@ -1,29 +1,49 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+ 
+-export var EnigmailSingletons = {
+-  // information about the last PGP/MIME decrypted message (mimeDecrypt)
+-  lastDecryptedMessage: {},
+-  lastMessageDecryptTime: 0,
++const lazy = {};
++ChromeUtils.defineESModuleGetters(lazy, {
++  EnigmailURIs: "chrome://openpgp/content/modules/uris.sys.mjs",
++});
+ 
+-  clearLastDecryptedMessage() {
+-    const lm = this.lastDecryptedMessage;
+-    lm.lastMessageData = "";
+-    lm.lastMessageURI = null;
+-    lm.mimePartNumber = "";
+-    lm.lastStatus = {};
+-    lm.gossip = [];
++export var EnigmailSingletons = {
++  // Cache of recently decrypted PGP/MIME messages (mimeDecrypt), keyed by
++  // "folder|msgNum".
++  decryptedMessagesCache: new Map(),
++  lastMessageDecryptTime: 0,
++  maxCachedDecryptedMessages: 100,
++
++  clearDecryptedMessagesCache() {
++    this.decryptedMessagesCache.clear();
++  },
++
++  getDecryptedMessageCacheEntry(folder, msgNum) {
++    return this.decryptedMessagesCache.get(`${folder}|${msgNum}`);
+   },
+ 
+-  isLastDecryptedMessagePart(folder, msgNum, mimePartNumber) {
+-    const reval =
+-      this.lastDecryptedMessage.lastMessageURI &&
+-      this.lastDecryptedMessage.lastMessageURI.folder == folder &&
+-      this.lastDecryptedMessage.lastMessageURI.msgNum == msgNum &&
+-      this.lastDecryptedMessage.mimePartNumber == mimePartNumber;
+-    return reval;
++  setDecryptedMessageCacheEntry(folder, msgNum, entry) {
++    if (this.decryptedMessagesCache.size >= this.maxCachedDecryptedMessages) {
++      this.decryptedMessagesCache.delete(
++        this.decryptedMessagesCache.keys().next().value
++      );
++    }
++    this.decryptedMessagesCache.set(`${folder}|${msgNum}`, entry);
++  },
++
++  deleteDecryptedMessageCacheEntry(folder, msgNum) {
++    this.decryptedMessagesCache.delete(`${folder}|${msgNum}`);
++  },
++
++  getDecryptedMessageCacheEntryForUrl(url) {
++    const id = lazy.EnigmailURIs.msgIdentificationFromUrl(url);
++    return id ? this.getDecryptedMessageCacheEntry(id.folder, id.msgNum) : null;
++  },
++
++  isDecryptedMessagePart(folder, msgNum, mimePartNumber) {
++    const entry = this.getDecryptedMessageCacheEntry(folder, msgNum);
++    return !!entry?.lastMessageURI && entry.mimePartNumber == mimePartNumber;
+   },
+ 
+   urisWithNestedEncryptedParts: [],
+   urisWithNestedSignedParts: [],
+@@ -69,6 +89,4 @@ export var EnigmailSingletons = {
+   isRecentUriWithNestedSignedPart(uri) {
+     return this.urisWithNestedSignedParts.includes(uri);
+   },
+ };
+-
+-EnigmailSingletons.clearLastDecryptedMessage();
+diff --git a/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js b/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js
+--- a/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js
++++ b/mail/extensions/openpgp/content/ui/enigmailMessengerOverlay.js
+@@ -131,9 +131,9 @@ Enigmail.msg = {
+     onEndAttachments() {},
+   },
+ 
+   clearLastMessage() {
+-    EnigmailSingletons.clearLastDecryptedMessage();
++    EnigmailSingletons.clearDecryptedMessagesCache();
+   },
+ 
+   messageReload() {
+     this.clearLastMessage();
+@@ -2248,9 +2248,12 @@ Enigmail.msg = {
+         }
+       }
+     }
+ 
+-    for (const gossipKey of EnigmailSingletons.lastDecryptedMessage.gossip) {
++    const gossipEntry = EnigmailSingletons.getDecryptedMessageCacheEntryForUrl(
++      Enigmail.msg.getCurrentMsgUrl()
++    );
++    for (const gossipKey of gossipEntry?.gossip ?? []) {
+       await this.commonProcessAttachedKey(gossipKey, true);
+     }
+ 
+     if (this.keyCollectCandidates && this.keyCollectCandidates.size) {
+diff --git a/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js b/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
+--- a/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
++++ b/mail/extensions/openpgp/content/ui/enigmailMsgHdrViewOverlay.js
+@@ -25,9 +25,8 @@ ChromeUtils.defineESModuleGetters(this, 
+   EnigmailKeyRing: "chrome://openpgp/content/modules/keyRing.sys.mjs",
+   EnigmailMime: "chrome://openpgp/content/modules/mime.sys.mjs",
+   EnigmailMsgRead: "chrome://openpgp/content/modules/msgRead.sys.mjs",
+   EnigmailSingletons: "chrome://openpgp/content/modules/singletons.sys.mjs",
+-  EnigmailVerify: "chrome://openpgp/content/modules/mimeVerify.sys.mjs",
+   EnigmailWindows: "chrome://openpgp/content/modules/windows.sys.mjs",
+   RNP: "chrome://openpgp/content/modules/RNP.sys.mjs",
+ });
+ 
+@@ -325,9 +324,8 @@ Enigmail.hdrView = {
+   msgHdrViewLoad() {
+     this.messageListener = {
+       onStartHeaders() {
+         Enigmail.hdrView.statusBarHide();
+-        EnigmailVerify.setLastMsgUri(Enigmail.msg.getCurrentMsgUriSpec());
+ 
+         const msgFrame = document.getElementById("messagepane").contentDocument;
+ 
+         if (msgFrame) {
+@@ -343,12 +341,8 @@ Enigmail.hdrView = {
+ 
+       onEndHeaders() {},
+ 
+       onEndAttachments() {
+-        try {
+-          EnigmailVerify.setLastMsgUri(null);
+-        } catch (ex) {}
+-
+         Enigmail.hdrView.messageLoad();
+       },
+ 
+       beforeStartHeaders() {
