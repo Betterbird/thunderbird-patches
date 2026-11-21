@@ -301,6 +301,9 @@ echo "  .label = Iniciar o { -brand-short-name } na bandeja"                    
 echo "  .accesskey = I"                                                            >> localization/pt-BR/messenger/preferences/preferences.ftl
 
 # Stuff that hasn't been translated yet, grrr!
+# https://pontoon.mozilla.org/pt-BR/thunderbird/mail/messenger/preferences/preferences.ftl/?status=missing&string=331304
+# https://pontoon.mozilla.org/pt-BR/thunderbird/mail/messenger/preferences/preferences.ftl/?status=missing&string=331304
+# https://pontoon.mozilla.org/pt-BR/thunderbird/mail/messenger/extensionsUI.ftl/?string=334992
 echo "recent-destinations-description = Opções para listar e ordenar as pastas para onde as mensagens foram movidas recentemente." >> localization/pt-BR/messenger/preferences/preferences.ftl
 echo "general-folder-options-header = Opções de gestão de pastas" >> localization/pt-BR/messenger/preferences/preferences.ftl
 echo "webext-install-suppressed-details-2 = Complementos com APIs legadas podem modificar cada parte do { -brand-product-name } e precisam ser atualizados, revisados e aprovados sempre que o próprio { -brand-product-name } mudar. Essas APIs legadas são suportadas somente pelo { -brand-product-name } ESR, que recebe menos alterações de código e permanece estável durante o ciclo ESR de 1 ano." >> localization/pt-BR/messenger/extensionsUI.ftl
