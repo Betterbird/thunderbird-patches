@@ -1,0 +1,357 @@
+# HG changeset patch
+# User Betterbird <betterbird@betterbird.eu> and DeepSeek
+# Date 1795378784 -7200
+# Parent  f9e3bbf4c70ee466f34d706b4ccfb35f5a5ec430
+Bug 318600 - Implement text background colour in mail editor.
+
+Patch summary: Text background colour selector in the compose window
+
+- editFormatButtons.inc.xhtml
+  - Added TextBackgroundColorButton to the ColorButtons stack (calls
+    EditorSelectColor('TextBackground', event), observes cmd_highlight).
+  - BackgroundColorButton tooltip migrated from DTD to Fluent
+    (compose-tool-button-page-background-color).
+- editor.js
+  - EditorSelectColor('TextBackground') reuses the existing Highlight/backColor
+    machinery; applies execCommand("backColor") and updates the button
+    immediately after picking (pending styles are not in the DOM until typing).
+  - GetTextBackgroundColorState(): reads bgcolor/inline background-color from
+    the selection (the mail editor reports transparent for cmd_highlight);
+    collapsed caret -> colour at caret; non-collapsed -> walks the selected
+    text runs and returns "mixed" when colours differ (correct boundary
+    handling).
+  - SetTextBackgroundColorButton(): sets swatch colour, transparent when none,
+    multicolor icon for mixed.
+- ComposerCommands.js
+  - pokeMultiStateUI refreshes the text bg button on every cmd_highlight update
+    (selection-change feedback), since the editor state never changes from
+    transparent.
+- messengercompose.css
+  - Three-button stack layout: page background fills the stack, text bg
+    bottom-right, text colour top-left.
+  - Empty state shows a cross (X) via GrayText gradients; mixed state shows
+    multicolor.png.
+- messengercompose.ftl
+  - New compose-tool-button-text-background-color ("Choose color for text
+    background") and compose-tool-button-page-background-color ("Choose color
+    for page background").
+- editorOverlay.dtd
+  - Removed BackgroundColorButton.tooltip.
+- dialogs/EdColorPicker.xhtml
+  - Added LastHighlightColor to the persisted attributes, so the panel offers
+    the last-picked text background colour across compose windows/sessions.
+
+
+diff --git a/mail/components/compose/content/ComposerCommands.js b/mail/components/compose/content/ComposerCommands.js
+--- a/mail/components/compose/content/ComposerCommands.js
++++ b/mail/components/compose/content/ComposerCommands.js
+@@ -450,8 +450,14 @@ function pokeMultiStateUI(uiID, cmdParam
+         break;
+       }
+     }
+   }
++
++  // The mail editor always reports "transparent" for cmd_highlight, so
++  // update the text background button from the selection on every update.
++  if (uiID == "cmd_highlight") {
++    onHighlightColorChange();
++  }
+ }
+ 
+ /**
+  * Perform the action of the multiple states type commands available through
+diff --git a/mail/components/compose/content/MsgComposeCommands.js b/mail/components/compose/content/MsgComposeCommands.js
+--- a/mail/components/compose/content/MsgComposeCommands.js
++++ b/mail/components/compose/content/MsgComposeCommands.js
+@@ -1778,8 +1778,9 @@ function updateComposeItems() {
+     if (gMsgCompose && gMsgCompose.composeHTML) {
+       goUpdateCommand("cmd_renderedHTMLEnabler");
+       goUpdateCommand("cmd_fontColor");
+       goUpdateCommand("cmd_backgroundColor");
++      goUpdateCommand("cmd_highlight");
+       goUpdateCommand("cmd_decreaseFontStep");
+       goUpdateCommand("cmd_increaseFontStep");
+       goUpdateCommand("cmd_bold");
+       goUpdateCommand("cmd_italic");
+diff --git a/mail/components/compose/content/dialogs/EdColorPicker.xhtml b/mail/components/compose/content/dialogs/EdColorPicker.xhtml
+--- a/mail/components/compose/content/dialogs/EdColorPicker.xhtml
++++ b/mail/components/compose/content/dialogs/EdColorPicker.xhtml
+@@ -91,9 +91,10 @@
+           <spacer
+             id="LastPickedColor"
+             LastTextColor=""
+             LastBackgroundColor=""
+-            persist="LastTextColor LastBackgroundColor"
++            LastHighlightColor=""
++            persist="LastTextColor LastBackgroundColor LastHighlightColor"
+           />
+         </button>
+       </hbox>
+ 
+diff --git a/mail/components/compose/content/editFormatButtons.inc.xhtml b/mail/components/compose/content/editFormatButtons.inc.xhtml
+--- a/mail/components/compose/content/editFormatButtons.inc.xhtml
++++ b/mail/components/compose/content/editFormatButtons.inc.xhtml
+@@ -58,11 +58,16 @@
+                      align="center">
+           <stack id="ColorButtons">
+             <box class="color-button" id="BackgroundColorButton"
+                  onclick="if (!this.hasAttribute('disabled')) { EditorSelectColor('', event); }"
+-                 tooltiptext="&BackgroundColorButton.tooltip;"
++                 data-l10n-id="compose-tool-button-page-background-color"
+                  observes="cmd_backgroundColor"
+                  oncommand="/* See MsgComposeCommands.js::updateAllItems for why this attribute is needed here. */"/>
++            <box class="color-button" id="TextBackgroundColorButton"
++                 onclick="if (!this.hasAttribute('disabled')) { EditorSelectColor('TextBackground', event); }"
++                 data-l10n-id="compose-tool-button-text-background-color"
++                 observes="cmd_highlight"
++                 oncommand="/* See MsgComposeCommands.js::updateAllItems for why this attribute is needed here. */"/>
+             <box class="color-button" id="TextColorButton"
+                  onclick="if (!this.hasAttribute('disabled')) { EditorSelectColor('Text', event); }"
+                  tooltiptext="&TextColorButton.tooltip;"
+                  observes="cmd_fontColor"
+diff --git a/mail/components/compose/content/editor.js b/mail/components/compose/content/editor.js
+--- a/mail/components/compose/content/editor.js
++++ b/mail/components/compose/content/editor.js
+@@ -803,8 +803,100 @@ function onBackgroundColorChange() {
+     gDefaultBackgroundColor
+   );
+ }
+ 
++function onHighlightColorChange() {
++  SetTextBackgroundColorButton(GetTextBackgroundColorState());
++}
++
++function SetTextBackgroundColorButton(color) {
++  const button = document.getElementById("TextBackgroundColorButton");
++  if (button) {
++    button.setAttribute("color", color);
++    if (color == "mixed") {
++      button.style.backgroundColor = "";
++    } else {
++      button.style.backgroundColor = color || "transparent";
++    }
++  }
++}
++
++function GetTextBackgroundColorFromElement(element) {
++  const editor = GetCurrentEditor();
++  const body = GetBodyElement();
++  while (element && element != body) {
++    // Stop at block elements: their background color is not a text background.
++    if (editor.nodeIsBlock(element)) {
++      return "";
++    }
++    let color = element.getAttribute("bgcolor");
++    if (!color) {
++      color = element.style.getPropertyValue("background-color");
++    }
++    if (color) {
++      return ConvertRGBColorIntoHEXColor(color);
++    }
++    element = element.parentElement;
++  }
++  return "";
++}
++
++function GetTextBackgroundColorState() {
++  const editor = GetCurrentEditor();
++  if (!editor || !editor.selection || !IsHTMLEditor()) {
++    return "";
++  }
++  const range = editor.selection.getRangeAt(0);
++  if (!range) {
++    return "";
++  }
++  if (range.collapsed) {
++    let element = range.startContainer;
++    if (element.nodeType != Node.ELEMENT_NODE) {
++      element = element.parentElement;
++    }
++    return GetTextBackgroundColorFromElement(element);
++  }
++
++  // For a non-collapsed selection, report "mixed" if the selected text runs
++  // have different background colors.
++  let root = range.commonAncestorContainer;
++  if (root.nodeType != Node.ELEMENT_NODE) {
++    root = root.parentElement;
++  }
++  const iterator = editor.document.createNodeIterator(
++    root,
++    NodeFilter.SHOW_TEXT,
++    node =>
++      range.intersectsNode(node)
++        ? NodeFilter.FILTER_ACCEPT
++        : NodeFilter.FILTER_REJECT
++  );
++  let firstColor;
++  for (let node = iterator.nextNode(); node; node = iterator.nextNode()) {
++    // Stop once we have walked past the end of the range.
++    if (
++      node.compareDocumentPosition(range.endContainer) &
++      Node.DOCUMENT_POSITION_PRECEDING
++    ) {
++      break;
++    }
++    // Only consider text that is actually part of the range.
++    const start = node == range.startContainer ? range.startOffset : 0;
++    const end = node == range.endContainer ? range.endOffset : node.length;
++    if (end <= start) {
++      continue;
++    }
++    const color = GetTextBackgroundColorFromElement(node.parentElement);
++    if (firstColor === undefined) {
++      firstColor = color;
++    } else if (color != firstColor) {
++      return "mixed";
++    }
++  }
++  return firstColor ?? "";
++}
++
+ /**
+  * Helper function that changes the button color.
+  *
+  * @param {string} commandID - The ID of the command element.
+@@ -977,15 +1069,16 @@ function EditorSelectColor(colorType, mo
+       gColorObj.TextColor = gColorObj.LastTextColor;
+     } else {
+       useLastColor = false;
+     }
+-  } else if (colorType == "Highlight") {
+-    gColorObj.Type = colorType;
++  } else if (colorType == "Highlight" || colorType == "TextBackground") {
++    // "TextBackground" is the text background color, same as "Highlight".
++    gColorObj.Type = "Highlight";
+ 
+-    // Get color from command node state
+-    commandNode = document.getElementById("cmd_highlight");
+-    currentColor = commandNode.getAttribute("state");
+-    currentColor = ConvertRGBColorIntoHEXColor(currentColor);
++    // Get the text background color from the selection. The editor reports
++    // "transparent" for cmd_highlight in the mail composer, so the command
++    // state is not useful here.
++    currentColor = GetTextBackgroundColorState();
+     gColorObj.HighlightColor = currentColor;
+ 
+     if (useLastColor && gColorObj.LastHighlightColor) {
+       gColorObj.HighlightColor = gColorObj.LastHighlightColor;
+@@ -1067,21 +1160,20 @@ function EditorSelectColor(colorType, mo
+     }
+     // Update the command state (this will trigger color button update)
+     goUpdateCommandState("cmd_fontColor");
+   } else if (gColorObj.Type == "Highlight") {
+-    if (currentColor != gColorObj.HighlightColor) {
+-      if (gColorObj.HighlightColor) {
+-        GetCurrentEditor().document.execCommand(
+-          "backColor",
+-          false,
+-          gColorObj.HighlightColor
+-        );
+-      } else {
+-        EditorRemoveTextProperty("font", "bgcolor");
+-      }
++    if (gColorObj.HighlightColor) {
++      GetCurrentEditor().document.execCommand(
++        "backColor",
++        false,
++        gColorObj.HighlightColor
++      );
++    } else {
++      EditorRemoveTextProperty("font", "bgcolor");
+     }
+-    // Update the command state (this will trigger color button update)
+-    goUpdateCommandState("cmd_highlight");
++    // Update the button color now; with a pending style, the selection
++    // feedback only arrives once the user starts typing.
++    SetTextBackgroundColorButton(gColorObj.HighlightColor);
+   } else if (element) {
+     if (gColorObj.Type == "Table") {
+       // Set background on a table
+       // Note that we shouldn't trust "currentColor" because of "TableOrCell" behavior
+diff --git a/mail/locales/en-US/chrome/messenger/messengercompose/editorOverlay.dtd b/mail/locales/en-US/chrome/messenger/messengercompose/editorOverlay.dtd
+--- a/mail/locales/en-US/chrome/messenger/messengercompose/editorOverlay.dtd
++++ b/mail/locales/en-US/chrome/messenger/messengercompose/editorOverlay.dtd
+@@ -272,9 +272,8 @@
+ <!ENTITY linkToolbarCmd.tooltip "Insert new link or edit selected link's properties">
+ <!ENTITY anchorToolbarCmd.label "Anchor">
+ <!ENTITY anchorToolbarCmd.tooltip "Insert new named anchor or edit selected anchor's properties">
+ <!ENTITY TextColorButton.tooltip "Choose color for text">
+-<!ENTITY BackgroundColorButton.tooltip "Choose color for background">
+ 
+ <!-- Editor toolbar -->
+ <!ENTITY absoluteFontSizeToolbarCmd.tooltip "Set font size">
+ <!ENTITY decreaseFontSizeToolbarCmd.tooltip "Smaller font size">
+diff --git a/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl b/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl
+--- a/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl
++++ b/mail/locales/en-US/messenger/messengercompose/messengercompose.ftl
+@@ -550,4 +550,10 @@ spell-add-dictionaries =
+     .accesskey = A
+ 
+ subject-encription-icon =
+     .title = Subject will not be encrypted
++
++compose-tool-button-text-background-color =
++  .tooltiptext = Choose color for text background
++
++compose-tool-button-page-background-color =
++  .tooltiptext = Choose color for page background
+diff --git a/mail/themes/shared/mail/messengercompose.css b/mail/themes/shared/mail/messengercompose.css
+--- a/mail/themes/shared/mail/messengercompose.css
++++ b/mail/themes/shared/mail/messengercompose.css
+@@ -841,10 +841,10 @@ toolbarbutton.formatting-button {
+ 
+ .color-button {
+   border: 1px solid var(--toolbarbutton-active-bordercolor);
+   padding: 0;
+-  inline-size: 18px;
+-  block-size: 15px;
++  inline-size: 16px;
++  block-size: 13px;
+   margin: 2px;
+ 
+   &[disabled] {
+     opacity: 0.5;
+@@ -857,20 +857,38 @@ toolbarbutton.formatting-button {
+   padding: 2px;
+ }
+ 
+ #TextColorButton {
+-  margin-block: 2px 9px;
+-  margin-inline: 2px 9px;
++  margin-block: 2px 11px;
++  margin-inline: 2px 11px;
+ 
+   &[color="mixed"] {
+     background-image: url("chrome://messenger/skin/icons/multicolor.png");
+     background-size: cover;
+   }
+ }
+ 
+ #BackgroundColorButton {
+-  margin-block: 9px 2px;
+-  margin-inline: 9px 2px;
++  margin: 0;
++  inline-size: 29px;
++  block-size: 26px;
++}
++
++#TextBackgroundColorButton {
++  margin-block: 11px 2px;
++  margin-inline: 11px 2px;
++
++  /* A cross marks the state where no text background color is set. */
++  &[color=""] {
++    background-image:
++      linear-gradient(to top right, transparent calc(50% - 0.5px), GrayText calc(50% - 0.5px) calc(50% + 0.5px), transparent calc(50% + 0.5px)),
++      linear-gradient(to top left, transparent calc(50% - 0.5px), GrayText calc(50% - 0.5px) calc(50% + 0.5px), transparent calc(50% + 0.5px));
++  }
++
++  &[color="mixed"] {
++    background-image: url("chrome://messenger/skin/icons/multicolor.png");
++    background-size: cover;
++  }
+ }
+ 
+ /* :::: Reorder Attachments Panel :::: */
+ 
