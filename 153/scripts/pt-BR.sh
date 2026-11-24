@@ -323,3 +323,7 @@ echo "  .tooltiptext = Criar uma cópia do artigo selecionado e anexar o arquivo
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="         >> localization/pt-BR/messenger/messenger.ftl
 echo "    .label = Recolher todas as pastas" >> localization/pt-BR/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Assistente de contas de canais de informações" >> localization/pt-BR/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Canais de blogs e notícias"            >> localization/pt-BR/messenger/accountSettings.ftl

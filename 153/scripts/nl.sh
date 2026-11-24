@@ -315,3 +315,7 @@ echo "  .tooltiptext = Een kopie maken van het geselecteerde artikel en het arch
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="        >> localization/nl/messenger/messenger.ftl
 echo "    .label = Alle mappen samenvouwen" >> localization/nl/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Feedaccountwizard"           >> localization/nl/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Blogs & nieuwsfeeds" >> localization/nl/messenger/accountSettings.ftl

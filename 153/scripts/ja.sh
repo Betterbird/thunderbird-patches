@@ -315,3 +315,7 @@ echo "  .tooltiptext = 選択した記事のコピーを作成し、ウェブペ
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="    >> localization/ja/messenger/messenger.ftl
 echo "    .label = すべてのフォルダーを折りたたむ" >> localization/ja/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = フィードアカウントアシスタント" >> localization/ja/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = ブログとニュース" >> localization/ja/messenger/accountSettings.ftl

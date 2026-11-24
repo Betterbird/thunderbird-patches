@@ -315,3 +315,7 @@ echo "  .tooltiptext = Создать копию выбранной статьи
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="   >> localization/ru/messenger/messenger.ftl
 echo "    .label = Свернуть все папки" >> localization/ru/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Мастер учётной записи лент новостей" >> localization/ru/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Блоги и ленты новостей"      >> localization/ru/messenger/accountSettings.ftl

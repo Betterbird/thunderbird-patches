@@ -202,3 +202,7 @@ echo "  .tooltiptext = Create a copy of the selected feed message with attached 
 # Collapse All Folders
 echo "folder-collapse-all-folders ="     >> localization/en-GB/messenger/messenger.ftl
 echo "    .label = Collapse All Folders" >> localization/en-GB/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Feed Account Wizard"        >> localization/en-GB/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Blogs & News Feeds" >> localization/en-GB/messenger/accountSettings.ftl

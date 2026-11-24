@@ -315,3 +315,7 @@ echo "  .tooltiptext = Skapa en kopia av den valda artikeln och bifoga arkivet a
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="      >> localization/sv-SE/messenger/messenger.ftl
 echo "    .label = Fäll ihop alla mappar" >> localization/sv-SE/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = RSS-kanalguide"                  >> localization/sv-SE/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Bloggar & nyhetskanaler" >> localization/sv-SE/messenger/accountSettings.ftl

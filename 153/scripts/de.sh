@@ -318,3 +318,7 @@ echo "  .tooltiptext = Kopie des selektierten Artikels anlegen und Archiv der We
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="      >> localization/de/messenger/messenger.ftl
 echo "    .label = Alle Ordner zuklappen" >> localization/de/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Feed-Konten-Assistent"      >> localization/de/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Blogs & News Feeds" >> localization/de/messenger/accountSettings.ftl

@@ -315,3 +315,7 @@ echo "  .tooltiptext = Utwórz kopię wybranego artykułu i dołącz archiwum st
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="         >> localization/pl/messenger/messenger.ftl
 echo "    .label = Zwijaj wszystkie foldery" >> localization/pl/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Kreator kont aktualności" >> localization/pl/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Aktualności"      >> localization/pl/messenger/accountSettings.ftl

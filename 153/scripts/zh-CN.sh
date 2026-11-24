@@ -315,3 +315,7 @@ echo "  .tooltiptext = 创建所选文章的副本并附加网页存档"  >> loc
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders =" >> localization/zh-CN/messenger/messenger.ftl
 echo "    .label = 折叠所有文件夹"     >> localization/zh-CN/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = 收取点账号向导"           >> localization/zh-CN/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = 博客和新闻收取点" >> localization/zh-CN/messenger/accountSettings.ftl

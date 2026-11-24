@@ -319,3 +319,7 @@ echo "  .tooltiptext = Vytvořit kopii vybraného článku a připojit archiv we
 #     .label = Collapse All Folders
 echo "folder-collapse-all-folders ="      >> localization/cs/messenger/messenger.ftl
 echo "    .label = Sbalit všechny složky" >> localization/cs/messenger/messenger.ftl
+
+# Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
+echo "account-settings-rss-wizard-title = Průvodce vytvořením účtu pro kanály" >> localization/cs/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Kanály blogů a novinek"      >> localization/cs/messenger/accountSettings.ftl
