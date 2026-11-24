@@ -319,3 +319,13 @@ echo "    .label = 折叠所有文件夹"     >> localization/zh-CN/messenger/me
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = 收取点账号向导"           >> localization/zh-CN/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = 博客和新闻收取点" >> localization/zh-CN/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color =" >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = 选择文本背景颜色"              >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color =" >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = 选择页面背景颜色"              >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl

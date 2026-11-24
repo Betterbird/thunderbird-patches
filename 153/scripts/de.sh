@@ -322,3 +322,13 @@ echo "    .label = Alle Ordner zuklappen" >> localization/de/messenger/messenger
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Feed-Konten-Assistent"      >> localization/de/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Blogs & News Feeds" >> localization/de/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="             >> localization/de/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Farbe für Text-Hintergrund auswählen"   >> localization/de/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="             >> localization/de/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Farbe für Seiten-Hintergrund auswählen" >> localization/de/messenger/messengercompose/messengercompose.ftl

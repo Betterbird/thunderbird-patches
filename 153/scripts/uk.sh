@@ -319,3 +319,13 @@ echo "    .label = Згорнути всі теки" >> localization/uk/messenge
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Майстер стрічок новин"          >> localization/uk/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Блоги та стрічки новин" >> localization/uk/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="      >> localization/uk/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Вибір фонового кольору тексту"   >> localization/uk/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="      >> localization/uk/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Вибір фонового кольору сторінки" >> localization/uk/messenger/messengercompose/messengercompose.ftl

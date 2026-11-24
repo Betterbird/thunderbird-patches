@@ -319,3 +319,13 @@ echo "    .label = Zwijaj wszystkie foldery" >> localization/pl/messenger/messen
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Kreator kont aktualności" >> localization/pl/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Aktualności"      >> localization/pl/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color =" >> localization/pl/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Wybierz kolor tła tekstu"   >> localization/pl/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color =" >> localization/pl/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Wybierz kolor tła strony"   >> localization/pl/messenger/messengercompose/messengercompose.ftl

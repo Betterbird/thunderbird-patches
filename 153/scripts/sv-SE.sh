@@ -319,3 +319,13 @@ echo "    .label = Fäll ihop alla mappar" >> localization/sv-SE/messenger/messe
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = RSS-kanalguide"                  >> localization/sv-SE/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Bloggar & nyhetskanaler" >> localization/sv-SE/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="   >> localization/sv-SE/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Välj färg för textbakgrunden" >> localization/sv-SE/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="   >> localization/sv-SE/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Välj färg för sidbakgrunden"  >> localization/sv-SE/messenger/messengercompose/messengercompose.ftl

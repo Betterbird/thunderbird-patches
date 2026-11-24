@@ -319,3 +319,13 @@ echo "    .label = Свернуть все папки" >> localization/ru/messen
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Мастер учётной записи лент новостей" >> localization/ru/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Блоги и ленты новостей"      >> localization/ru/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="    >> localization/ru/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Выбор цвета для фона текста"   >> localization/ru/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="    >> localization/ru/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Выбор цвета для фона страницы" >> localization/ru/messenger/messengercompose/messengercompose.ftl

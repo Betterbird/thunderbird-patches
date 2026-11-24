@@ -323,3 +323,13 @@ echo "    .label = Sbalit všechny složky" >> localization/cs/messenger/messeng
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Průvodce vytvořením účtu pro kanály" >> localization/cs/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Kanály blogů a novinek"      >> localization/cs/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="  >> localization/cs/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Vybere barvu pozadí textu"   >> localization/cs/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="  >> localization/cs/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Vybere barvu pozadí stránky" >> localization/cs/messenger/messengercompose/messengercompose.ftl

@@ -206,3 +206,9 @@ echo "    .label = Collapse All Folders" >> localization/en-GB/messenger/messeng
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Feed Account Wizard"        >> localization/en-GB/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Blogs & News Feeds" >> localization/en-GB/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+echo "compose-tool-button-text-background-color ="       >> localization/en-GB/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Choose color for text background" >> localization/en-GB/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="       >> localization/en-GB/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Choose color for page background" >> localization/en-GB/messenger/messengercompose/messengercompose.ftl

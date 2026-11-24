@@ -319,3 +319,13 @@ echo "    .label = Alle mappen samenvouwen" >> localization/nl/messenger/messeng
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Feedaccountwizard"           >> localization/nl/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Blogs & nieuwsfeeds" >> localization/nl/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="         >> localization/nl/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Kleur voor tekstachtergrond kiezen" >> localization/nl/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="         >> localization/nl/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Kleur voor paginachtergrond kiezen" >> localization/nl/messenger/messengercompose/messengercompose.ftl

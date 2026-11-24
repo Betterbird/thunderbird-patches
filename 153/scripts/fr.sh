@@ -319,3 +319,13 @@ echo "    .label = Réduire tous les dossiers" >> localization/fr/messenger/mess
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Assistant de compte de flux" >> localization/fr/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Blogs et nouvelles"  >> localization/fr/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="                  >> localization/fr/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Choisir une couleur pour le fond du texte"   >> localization/fr/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="                  >> localization/fr/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Choisir une couleur pour le fond de la page" >> localization/fr/messenger/messengercompose/messengercompose.ftl

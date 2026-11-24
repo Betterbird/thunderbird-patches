@@ -319,3 +319,13 @@ echo "    .label = Contrai tutte le cartelle" >> localization/it/messenger/messe
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = Creazione nuovo account di feed" >> localization/it/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = Blog e feed delle news"  >> localization/it/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color ="                 >> localization/it/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Scegli il colore dello sfondo del testo"    >> localization/it/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="                 >> localization/it/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Scegli il colore dello sfondo della pagina" >> localization/it/messenger/messengercompose/messengercompose.ftl

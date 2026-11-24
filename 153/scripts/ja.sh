@@ -319,3 +319,13 @@ echo "    .label = すべてのフォルダーを折りたたむ" >> localizatio
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
 echo "account-settings-rss-wizard-title = フィードアカウントアシスタント" >> localization/ja/messenger/accountSettings.ftl
 echo "account-settings-rss-default-account-name = ブログとニュース" >> localization/ja/messenger/accountSettings.ftl
+
+# Strings for the text background colour.
+# compose-tool-button-text-background-color =
+#   .tooltiptext = Choose color for text background
+# compose-tool-button-page-background-color =
+#   .tooltiptext = Choose color for page background
+echo "compose-tool-button-text-background-color =" >> localization/ja/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = テキストの背景の色を選択します"      >> localization/ja/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color =" >> localization/ja/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = ページの背景の色を選択します"       >> localization/ja/messenger/messengercompose/messengercompose.ftl
