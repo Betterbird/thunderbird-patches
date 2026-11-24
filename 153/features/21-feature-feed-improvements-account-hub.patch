@@ -1,0 +1,822 @@
+# HG changeset patch
+# User alta88@fixall.com
+# Date 1795290946 -7200
+#      Sat Nov 21 12:09:34 2026 -0700
+# Node ID 66d9787fdffa4e5130902a9e6aae91019c6496e0
+# Parent  24e6d36ff67e0c35976bff9565940dca1a33a0af
+Add feeds to Account Hub
+
+Authored by Alta88 and contributed to the Betterbird Project.
+See https://github.com/Betterbird/thunderbird-patches/blob/main/LICENSE for license details.
+All uses require attribution to the Author.
+
+diff --git a/mail/base/content/messenger-menubar.inc.xhtml b/mail/base/content/messenger-menubar.inc.xhtml
+--- a/mail/base/content/messenger-menubar.inc.xhtml
++++ b/mail/base/content/messenger-menubar.inc.xhtml
+@@ -72,9 +72,9 @@
+                     oncommand="openIMAccountWizard();"/>
+           <menuitem id="newFeedAccountMenuItem"
+                     label="&newFeedAccountCmd.label;"
+                     accesskey="&newFeedAccountCmd.accesskey;"
+-                    oncommand="AddFeedAccount();"/>
++                    oncommand="top.FeedUtils.openAccountSetup();"/>
+           <menuitem id="newNewsgroupAccountMenuItem"
+                     data-l10n-id="file-new-newsgroup-account"
+                     oncommand="openNewsgroupAccountWizard();"/>
+ #ifdef HAVE_MOVEMAIL
+diff --git a/mail/base/content/messenger.js b/mail/base/content/messenger.js
+--- a/mail/base/content/messenger.js
++++ b/mail/base/content/messenger.js
+@@ -308,13 +308,10 @@ var gMailInit = {
+    *
+    * @param {Event} event - The message event.
+    */
+   _onMessageReceived(event) {
+-    if (
+-      event.data?.type == "feed-account-created" ||
+-      event.data?.type == "news-account-created"
+-    ) {
+-      // The feed or news account wizard asked the main window to display the
++    if (event.data?.type == "news-account-created") {
++      // The news account wizard asked the main window to display the
+       // root folder of the newly created account.
+       const tabmail = document.getElementById("tabmail");
+       if (!tabmail.currentAbout3Pane) {
+         tabmail.switchToTab(0);
+diff --git a/mail/base/test/browser/browser_accountCentral.js b/mail/base/test/browser/browser_accountCentral.js
+--- a/mail/base/test/browser/browser_accountCentral.js
++++ b/mail/base/test/browser/browser_accountCentral.js
+@@ -453,11 +453,9 @@ add_task(async function testLocal() {
+     win
+   );
+   await filelinkPromise;
+ 
+-  const feedsPromise = promiseWindow(
+-    "chrome://messenger-newsblog/content/feedAccountWizard.xhtml"
+-  );
++  const feedsPromise = promiseAccountHub("account-hub-feed");
+   EventUtils.synthesizeMouseAtCenter(doc.getElementById("setupFeeds"), {}, win);
+   await feedsPromise;
+ 
+   const newsgroupsPromise = promiseWindow(
+diff --git a/mail/components/accountcreation/content/accountHub.js b/mail/components/accountcreation/content/accountHub.js
+--- a/mail/components/accountcreation/content/accountHub.js
++++ b/mail/components/accountcreation/content/accountHub.js
+@@ -323,12 +323,13 @@ class AccountHubControllerClass {
+     dump("Chat setup\n");
+   }
+ 
+   /**
+-   * TODO: Show the feed setup view.
++   * Show the feed setup view.
+    */
+-  #viewFeedSetup() {
+-    dump("Feed setup\n");
++  async #viewFeedSetup() {
++    await this.#loadScript("feed");
++    await this.#loadView("account-hub-feed");
+   }
+ 
+   /**
+    * TODO: Show the newsgroup setup view.
+diff --git a/mail/components/accountcreation/content/widgets/feed-account-form.mjs b/mail/components/accountcreation/content/widgets/feed-account-form.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/components/accountcreation/content/widgets/feed-account-form.mjs
+@@ -0,0 +1,124 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import { AccountHubStep } from "./account-hub-step.mjs";
++import "./account-hub-input.mjs"; // eslint-disable-line import/no-unassigned-import
++
++/**
++ * Account Hub Feed Account Form.
++ */
++class FeedAccountForm extends AccountHubStep {
++  /**
++   * Default feed account name.
++   *
++   * @type {string}
++   */
++  #defaultAccountName;
++  /**
++   * Custom <account-hub-input> element for feed account.
++   *
++   * @type {HTMLElement}
++   */
++  #feedAccountName;
++
++  /**
++   * Feed account <input> element.
++   *
++   * @type {HTMLElement}
++   */
++  #feedAccountNameInput;
++
++  connectedCallback() {
++    if (this.hasConnected) {
++      return;
++    }
++    this.hasConnected = true;
++
++    super.connectedCallback();
++
++    // Import .ftl files here, after super and before appending the template.
++    this.l10n.addResourceIds([
++      "messenger/accountSettings.ftl",
++      "calendar/preferences.ftl",
++    ]);
++    this.l10n.connectRoot(this);
++
++    const template = document
++      .getElementById("accountHubFeedAccountFormTemplate")
++      .content.cloneNode(true);
++    this.appendChild(template);
++
++    this.showBrandingHeader();
++    this.#feedAccountName = this.querySelector("#feedAccountName");
++    this.#feedAccountNameInput = this.querySelector("#feedAccountNameInput");
++    this.#feedAccountNameInput.addEventListener("input", this);
++  }
++
++  handleEvent(event) {
++    switch (event.type) {
++      case "input":
++        this.#cleanValue();
++        this.dispatchEvent(
++          new CustomEvent("config-updated", { bubbles: true })
++        );
++        break;
++    }
++  }
++
++  /**
++   * Disallow invalid chars.
++   */
++  #cleanValue() {
++    this.#feedAccountNameInput.value = this.#feedAccountNameInput.value
++      /* eslint-disable-next-line no-control-regex */
++      .replace(/[\x00-\x1F\x7F]/g, "")
++      .trimStart();
++  }
++
++  /**
++   * Sets the form when this step is first visited.
++   */
++  async setState(stateDetails) {
++    this.#defaultAccountName = await this.l10n.formatValue([
++      stateDetails.defaultAccountNameFluentID,
++    ]);
++    this.#feedAccountNameInput.value = this.#defaultAccountName;
++    this.#feedAccountNameInput.select();
++    this.#feedAccountNameInput.focus();
++  }
++
++  /**
++   * Updates form for validity errors.
++   */
++  updateState(valid, errorFluentID) {
++    !valid &&
++      this.#feedAccountName.setAttribute("l10n-error-id", errorFluentID);
++    this.#feedAccountName.setErrorState(valid || errorFluentID);
++  }
++
++  /**
++   * Return the current state of the feed account form.
++   *
++   * @returns {object}
++   */
++  captureState() {
++    return {
++      accountName: this.#feedAccountNameInput.value.trim(),
++    };
++  }
++
++  /**
++   * Resets the feed account form.
++   */
++  resetState(stateDetails) {
++    this.querySelector("#feedAccountForm").reset();
++    const l10nErrorId = stateDetails.validityValueMissingFluentID;
++    this.#feedAccountName.setAttribute("l10n-error-id", l10nErrorId);
++    this.#feedAccountNameInput.setCustomValidity("");
++    this.#feedAccountNameInput.value = this.#defaultAccountName;
++    this.#feedAccountNameInput.select();
++  }
++}
++
++customElements.define("feed-account-form", FeedAccountForm);
+diff --git a/mail/components/accountcreation/jar.mn b/mail/components/accountcreation/jar.mn
+--- a/mail/components/accountcreation/jar.mn
++++ b/mail/components/accountcreation/jar.mn
+@@ -8,8 +8,9 @@ messenger.jar:
+ # Custom elements
+   content/messenger/accountcreation/views/address-book.mjs                                (views/address-book.mjs)
+   content/messenger/accountcreation/views/container.mjs                                   (views/container.mjs)
+   content/messenger/accountcreation/views/email.mjs                                       (views/email.mjs)
++  content/messenger/accountcreation/views/feed.mjs                                        (views/feed.mjs)
+   content/messenger/accountcreation/views/start.mjs                                       (views/start.mjs)
+   content/messenger/accountcreation/content/widgets/address-book-account-select.mjs       (content/widgets/address-book-account-select.mjs)
+   content/messenger/accountcreation/content/widgets/address-book-ldap-account-form.mjs    (content/widgets/address-book-ldap-account-form.mjs)
+   content/messenger/accountcreation/content/widgets/address-book-local-form.mjs           (content/widgets/address-book-local-form.mjs)
+@@ -25,8 +26,9 @@ messenger.jar:
+   content/messenger/accountcreation/content/widgets/email-password-form.mjs               (content/widgets/email-password-form.mjs)
+   content/messenger/accountcreation/content/widgets/email-sync-accounts-form.mjs          (content/widgets/email-sync-accounts-form.mjs)
+   content/messenger/accountcreation/content/widgets/email-added-success.mjs               (content/widgets/email-added-success.mjs)
+   content/messenger/accountcreation/content/widgets/email-credentials-confirmation.mjs    (content/widgets/email-credentials-confirmation.mjs)
++  content/messenger/accountcreation/content/widgets/feed-account-form.mjs                 (content/widgets/feed-account-form.mjs)
+   content/messenger/accountcreation/content/widgets/account-hub-footer.mjs                (content/widgets/account-hub-footer.mjs)
+   content/messenger/accountcreation/content/widgets/account-hub-header.mjs                (content/widgets/account-hub-header.mjs)
+   content/messenger/accountcreation/content/widgets/account-hub-input.mjs                 (content/widgets/account-hub-input.mjs)
+   content/messenger/accountcreation/content/widgets/account-hub-select.mjs                (content/widgets/account-hub-select.mjs)
+diff --git a/mail/components/accountcreation/templates/accountHubFeedAccountFormTemplate.inc.xhtml b/mail/components/accountcreation/templates/accountHubFeedAccountFormTemplate.inc.xhtml
+new file mode 100644
+--- /dev/null
++++ b/mail/components/accountcreation/templates/accountHubFeedAccountFormTemplate.inc.xhtml
+@@ -0,0 +1,26 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++<html:template
++  id="accountHubFeedAccountFormTemplate"
++  xmlns="http://www.w3.org/1999/xhtml"
++>
++  <form
++    id="feedAccountForm"
++    class="account-hub-step"
++    slot="content"
++  >
++    <div class="hub-body email-form-body">
++      <account-hub-input
++        id="feedAccountName"
++        classes="input-field"
++        type="text"
++        required="required"
++        placeholder=""
++        l10n-label-id="account-hub-address-book-name-label"
++        l10n-error-id="account-hub-address-book-name-error-text"
++      ></account-hub-input>
++    </div>
++  </form>
++</html:template>
+diff --git a/mail/components/accountcreation/templates/accountHubTemplate.inc.xhtml b/mail/components/accountcreation/templates/accountHubTemplate.inc.xhtml
+--- a/mail/components/accountcreation/templates/accountHubTemplate.inc.xhtml
++++ b/mail/components/accountcreation/templates/accountHubTemplate.inc.xhtml
+@@ -25,8 +25,9 @@
+ #include ./accountHubEmailManualConfigFormTemplate.inc.xhtml
+ #include ./accountHubEmailOutgoingFormTemplate.inc.xhtml
+ #include ./accountHubEmailPasswordFormTemplate.inc.xhtml
+ #include ./accountHubEmailSyncAccountsFormTemplate.inc.xhtml
++#include ./accountHubFeedAccountFormTemplate.inc.xhtml
+ #include ./accountHubFooterTemplate.inc.xhtml
+ #include ./accountHubHeaderTemplate.inc.xhtml
+ #include ./accountHubStepTemplate.inc.xhtml
+ <html:template id="accountHubDialog" xmlns="http://www.w3.org/1999/xhtml">
+@@ -242,4 +243,19 @@
+   </email-password-form>
+   <account-hub-footer id="addressBookFooter" class="hub-footer">
+   </account-hub-footer>
+ </html:template>
++
++<html:template
++  id="accountHubFeedSetup"
++  xmlns="http://www.w3.org/1999/xhtml"
++>
++  <feed-account-form
++    id="feedAccountForm"
++    class="account-hub-step"
++    title-id="account-settings-rss-wizard-title"
++    hidden="hidden"
++  >
++  </feed-account-form>
++  <account-hub-footer id="feedAccountFooter" class="hub-footer">
++  </account-hub-footer>
++</html:template>
+diff --git a/mail/components/accountcreation/views/feed.mjs b/mail/components/accountcreation/views/feed.mjs
+new file mode 100644
+--- /dev/null
++++ b/mail/components/accountcreation/views/feed.mjs
+@@ -0,0 +1,241 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import "chrome://messenger/content/accountcreation/content/widgets/account-hub-step.mjs"; // eslint-disable-line import/no-unassigned-import
++import "chrome://messenger/content/accountcreation/content/widgets/account-hub-footer.mjs"; // eslint-disable-line import/no-unassigned-import
++
++const lazy = {};
++ChromeUtils.defineESModuleGetters(lazy, {
++  FeedUtils: "resource:///modules/FeedUtils.sys.mjs",
++});
++
++class AccountHubFeed extends HTMLElement {
++  /**
++   * Dialog.
++   *
++   * @type {HTMLElement}
++   */
++  #dialog;
++
++  /**
++   * String of ID of current step; there is only one: "feedAccountView".
++   *
++   * @type {string}
++   */
++  #currentState;
++
++  /**
++   * Feed account footer.
++   *
++   * @type {HTMLElement}
++   */
++  #footer;
++
++  /**
++   * States of the feed account setup flow, based on the ID's of the steps in
++   * the flow. We only have one state, no back/forward.
++   *
++   * @type {object}
++   */
++  #states = {
++    feedAccountView: {
++      id: "feedAccountForm",
++      nextStep: true,
++      previousStep: "",
++      forwardEnabled: true,
++      customForwardFluentID: "account-hub-email-finish-button",
++      validityValueMissingFluentID: "account-hub-address-book-name-error-text",
++      validityAlreadyExistsFluentID: "category-overwrite-title",
++      defaultAccountNameFluentID: "account-settings-rss-default-account-name",
++      subview: {},
++      templateId: "feed-account-form",
++    },
++  };
++
++  async connectedCallback() {
++    if (this.hasConnected) {
++      return;
++    }
++
++    this.hasConnected = true;
++
++    this.classList.add("account-hub-view");
++
++    const template = document.getElementById("accountHubFeedSetup");
++    this.appendChild(template.content.cloneNode(true));
++
++    for (const state of Object.values(this.#states)) {
++      state.subview = this.querySelector(`#${state.id}`);
++    }
++
++    const container = document.querySelector("account-hub-container");
++    this.#dialog = container.shadowRoot.querySelector(".account-hub-dialog");
++
++    this.#footer = this.querySelector("#feedAccountFooter");
++    this.#footer.addEventListener("forward", this);
++    this.addEventListener("submit", this);
++    this.addEventListener("config-updated", this);
++    this.ready = this.#initUI("feedAccountView");
++    await this.ready;
++  }
++
++  /**
++   * Returns the subview of the current state.
++   *
++   * @returns {HTMLElement} The current subview.
++   */
++  get #currentSubview() {
++    return this.#states[this.#currentState].subview;
++  }
++
++  /**
++   * Handle the events from the subviews.
++   *
++   * @param {Event} event
++   */
++  async handleEvent(event) {
++    switch (event.type) {
++      case "submit":
++        event.preventDefault();
++      // Fall through to handle like forward event.
++      case "forward":
++        if (this.checkValidity()) {
++          this.onFinish();
++        }
++        break;
++      case "config-updated":
++        this.checkValidity();
++        break;
++      default:
++        break;
++    }
++  }
++
++  /**
++   * Initialize the UI of feed account view.
++   *
++   * @param {string} subview - Subview for which the UI is being initialized.
++   */
++  async #initUI(subview) {
++    this.#currentState = subview;
++    const stateDetails = this.#states[this.#currentState];
++    await this.#loadTemplateScript(stateDetails.templateId);
++
++    // Always dispatch the maximized event to ensure that the account hub is
++    // fully visible when we change subview.
++    this.dispatchEvent(
++      new CustomEvent("request-maximize", {
++        bubbles: true,
++      })
++    );
++
++    this.#setFooterButtons();
++    // Unhide for focus to work.
++    this.#currentSubview.hidden = false;
++    await this.#currentSubview.setState(stateDetails);
++    // Required.
++    this.#dialog.focus();
++  }
++
++  /**
++   * Inits the footer buttons in the footer template.
++   */
++  #setFooterButtons() {
++    const stateDetails = this.#states[this.#currentState];
++    this.#footer.canForward(stateDetails.nextStep);
++    this.#footer.setDirectionalButtonText(
++      "forward",
++      stateDetails.customForwardFluentID
++    );
++    // The footer forward button is enabled since there is a default value.
++    this.#footer.toggleForwardDisabled(!stateDetails.forwardEnabled);
++  }
++
++  /**
++   * Load the template of a subview using the template ID.
++   *
++   * @param {string} templateId - ID of the template that needs to be loaded.
++   */
++  async #loadTemplateScript(templateId) {
++    if (customElements.get(templateId)) {
++      return;
++    }
++
++    // eslint-disable-next-line no-unsanitized/method
++    await import(
++      `chrome://messenger/content/accountcreation/content/widgets/${templateId}.mjs`
++    );
++  }
++
++  /**
++   * Required function for accountHub.js on dialog close.
++   *
++   * @returns {boolean} - If the account hub can remove this view.
++   */
++  reset() {
++    const stateDetails = this.#states[this.#currentState];
++    // Reset the one subview.
++    this.#currentSubview.resetState(stateDetails);
++    this.#footer.toggleForwardDisabled(!stateDetails.forwardEnabled);
++
++    return true;
++  }
++
++  /**
++   * Set the validity error message if necessary.
++   *
++   * @returns {boolean} - True if the name is valid.
++   */
++  checkValidity() {
++    const stateDetails = this.#states[this.#currentState];
++    const stateData = this.#currentSubview.captureState();
++    let valid = false;
++    // Set to default.
++    let l10nErrorId = stateDetails.validityValueMissingFluentID;
++    if (!stateData.accountName) {
++      l10nErrorId = stateDetails.validityValueMissingFluentID;
++    } else if (this.checkAccountNameExists(stateData.accountName)) {
++      l10nErrorId = stateDetails.validityAlreadyExistsFluentID;
++    } else {
++      valid = true;
++    }
++    this.#currentSubview.clearNotifications?.();
++    this.#currentSubview.updateState(valid, l10nErrorId);
++    this.#footer.toggleForwardDisabled(!valid);
++
++    return valid;
++  }
++
++  /**
++   * Check for an existing feed account name.
++   *
++   * @param {string} accountName - Proposed account name.
++   * @returns {boolean} - True if the name exists.
++   */
++  checkAccountNameExists(accountName) {
++    const feedAccountServers = lazy.FeedUtils.getAllRssServerRootFolders();
++    return feedAccountServers.some(
++      server => server.localizedName == accountName
++    );
++  }
++
++  onFinish() {
++    const accountName = this.#currentSubview.captureState().accountName;
++    try {
++      lazy.FeedUtils.createRssAccount(accountName);
++      this.#dialog.close();
++    } catch (error) {
++      const errorNotification = new Error(error);
++      this.#currentSubview.showNotification({
++        fluentTitleId: "account-hub-creation-error-title",
++        error: errorNotification,
++        type: "error",
++      });
++      this.#currentSubview.updateState(true);
++      this.#footer.toggleForwardDisabled(true);
++    }
++  }
++}
++
++customElements.define("account-hub-feed", AccountHubFeed);
+diff --git a/mail/components/customizableui/content/panelUI.inc.xhtml b/mail/components/customizableui/content/panelUI.inc.xhtml
+--- a/mail/components/customizableui/content/panelUI.inc.xhtml
++++ b/mail/components/customizableui/content/panelUI.inc.xhtml
+@@ -220,9 +220,9 @@
+                        oncommand="openIMAccountWizard();"/>
+         <toolbarbutton id="appmenu_newFeedAccountMenuItem"
+                        class="subviewbutton subviewbutton-iconic"
+                        data-l10n-id="appmenu-new-feed"
+-                       oncommand="AddFeedAccount();"/>
++                       oncommand="top.FeedUtils.openAccountSetup();"/>
+         <toolbarbutton id="appmenu_newNewsgroupAccountMenuItem"
+                        class="subviewbutton subviewbutton-iconic"
+                        data-l10n-id="appmenu-new-newsgroup"
+                        oncommand="openNewsgroupAccountWizard();"/>
+diff --git a/mail/locales/en-US/messenger/accountSettings.ftl b/mail/locales/en-US/messenger/accountSettings.ftl
+--- a/mail/locales/en-US/messenger/accountSettings.ftl
++++ b/mail/locales/en-US/messenger/accountSettings.ftl
+@@ -45,4 +45,8 @@ ews-endpointhost-label =
+   .accesskey = h
+ ews-oauthscopes-label =
+   .value = OAuth Scopes:
+   .accesskey = s
++
++## Feed account wizard. These strings are added to this file in Tb 161.
++account-settings-rss-wizard-title = Feed Account Wizard
++account-settings-rss-default-account-name = Blogs & News Feeds
+diff --git a/mailnews/base/content/msgAccountCentral.xhtml b/mailnews/base/content/msgAccountCentral.xhtml
+--- a/mailnews/base/content/msgAccountCentral.xhtml
++++ b/mailnews/base/content/msgAccountCentral.xhtml
+@@ -226,9 +226,9 @@
+             id="setupFeeds"
+             type="button"
+             data-l10n-id="feeds-label"
+             class="btn-hub btn-inline"
+-            onclick="top.AddFeedAccount()"
++            onclick="top.FeedUtils.openAccountSetup()"
+           ></button>
+           <div class="account-description">
+             <p data-l10n-id="feeds-description"></p>
+           </div>
+diff --git a/mailnews/base/prefs/content/AccountManager.xhtml b/mailnews/base/prefs/content/AccountManager.xhtml
+--- a/mailnews/base/prefs/content/AccountManager.xhtml
++++ b/mailnews/base/prefs/content/AccountManager.xhtml
+@@ -93,9 +93,9 @@
+                 oncommand="AddIMAccount(event); event.stopPropagation();"/>
+       <menuitem id="accountActionsAddFeedAccount"
+                 data-l10n-id="account-tree-add-feed-account"
+                 prefstring="mail.disable_new_account_addition"
+-                oncommand="AddFeedAccount(event); event.stopPropagation();"/>
++                oncommand="getMostRecentMailWindow().FeedUtils.openAccountSetup();"/>
+       <menuitem id="accountActionsAddOtherAccount"
+                 data-l10n-id="account-tree-add-newsgroup-account"
+                 prefstring="mail.disable_new_account_addition"
+                 oncommand="openNewsgroupAccountWizard(); event.stopPropagation();"/>
+diff --git a/mailnews/base/prefs/content/accountUtils.js b/mailnews/base/prefs/content/accountUtils.js
+--- a/mailnews/base/prefs/content/accountUtils.js
++++ b/mailnews/base/prefs/content/accountUtils.js
+@@ -82,16 +82,8 @@ function AddIMAccount() {
+     "chrome,modal,titlebar,centerscreen"
+   );
+ }
+ 
+-function AddFeedAccount() {
+-  window.browsingContext.topChromeWindow.openDialog(
+-    "chrome://messenger-newsblog/content/feedAccountWizard.xhtml",
+-    "",
+-    "chrome,modal,titlebar,centerscreen"
+-  );
+-}
+-
+ /**
+  * Opens Address Book tab and triggers the address book creation dialog based on
+  * the passed type.
+  *
+diff --git a/mailnews/extensions/newsblog/FeedUtils.sys.mjs b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+--- a/mailnews/extensions/newsblog/FeedUtils.sys.mjs
++++ b/mailnews/extensions/newsblog/FeedUtils.sys.mjs
+@@ -2467,8 +2467,16 @@ export var FeedUtils = {
+         folder,
+       });
+     }
+   },
++  /**
++   * Open the Account Hub to set up a new feed account.
++   */
++  openAccountSetup() {
++    const mail3Pane = Services.wm.getMostRecentWindow("mail:3pane");
++    mail3Pane.focus();
++    mail3Pane.openAccountHub("FEED");
++  },
+ };
+ 
+ // Change maxLogLevelPref from default Warn to Log or Debug for finer
+ // granularity. Within Log, a regular .log is differentiated from .info in the
+diff --git a/mailnews/extensions/newsblog/feedAccountWizard.js b/mailnews/extensions/newsblog/feedAccountWizard.js
+deleted file mode 100644
+--- a/mailnews/extensions/newsblog/feedAccountWizard.js
++++ /dev/null
+@@ -1,66 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+-var { FeedUtils } = ChromeUtils.importESModule(
+-  "resource:///modules/FeedUtils.sys.mjs"
+-);
+-
+-window.addEventListener("DOMContentLoaded", () => {
+-  FeedAccountWizard.onLoad();
+-});
+-
+-/** Feed account standalone wizard functions. */
+-var FeedAccountWizard = {
+-  accountName: "",
+-
+-  onLoad() {
+-    document
+-      .querySelector("wizard")
+-      .addEventListener("wizardfinish", this.onFinish.bind(this));
+-    const accountSetupPage = document.getElementById("accountsetuppage");
+-    accountSetupPage.addEventListener(
+-      "pageshow",
+-      this.accountSetupPageValidate.bind(this)
+-    );
+-    accountSetupPage.addEventListener(
+-      "pagehide",
+-      this.accountSetupPageValidate.bind(this)
+-    );
+-    const donePage = document.getElementById("done");
+-    donePage.addEventListener("pageshow", this.donePageInit.bind(this));
+-  },
+-
+-  accountSetupPageValidate() {
+-    this.accountName = document.getElementById("prettyName").value.trim();
+-    document.querySelector("wizard").canAdvance = this.accountName;
+-  },
+-
+-  donePageInit() {
+-    document.getElementById("account.name.text").value = this.accountName;
+-  },
+-
+-  onFinish() {
+-    const account = FeedUtils.createRssAccount(this.accountName);
+-    const mainWindow = Services.wm.getMostRecentWindow("mail:3pane");
+-    const tabMail = mainWindow?.document.getElementById("tabmail");
+-    const selectedTab = tabMail?.currentTabInfo;
+-    if (selectedTab?.browser?.currentURI?.spec == "about:accountsettings") {
+-      // Opened from Account Settings. The new account will be selected there.
+-    } else if (tabMail) {
+-      // Opened from File->New, Appmenu Add Account, or Account Central in
+-      // 3pane, or from a standalone message window. Ask the main window to
+-      // display the root folder of the new account.
+-      // We can't do it here since we're in the wizard window.
+-      mainWindow.postMessage(
+-        {
+-          type: "feed-account-created",
+-          rootFolderURI: account.incomingServer.rootMsgFolder.URI,
+-        },
+-        "*"
+-      );
+-    }
+-
+-    window.close();
+-  },
+-};
+diff --git a/mailnews/extensions/newsblog/feedAccountWizard.xhtml b/mailnews/extensions/newsblog/feedAccountWizard.xhtml
+deleted file mode 100644
+--- a/mailnews/extensions/newsblog/feedAccountWizard.xhtml
++++ /dev/null
+@@ -1,99 +0,0 @@
+-<?xml version="1.0"?>
+-<!-- This Source Code Form is subject to the terms of the Mozilla Public
+-   - License, v. 2.0. If a copy of the MPL was not distributed with this
+-   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+-
+-<!DOCTYPE html [ <!ENTITY % accountDTD SYSTEM "chrome://messenger/locale/AccountWizard.dtd">
+-%accountDTD;
+-<!ENTITY % newsblogDTD SYSTEM "chrome://messenger-newsblog/locale/am-newsblog.dtd" >
+-%newsblogDTD;
+-<!ENTITY %       imDTD SYSTEM "chrome://messenger/locale/imAccountWizard.dtd" >
+-%imDTD; ]>
+-
+-<html
+-  id="FeedAccountWizard"
+-  xmlns="http://www.w3.org/1999/xhtml"
+-  xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+-  xmlns:html="http://www.w3.org/1999/xhtml"
+-  lightweightthemes="true"
+-  scrolling="false"
+->
+-  <head>
+-    <title>&feedWindowTitle.label;</title>
+-    <meta
+-      http-equiv="Content-Security-Policy"
+-      content="default-src chrome:; script-src chrome: 'unsafe-inline' moz-src:; style-src chrome: 'unsafe-inline'"
+-    />
+-    <link rel="stylesheet" href="chrome://messenger/skin/accountWizard.css" />
+-    <link rel="stylesheet" href="chrome://messenger/skin/input-fields.css" />
+-    <link rel="stylesheet" href="chrome://messenger/skin/colors.css" />
+-    <link rel="stylesheet" href="chrome://messenger/skin/themeableDialog.css" />
+-
+-    <link rel="localization" href="toolkit/global/wizard.ftl" />
+-    <script
+-      defer="defer"
+-      src="chrome://messenger/content/globalOverlay.js"
+-    ></script>
+-    <script
+-      defer="defer"
+-      src="chrome://global/content/editMenuOverlay.js"
+-    ></script>
+-    <script
+-      defer="defer"
+-      src="chrome://messenger-newsblog/content/feedAccountWizard.js"
+-    ></script>
+-  </head>
+-  <html:body
+-    xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+-  >
+-    <wizard>
+-      <!-- Account setup page : User gets a choice to enter a name for the account -->
+-      <!-- Defaults : Feed account name -> default string -->
+-      <wizardpage
+-        id="accountsetuppage"
+-        pageid="accountsetuppage"
+-        label="&accnameTitle.label;"
+-      >
+-        <vbox flex="1">
+-          <description>&accnameDesc.label;</description>
+-          <separator class="thin" />
+-          <hbox align="center" class="input-container">
+-            <label
+-              id="prettyNameLabel"
+-              class="label"
+-              value="&accnameLabel.label;"
+-              accesskey="&accnameLabel.accesskey;"
+-              control="prettyName"
+-            />
+-            <html:input
+-              id="prettyName"
+-              type="text"
+-              class="input-inline"
+-              value="&feeds.accountName;"
+-              aria-labelledby="prettyNameLabel"
+-              oninput="FeedAccountWizard.accountSetupPageValidate()"
+-            />
+-          </hbox>
+-        </vbox>
+-      </wizardpage>
+-
+-      <!-- Done page : Summarizes information collected to create a feed account -->
+-      <wizardpage id="done" pageid="done" label="&accountSummaryTitle.label;">
+-        <vbox flex="1">
+-          <description>&accountSummaryInfo.label;</description>
+-          <separator class="thin" />
+-          <hbox id="account.name" align="center">
+-            <label
+-              id="account.name.label"
+-              class="label"
+-              value="&accnameLabel.label;"
+-            />
+-            <label id="account.name.text" class="label" />
+-          </hbox>
+-          <separator />
+-          <spacer flex="1" />
+-        </vbox>
+-      </wizardpage>
+-    </wizard>
+-  </html:body>
+-</html>
+diff --git a/mailnews/extensions/newsblog/jar.mn b/mailnews/extensions/newsblog/jar.mn
+--- a/mailnews/extensions/newsblog/jar.mn
++++ b/mailnews/extensions/newsblog/jar.mn
+@@ -8,6 +8,4 @@ newsblog.jar:
+    content/messenger-newsblog/feed-subscriptions.js             (feed-subscriptions.js)
+    content/messenger-newsblog/feed-subscriptions.xhtml          (feed-subscriptions.xhtml)
+    content/messenger-newsblog/am-newsblog.js                    (am-newsblog.js)
+    content/messenger-newsblog/am-newsblog.xhtml                 (am-newsblog.xhtml)
+-   content/messenger-newsblog/feedAccountWizard.js              (feedAccountWizard.js)
+-   content/messenger-newsblog/feedAccountWizard.xhtml           (feedAccountWizard.xhtml)
