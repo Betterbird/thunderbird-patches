@@ -234,28 +234,28 @@ echo "  .label = Gelen iletilerde filtreleri çalıştır" >> localization/tr/me
 echo "carddav-directory-sync-warning =" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
 echo "    CardDAV: Bazı veriler sunucu tarafından silindi, ayrıntılar için Hata Konsolunu kontrol edin" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
 echo "carddav-directory-sync-failed =" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
-echo "    CardDAV: Sunucuyla eşzamanlama başarısız oldu, ayrıntılar için Hata Konsolunu kontrol edin" >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
+echo "    CardDAV: Sunucuyla eşzamanlama başarısız oldu, ayrıntılar için Hata Konsolunu kontrol edin"   >> localization/tr/messenger/addressbook/abCardDAVProperties.ftl
 
 # New Gloda facets:
 # gloda.message.attr._subjectMatches.facetNameLabel=Subject
 # gloda.message.attr._bodyMatches.facetNameLabel=Body
-echo "gloda.message.attr._subjectMatches.facetNameLabel=Subject" >> chrome/tr/locale/tr/messenger/gloda.properties
-echo "gloda.message.attr._bodyMatches.facetNameLabel=Body"       >> chrome/tr/locale/tr/messenger/gloda.properties
+echo "gloda.message.attr._subjectMatches.facetNameLabel=Konu" >> chrome/tr/locale/tr/messenger/gloda.properties
+echo "gloda.message.attr._bodyMatches.facetNameLabel=Gövde"   >> chrome/tr/locale/tr/messenger/gloda.properties
 
 # Categories:
-echo "about-addressbook-details-categories-header = Categories" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "about-addressbook-column-header-categories2 = Categories" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "about-addressbook-column-header-a11y-categories2 = Categories" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "  .title = Sort by categories"                            >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "about-addressbook-column-label-categories2 ="             >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "  .label = Categories"                                    >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "about-addressbook-cell-categories2 ="                     >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "  .aria-label = Categories"                               >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "  .title = { \$title }"                                   >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
-echo "vcard-categories-header = Categories"                     >> localization/tr/messenger/addressbook/vcard.ftl
-echo "vcard-category-add = Add category"                        >> localization/tr/messenger/addressbook/vcard.ftl
-echo "vcard-category-input-label = Category"                    >> localization/tr/messenger/addressbook/vcard.ftl
-echo "vcard-category-input-title = Category name"               >> localization/tr/messenger/addressbook/vcard.ftl
+echo "about-addressbook-details-categories-header = Kategoriler" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-categories2 = Kategoriler" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-header-a11y-categories2 = Kategoriler" >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = Kategorilere göre sırala"                       >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-column-label-categories2 ="              >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .label = Kategoriler"                                    >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "about-addressbook-cell-categories2 ="                      >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .aria-label = Kategoriler"                               >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "  .title = { \$title }"                                    >> localization/tr/messenger/addressbook/aboutAddressBook.ftl
+echo "vcard-categories-header = Kategoriler"                     >> localization/tr/messenger/addressbook/vcard.ftl
+echo "vcard-category-add = Kategori ekle"                        >> localization/tr/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-label = Kategori"                     >> localization/tr/messenger/addressbook/vcard.ftl
+echo "vcard-category-input-title = Kategori adı"                 >> localization/tr/messenger/addressbook/vcard.ftl
 
 # Migrated to Fluent in 153:
 
@@ -267,16 +267,16 @@ echo "search-add-group-button ="           >> localization/tr/messenger/searchWi
 echo "  .label = +( )"                     >> localization/tr/messenger/searchWidgets.ftl
 echo "  .tooltiptext = Yeni bir grup ekle" >> localization/tr/messenger/searchWidgets.ftl
 
-echo "search-attrib-expires = Expires"       >> localization/tr/messenger/searchWidgets.ftl
-echo "search-attrib-categories = Categories" >> localization/tr/messenger/searchWidgets.ftl
+echo "search-attrib-expires = Expires"        >> localization/tr/messenger/searchWidgets.ftl
+echo "search-attrib-categories = Kategoriler" >> localization/tr/messenger/searchWidgets.ftl
 
 # Strings for searching all mail accounts:
 # search-all-mail-accounts =
 #   .label = Search all mail accounts
 #   .accesskey = m
-echo "search-all-mail-accounts ="          >> localization/tr/messenger/searchDialog.ftl
-echo "  .label = Search all mail accounts" >> localization/tr/messenger/searchDialog.ftl
-echo "  .accesskey = m"                    >> localization/tr/messenger/searchDialog.ftl
+echo "search-all-mail-accounts ="              >> localization/tr/messenger/searchDialog.ftl
+echo "  .label = Tüm e-posta hesaplarında ara" >> localization/tr/messenger/searchDialog.ftl
+echo "  .accesskey = H"                        >> localization/tr/messenger/searchDialog.ftl
 
 # New in 153:
 
@@ -293,12 +293,12 @@ echo "  .label = { recent-sort-order-mru.label } + { recent-sort-order-alphabeti
 # echo "minimize-to-tray-label ="                                                              >> localization/tr/messenger/preferences/preferences.ftl
 # echo "  .label = { -brand-short-name } simge durumuna küçültüldüğünde sistem tepsisine taşı" >> localization/tr/messenger/preferences/preferences.ftl
 # echo "  .accesskey = m"                                                                      >> localization/tr/messenger/preferences/preferences.ftl
-echo "close-to-tray-label ="                                                >> localization/tr/messenger/preferences/preferences.ftl
-echo "  .label = When { -brand-short-name } is closed, move it to the tray" >> localization/tr/messenger/preferences/preferences.ftl
-echo "  .accesskey = c"                                                     >> localization/tr/messenger/preferences/preferences.ftl
-echo "start-in-tray-label ="                                                >> localization/tr/messenger/preferences/preferences.ftl
-echo "  .label = Start { -brand-short-name } in the tray"                   >> localization/tr/messenger/preferences/preferences.ftl
-echo "  .accesskey = S"                                                     >> localization/tr/messenger/preferences/preferences.ftl
+echo "close-to-tray-label ="                                                 >> localization/tr/messenger/preferences/preferences.ftl
+echo "  .label = { -brand-short-name } kapatıldığında sistem tepsisine taşı" >> localization/tr/messenger/preferences/preferences.ftl
+echo "  .accesskey = k"                                                      >> localization/tr/messenger/preferences/preferences.ftl
+echo "start-in-tray-label ="                                                 >> localization/tr/messenger/preferences/preferences.ftl
+echo "  .label = { -brand-short-name }’ü sistem tepsisinde başlat"           >> localization/tr/messenger/preferences/preferences.ftl
+echo "  .accesskey = s"                                                      >> localization/tr/messenger/preferences/preferences.ftl
 
 echo "system-tray-menuitem-quit = { -brand-full-name } uygulamasından çık" >> localization/tr/messenger/menubar.ftl
 
@@ -306,30 +306,30 @@ echo "system-tray-menuitem-quit = { -brand-full-name } uygulamasından çık" >>
 # copy-attach-web-page-archive =
 #   .label = Attach Web Page Archive
 #   .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive
-echo "copy-attach-web-page-archive ="                                                             >> localization/tr/messenger/feeds.ftl
-echo "  .label = Attach Web Page Archive"                                                         >> localization/tr/messenger/feeds.ftl
-echo "  .tooltiptext = Create a copy of the selected feed message with attached Web Page Archive" >> localization/tr/messenger/feeds.ftl
+echo "copy-attach-web-page-archive ="                                                            >> localization/tr/messenger/feeds.ftl
+echo "  .label = Web sayfası arşivini ekle"                                                      >> localization/tr/messenger/feeds.ftl
+echo "  .tooltiptext = Seçili besleme iletisinin kopyasını oluştur ve Web sayfası arşivini ekle" >> localization/tr/messenger/feeds.ftl
 
 # Collapse All Folders
 # folder-collapse-all-folders =
 #     .label = Collapse All Folders
-echo "folder-collapse-all-folders ="     >> localization/tr/messenger/messenger.ftl
-echo "    .label = Collapse All Folders" >> localization/tr/messenger/messenger.ftl
+echo "folder-collapse-all-folders ="      >> localization/tr/messenger/messenger.ftl
+echo "    .label = Tüm klasörleri daralt" >> localization/tr/messenger/messenger.ftl
 
 # Strings for Feed Account creation (taken directly from XX/mail/messenger/accountSettings.ftl)
-echo "account-settings-rss-wizard-title = Feed Account Wizard"        >> localization/tr/messenger/accountSettings.ftl
-echo "account-settings-rss-default-account-name = Blogs & News Feeds" >> localization/tr/messenger/accountSettings.ftl
+echo "account-settings-rss-wizard-title = Besleme Hesabı Sihirbazı"      >> localization/tr/messenger/accountSettings.ftl
+echo "account-settings-rss-default-account-name = Bloglar ve Beslemeler" >> localization/tr/messenger/accountSettings.ftl
 
 # Strings for the text background colour.
 # compose-tool-button-text-background-color =
 #   .tooltiptext = Choose color for text background
 # compose-tool-button-page-background-color =
 #   .tooltiptext = Choose color for page background
-echo "compose-tool-button-text-background-color ="       >> localization/tr/messenger/messengercompose/messengercompose.ftl
-echo "  .tooltiptext = Choose color for text background" >> localization/tr/messenger/messengercompose/messengercompose.ftl
-echo "compose-tool-button-page-background-color ="       >> localization/tr/messenger/messengercompose/messengercompose.ftl
-echo "  .tooltiptext = Choose color for page background" >> localization/tr/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-text-background-color ="   >> localization/tr/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Metin arka planı rengini seç" >> localization/tr/messenger/messengercompose/messengercompose.ftl
+echo "compose-tool-button-page-background-color ="   >> localization/tr/messenger/messengercompose/messengercompose.ftl
+echo "  .tooltiptext = Sayfa arka planı rengini seç" >> localization/tr/messenger/messengercompose/messengercompose.ftl
 
-# Strings for SMTP OAuth2 login failure (bug 1935379) (taken directly from XX/mail/messenger/messageSend.ftl)
-echo "smtp-auth-oauth2-failure = Unable to authenticate to Outgoing server (SMTP) { \$hostname } using OAuth2. The server responded: { \$serverResponse }" >> localization/tr/messenger/messageSend.ftl
-echo "smtp-auth-oauth2-failure-no-response = Unable to authenticate to Outgoing server (SMTP) { \$hostname } using OAuth2."                                >> localization/tr/messenger/messageSend.ftl
+# Strings for SMTP OAuth2 login failure (bug 1935379)
+echo "smtp-auth-oauth2-failure = { \$hostname } giden sunucusunda (SMTP) OAuth2 ile kimlik doğrulanamadı. Sunucunun yanıtı: { \$serverResponse }" >> localization/tr/messenger/messageSend.ftl
+echo "smtp-auth-oauth2-failure-no-response = { \$hostname } giden sunucusunda (SMTP) OAuth2 ile kimlik doğrulanamadı."                            >> localization/tr/messenger/messageSend.ftl
