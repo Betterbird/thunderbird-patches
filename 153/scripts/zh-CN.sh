@@ -329,3 +329,7 @@ echo "compose-tool-button-text-background-color =" >> localization/zh-CN/messeng
 echo "  .tooltiptext = 选择文本背景颜色"              >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl
 echo "compose-tool-button-page-background-color =" >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl
 echo "  .tooltiptext = 选择页面背景颜色"              >> localization/zh-CN/messenger/messengercompose/messengercompose.ftl
+
+# Strings for SMTP OAuth2 login failure (bug 1935379)
+echo "smtp-auth-oauth2-failure = 无法使用 OAuth2 向发件服务器 (SMTP) { \$hostname } 进行验证。服务器响应：{ \$serverResponse }" >> localization/zh-CN/messenger/messageSend.ftl
+echo "smtp-auth-oauth2-failure-no-response = 无法使用 OAuth2 向发件服务器 (SMTP) { \$hostname } 进行验证。"                   >> localization/zh-CN/messenger/messageSend.ftl

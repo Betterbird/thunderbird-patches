@@ -329,3 +329,7 @@ echo "compose-tool-button-text-background-color ="         >> localization/nl/me
 echo "  .tooltiptext = Kleur voor tekstachtergrond kiezen" >> localization/nl/messenger/messengercompose/messengercompose.ftl
 echo "compose-tool-button-page-background-color ="         >> localization/nl/messenger/messengercompose/messengercompose.ftl
 echo "  .tooltiptext = Kleur voor paginachtergrond kiezen" >> localization/nl/messenger/messengercompose/messengercompose.ftl
+
+# Strings for SMTP OAuth2 login failure (bug 1935379) (taken directly from XX/mail/messenger/messageSend.ftl)
+echo "smtp-auth-oauth2-failure = Kan niet authenticeren bij uitgaande (SMTP-)server { \$hostname } via OAuth2. De server antwoordde: { \$serverResponse }" >> localization/nl/messenger/messageSend.ftl
+echo "smtp-auth-oauth2-failure-no-response = Kan niet authenticeren bij uitgaande (SMTP-)server { \$hostname } via OAuth2."                                >> localization/nl/messenger/messageSend.ftl
