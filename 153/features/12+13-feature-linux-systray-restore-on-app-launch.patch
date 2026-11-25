@@ -4,6 +4,41 @@
 # Parent  36d517574f8c22d80dc8257253f83ca5a5642de5
 Feature: Linux systray. Restore last app window on launch of same application.
 
+1. Problem:
+   The Betterbird systray patch unconditionally restored the tray-hidden main
+   window for every remote command line (STATE_REMOTE_AUTO) on Linux, so
+   -compose also raised/moved the main window (issue #643).
+
+2. Root cause:
+   window.focus() can restore a minimized+hidden window on Windows because
+   nsWindow::SetFocus calls ShowWindow(SW_RESTORE) for iconic windows at the
+   widget level. On Linux, GTK's SetFocus raise path requires mIsShown
+   (widget/gtk/nsWindow.cpp:1336), so focus() cannot unhide a window with
+   visibility=false. Windows' HideWindow minimizes before hiding for Toast
+   reasons (bug 2092299); Linux's only hid the window.
+
+3. Rejected approaches:
+   - JS second-guessing of handle()'s dispatch logic
+     (commandOpensOwnWindow): duplicates command classification and must be
+     kept in sync with handle().
+   - gtk_window_set_skip_taskbar_hint() (iconify instead of hide): X11/EWMH
+     only, no-op on Wayland; xdg_toplevel.set_minimized is also not honored
+     by all compositors (e.g. wlroots/sway).
+   - C++ minimize-before-hide in nsMessengerUnixIntegration::HideWindow():
+     pointless since the unmap kills the iconified state and the focus path
+     never runs.
+
+4. Final solution:
+   Keep the restore logic in MessengerContentHandler.sys.mjs, but remove the
+   unconditional call at the top of handle() and add
+   restoreHiddenMainWindowLinux() only where the main window is actually
+   needed:
+   - the four main-window flags (-mail, -addressbook, -options, -calendar)
+   - the existing focus() fallback (plain relaunch).
+   -compose, -file, -keymanager skip the restore - upstream's preventDefault
+   semantics already encode "opens its own window". Verified working on
+   Linux.
+
 diff --git a/mail/components/MessengerContentHandler.sys.mjs b/mail/components/MessengerContentHandler.sys.mjs
 --- a/mail/components/MessengerContentHandler.sys.mjs
 +++ b/mail/components/MessengerContentHandler.sys.mjs
