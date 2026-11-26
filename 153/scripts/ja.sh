@@ -329,7 +329,3 @@ echo "compose-tool-button-text-background-color =" >> localization/ja/messenger/
 echo "  .tooltiptext = テキストの背景の色を選択します"      >> localization/ja/messenger/messengercompose/messengercompose.ftl
 echo "compose-tool-button-page-background-color =" >> localization/ja/messenger/messengercompose/messengercompose.ftl
 echo "  .tooltiptext = ページの背景の色を選択します"       >> localization/ja/messenger/messengercompose/messengercompose.ftl
-
-# Strings for SMTP OAuth2 login failure (bug 1935379) (taken directly from XX/mail/messenger/messageSend.ftl)
-echo "smtp-auth-oauth2-failure = OAuth2 を利用した送信 (SMTP) サーバー { \$hostname } の認証に失敗しました。サーバーからの応答: { \$serverResponse }" >> localization/ja/messenger/messageSend.ftl
-echo "smtp-auth-oauth2-failure-no-response = OAuth2 を利用した送信 (SMTP) サーバー { \$hostname } の認証に失敗しました。"                       >> localization/ja/messenger/messageSend.ftl

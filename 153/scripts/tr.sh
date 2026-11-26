@@ -329,7 +329,3 @@ echo "compose-tool-button-text-background-color ="   >> localization/tr/messenge
 echo "  .tooltiptext = Metin arka planı rengini seç" >> localization/tr/messenger/messengercompose/messengercompose.ftl
 echo "compose-tool-button-page-background-color ="   >> localization/tr/messenger/messengercompose/messengercompose.ftl
 echo "  .tooltiptext = Sayfa arka planı rengini seç" >> localization/tr/messenger/messengercompose/messengercompose.ftl
-
-# Strings for SMTP OAuth2 login failure (bug 1935379)
-echo "smtp-auth-oauth2-failure = { \$hostname } giden sunucusunda (SMTP) OAuth2 ile kimlik doğrulanamadı. Sunucunun yanıtı: { \$serverResponse }" >> localization/tr/messenger/messageSend.ftl
-echo "smtp-auth-oauth2-failure-no-response = { \$hostname } giden sunucusunda (SMTP) OAuth2 ile kimlik doğrulanamadı."                            >> localization/tr/messenger/messageSend.ftl

@@ -332,7 +332,3 @@ echo "compose-tool-button-text-background-color ="             >> localization/d
 echo "  .tooltiptext = Farbe für Text-Hintergrund auswählen"   >> localization/de/messenger/messengercompose/messengercompose.ftl
 echo "compose-tool-button-page-background-color ="             >> localization/de/messenger/messengercompose/messengercompose.ftl
 echo "  .tooltiptext = Farbe für Seiten-Hintergrund auswählen" >> localization/de/messenger/messengercompose/messengercompose.ftl
-
-# Strings for SMTP OAuth2 login failure (bug 1935379) (taken directly from XX/mail/messenger/messageSend.ftl)
-echo "smtp-auth-oauth2-failure = Die Authentifizierung am Postausgangsserver (SMTP) { \$hostname } über OAuth2 ist fehlgeschlagen. Der Server antwortete: { \$serverResponse }" >> localization/de/messenger/messageSend.ftl
-echo "smtp-auth-oauth2-failure-no-response = Die Authentifizierung am Postausgangsserver (SMTP) { \$hostname } über OAuth2 ist fehlgeschlagen."                                 >> localization/de/messenger/messageSend.ftl
