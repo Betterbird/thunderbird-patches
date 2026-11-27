@@ -1,0 +1,121 @@
+
+# HG changeset patch
+# User Max Emig <mozilla@emigm.ax>
+# Date 1795729956 -7200
+# Node ID ff78fe4ef278a6b7ed42b198962cd14552351321
+# Parent  88839ea39894aad74c0546249f3c0c656d7d23b6
+Bug 2084190 - Hold mMonitor when the IMAP thread writes m_imapMailFolderSink. r=mkmelin
+
+Differential Revision: https://phabricator.services.mozilla.com/D345140
+
+diff --git a/mailnews/imap/src/nsImapProtocol.cpp b/mailnews/imap/src/nsImapProtocol.cpp
+--- a/mailnews/imap/src/nsImapProtocol.cpp
++++ b/mailnews/imap/src/nsImapProtocol.cpp
+@@ -1110,11 +1110,11 @@ void nsImapProtocol::ReleaseUrlState(boo
+       m_runningUrl =
+           nullptr;  // force us to release our last reference on the url
+       m_urlInProgress = false;
+     }
+-  }
+-  // Need to null this out whether we have an m_runningUrl or not
+-  m_imapMailFolderSink = nullptr;
++    // Need to null this out whether we have an m_runningUrl or not
++    m_imapMailFolderSink = nullptr;
++  }
+ 
+   // we want to make sure the imap protocol's last reference to the url gets
+   // released back on the UI thread. This ensures that the objects the imap url
+   // hangs on to properly get released back on the UI thread.
+@@ -1170,9 +1170,9 @@ bool nsImapProtocol::RunImapThreadMainLo
+ 
+   // close streams via UI thread if it's not already done
+   if (m_imapProtocolSink) m_imapProtocolSink->CloseStreams();
+ 
+-  m_imapMailFolderSink = nullptr;
++  SetMailFolderSink(nullptr);
+   m_imapMailFolderSinkSelected = nullptr;
+   m_imapMessageSink = nullptr;
+ 
+   return true;
+@@ -1562,9 +1562,9 @@ void nsImapProtocol::ImapThreadMainLoop(
+       //
+       if (ProcessCurrentURL()) {
+         // Another URL has been setup to run. Process it on next loop.
+         m_nextUrlReadyToRun = true;
+-        m_imapMailFolderSink = nullptr;
++        SetMailFolderSink(nullptr);
+       } else {
+         // No more URLs setup to run. Set idle pending if user has configured
+         // idle and if a URL is not in progress and if the server has IDLE
+         // capability. Just set idlePending since want to wait a short time
+@@ -1580,9 +1580,9 @@ void nsImapProtocol::ImapThreadMainLoop(
+           idlePending = true;
+           Log("ImapThreadMainLoop", nullptr, "idlePending set");
+         } else {
+           // if not idle used, don't need to remember folder sink
+-          m_imapMailFolderSink = nullptr;
++          SetMailFolderSink(nullptr);
+         }
+       }
+     } else {
+       // No URL to run detected on wake up.
+@@ -1591,9 +1591,9 @@ void nsImapProtocol::ImapThreadMainLoop(
+         // and set the loop sleep time back to its original longer time.
+         Idle();
+         if (!m_idle) {
+           // Server rejected IDLE. Treat like IDLE not enabled or available.
+-          m_imapMailFolderSink = nullptr;
++          SetMailFolderSink(nullptr);
+         }
+         idlePending = false;
+         sleepTime = kImapSleepTime;
+       }
+@@ -2125,9 +2125,9 @@ bool nsImapProtocol::ProcessCurrentURL()
+ 
+       NS_ReleaseOnMainThread("nsImapProtocol, copyState", copyState.forget());
+     }
+     // we might need this to stick around for IDLE support
+-    m_imapMailFolderSink = imapMailFolderSink;
++    SetMailFolderSink(imapMailFolderSink);
+     imapMailFolderSink = nullptr;
+   } else
+     MOZ_LOG(IMAP, LogLevel::Info, ("null imapMailFolderSink"));
+ 
+@@ -7946,9 +7946,9 @@ void nsImapProtocol::EndIdle(bool waitFo
+   // shutting down so the URL that is attempting to run on this connection can
+   // retry or signal a failed status when SetUrlState is called in
+   // ProcessCurrentUrl to invoke nsIUrlListener.onStopRunningUrl.
+   if (!waitForResponse || GetServerStateParser().LastCommandSuccessful())
+-    m_imapMailFolderSink = nullptr;
++    SetMailFolderSink(nullptr);
+ }
+ 
+ void nsImapProtocol::Search(const char* searchCriteria, bool useUID,
+                             bool notifyHit /* true */) {
+diff --git a/mailnews/imap/src/nsImapProtocol.h b/mailnews/imap/src/nsImapProtocol.h
+--- a/mailnews/imap/src/nsImapProtocol.h
++++ b/mailnews/imap/src/nsImapProtocol.h
+@@ -443,8 +443,10 @@ class nsImapProtocol : public nsIImapPro
+   bool m_nextUrlReadyToRun;
+   bool m_idleResponseReadyToHandle;
+   nsWeakPtr m_server;
+ 
++  // Written on both the main thread and the IMAP thread. Every write must
++  // hold mMonitor; use SetMailFolderSink() on the IMAP thread.
+   RefPtr<ImapMailFolderSinkProxy> m_imapMailFolderSink;
+   RefPtr<ImapMailFolderSinkProxy> m_imapMailFolderSinkSelected;
+   RefPtr<ImapMessageSinkProxy> m_imapMessageSink;
+   RefPtr<ImapServerSinkProxy> m_imapServerSink;
+@@ -452,8 +454,12 @@ class nsImapProtocol : public nsIImapPro
+   RefPtr<ImapProtocolSinkProxy> m_imapProtocolSink;
+ 
+   // helper function to setup imap sink interface proxies
+   nsresult SetupSinkProxy();
++  void SetMailFolderSink(ImapMailFolderSinkProxy* aSink) {
++    mozilla::ReentrantMonitorAutoEnter mon(mMonitor);
++    m_imapMailFolderSink = aSink;
++  }
+   // End thread support stuff
+   nsresult LoadImapUrlInternal();
+ 
+   bool GetDeleteIsMoveToTrash();
