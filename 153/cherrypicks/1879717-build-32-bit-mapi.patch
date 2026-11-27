@@ -1,0 +1,419 @@
+# HG changeset patch
+# User Rob Lemley <rob@thunderbird.net>
+# Date 1795798369 -7200
+# Parent  ffd3fccabc32bbd52e21bdddde620b1a1e077841
+Bug 1879717 - Build 32-bit mozMapi DLLs for 64-bit build.
+
+Slight changes by Betterbird to make it work when `ac_add_options --enable-clang-plugin` is used:
+  -        elif "clang-cl" in a:
+  +        elif os.path.basename(a) in ("clang", "clang-cl", "clang.exe", "clang-cl.exe"):
+and
+  -ALLOWED_EXECUTABLES = {"clang-cl": clang_cl, "lld-link": lld_link}
+  +ALLOWED_EXECUTABLES = {"clang": clang_cl, "clang-cl": clang_cl, "lld-link": lld_link}
+  
+All files in mailnews/mapi/mapiDll/32/ are now new and not an edited copy because
+"edit the original file, then copy it" is different to "copy the original file, then edit it".
+
+diff --git a/build/clang32-wrap.py b/build/clang32-wrap.py
+new file mode 100644
+--- /dev/null
++++ b/build/clang32-wrap.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/python
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++"""clang32-wrap.py
++
++Wraps commands that build a 64-bit DLL and mangles them into commands that build
++a 32-bit DLL.
++"""
++import os
++import shlex
++import sys
++
++import buildconfig
++
++
++def clang_cl(exec_args):
++    """Mangle a clang-cl command.
++    - Add '-m32 -arch:SSE2'
++    - Change '-FI <path>/mozilla-config.h in to mozilla-winx86.h'
++    - Drop '--target=aarch64-windows-msvc' (arm64 only, effectively replaced with -m32)
++    """
++    rv_args = []
++    arg_pos = 0
++    while arg_pos < len(exec_args):
++        a = exec_args[arg_pos]
++        insert = []
++        if a == "-FI" and exec_args[arg_pos + 1].endswith("mozilla-config.h"):
++            arg_pos += 1
++            mozilla_winx86_h = os.path.join(
++                buildconfig.topsrcdir, "comm", "build", "mozilla-winx86.h"
++            )
++            insert.extend([a, mozilla_winx86_h])
++        elif os.path.basename(a) in ("clang", "clang-cl", "clang.exe", "clang-cl.exe"):
++            insert.extend([a, "-m32", "-arch:SSE2"])
++        elif a in ("--target=aarch64-windows-msvc",):
++            pass
++        else:
++            insert.append(a)
++        rv_args.extend(insert)
++        arg_pos += 1
++
++    return rv_args
++
++
++def lld_link(exec_args):
++    """Mangle an lld-link command.
++    - Change '-MACHINE:X64' or '-MACHINE:ARM64' to '-MACHINE:X86'
++    - Drop '-CETCOMPAT'
++    - Insert '-LARGEADDRESSAWARE -SAFESEH' before '-DEBUG'
++    """
++    rv_args = []
++    arg_pos = 0
++    while arg_pos < len(exec_args):
++        a = exec_args[arg_pos]
++        insert = []
++        if a == "-CETCOMPAT":
++            pass
++        elif a in ("-MACHINE:X64", "-MACHINE:ARM64"):
++            insert.append("-MACHINE:X86")
++        elif a == "-DEBUG":
++            insert.extend(["-LARGEADDRESSAWARE", "-SAFESEH", a])
++        else:
++            insert.append(a)
++        rv_args.extend(insert)
++        arg_pos += 1
++
++    return rv_args
++
++
++ALLOWED_EXECUTABLES = {"clang": clang_cl, "clang-cl": clang_cl, "lld-link": lld_link}
++
++
++def update_environ():
++    lib_env = os.environ.get("LIB")
++    if buildconfig.substs["TARGET_CPU"] == "x86_64":
++        lib_env = lib_env.replace("/x64", "/x86")
++    elif buildconfig.substs["TARGET_CPU"] == "aarch64":
++        lib_env = lib_env.replace("/arm64", "/x86")
++    os.environ["LIB"] = lib_env
++
++
++def get_executable(exec_args):
++    executable = exec_args[0]
++    if "sccache" in executable:
++        executable = exec_args[1]
++    executable = os.path.splitext(os.path.basename(executable))[0]
++    if executable not in ALLOWED_EXECUTABLES:
++        raise Exception(f"Unsupported executable: {executable}")
++    return ALLOWED_EXECUTABLES[executable]
++
++
++def main(exec_args):
++    exec_func = get_executable(exec_args)
++    exec_args = exec_func(exec_args)
++    update_environ()
++    print(shlex.join(exec_args))
++    os.execv(exec_args[0], exec_args[0:])
++
++
++if __name__ == "__main__":
++    args = sys.argv[1:]
++    if not args:
++        raise Exception("Must provide full command to mangle.")
++    main(args)
+diff --git a/build/midl32.py b/build/midl32.py
+new file mode 100644
+--- /dev/null
++++ b/build/midl32.py
+@@ -0,0 +1,62 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++import os
++import shutil
++import subprocess
++
++from mozfile import load_source
++
++import buildconfig
++
++
++def midl32_flags(flags):
++    if buildconfig.substs["TARGET_CPU"] == "x86_64":
++        idx = flags.index("x64")
++    elif buildconfig.substs["TARGET_CPU"] == "aarch64":
++        idx = flags.index("arm64")
++    else:
++        raise Exception(f"Unexpected TARGET_CPU: {buildconfig.substs['TARGET_CPU']}")
++    flags[idx] = "win32"
++    return flags
++
++
++def midl32(out, input, *flags):
++    """This is a copy of /build/midl.py:midl() with one tweak: change MIDL_FLAGS
++    to emit 32-bit code."""
++    MIDL = load_source("midl", os.path.join(buildconfig.topsrcdir, "build", "midl.py"))
++
++    out.avoid_writing_to_file()
++    midl_flags = midl32_flags(buildconfig.substs["MIDL_FLAGS"])
++    base = os.path.dirname(out.name) or "."
++    tmpdir = None
++    try:
++        # If the build system is asking to not use the preprocessor to midl,
++        # we need to do the preprocessing ourselves.
++        if "-no_cpp" in midl_flags:
++            # Normally, we'd use tempfile.TemporaryDirectory, but in this specific
++            # case, we actually want a deterministic directory name, because it's
++            # recorded in the code midl generates.
++            tmpdir = os.path.join(base, os.path.basename(input) + ".tmp")
++            os.makedirs(tmpdir, exist_ok=True)
++            try:
++                input, flags = MIDL.preprocess(tmpdir, input, flags)
++            except subprocess.CalledProcessError as e:
++                return e.returncode
++        midl = buildconfig.substs["MIDL"]
++        wine = buildconfig.substs.get("WINE")
++        if midl.lower().endswith(".exe") and wine:
++            command = [wine, midl]
++        else:
++            command = [midl]
++        command.extend(midl_flags)
++        command.extend([MIDL.relativize(f, base) for f in flags])
++        command.append("-Oicf")
++        command.append(MIDL.relativize(input, base))
++        print("Executing:", " ".join(command))
++        result = subprocess.run(command, cwd=base)
++        return result.returncode
++    finally:
++        if tmpdir:
++            shutil.rmtree(tmpdir)
+diff --git a/build/mozilla-winx86.h b/build/mozilla-winx86.h
+new file mode 100644
+--- /dev/null
++++ b/build/mozilla-winx86.h
+@@ -0,0 +1,20 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This file is used to build 32-bit DLLs when the target is 64-bit Windows.
++ * This gets the benefits of mozilla-config.h, while overriding the defines
++ * needed to make a proper 32-bit object.
++ * This is a minimal implementation needed for mozMapi. Other uses may not work.
++ */
++
++#include <mozilla-config.h>
++
++#ifdef _AMD64_
++#undef _AMD64_
++#endif
++#ifdef _ARM64_
++#undef _ARM64_
++#endif
++
++#define _X86_ 1
+diff --git a/mailnews/mapi/mapiDll/32/Makefile.in b/mailnews/mapi/mapiDll/32/Makefile.in
+new file mode 100644
+--- /dev/null
++++ b/mailnews/mapi/mapiDll/32/Makefile.in
+@@ -0,0 +1,5 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++EMBED_MANIFEST_AT = 2
+diff --git a/mailnews/mapi/mapiDll/32/defs.mk b/mailnews/mapi/mapiDll/32/defs.mk
+new file mode 100644
+--- /dev/null
++++ b/mailnews/mapi/mapiDll/32/defs.mk
+@@ -0,0 +1,12 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++CC := $(PYTHON3) $(MZLA_WIN32_BUILD_WRAPPER) $(CC)
++CXX := $(PYTHON3) $(MZLA_WIN32_BUILD_WRAPPER) $(CXX)
++LINKER := $(PYTHON3) $(MZLA_WIN32_BUILD_WRAPPER) $(LINKER)
++
++override STATIC_LIBS =
++
++undefine WINCHECKSEC
++
+diff --git a/mailnews/mapi/mapiDll/32/module.ver b/mailnews/mapi/mapiDll/32/module.ver
+new file mode 100644
+--- /dev/null
++++ b/mailnews/mapi/mapiDll/32/module.ver
+@@ -0,0 +1,6 @@
++WIN32_MODULE_FILEVERSION=0,8,0,0
++WIN32_MODULE_FILEVERSION_STRING=0.8
++WIN32_MODULE_COPYRIGHT=©Thunderbird and Mozilla Developers, according to the MPL 1.1/GPL 2.0/LGPL 2.1 licenses, as applicable.
++WIN32_MODULE_COMPANYNAME=Mozilla.org
++WIN32_MODULE_TRADEMARKS=Mozilla
++WIN32_MODULE_COMMENT=Mozilla Thunderbird MAPI Dll (32-bit)
+diff --git a/mailnews/mapi/mapiDll/32/moz.build b/mailnews/mapi/mapiDll/32/moz.build
+new file mode 100644
+--- /dev/null
++++ b/mailnews/mapi/mapiDll/32/moz.build
+@@ -0,0 +1,25 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++DIST_SUBDIR = "mozMapi_32bit"
++
++# Statically link against the CRT, so that we don't go hunting around for it
++# and not find it when we're loaded into explorer.exe or similar
++SharedLibrary("mozMapi32_x86")
++USE_STATIC_MSVCRT = True
++
++LOCAL_INCLUDES += ["/comm/mailnews/mapi/include"]
++
++UNIFIED_SOURCES += [
++    "../MapiDll.cpp",
++]
++
++OS_LIBS += [
++    "ole32",
++]
++
++DEFINES["UNICODE"] = True
++DEFINES["_UNICODE"] = True
++
++DEFFILE = "../Mapi32.def"
+diff --git a/mailnews/mapi/mapiDll/Makefile.in b/mailnews/mapi/mapiDll/Makefile.in
+--- a/mailnews/mapi/mapiDll/Makefile.in
++++ b/mailnews/mapi/mapiDll/Makefile.in
+@@ -1,5 +1,4 @@
+-#
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+diff --git a/mailnews/mapi/mapiDll/moz.build b/mailnews/mapi/mapiDll/moz.build
+--- a/mailnews/mapi/mapiDll/moz.build
++++ b/mailnews/mapi/mapiDll/moz.build
+@@ -20,4 +20,7 @@ OS_LIBS += [
+ DEFINES["UNICODE"] = True
+ DEFINES["_UNICODE"] = True
+ 
+ DEFFILE = "Mapi32.def"
++
++if CONFIG["HAVE_64BIT_BUILD"]:
++    DIRS += ["32"]
+diff --git a/mailnews/mapi/mapihook/build/32/defs.mk b/mailnews/mapi/mapihook/build/32/defs.mk
+new file mode 100644
+--- /dev/null
++++ b/mailnews/mapi/mapihook/build/32/defs.mk
+@@ -0,0 +1,9 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++CC := $(PYTHON3) $(MZLA_WIN32_BUILD_WRAPPER) $(CC)
++CXX := $(PYTHON3) $(MZLA_WIN32_BUILD_WRAPPER) $(CXX)
++LINKER := $(PYTHON3) $(MZLA_WIN32_BUILD_WRAPPER) $(LINKER)
++
++undefine WINCHECKSEC
+diff --git a/mailnews/mapi/mapihook/build/32/module.ver b/mailnews/mapi/mapihook/build/32/module.ver
+new file mode 100644
+--- /dev/null
++++ b/mailnews/mapi/mapihook/build/32/module.ver
+@@ -0,0 +1,6 @@
++WIN32_MODULE_FILEVERSION=0,8,0,0
++WIN32_MODULE_FILEVERSION_STRING=0.8
++WIN32_MODULE_COPYRIGHT=©Thunderbird and Mozilla Developers, according to the MPL 1.1/GPL 2.0/LGPL 2.1 licenses, as applicable.
++WIN32_MODULE_COMPANYNAME=Mozilla.org
++WIN32_MODULE_TRADEMARKS=Mozilla
++WIN32_MODULE_COMMENT=Mozilla Thunderbird Thunderbird MAPI Proxy Dll (32-bit)
+diff --git a/mailnews/mapi/mapihook/build/moz.build b/mailnews/mapi/mapihook/build/32/moz.build
+copy from mailnews/mapi/mapihook/build/moz.build
+copy to mailnews/mapi/mapihook/build/32/moz.build
+--- a/mailnews/mapi/mapihook/build/moz.build
++++ b/mailnews/mapi/mapihook/build/32/moz.build
+@@ -1,9 +1,11 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+-SharedLibrary("MapiProxy")
++DIST_SUBDIR = "mozMapi_32bit"
++
++SharedLibrary("MapiProxy_x86")
+ 
+ OS_LIBS += [
+     "rpcrt4",
+ ]
+@@ -16,28 +18,25 @@ GeneratedFile(
+     "dlldata.c",
+     "msgMapi.h",
+     "msgMapi_i.c",
+     "msgMapi_p.c",
+-    inputs=["msgMapi.idl"],
+-    script="/build/midl.py",
+-    entry_point="midl",
++    inputs=["../msgMapi.idl"],
++    script="/comm/build/midl32.py",
++    entry_point="midl32",
+     flags=[
+         "-I",
+         SRCDIR,
+         "-I",
++        SRCDIR + "..",
++        "-I",
+         TOPSRCDIR + "/comm/mailnews/mapi/include",
+     ],
+ )
+ 
+-EXPORTS += [
+-    "!msgMapi.h",
+-    "!msgMapi_i.c",
+-]
+-
+ for var in ("REGISTER_PROXY_DLL", "UNICODE", "_UNICODE"):
+     DEFINES[var] = True
+ 
+-DEFFILE = "MapiProxy.def"
++DEFFILE = "../MapiProxy.def"
+ 
+ # The Windows MIDL code generator creates things like:
+ #
+ #   #endif !_MIDL_USE_GUIDDEF_
+diff --git a/mailnews/mapi/mapihook/build/moz.build b/mailnews/mapi/mapihook/build/moz.build
+--- a/mailnews/mapi/mapihook/build/moz.build
++++ b/mailnews/mapi/mapihook/build/moz.build
+@@ -52,4 +52,7 @@ if CONFIG["CC_TYPE"] == "clang-cl":
+         "-Wno-extern-initializer",
+         "-Wno-missing-braces",
+         "-Wno-unused-const-variable",
+     ]
++
++if CONFIG["HAVE_64BIT_BUILD"]:
++    DIRS += ["32"]
+diff --git a/mailnews/moz.configure b/mailnews/moz.configure
+--- a/mailnews/moz.configure
++++ b/mailnews/moz.configure
+@@ -16,8 +16,20 @@ def mapi_support(arg):
+ 
+ set_config("MOZ_MAPI_SUPPORT", mapi_support)
+ set_define("MOZ_MAPI_SUPPORT", mapi_support)
+ 
++
++@depends(target, build_environment)
++@imports(_from="os.path", _import="join")
++def win32_build_wrapper(target, build_env):
++    if target.kernel == "WINNT" and target.cpu in ("x86_64", "aarch64"):
++        wrapper = join(build_env.topsrcdir, "comm/build/clang32-wrap.py")
++        return wrapper
++
++
++set_config("MZLA_WIN32_BUILD_WRAPPER", win32_build_wrapper)
++
++
+ # =========================================================
+ # = OpenPGP integration
+ # =========================================================
+ 
